@@ -1,0 +1,20 @@
+# Aletheia CI (GitLab) — mirror of the GitHub pipeline for the self-hosted origin.
+# Realizes the VM-Testing layer of the validation pyramid (PRD §38.10, §40, ADR-013):
+# build the bootable microkernel image, boot it in QEMU, and run the M1 acceptance suite.
+stages:
+  - test
+
+m1-hosted-acceptance:
+  stage: test
+  image: rust:latest
+  script:
+    - cargo test --manifest-path aletheia/Cargo.toml --locked
+
+vm-e2e:
+  stage: test
+  image: rust:latest
+  script:
+    - apt-get update && apt-get install -y qemu-system-arm perl
+    - rustup toolchain install nightly --profile minimal
+    - rustup component add rust-src --toolchain nightly
+    - ./scripts/vm-e2e.sh

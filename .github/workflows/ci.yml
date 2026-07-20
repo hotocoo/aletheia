@@ -1,0 +1,33 @@
+# Aletheia CI — realizes the VM-Testing layer of the validation pyramid (PRD §38.10, §40,
+# ADR-013): every push builds the bootable microkernel image and boots it in QEMU, and runs
+# the M1 hosted acceptance suite. The VM boot test is a hard gate.
+name: aletheia-ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  m1-hosted-acceptance:
+    name: M1 hosted System-Core acceptance (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test (20 M1 acceptance criteria)
+        run: cargo test --manifest-path aletheia/Cargo.toml --locked
+
+  vm-e2e:
+    name: Microkernel VM boot e2e (QEMU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU (aarch64 system emulation)
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - name: Install Rust nightly + rust-src (for build-std)
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add rust-src --toolchain nightly
+      - name: Boot kernel in VM and assert 11/11 invariants + exit 0
+        run: ./scripts/vm-e2e.sh
