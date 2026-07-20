@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+/data/
+/.aletheia/
+bun.lockb
+# Rust build artifacts
+target/
+aletheia/target/
