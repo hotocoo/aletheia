@@ -51,17 +51,21 @@ for the bare-metal target) and `qemu-system-aarch64`. Both are pinned/declared:
 
 - The in-VM figures are **wall-clock ns under QEMU TCG emulation**, not bare-metal hardware
   timings. Do not present them as hardware latency.
-- The **`svc` syscall floor and the Aletheia IPC number are measured in the same run on the
-  same emulated CPU**, so their *ratio* is substrate-fair. The defensible claim is the ratio:
-  a full capability-checked IPC round-trip costs *less than one* bare privilege-boundary
-  crossing, while a Linux pipe round-trip must pay **at least two** crossings plus a context
-  switch and buffer copies. On identical hardware the microkernel IPC fast-path therefore has
-  the lower floor.
-- This measures the fast-path **within one address space** (the reference kernel is
-  single-AS today). Cross-address-space switch cost is **not** modeled yet; the `svc` floor
-  is reported precisely so the comparison is not silently flattering. A full cross-AS IPC
-  benchmark and a same-emulator Linux guest comparison are the next performance-validation
-  milestones (tracked in the PRD V&V section).
+- The **`svc` syscall floor and the capability-check number are measured in the same run on
+  the same emulated CPU**, so their *ratio* is substrate-fair. The defensible claim is
+  **narrow**: the capability authorization check Aletheia *adds* costs less than one bare `svc`
+  trap (the two-check request/response measures ≈0.79× one `svc`). The added authority check is
+  cheap.
+- This does **NOT** establish that Aletheia IPC is faster than a Linux pipe. The measured loop
+  is two `evaluate()` calls plus a ring push/pop, run entirely in EL1 — it crosses **no**
+  privilege or address-space boundary. A *real* microkernel IPC round-trip **and** a Linux pipe
+  both pay ≥2 boundary crossings plus context/address-space switches, which this loop skips. So
+  the benchmark isolates the cost Aletheia *adds* (the authority check), not IPC transport. A
+  microkernel's real edge is a short in-kernel code path, which this reference does not yet
+  measure.
+- Next performance-validation milestones: cross-address-space IPC, and a comparison against a
+  Linux guest running in the **same** emulator (so the substrate matches). Only then can an
+  Aletheia-IPC-vs-Linux-IPC claim be made honestly.
 
 ## Not yet here (later P4/P5 phases)
 

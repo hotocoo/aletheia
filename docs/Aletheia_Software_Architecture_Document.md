@@ -293,10 +293,12 @@ per-request Trace model (§10, §18).
 **Performance validation.** Boot time, IPC latency, scheduling + context-switch cost, storage
 throughput, memory overhead, agent startup, retrieval latency, inference scheduling,
 CPU/GPU/NPU utilization, energy. Numbers are **labeled by substrate**; only same-substrate
-comparisons are treated as fair. First data point (QEMU TCG, same emulated CPU): a
-capability-checked IPC round-trip ≈ 0.79× one bare `svc` crossing, vs a Linux pipe round-trip's
-≥2 crossings + context switch — the microkernel IPC fast-path has the lower floor. Whole-OS
-"faster than Linux" is a benchmark program with named milestones, not a headline (ADR-013).
+comparisons are treated as fair. First data point (QEMU TCG, same emulated CPU): the
+capability authorization check Aletheia *adds* ≈ 0.79× one bare `svc` trap (two checks) — cheap.
+This does NOT show Aletheia IPC < Linux IPC: the measured loop runs in EL1 and crosses no
+privilege/address-space boundary, while a real microkernel IPC AND a Linux pipe both pay ≥2
+crossings + context/AS switches. Whole-OS "faster than Linux" is a benchmark program with named
+milestones (cross-AS IPC vs a same-emulator Linux guest), not a headline (ADR-013).
 
 The 20 M1 acceptance criteria (PRD §42) remain encoded as automated tests and are the M1 bar.
 
