@@ -31,8 +31,11 @@ native build surface; `wasmi` is a pure-Rust interpreter, lighter, and `no_std`-
 **Consequences:** The P2 acceptance test (`tests/component.rs`) proves the invariant that makes the
 increment real: no capability → the component does nothing; an attenuated grant → it does exactly
 that and no more; every allowed effect is in the audit log; a runaway is bounded; and launching is
-itself gated. The host ABI is deliberately narrow (read returns content length, not bytes yet); a
-richer return-buffer ABI, a component SDK, and multi-agent composition are follow-on P2 iterations
-(their fuzzing/stress/chaos gates per PRD §22 come online with them). Choosing an interpreter trades
+itself gated. `read` copies authorized content into a guest-supplied return buffer (guest passes an
+out-pointer + capacity; the call returns the full content length so the guest detects truncation),
+so a component can consume the data it is authorized to read and compute over it — proven by an
+end-to-end read→transform→write test. A trap after a committed effect leaves that effect intact and
+attributed (state-integrity test). A component SDK and multi-agent composition are follow-on P2
+iterations (their fuzzing/stress/chaos gates per PRD §22 come online with them). Choosing an interpreter trades
 peak throughput for a smaller, auditable, `no_std`-friendly surface — the right trade while the
 property under test is security, not speed. See PRD-003 §22, §45 (P2), and `src/component.rs`.

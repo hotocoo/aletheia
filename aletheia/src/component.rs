@@ -147,30 +147,44 @@ fn host_write(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> i64 {
     OK_CODE
 }
 
-fn host_read(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> i64 {
-    let id = match String::from_utf8(bytes) {
+fn host_read(caller: &mut Caller<'_, HostState<'_>>, id_bytes: Vec<u8>, out_ptr: i32, out_cap: i32) -> i64 {
+    let id = match String::from_utf8(id_bytes) {
         Ok(s) => s,
         Err(_) => return BAD,
     };
-    let st = caller.data_mut();
-    let etype = st.store.get_entity(&id).map(|e| e.etype);
-    let target = Target { id: Some(id.clone()), etype };
-    let decision = st.caps.evaluate(READ_ACTION, &target, &st.offered);
-    st.calls.push(HostCall { func: "read".into(), action: READ_ACTION.into(), decision: decision_str(&decision), target: Some(id.clone()) });
-    match decision {
-        Decision::Allow => {}
-        Decision::RequireApproval => return APPROVAL,
-        Decision::Deny(_) => return DENIED,
+    if out_ptr < 0 || out_cap < 0 {
+        return BAD;
     }
-    // Effect: return the content byte-length — proves the capability-gated read succeeded. Content is
-    // DATA; a richer return-buffer ABI (copying bytes back into guest memory) is a follow-on.
-    match st.store.get_entity(&id) {
-        Some(e) if !e.deleted => {
-            let len = e.content_ref.as_ref().and_then(|h| st.store.get_blob(h)).map(|b| b.len()).unwrap_or(0);
-            len as i64
+    // Authorize + fetch the content as an owned copy so the store borrow ends before we touch the
+    // guest's memory. `return` inside the block exits the whole host call (denied/approval/bad).
+    let content: Vec<u8> = {
+        let st = caller.data_mut();
+        let etype = st.store.get_entity(&id).map(|e| e.etype);
+        let target = Target { id: Some(id.clone()), etype };
+        let decision = st.caps.evaluate(READ_ACTION, &target, &st.offered);
+        st.calls.push(HostCall { func: "read".into(), action: READ_ACTION.into(), decision: decision_str(&decision), target: Some(id.clone()) });
+        match decision {
+            Decision::Allow => {}
+            Decision::RequireApproval => return APPROVAL,
+            Decision::Deny(_) => return DENIED,
         }
-        _ => BAD,
+        match st.store.get_entity(&id) {
+            Some(e) if !e.deleted => e.content_ref.as_ref().and_then(|h| st.store.get_blob(h)).cloned().unwrap_or_default(),
+            _ => return BAD,
+        }
+    };
+    // Copy up to `out_cap` bytes of content into the guest's linear memory at `out_ptr`. The content
+    // is DATA the component is authorized to consume; it is never interpreted as instruction (SEC-003).
+    let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+        Some(m) => m,
+        None => return BAD,
+    };
+    let n = content.len().min(out_cap as usize);
+    if mem.write(&mut *caller, out_ptr as usize, &content[..n]).is_err() {
+        return BAD;
     }
+    // Return the FULL content length; the guest compares it to its capacity to detect truncation.
+    content.len() as i64
 }
 
 fn host_emit(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> i64 {
@@ -234,12 +248,16 @@ pub fn run(
 
     let mut linker = Linker::new(&engine);
     linker
-        .func_wrap("aletheia", "read", |mut c: Caller<'_, HostState<'_>>, ptr: i32, len: i32| -> i64 {
-            match guest_bytes(&mut c, ptr, len) {
-                Some(b) => host_read(&mut c, b),
-                None => BAD,
-            }
-        })
+        .func_wrap(
+            "aletheia",
+            "read",
+            |mut c: Caller<'_, HostState<'_>>, id_ptr: i32, id_len: i32, out_ptr: i32, out_cap: i32| -> i64 {
+                match guest_bytes(&mut c, id_ptr, id_len) {
+                    Some(b) => host_read(&mut c, b, out_ptr, out_cap),
+                    None => BAD,
+                }
+            },
+        )
         .expect("define read");
     linker
         .func_wrap("aletheia", "write", |mut c: Caller<'_, HostState<'_>>, ptr: i32, len: i32| -> i64 {
