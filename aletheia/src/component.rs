@@ -23,6 +23,7 @@ use wasmi::{Caller, Config, Engine, Linker, Module, Store as WStore, TrapCode};
 pub const READ_ACTION: &str = "entity.read";
 pub const WRITE_ACTION: &str = "entity.write";
 pub const EMIT_ACTION: &str = "event.emit";
+pub const SPAWN_ACTION: &str = "component.spawn";
 
 // Host-call return codes seen by the guest (i64). Non-negative = success/result; negative = refused.
 const OK_CODE: i64 = 0;
@@ -40,6 +41,16 @@ pub struct HostCall {
     pub target: Option<Id>,
 }
 
+/// A request by a component to spawn another installed component (multi-agent composition). It names
+/// the child application and the capability action the parent wants the child to have. The System
+/// Core fulfils it AFTER this component finishes, delegating an ATTENUATED capability from the
+/// parent's own authority — so the child can never exceed the parent (enforced by the cap engine).
+#[derive(Debug, Clone, Serialize)]
+pub struct SpawnRequest {
+    pub app_id: String,
+    pub action: String,
+}
+
 /// The result of running one component: whether it completed, its exit code, whether it was killed
 /// for exhausting fuel, any host-side error, the per-call audit, and the entities it created.
 #[derive(Debug, Clone, Serialize)]
@@ -50,11 +61,24 @@ pub struct ComponentOutcome {
     pub error: Option<String>,
     pub calls: Vec<HostCall>,
     pub wrote: Vec<Id>,
+    /// Spawn requests this component made (fulfilled by the System Core after the run).
+    pub spawns: Vec<SpawnRequest>,
+    /// Outcomes of the children the System Core spawned on this component's behalf.
+    pub spawned: Vec<ComponentOutcome>,
 }
 
 impl ComponentOutcome {
     fn load_err(msg: String) -> Self {
-        ComponentOutcome { ok: false, exit_code: 0, fuel_exhausted: false, error: Some(msg), calls: vec![], wrote: vec![] }
+        ComponentOutcome {
+            ok: false,
+            exit_code: 0,
+            fuel_exhausted: false,
+            error: Some(msg),
+            calls: vec![],
+            wrote: vec![],
+            spawns: vec![],
+            spawned: vec![],
+        }
     }
     /// True iff the component made a host call to `func` that the capability engine ALLOWED.
     pub fn allowed(&self, func: &str) -> bool {
@@ -77,6 +101,7 @@ struct HostState<'a> {
     corr: Id,
     calls: Vec<HostCall>,
     wrote: Vec<Id>,
+    spawns: Vec<SpawnRequest>,
 }
 
 fn decision_str(d: &Decision) -> String {
@@ -209,6 +234,24 @@ fn host_emit(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> i64 {
     OK_CODE
 }
 
+/// Record a spawn request (multi-agent composition). The parent names a child application and the
+/// capability action it wants the child to have; the System Core fulfils it after this run, giving
+/// the child an ATTENUATED capability delegated from the parent (never more than the parent holds).
+fn host_spawn(caller: &mut Caller<'_, HostState<'_>>, app_bytes: Vec<u8>, action_bytes: Vec<u8>) -> i64 {
+    let app_id = match String::from_utf8(app_bytes) {
+        Ok(s) => s,
+        Err(_) => return BAD,
+    };
+    let action = match String::from_utf8(action_bytes) {
+        Ok(s) => s,
+        Err(_) => return BAD,
+    };
+    let st = caller.data_mut();
+    st.calls.push(HostCall { func: "spawn".into(), action: SPAWN_ACTION.into(), decision: "QUEUED".into(), target: Some(app_id.clone()) });
+    st.spawns.push(SpawnRequest { app_id, action });
+    OK_CODE
+}
+
 /// Run an untrusted WASM component against the System Core's store + capability engine.
 ///
 /// `offered` is the component's exact authority. `fuel` bounds execution. The component must export
@@ -240,6 +283,7 @@ pub fn run(
         corr: new_id(),
         calls: Vec::new(),
         wrote: Vec::new(),
+        spawns: Vec::new(),
     };
     let mut wstore = WStore::new(&engine, host);
     if let Err(e) = wstore.set_fuel(fuel) {
@@ -275,6 +319,18 @@ pub fn run(
             }
         })
         .expect("define emit");
+    linker
+        .func_wrap(
+            "aletheia",
+            "spawn",
+            |mut c: Caller<'_, HostState<'_>>, app_ptr: i32, app_len: i32, act_ptr: i32, act_len: i32| -> i64 {
+                match (guest_bytes(&mut c, app_ptr, app_len), guest_bytes(&mut c, act_ptr, act_len)) {
+                    (Some(app), Some(act)) => host_spawn(&mut c, app, act),
+                    _ => BAD,
+                }
+            },
+        )
+        .expect("define spawn");
 
     let instance = match linker.instantiate_and_start(&mut wstore, &module) {
         Ok(i) => i,
@@ -300,5 +356,14 @@ pub fn run(
 
 fn finish(wstore: &WStore<HostState<'_>>, ok: bool, exit_code: i32, error: Option<String>, fuel_exhausted: bool) -> ComponentOutcome {
     let st = wstore.data();
-    ComponentOutcome { ok, exit_code, fuel_exhausted, error, calls: st.calls.clone(), wrote: st.wrote.clone() }
+    ComponentOutcome {
+        ok,
+        exit_code,
+        fuel_exhausted,
+        error,
+        calls: st.calls.clone(),
+        wrote: st.wrote.clone(),
+        spawns: st.spawns.clone(),
+        spawned: Vec::new(),
+    }
 }

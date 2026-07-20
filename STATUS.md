@@ -88,9 +88,12 @@ WASM as first-class applications while preserving every M1 invariant. This is th
 Aletheia actually run programs — and it does so with **no ambient authority**.
 
 - **No WASI.** A component reaches the OS only through an explicit host ABI (`read` / `write` /
-  `emit`). There is deliberately no ambient filesystem/clock/rand/env. `read` copies authorized
-  content into a guest-supplied return buffer, so a component can consume and compute over the data
-  it is allowed to read (proven by an end-to-end read→transform→write program).
+  `emit` / `spawn`). There is deliberately no ambient filesystem/clock/rand/env. `read` copies
+  authorized content into a guest-supplied return buffer, so a component can consume and compute over
+  the data it is allowed to read (proven by an end-to-end read→transform→write program).
+- **Multi-agent composition.** A component can `spawn` an installed child component; the System Core
+  runs the child with a capability **attenuated** (delegated) from the parent — so a child can never
+  exceed its parent's authority (a read-only parent cannot hand a child write). Spawn depth is bounded.
 - **Same authority mechanism.** Every host call authorizes through the *same* `CapEngine::evaluate`
   the deterministic pipeline uses, against the exact capabilities the component was granted —
   nothing inherited from the launcher.
@@ -103,15 +106,16 @@ Aletheia actually run programs — and it does so with **no ambient authority**.
 - **Fuel-bounded.** A runaway component is trapped out-of-fuel and leaves no effects — it cannot
   hang the OS (pre-stages the P2 stress/chaos gate).
 
-**12 P2 acceptance tests** (`tests/component.rs`, all green; 2 are property/fuzz) prove the core
+**14 P2 acceptance tests** (`tests/component.rs`, all green; 2 are property/fuzz) prove the core
 invariant: a component with no capability can do nothing; with an attenuated grant it can do exactly
 that and no more; every effect is traced; reads and writes are capability-gated; a runaway is bounded;
 launching is gated; an installed component runs from the store; an approval-required capability is
 refused at the component boundary (criterion 9 preserved); a component reads→transforms→writes real
-data end to end; and a committed effect survives a later fuel-kill (a trap cannot corrupt state). The
-untrusted host-ABI boundary is **fuzzed** (PRD §38.4): the fail-closed default and host robustness hold
-for randomized memory arguments no one enumerated. Deferred (follow-on P2 iterations): component SDK,
-multi-agent composition, and the gating stress/chaos campaigns.
+data end to end; a committed effect survives a later fuel-kill (a trap cannot corrupt state); a
+component spawns a child that runs under a delegated capability; and a spawned child cannot exceed its
+parent's authority. The untrusted host-ABI boundary is **fuzzed** (PRD §38.4): the fail-closed default
+and host robustness hold for randomized memory arguments no one enumerated. Deferred (follow-on P2
+iterations): the component SDK, richer parent→child data-flow wiring, and the gating stress/chaos campaigns.
 
 ## Delivered (P4 start — VM-tested microkernel)
 
@@ -137,8 +141,8 @@ M1 invariants **in kernel space** — the first executed instance of the PRD's V
 
 ```bash
 cd aletheia
-cargo test        # 36 passed — M1 acceptance + property + security + P2 component invariants
-cargo test --test component   # the 12 P2 WASM-component acceptance + fuzz tests
+cargo test        # 38 passed — M1 acceptance + property + security + P2 component invariants
+cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
 ./scripts/vm-e2e.sh          # build + boot the microkernel in QEMU + assert 11/11 invariants + exit 0

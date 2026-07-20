@@ -13,6 +13,10 @@ use crate::worldmodel::{self, Dir};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
+/// Bound on component spawn depth (multi-agent composition), so a spawn cycle cannot exhaust the
+/// system. Effect authority already attenuates to nothing down a chain; this bounds resource use.
+const MAX_SPAWN_DEPTH: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
     Created,
@@ -224,8 +228,18 @@ impl SysCore {
             self.emit("CapabilityDenied", &new_id(), subject, json!({"action": "component.run"}));
             return Err(AlethError::authorization("not permitted to run components"));
         }
+        // Launch is authorized once at the top; this component and any children it spawns then run
+        // with capabilities strictly attenuated down the tree (no child can exceed its parent).
+        Ok(self.compose_run(grant_caps, subject, wasm, fuel, 0))
+    }
+
+    /// Run a component and fulfil any children it spawns (multi-agent composition). Each child runs
+    /// with a capability ATTENUATED from this component's grant — delegated through the cap engine,
+    /// which rejects amplification — so no child can exceed its parent's authority. Spawn depth is
+    /// bounded (`MAX_SPAWN_DEPTH`) so a spawn cycle cannot exhaust the system.
+    fn compose_run(&mut self, grant_caps: &[String], subject: &str, wasm: &[u8], fuel: u64, depth: usize) -> crate::component::ComponentOutcome {
         // Split borrow of self: `&self.caps` (read) + `&mut self.store` (effects) are disjoint fields.
-        let outcome = crate::component::run(&self.caps, &mut self.store, grant_caps, subject, wasm, fuel);
+        let mut outcome = crate::component::run(&self.caps, &mut self.store, grant_caps, subject, wasm, fuel);
         self.emit(
             "ComponentRan",
             &new_id(),
@@ -235,10 +249,64 @@ impl SysCore {
                 "exit_code": outcome.exit_code,
                 "fuel_exhausted": outcome.fuel_exhausted,
                 "host_calls": outcome.calls.len(),
-                "wrote": outcome.wrote.len()
+                "wrote": outcome.wrote.len(),
+                "spawns": outcome.spawns.len()
             }),
         );
-        Ok(outcome)
+        if depth >= MAX_SPAWN_DEPTH {
+            if !outcome.spawns.is_empty() {
+                self.emit("ComponentSpawnDenied", &new_id(), subject, json!({"reason": "max spawn depth", "depth": depth}));
+            }
+            return outcome;
+        }
+        let requests = outcome.spawns.clone();
+        let mut children = Vec::new();
+        for req in requests {
+            if let Some((child_wasm, child_grant, child_subject)) = self.prepare_spawn(grant_caps, subject, &req) {
+                self.emit(
+                    "ComponentSpawned",
+                    &new_id(),
+                    subject,
+                    json!({"app": req.app_id, "action": req.action, "child": child_subject, "granted": !child_grant.is_empty()}),
+                );
+                let child_outcome = self.compose_run(&child_grant, &child_subject, &child_wasm, fuel, depth + 1);
+                children.push(child_outcome);
+            }
+        }
+        outcome.spawned = children;
+        outcome
+    }
+
+    /// Resolve a spawn request: load the child's code and delegate an attenuated capability for the
+    /// requested action from the parent's grant. Returns None if the app is unknown/not runnable.
+    /// The child grant is empty when the parent holds nothing covering the requested action — the
+    /// child then runs but can do nothing (it cannot exceed the parent).
+    fn prepare_spawn(&mut self, parent_caps: &[String], parent_subject: &str, req: &crate::component::SpawnRequest) -> Option<(Vec<u8>, Vec<String>, String)> {
+        let app = self.store.get_entity(&req.app_id).cloned()?;
+        if app.etype != EntityType::Application {
+            return None;
+        }
+        let hash = app.content_ref.clone()?;
+        let wasm = self.store.get_blob(&hash).cloned()?;
+        let child_subject = format!("{}>{}", parent_subject, req.app_id);
+        let child_grant: Vec<String> = self.attenuate_for_child(parent_caps, &child_subject, &req.action).into_iter().collect();
+        Some((wasm, child_grant, child_subject))
+    }
+
+    /// Delegate a capability for `action` to `child_subject`, attenuated from whichever parent cap
+    /// covers it (same scope + constraints — no amplification). Returns None if no parent cap covers
+    /// the action; the cap engine's attenuation rule is what enforces "child <= parent".
+    fn attenuate_for_child(&mut self, parent_caps: &[String], child_subject: &str, action: &str) -> Option<String> {
+        for pt in parent_caps {
+            let attn = self.caps.get(pt).map(|p| (p.scope.clone(), p.constraints.clone()));
+            if let Some((scope, cons)) = attn {
+                if let Ok(child) = self.caps.delegate(pt, child_subject, action, scope, cons, child_subject) {
+                    let _ = self.store.put_capability(&child);
+                    return Some(child.token);
+                }
+            }
+        }
+        None
     }
 
     /// Launch a previously-installed component by its `Application` entity id (loads code from the store).
