@@ -1,9 +1,9 @@
 # Aletheia — Implementation Status
 
 **As of:** 2026-07-20
-**Milestone delivered:** M1 — Hosted System-Core Reference (Rust)
-**Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-002),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..011`.
+**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P4 (start)** — bootable aarch64 microkernel, VM-tested
+**Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..013`.
 
 ## What Aletheia is
 
@@ -78,10 +78,31 @@ architecture text and phased plans, not blind code (ADR-010).
 - **Single crate, module boundaries** mirror the SAD's crate list; splitting into a cargo workspace is
   a mechanical later step (dependency direction already points inward toward `domain`).
 
+## Delivered (P4 start — VM-tested microkernel)
+
+A `no_std` Rust microkernel (`kernel/`) that **boots on QEMU `virt` at EL1** and re-proves the
+M1 invariants **in kernel space** — the first executed instance of the PRD's VM-Testing layer
+(ADR-012, ADR-013), done contract-honest (ADR-010: no blind hardware code; this runs).
+
+- Boot: stack/BSS/heap (bump alloc), PL011 UART, EL1 exception vectors, ARM semihosting exit.
+- In-kernel capability-secure spine: content-addressed store, capability engine with an
+  **unforgeable-by-construction** `CapToken` (private id field — stronger than the hosted
+  string token), and the validate→authorize→execute→verify→record pipeline + secure IPC.
+- **11 in-kernel invariant selftests** (M1 acceptance, re-proved live) drive the VM exit code;
+  all green. `scripts/vm-e2e.sh` is the CI VM gate (build→boot→assert→exit 0).
+- **Performance validation** (QEMU TCG; same emulated CPU, same run — substrate-fair ratio):
+  a capability-checked Aletheia IPC round-trip ≈ **0.79× one bare `svc` crossing**; a Linux
+  pipe round-trip pays ≥2 crossings + a context switch. The microkernel IPC fast-path has the
+  lower floor. This is the fast-path ratio, **not** a whole-OS "faster than Linux" claim and
+  **not** bare-metal numbers; cross-AS IPC + a same-emulator Linux-guest comparison are next.
+
 ## Run it
 
 ```bash
 cd aletheia
 cargo test        # 18 passed — the M1 acceptance bar
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
+
+./scripts/vm-e2e.sh          # build + boot the microkernel in QEMU + assert 11/11 invariants + exit 0
+./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
