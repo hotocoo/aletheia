@@ -1,0 +1,24 @@
+[package]
+name = "aletheia"
+version = "0.1.0"
+edition = "2021"
+description = "Aletheia — AI-native OS. M1 hosted System-Core reference implementation."
+
+[lib]
+name = "aletheia"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aletheiad"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+ulid = { version = "1", features = ["serde"] }
+
+[profile.dev]
+opt-level = 0
