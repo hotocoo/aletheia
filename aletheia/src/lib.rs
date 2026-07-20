@@ -5,6 +5,7 @@
 //! workspace is a mechanical later step. Dependency direction points inward toward `domain`.
 pub mod agents;
 pub mod capabilities;
+pub mod component;
 pub mod context;
 pub mod crypto;
 pub mod domain;

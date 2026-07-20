@@ -179,6 +179,86 @@ impl SysCore {
         agent
     }
 
+    // --- components (P2: applications as capability-secure WASM, ADR-014) ---
+
+    /// Install an untrusted WASM component as a first-class `Application` entity: its code is stored
+    /// as an encrypted content-addressed blob, and installing at all requires the `component.install`
+    /// capability. The install is itself a recorded, authorized action.
+    pub fn install_component(&mut self, offered: &[String], subject: &str, name: &str, wasm: &[u8]) -> Result<Entity> {
+        let target = Target { id: None, etype: Some(EntityType::Application) };
+        if !matches!(self.caps.evaluate("component.install", &target, offered), Decision::Allow) {
+            self.emit("CapabilityDenied", &new_id(), subject, json!({"action": "component.install"}));
+            return Err(AlethError::authorization("not permitted to install components"));
+        }
+        let hash = self.store.put_blob(wasm)?;
+        let e = Entity {
+            id: new_id(),
+            etype: EntityType::Application,
+            content_ref: Some(hash),
+            version: 1,
+            version_chain: new_id(),
+            metadata: json!({"name": name, "kind": "wasm-component", "bytes": wasm.len()}),
+            provenance: Provenance::of(subject),
+            created_at: now(),
+            updated_at: now(),
+            deleted: false,
+        };
+        self.store.put_entity(&e)?;
+        self.emit("ComponentInstalled", &new_id(), subject, json!({"app": e.id, "name": name, "bytes": wasm.len()}));
+        Ok(e)
+    }
+
+    /// Launch an untrusted component. Two distinct authority layers (application-as-capability):
+    /// `launch_caps` must satisfy `component.run` (the right to run any component at all), while the
+    /// component executes with EXACTLY `grant_caps` as its authority — nothing is inherited from the
+    /// launcher, so a component with an empty grant can do nothing (INV-011, no ambient authority).
+    pub fn run_component(
+        &mut self,
+        launch_caps: &[String],
+        grant_caps: &[String],
+        subject: &str,
+        wasm: &[u8],
+        fuel: u64,
+    ) -> Result<crate::component::ComponentOutcome> {
+        if !matches!(self.caps.evaluate("component.run", &Target::default(), launch_caps), Decision::Allow) {
+            self.emit("CapabilityDenied", &new_id(), subject, json!({"action": "component.run"}));
+            return Err(AlethError::authorization("not permitted to run components"));
+        }
+        // Split borrow of self: `&self.caps` (read) + `&mut self.store` (effects) are disjoint fields.
+        let outcome = crate::component::run(&self.caps, &mut self.store, grant_caps, subject, wasm, fuel);
+        self.emit(
+            "ComponentRan",
+            &new_id(),
+            subject,
+            json!({
+                "ok": outcome.ok,
+                "exit_code": outcome.exit_code,
+                "fuel_exhausted": outcome.fuel_exhausted,
+                "host_calls": outcome.calls.len(),
+                "wrote": outcome.wrote.len()
+            }),
+        );
+        Ok(outcome)
+    }
+
+    /// Launch a previously-installed component by its `Application` entity id (loads code from the store).
+    pub fn run_installed(
+        &mut self,
+        launch_caps: &[String],
+        grant_caps: &[String],
+        subject: &str,
+        app_id: &Id,
+        fuel: u64,
+    ) -> Result<crate::component::ComponentOutcome> {
+        let app = self.store.get_entity(app_id).cloned().ok_or_else(|| AlethError::not_found("application not found"))?;
+        if app.etype != EntityType::Application {
+            return Err(AlethError::validation("entity is not an application"));
+        }
+        let hash = app.content_ref.clone().ok_or_else(|| AlethError::validation("application has no code"))?;
+        let wasm = self.store.get_blob(&hash).cloned().ok_or_else(|| AlethError::not_found("application code missing"))?;
+        self.run_component(launch_caps, grant_caps, subject, &wasm, fuel)
+    }
+
     // --- task lifecycle ---
 
     pub fn begin_task(&mut self, _subject: &str) -> Id {
