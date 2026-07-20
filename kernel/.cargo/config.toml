@@ -1,0 +1,24 @@
+# Bare-metal aarch64 build for the Aletheia microkernel reference.
+# Uses build-std (nightly + rust-src) because no precompiled core/alloc ships for the
+# bare-metal target. `cargo run` boots the ELF in QEMU 'virt' and propagates the kernel's
+# semihosting exit code, so `cargo run` IS the end-to-end VM boot test.
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[build]
+target = "aarch64-unknown-none-softfloat"
+
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["-C", "link-arg=-Tlinker.ld"]
+runner = [
+  "qemu-system-aarch64",
+  "-machine", "virt",
+  "-cpu", "cortex-a72",
+  "-smp", "1",
+  "-m", "128M",
+  "-nographic",
+  "-semihosting-config", "enable=on,target=native",
+  "-kernel",
+]
