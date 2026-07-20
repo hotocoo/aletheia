@@ -44,20 +44,69 @@ fn writer_wasm(payload: &str, event: &str) -> Vec<u8> {
     wat::parse_str(&wat).expect("writer wat compiles")
 }
 
-/// A component that reads the entity whose id is baked into its data segment. Returns 0.
+/// A component that reads the entity whose id is baked into its data segment into a return buffer.
+/// Returns 0.
 fn reader_wasm(id: &str) -> Vec<u8> {
     let wat = format!(
         r#"(module
-  (import "aletheia" "read" (func $read (param i32 i32) (result i64)))
+  (import "aletheia" "read" (func $read (param i32 i32 i32 i32) (result i64)))
   (memory (export "memory") 1)
   (data (i32.const 0) "{id}")
   (func (export "run") (result i32)
-    (drop (call $read (i32.const 0) (i32.const {idlen})))
+    (drop (call $read (i32.const 0) (i32.const {idlen}) (i32.const 256) (i32.const 128)))
     (i32.const 0)))"#,
         id = id,
         idlen = id.len()
     );
     wat::parse_str(&wat).expect("reader wat compiles")
+}
+
+/// A real program: read a source entity's content into memory, uppercase the ASCII letters, and
+/// write the transformed bytes back as a new entity. Requires both read and write capabilities.
+fn transform_wasm(id: &str) -> Vec<u8> {
+    let wat = format!(
+        r#"(module
+  (import "aletheia" "read"  (func $read  (param i32 i32 i32 i32) (result i64)))
+  (import "aletheia" "write" (func $write (param i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "{id}")
+  (func (export "run") (result i32)
+    (local $n i32) (local $i i32) (local $b i32)
+    (local.set $n (i32.wrap_i64 (call $read (i32.const 0) (i32.const {idlen}) (i32.const 256) (i32.const 128))))
+    (if (i32.gt_s (local.get $n) (i32.const 128)) (then (local.set $n (i32.const 128))))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $l
+        (br_if $done (i32.ge_s (local.get $i) (local.get $n)))
+        (local.set $b (i32.load8_u (i32.add (i32.const 256) (local.get $i))))
+        (if (i32.and (i32.ge_u (local.get $b) (i32.const 97)) (i32.le_u (local.get $b) (i32.const 122)))
+          (then (i32.store8 (i32.add (i32.const 256) (local.get $i)) (i32.sub (local.get $b) (i32.const 32)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l)))
+    (drop (call $write (i32.const 256) (local.get $n)))
+    (i32.const 0)))"#,
+        id = id,
+        idlen = id.len()
+    );
+    wat::parse_str(&wat).expect("transform wat compiles")
+}
+
+/// A component that writes an entity, then loops forever — used to prove a committed effect survives
+/// a later fuel-kill (the trap cannot roll back or corrupt what already committed).
+fn writer_then_spin_wasm(payload: &str) -> Vec<u8> {
+    let wat = format!(
+        r#"(module
+  (import "aletheia" "write" (func $write (param i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "{payload}")
+  (func (export "run") (result i32)
+    (drop (call $write (i32.const 0) (i32.const {plen})))
+    (loop $l (br $l))
+    (unreachable)))"#,
+        payload = payload,
+        plen = payload.len()
+    );
+    wat::parse_str(&wat).expect("writer_then_spin wat compiles")
 }
 
 /// A component that loops forever — used to prove fuel bounding.
@@ -229,4 +278,52 @@ fn approval_required_capability_is_refused_at_component_boundary() {
     assert_eq!(write_call.decision, "REQUIRE_APPROVAL");
     assert!(outcome.wrote.is_empty(), "an approval-required action does not execute inline");
     assert_eq!(count_events(&core, "ComponentWroteEntity"), 0);
+}
+
+/// A real end-to-end program: the component reads a source entity it is authorized to read, computes
+/// over the bytes (uppercase), and writes the result — proving the read return-buffer actually
+/// delivers consumable data, and that read + write compose under distinct scoped capabilities.
+#[test]
+fn component_reads_transforms_and_writes() {
+    let (mut core, owner) = open();
+    let source = core
+        .create_entity(std::slice::from_ref(&owner), "human:owner", EntityType::Document, b"hello component world", serde_json::json!({}))
+        .unwrap();
+    let read_cap = grant(&mut core, &owner, "component:xform", "entity.read", Scope::Entities(vec![source.id.clone()]), Constraints::none());
+    let write_cap = grant(&mut core, &owner, "component:xform", "entity.write", Scope::All, Constraints::none());
+    let wasm = transform_wasm(&source.id);
+
+    let outcome = core.run_component(&[owner], &[read_cap, write_cap], "component:xform", &wasm, 5_000_000).unwrap();
+
+    assert!(outcome.ok, "program ran: {:?}", outcome.error);
+    assert!(outcome.allowed("read") && outcome.allowed("write"));
+    assert_eq!(outcome.wrote.len(), 1, "one transformed entity written");
+
+    // The written entity holds the actual transform of the source content — the component consumed
+    // the bytes the read delivered and computed on them.
+    let out = core.store().get_entity(&outcome.wrote[0]).expect("output persisted");
+    let bytes = core.store().get_blob(out.content_ref.as_ref().unwrap()).expect("output content");
+    assert_eq!(bytes, b"HELLO COMPONENT WORLD");
+}
+
+/// State integrity under a trap (matches ADR-014's "a trap cannot corrupt state"): a component that
+/// commits a write and THEN is fuel-killed leaves the committed effect intact and attributed — the
+/// trap neither rolls it back nor corrupts anything else.
+#[test]
+fn committed_effect_survives_a_later_fuel_kill() {
+    let (mut core, owner) = open();
+    let write_cap = grant(&mut core, &owner, "component:half", "entity.write", Scope::All, Constraints::none());
+    let wasm = writer_then_spin_wasm("committed-before-trap");
+
+    let outcome = core.run_component(&[owner], &[write_cap], "component:half", &wasm, 2_000_000).unwrap();
+
+    assert!(!outcome.ok, "the component is killed mid-run");
+    assert!(outcome.fuel_exhausted, "killed by fuel exhaustion, after the write committed");
+    assert_eq!(outcome.wrote.len(), 1, "the pre-trap write committed exactly once");
+    assert_eq!(count_events(&core, "ComponentWroteEntity"), 1);
+
+    let e = core.store().get_entity(&outcome.wrote[0]).expect("committed entity persisted through the trap");
+    assert_eq!(e.provenance.actor, "component:half");
+    let bytes = core.store().get_blob(e.content_ref.as_ref().unwrap()).unwrap();
+    assert_eq!(bytes, b"committed-before-trap");
 }
