@@ -13,7 +13,7 @@ native build surface; `wasmi` is a pure-Rust interpreter, lighter, and `no_std`-
 
 **Decision:**
 1. **No WASI.** A component reaches the OS only through an explicit host ABI (`aletheia.read`,
-   `aletheia.write`, `aletheia.emit`), each of which authorizes through the **same**
+   `aletheia.write`, `aletheia.emit`, `aletheia.spawn`), each of which authorizes through the **same**
    `CapEngine::evaluate` the deterministic pipeline uses, against the exact capability set the
    component was granted — nothing inherited from the launcher. Effects flow through the **same**
    `Store` and land in the one immutable event log. Untrusted linear-memory input is bounds-checked
@@ -27,6 +27,12 @@ native build surface; `wasmi` is a pure-Rust interpreter, lighter, and `no_std`-
    hosting components inside the `no_std` P4 kernel. For *proving invariants* (not maximizing
    throughput) an interpreter is the right first pick; a JIT engine can be revisited behind the same
    host ABI if throughput ever gates a milestone.
+5. **Multi-agent composition via attenuated spawn.** A component may `spawn` an installed child
+   component; the request is recorded and fulfilled by the System Core *after* the parent's run
+   (no in-guest reentrancy). The child runs with a capability **delegated (attenuated)** from the
+   parent's own grant through the same cap engine — which rejects amplification — so a child can
+   never exceed its parent's authority (a read-only parent cannot hand a child write). Spawn depth
+   is bounded so a spawn cycle cannot exhaust the system.
 
 **Consequences:** The P2 acceptance test (`tests/component.rs`) proves the invariant that makes the
 increment real: no capability → the component does nothing; an attenuated grant → it does exactly

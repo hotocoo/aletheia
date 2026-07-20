@@ -110,6 +110,67 @@ fn writer_then_spin_wasm(payload: &str) -> Vec<u8> {
     wat::parse_str(&wat).expect("writer_then_spin wat compiles")
 }
 
+/// A component that spawns an installed child component, requesting a capability action for it.
+fn spawner_wasm(child_id: &str, action: &str) -> Vec<u8> {
+    let wat = format!(
+        r#"(module
+  (import "aletheia" "spawn" (func $spawn (param i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0)  "{child_id}")
+  (data (i32.const 64) "{action}")
+  (func (export "run") (result i32)
+    (drop (call $spawn (i32.const 0) (i32.const {idlen}) (i32.const 64) (i32.const {actlen})))
+    (i32.const 0)))"#,
+        child_id = child_id,
+        action = action,
+        idlen = child_id.len(),
+        actlen = action.len()
+    );
+    wat::parse_str(&wat).expect("spawner wat compiles")
+}
+
+/// Multi-agent composition: a component spawns an installed child and the System Core runs it with a
+/// capability delegated (attenuated) from the parent — one agent invoking another under its authority.
+#[test]
+fn component_spawns_a_child_with_attenuated_authority() {
+    let (mut core, owner) = open();
+    let child = core
+        .install_component(std::slice::from_ref(&owner), "human:owner", "child-writer", &writer_wasm("child-output-payload", "child-event"))
+        .unwrap();
+    let write_cap = grant(&mut core, &owner, "component:parent", "entity.write", Scope::All, Constraints::none());
+    let parent = spawner_wasm(&child.id, "entity.write");
+
+    let outcome = core.run_component(std::slice::from_ref(&owner), &[write_cap], "component:parent", &parent, 5_000_000).unwrap();
+
+    assert_eq!(outcome.spawns.len(), 1, "the parent queued one spawn");
+    assert_eq!(outcome.spawned.len(), 1, "the System Core ran the child");
+    let child_out = &outcome.spawned[0];
+    assert!(child_out.allowed("write"), "child received a delegated write capability");
+    assert_eq!(child_out.wrote.len(), 1, "child wrote under its attenuated grant");
+    assert!(child_out.denied("emit"), "child got ONLY the delegated action, nothing else");
+    assert!(core.store().events().iter().any(|e| e.etype == "ComponentSpawned"));
+}
+
+/// The invariant that makes composition safe: a spawned child can never exceed its parent's
+/// authority. A parent holding only `entity.read` cannot hand a child `entity.write` — the
+/// delegation is rejected by the cap engine, so the child runs but its write is denied.
+#[test]
+fn spawned_child_cannot_exceed_parent_authority() {
+    let (mut core, owner) = open();
+    let child = core
+        .install_component(std::slice::from_ref(&owner), "human:owner", "child-writer", &writer_wasm("should-not-write", "should-not-emit"))
+        .unwrap();
+    let read_cap = grant(&mut core, &owner, "component:parent", "entity.read", Scope::All, Constraints::none());
+    let parent = spawner_wasm(&child.id, "entity.write");
+
+    let outcome = core.run_component(std::slice::from_ref(&owner), &[read_cap], "component:parent", &parent, 5_000_000).unwrap();
+
+    assert_eq!(outcome.spawned.len(), 1, "the child still runs");
+    let child_out = &outcome.spawned[0];
+    assert!(child_out.denied("write"), "child cannot write — parent had no write authority to delegate");
+    assert!(child_out.wrote.is_empty(), "no effect: the callee cannot exceed the caller");
+}
+
 /// A component that loops forever — used to prove fuel bounding.
 fn spinner_wasm() -> Vec<u8> {
     wat::parse_str(
