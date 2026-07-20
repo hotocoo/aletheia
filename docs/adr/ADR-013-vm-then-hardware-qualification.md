@@ -16,9 +16,11 @@ kernel space via 11 in-kernel selftests, gated by `scripts/vm-e2e.sh`. (2) **Rea
 output, runs the suites, resets devices, and reports failures, per supported architecture and
 accelerator configuration. Performance claims follow the same discipline: numbers are labeled
 by substrate (emulated vs native), and only same-substrate comparisons are treated as fair
-(e.g., the microkernel IPC fast-path vs the raw syscall-crossing floor on the same emulated
-CPU); whole-OS "faster than Linux" is a benchmark program with named milestones, not a
-headline asserted from one microbenchmark.
+(e.g., the cost of the capability check Aletheia adds vs the raw syscall-crossing floor on the
+same emulated CPU — which shows the added check is cheap, not that Aletheia IPC beats a pipe,
+since the measured path crosses no privilege/address-space boundary); whole-OS "faster than
+Linux" is a benchmark program with named milestones (cross-AS IPC vs a same-emulator Linux
+guest), not a headline asserted from one microbenchmark.
 **Consequences:** Regressions are caught in CI in seconds, not on a bench weeks later; hardware
 lab time is spent on what only hardware can prove. Emulation caveats are recorded so no VM
 result is mistaken for a hardware guarantee. See PRD-003 §V&V, §Hardware Qualification, and

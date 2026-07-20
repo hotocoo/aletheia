@@ -91,10 +91,12 @@ M1 invariants **in kernel space** — the first executed instance of the PRD's V
 - **11 in-kernel invariant selftests** (M1 acceptance, re-proved live) drive the VM exit code;
   all green. `scripts/vm-e2e.sh` is the CI VM gate (build→boot→assert→exit 0).
 - **Performance validation** (QEMU TCG; same emulated CPU, same run — substrate-fair ratio):
-  a capability-checked Aletheia IPC round-trip ≈ **0.79× one bare `svc` crossing**; a Linux
-  pipe round-trip pays ≥2 crossings + a context switch. The microkernel IPC fast-path has the
-  lower floor. This is the fast-path ratio, **not** a whole-OS "faster than Linux" claim and
-  **not** bare-metal numbers; cross-AS IPC + a same-emulator Linux-guest comparison are next.
+  the capability authorization check Aletheia *adds* ≈ **0.79× one bare `svc` trap** (two
+  checks) — cheap. This does **NOT** show Aletheia IPC < Linux IPC: the measured loop runs in
+  EL1 and crosses no privilege/address-space boundary, while a real microkernel IPC AND a Linux
+  pipe both pay ≥2 crossings + context/AS switches. Whole-OS "faster than Linux" stays a
+  benchmark program (cross-AS IPC vs a same-emulator Linux guest = next milestone), never a
+  claim; and **not** bare-metal numbers.
 
 ## Run it
 

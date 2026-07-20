@@ -3,14 +3,18 @@
 //! HONESTY / SCOPE (read before quoting any number):
 //!  * All figures are wall-clock nanoseconds derived from `CNTVCT_EL0` while running under
 //!    QEMU TCG emulation on this host. They are NOT bare-metal hardware timings.
-//!  * The `svc` floor and the Aletheia IPC number are measured on the *same* emulated CPU,
-//!    in the same run, so their RATIO is substrate-fair. That ratio is the defensible claim:
-//!    the Aletheia capability-checked IPC round-trip costs less than a single hardware
-//!    privilege-boundary crossing (`svc`), whereas a Linux pipe round-trip must pay at least
-//!    two such crossings PLUS a context switch and buffer copies (see scripts/linux_pipe_bench).
-//!  * This measures the IPC fast-path within one address space (the current reference kernel
-//!    is single-AS). Cross-address-space switch cost is explicitly NOT modeled here; the
-//!    `svc` floor is included precisely so the comparison is not silently flattering.
+//!  * The `svc` floor and the capability-check number are measured on the *same* emulated CPU,
+//!    in the same run, so their RATIO is substrate-fair. The defensible claim is NARROW: the
+//!    capability authorization check Aletheia ADDS costs less than one bare `svc` trap — it is
+//!    cheap. This does NOT show that Aletheia IPC is faster than a Linux pipe.
+//!  * WHY IT DOESN'T: the measured loop is two `evaluate()` calls + a ring push/pop, run entirely
+//!    in EL1 — it crosses NO privilege or address-space boundary. A *real* microkernel IPC
+//!    round-trip AND a Linux pipe both pay >=2 boundary crossings plus context/address-space
+//!    switches, which this loop skips. So this benchmark isolates the cost of the authority
+//!    check Aletheia adds on top of transport — not the transport itself.
+//!  * Establishing Aletheia-IPC-vs-Linux honestly needs cross-address-space IPC measured against
+//!    a Linux guest in the SAME emulator (the next performance-validation milestone). The `svc`
+//!    floor is included so the added-check cost is anchored to a real crossing, not flattered.
 use crate::arch::{cntvct, ticks_to_ns};
 use crate::spine::{CapEngine, CapToken, Decision, Scope, Target};
 use core::arch::asm;
@@ -129,26 +133,28 @@ pub fn run() {
     let ipc_ns = ns_per_op(ipc_ticks, ITERS);
 
     kprintln!("");
-    kprintln!("--- performance validation (QEMU TCG emulation; ratios are substrate-fair) ---");
+    kprintln!("--- performance validation (QEMU TCG emulation; same-CPU ratio only) ---");
     kprintln!("[bench] iterations: {}", ITERS);
     kprintln!(
-        "[bench] syscall floor  (1x svc EL1 round-trip)      : {} ns/op  ({} ticks total)",
+        "[bench] syscall floor (1x svc EL1 trap+eret)                  : {} ns/op ({} ticks)",
         svc_ns, svc_ticks
     );
     kprintln!(
-        "[bench] Aletheia IPC   (cap-checked req/resp, 2 hops): {} ns/op  ({} ticks total)",
+        "[bench] cap check + in-kernel delivery (2 checks, NO crossing): {} ns/op ({} ticks)",
         ipc_ns, ipc_ticks
     );
     if ipc_ns > 0 && svc_ns > 0 {
-        // How many bare syscall crossings fit in one Aletheia IPC round-trip.
+        // Cost of the authority check Aletheia ADDS, relative to one real syscall crossing.
         let x100 = (ipc_ns as u128 * 100 / svc_ns as u128) as u64;
         kprintln!(
-            "[bench] Aletheia IPC round-trip = {}.{:02}x ONE bare syscall crossing",
+            "[bench] => the authority check Aletheia ADDS costs {}.{:02}x one syscall trap (cheap)",
             x100 / 100,
             x100 % 100
         );
-        kprintln!("[bench] Linux pipe round-trip pays >= 2 crossings + 1 context switch + copies");
-        kprintln!("[bench] => on identical hardware the microkernel IPC fast-path has the lower floor");
     }
-    kprintln!("[bench] real-Linux pipe baseline: run scripts/linux_pipe_bench.sh (labeled, different substrate)");
+    kprintln!("[bench] HONESTY: this does NOT show Aletheia IPC < Linux IPC. The measured loop runs");
+    kprintln!("[bench]   in EL1 and crosses no privilege/address-space boundary; a real microkernel");
+    kprintln!("[bench]   IPC round-trip AND a Linux pipe both pay >=2 crossings + context/AS switches.");
+    kprintln!("[bench]   Comparing IPC transport needs cross-AS IPC vs a Linux guest in the SAME");
+    kprintln!("[bench]   emulator (next milestone). scripts/linux_pipe_bench.sh = real-Linux baseline.");
 }
