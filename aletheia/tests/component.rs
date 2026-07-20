@@ -9,6 +9,7 @@ use aletheia::capabilities::{Constraints, Scope};
 use aletheia::domain::EntityType;
 use aletheia::intelligence::DeterministicRuntime;
 use aletheia::syscore::SysCore;
+use proptest::prelude::*;
 
 fn temp_dir() -> String {
     std::env::temp_dir()
@@ -326,4 +327,51 @@ fn committed_effect_survives_a_later_fuel_kill() {
     assert_eq!(e.provenance.actor, "component:half");
     let bytes = core.store().get_blob(e.content_ref.as_ref().unwrap()).unwrap();
     assert_eq!(bytes, b"committed-before-trap");
+}
+
+/// A writer component whose memory arguments are chosen by the fuzzer.
+fn writer_with_args(ptr: i32, len: i32) -> Vec<u8> {
+    let wat = format!(
+        r#"(module
+  (import "aletheia" "write" (func $write (param i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "payload-bytes")
+  (func (export "run") (result i32)
+    (drop (call $write (i32.const {ptr}) (i32.const {len})))
+    (i32.const 0)))"#,
+        ptr = ptr,
+        len = len
+    );
+    wat::parse_str(&wat).expect("fuzz writer wat compiles")
+}
+
+// Fuzzing the untrusted host-ABI boundary (PRD §38.4). Fuzzing is treated as a security control, not
+// a QA nicety: the fail-closed default and host robustness must hold for inputs no one enumerated.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Fail-closed under fuzzing (PRD §38.3 capability release gate): for ANY memory arguments, a
+    /// component with no capability produces no effect — the fail-closed default never leaks.
+    #[test]
+    fn fuzzed_component_without_capability_never_writes(ptr in 0i32..200_000, len in 0i32..200_000) {
+        let mut core = SysCore::open(temp_dir(), Box::new(DeterministicRuntime)).unwrap();
+        let owner = core.bootstrap_owner("human:owner").unwrap().token;
+        let outcome = core.run_component(std::slice::from_ref(&owner), &[], "component:fuzz", &writer_with_args(ptr, len), 1_000_000).unwrap();
+        prop_assert!(outcome.wrote.is_empty());
+        prop_assert_eq!(count_events(&core, "ComponentWroteEntity"), 0);
+    }
+
+    /// Host robustness under fuzzing: even WITH a write capability, arbitrary (often out-of-bounds)
+    /// memory arguments never panic the host; any write that lands did pass the capability check.
+    #[test]
+    fn fuzzed_writer_never_panics(ptr in 0i32..200_000, len in 0i32..200_000) {
+        let mut core = SysCore::open(temp_dir(), Box::new(DeterministicRuntime)).unwrap();
+        let owner = core.bootstrap_owner("human:owner").unwrap().token;
+        let cap = core.grant_to(std::slice::from_ref(&owner), "component:fuzz", "entity.write", Scope::All, Constraints::none()).unwrap().token;
+        let outcome = core.run_component(std::slice::from_ref(&owner), &[cap], "component:fuzz", &writer_with_args(ptr, len), 1_000_000).unwrap();
+        prop_assert!(outcome.wrote.len() <= 1);
+        if !outcome.wrote.is_empty() {
+            prop_assert!(outcome.allowed("write"));
+        }
+    }
 }
