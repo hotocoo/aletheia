@@ -237,9 +237,68 @@ Boundaries: untrusted content/model output → validation boundary → capabilit
 
 ---
 
-# 20. Testing Architecture
+# 20. Verification & Validation Architecture
 
-Per PRD §39. Crate-level unit tests (domain, capabilities, context, intent-action, storage); integration (store durability/atomicity across restart, pipeline end-to-end); contract (ModelRuntime, tool, capability, IPC); security (ambient-authority absence, unforgeability, attenuation, fail-closed, injection-as-data, malformed output, sensitive-device gating); failure (interpretation failure mid-flight, agent crash isolation, cancellation). The 20 M1 acceptance criteria (PRD §42) are encoded as automated tests and are the acceptance bar.
+V&V is first-class architecture, not a final QA phase (ADR-012). PRD §V&V is the authoritative,
+per-subsystem specification; this section is the architectural realization. Guiding principle:
+**tests are evidence that known scenarios work; they are not proof of correctness** — so the
+pipeline layers evidence rather than relying on one kind.
+
+**The validation pyramid (ordered, normative).** Unit → Integration → Property-Based →
+Fuzzing → Stress/Load → Chaos/Fault-Injection → Formal Verification (critical components
+only) → VM/Emulator → Real Hardware → Security Audit → Performance Validation. Each layer
+proves something the layer below cannot; none proves the whole.
+
+- **Unit / Integration.** Crate-level tests (domain, capabilities, context, intent-action,
+  storage) and cross-subsystem integration (store durability/atomicity across restart,
+  pipeline end-to-end, microkernel↔System-Core contract).
+- **Property-based.** Randomized generators over invariants that must *always* hold: no
+  action without a covering capability; revocation blocks all future access; actor memory
+  isolation; IPC ordering + authentication; storage crash-consistency. (proptest.)
+- **Fuzzing (continuous).** Kernel IPC, syscalls, capability validation, (de)serialization,
+  store + semantic-object formats, network + compatibility layers, model-runtime interface.
+  Oracle: no panic, no invariant violation, no unauthorized effect.
+- **Stress / Chaos.** Many actors, IPC floods, memory/CPU/storage exhaustion, huge graphs,
+  concurrent AI load; and fault injection — crash services, kill the AI runtime, corrupt IPC,
+  drop storage/network mid-operation. Requirement: recover where design promises recovery;
+  **the AI subsystem is never a single point of failure** (INV: OS stays live with the model
+  killed — already proven in M1/kernel: operates with no resident model).
+- **Formal verification (scoped).** Capability enforcement, memory isolation, IPC security,
+  critical scheduler invariants, crypto boundaries — not the whole OS.
+- **Runtime assertions.** Diagnostic builds assert critical invariants and fail loud with rich
+  state (never silent corruption).
+- **Differential.** Storage, serialization, crypto, scheduling, protocols vs reference models.
+
+**VM / Emulator (delivered, P4 start).** Every change builds a bootable image and boots it in
+QEMU under CI; `scripts/vm-e2e.sh` asserts boot, kernel init, spine, capability enforcement,
+secure IPC, and a machine-checkable verdict (semihosting exit code). The `kernel/` crate boots
+on QEMU `virt` at EL1 and re-proves the M1 invariants in kernel space via 11 in-kernel
+selftests — an unforgeable-by-construction `CapToken`, fail-closed authorization, attenuated
+delegation, cascading revocation, malformed-output rejection, expiry, scope confinement,
+secure IPC, approval-gating, and the validate→authorize→execute→verify→record pipeline.
+
+**Real hardware (P5).** An automated lab flashes, boots, captures serial/diagnostics, runs the
+suites, resets, and reports — per architecture + accelerator (ADR-013).
+
+**CI/CD & release gates.** Pipeline stages map to the pyramid; each subsystem's release gates
+(PRD per-subsystem V&V blocks) aggregate into milestone gates. Bootable-image + VM boot test
+run on every change; fuzzing runs continuously; formal obligations are tracked; a
+performance-regression gate guards latency.
+
+**Observability (architecture, not add-on).** The system must answer at diagnostic level: what
+is running, why, which capabilities it holds, what it accessed, what IPC occurred, what state
+changed, what failed, and why recovery did or did not succeed — built on the immutable Event +
+per-request Trace model (§10, §18).
+
+**Performance validation.** Boot time, IPC latency, scheduling + context-switch cost, storage
+throughput, memory overhead, agent startup, retrieval latency, inference scheduling,
+CPU/GPU/NPU utilization, energy. Numbers are **labeled by substrate**; only same-substrate
+comparisons are treated as fair. First data point (QEMU TCG, same emulated CPU): a
+capability-checked IPC round-trip ≈ 0.79× one bare `svc` crossing, vs a Linux pipe round-trip's
+≥2 crossings + context switch — the microkernel IPC fast-path has the lower floor. Whole-OS
+"faster than Linux" is a benchmark program with named milestones, not a headline (ADR-013).
+
+The 20 M1 acceptance criteria (PRD §42) remain encoded as automated tests and are the M1 bar.
 
 ---
 
