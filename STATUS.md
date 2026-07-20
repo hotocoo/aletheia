@@ -1,7 +1,7 @@
 # Aletheia — Implementation Status
 
 **As of:** 2026-07-20
-**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P4 (start)** — bootable aarch64 microkernel, VM-tested
+**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable aarch64 microkernel, VM-tested
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..013`.
 
@@ -60,7 +60,10 @@ Plus `security.rs`: expired-capability denial, scope confinement, agent-cannot-s
 
 ## Deferred (documented, not coded — by design; see PRD §41 / SAD §22)
 
-- **P2** WASM/WASI capability-secure component runtime + SDK + multi-agent composition.
+- **P2** (partially delivered — see "Delivered (P2 start)" below) WASM/WASI capability-secure
+  component runtime + SDK + multi-agent composition. The runtime + app-as-capability model + fuel
+  bounding are delivered and tested; SDK, richer host ABI, multi-agent composition, and the gating
+  fuzz/stress/chaos campaigns remain.
 - **P3** Native-architecture experience layer (workspaces, dynamic interfaces, semantic search).
 - **P4** Real microkernel (Rust) on metal: capability enforcement, secure IPC, memory/address spaces,
   interrupts; System Core rehosted on it. VM-tested.
@@ -77,6 +80,33 @@ architecture text and phased plans, not blind code (ADR-010).
   pure-Rust). C/C++/asm only behind audited FFI in later hardware phases.
 - **Single crate, module boundaries** mirror the SAD's crate list; splitting into a cargo workspace is
   a mechanical later step (dependency direction already points inward toward `domain`).
+
+## Delivered (P2 start — WASM capability-secure components)
+
+A `wasmi`-based component runtime (`aletheia/src/component.rs`, ADR-014) that runs **untrusted**
+WASM as first-class applications while preserving every M1 invariant. This is the layer that lets
+Aletheia actually run programs — and it does so with **no ambient authority**.
+
+- **No WASI.** A component reaches the OS only through an explicit host ABI (`read` / `write` /
+  `emit`). There is deliberately no ambient filesystem/clock/rand/env.
+- **Same authority mechanism.** Every host call authorizes through the *same* `CapEngine::evaluate`
+  the deterministic pipeline uses, against the exact capabilities the component was granted —
+  nothing inherited from the launcher.
+- **Application-as-capability.** Launching a component at all requires a `component.run` capability;
+  the component then executes with *exactly* its `grant_caps`. `install_component` registers WASM as
+  an encrypted, content-addressed `Application` entity; `run_installed` launches it from the store.
+- **Same audit log.** Allowed effects (entity writes, event emits) land in the one immutable event
+  log with the component as actor; every host-call attempt (allowed or denied) is in an explainable
+  per-run audit.
+- **Fuel-bounded.** A runaway component is trapped out-of-fuel and leaves no effects — it cannot
+  hang the OS (pre-stages the P2 stress/chaos gate).
+
+**8 P2 acceptance tests** (`tests/component.rs`, all green) prove the core invariant: a component
+with no capability can do nothing; with an attenuated grant it can do exactly that and no more;
+every effect is traced; reads and writes are capability-gated; a runaway is bounded; launching is gated;
+an installed component runs from the store; and an approval-required capability is refused at the
+component boundary (criterion 9 preserved). Deferred (follow-on P2 iterations): richer return-buffer
+host ABI, component SDK, multi-agent composition, and the gating fuzz/stress/chaos campaigns.
 
 ## Delivered (P4 start — VM-tested microkernel)
 
@@ -102,7 +132,8 @@ M1 invariants **in kernel space** — the first executed instance of the PRD's V
 
 ```bash
 cd aletheia
-cargo test        # 18 passed — the M1 acceptance bar
+cargo test        # 32 passed — M1 acceptance + property + security + P2 component invariants
+cargo test --test component   # the 8 P2 WASM-component acceptance tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
 ./scripts/vm-e2e.sh          # build + boot the microkernel in QEMU + assert 11/11 invariants + exit 0
