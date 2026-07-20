@@ -1,0 +1,22 @@
+[package]
+name = "aletheia-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Aletheia microkernel reference — bare-metal aarch64 (QEMU virt). Enforces the same capability-secure spine invariants as the M1 hosted System Core, but in kernel space (PRD-002 §12, ADR-010 P4)."
+
+[[bin]]
+name = "aletheia-kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = true
