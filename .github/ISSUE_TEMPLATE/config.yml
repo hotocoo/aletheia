@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability (report privately)
+    url: https://github.com/hotocoo/aletheia/security/advisories/new
+    about: >-
+      Do NOT open a public issue for capability bypasses, ambient-authority leaks, or ways for
+      untrusted content/model output to gain authority. Report privately so it can be fixed first.
