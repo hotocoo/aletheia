@@ -38,14 +38,14 @@ pub enum Request {
     SubmitIntent { caps: Vec<String>, intent: Intent, approve: bool },
     /// capabilities (command): delegate a capability to a subject.
     Grant { caps: Vec<String>, subject: String, action: String, scope_entities: Vec<String>, approval: bool },
-    /// capabilities (command): revoke a capability (and its descendants).
-    Revoke { token: String },
-    /// policy (query): list pending approvals awaiting a human decision.
-    ListApprovals,
+    /// capabilities (command): revoke a capability (and its descendants). Capability-gated.
+    Revoke { caps: Vec<String>, token: String },
+    /// policy (query): list pending approvals awaiting a human decision. Capability-gated.
+    ListApprovals { caps: Vec<String> },
     /// policy (command): a human grants or denies a pending approval (re-runs the bound intent).
     ResolveApproval { caps: Vec<String>, approval_id: String, granted: bool },
-    /// audit (query): the tail of the immutable event log.
-    QueryAudit { limit: usize },
+    /// audit (query): the tail of the immutable event log. Capability-gated (`audit.read`).
+    QueryAudit { caps: Vec<String>, limit: usize },
     /// components (command): install untrusted WASM (hex-encoded bytes) as an Application entity.
     InstallComponent { caps: Vec<String>, subject: String, name: String, wasm_hex: String },
     /// components (command): launch an installed component with an explicit capability grant.
@@ -105,25 +105,24 @@ impl CoreService {
                     Err(e) => Response::err(e.to_string()),
                 }
             }
-            Request::Revoke { token } => match self.core.revoke(&token) {
+            Request::Revoke { caps, token } => match self.core.revoke_capability(&caps, &token) {
                 Ok(()) => Response::ok(json!({ "revoked": token })),
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::ListApprovals => {
-                let pending = self.core.list_pending_approvals();
-                Response::ok(serde_json::to_value(&pending).unwrap_or(Value::Null))
-            }
+            Request::ListApprovals { caps } => match self.core.list_pending_approvals(&caps) {
+                Ok(pending) => Response::ok(serde_json::to_value(&pending).unwrap_or(Value::Null)),
+                Err(e) => Response::err(e.to_string()),
+            },
             Request::ResolveApproval { caps, approval_id, granted } => {
                 match self.core.resolve_approval(&caps, &approval_id, granted) {
                     Ok(trace) => Response { ok: trace.ok || !granted, data: serde_json::to_value(&trace).unwrap_or(Value::Null), error: None },
                     Err(e) => Response::err(e.to_string()),
                 }
             }
-            Request::QueryAudit { limit } => {
-                let events = self.core.store().events();
-                let tail: Vec<&crate::domain::EventRecord> = events.iter().rev().take(limit).collect();
-                Response::ok(serde_json::to_value(&tail).unwrap_or(Value::Null))
-            }
+            Request::QueryAudit { caps, limit } => match self.core.query_audit(&caps, limit) {
+                Ok(tail) => Response::ok(serde_json::to_value(&tail).unwrap_or(Value::Null)),
+                Err(e) => Response::err(e.to_string()),
+            },
             Request::InstallComponent { caps, subject, name, wasm_hex } => match from_hex(&wasm_hex) {
                 Some(bytes) => match self.core.install_component(&caps, &subject, &name, &bytes) {
                     Ok(e) => Response::ok(json!({ "app": e.id, "name": name })),
@@ -146,24 +145,27 @@ impl CoreService {
 /// Serve requests on a Unix domain socket until the listener is dropped. Sequential accept loop:
 /// one connection at a time, each connection may issue many requests (length-prefixed JSON frames).
 /// std-only; no async runtime.
+/// Maximum accepted request frame (8 MiB): bounds a malicious length prefix BEFORE allocation.
+const MAX_FRAME: usize = 8 * 1024 * 1024;
+/// Per-connection read timeout: a client that stalls mid-frame is dropped rather than blocking the
+/// (sequential) accept loop forever (slow-loris mitigation). Bounds reading REQUEST bytes, not
+/// request processing, so a long model interpretation is unaffected.
+const CONN_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub fn serve_unix(mut svc: CoreService, socket_path: &str) -> std::io::Result<()> {
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     for conn in listener.incoming() {
         let mut stream = conn?;
-        loop {
-            match read_frame(&mut stream) {
-                Ok(Some(bytes)) => {
-                    let resp = match serde_json::from_slice::<Request>(&bytes) {
-                        Ok(req) => svc.handle(req),
-                        Err(e) => Response::err(format!("bad request: {e}")),
-                    };
-                    let out = serde_json::to_vec(&resp).unwrap_or_default();
-                    if write_frame(&mut stream, &out).is_err() {
-                        break;
-                    }
-                }
-                _ => break, // clean EOF or read error → close this connection
+        let _ = stream.set_read_timeout(Some(CONN_READ_TIMEOUT));
+        while let Ok(Some(bytes)) = read_frame(&mut stream) {
+            let resp = match serde_json::from_slice::<Request>(&bytes) {
+                Ok(req) => svc.handle(req),
+                Err(e) => Response::err(format!("bad request: {e}")),
+            };
+            let out = serde_json::to_vec(&resp).unwrap_or_default();
+            if write_frame(&mut stream, &out).is_err() {
+                break;
             }
         }
     }
@@ -203,6 +205,9 @@ fn read_frame(r: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
         Err(e) => return Err(e),
     }
     let n = u32::from_le_bytes(len) as usize;
+    if n > MAX_FRAME {
+        return Err(std::io::Error::other("frame exceeds MAX_FRAME"));
+    }
     let mut buf = vec![0u8; n];
     r.read_exact(&mut buf)?;
     Ok(Some(buf))
@@ -216,7 +221,7 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 fn from_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()

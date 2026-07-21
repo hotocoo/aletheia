@@ -54,9 +54,12 @@ fn uc_create_derive_traverse_through_the_api() {
     let results = tr.data["result"][0]["results"].as_array().unwrap();
     assert!(results.iter().any(|v| v.as_str() == Some(derived_id.as_str())), "world model resolves the derived entity via the API");
 
-    // audit query surface returns the immutable events.
-    let audit = svc.handle(Request::QueryAudit { limit: 50 });
+    // audit query surface returns the immutable events (capability-gated).
+    let audit = svc.handle(Request::QueryAudit { caps: vec![owner.clone()], limit: 50 });
     assert!(audit.ok && audit.data.as_array().map(|a| !a.is_empty()).unwrap_or(false));
+    // Unauthenticated audit read is denied (no ambient authority over the log).
+    let denied_audit = svc.handle(Request::QueryAudit { caps: vec![], limit: 50 });
+    assert!(!denied_audit.ok, "audit read requires a capability");
 }
 
 #[test]
@@ -103,9 +106,12 @@ fn destructive_requires_approval_lifecycle_over_the_api() {
     assert!(!attempt.ok, "destructive op stops pending approval");
     let approval_id = attempt.data["approval_id"].as_str().expect("pending approval id returned").to_string();
 
-    // policy query surface lists it.
-    let pending = svc.handle(Request::ListApprovals);
+    // policy query surface lists it (capability-gated).
+    let pending = svc.handle(Request::ListApprovals { caps: vec![owner.clone()] });
     assert!(pending.data.as_array().unwrap().iter().any(|a| a["id"] == approval_id));
+    // A zero-capability caller cannot force-deny another subject's pending approval (DoS gate).
+    let bad_deny = svc.handle(Request::ResolveApproval { caps: vec![], approval_id: approval_id.clone(), granted: false });
+    assert!(!bad_deny.ok, "resolving an approval requires authority over the bound action");
 
     // Human grants it → the bound intent executes (approval confers no authority; caps re-checked).
     let resolved = svc.handle(Request::ResolveApproval { caps: vec![owner], approval_id, granted: true });
