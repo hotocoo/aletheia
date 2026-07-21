@@ -170,6 +170,14 @@ Elevating the M1 reference from a scripted demo toward the real layered architec
   x86-64 and RISC-V are declared first-class targets**; aarch64 is the bootstrap/dev backend (VM-
   tested, still 11/11 green through the HAL). The x86-64/RISC-V backends are `cfg`-gated contracts —
   no untested bring-up code ships (ADR-010). The HAL imports no Linux/macOS/Darwin/POSIX.
+- **Security hardening (22-agent adversarial-review pass)** — the wave was adversarially reviewed and
+  the confirmed findings fixed: (CRITICAL) unauthenticated audit read + capability-token/decrypted-
+  content leakage via the event log → tokens/content are no longer logged and `QueryAudit`/
+  `ListApprovals` are `audit.read`-gated; (CRITICAL) ungated `Revoke` → now requires `capability.grant`
+  authority (no owner-lockout); (HIGH) ungated `ResolveApproval` → only a principal who could perform
+  the bound action may grant/deny; (HIGH) one-time owner bootstrap guard; (HIGH) socket frame cap
+  (8 MiB) + per-connection read timeout (slow-loris/OOM); (HIGH) Context-Engine now enforces
+  capability-before-inclusion for relationship EDGES, not just entities. Clippy `-D warnings` clean.
 
 Deferred (next): x86-64 + RISC-V HAL backends (VM-tested bring-up, P4/P5); the cargo-**workspace crate
 split** (SAD §4 — mechanical; module boundaries + dependency direction already match the crate list).

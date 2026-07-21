@@ -119,7 +119,7 @@ fn http(host: &str, port: u16, method: &str, path: &str, body: Option<&str>, tim
     let sockaddr = addr
         .to_socket_addrs()?
         .next()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no addr"))?;
+        .ok_or_else(|| std::io::Error::other("no addr"))?;
     let connect_timeout = Duration::from_millis(timeout_ms.min(2000));
     let mut stream = TcpStream::connect_timeout(&sockaddr, connect_timeout)?;
     stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)))?;

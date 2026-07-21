@@ -73,7 +73,7 @@ fn c6_capabilities_unforgeable() {
     // Fabricate a plausible-looking token; it is NOT in the engine's registry.
     let forged = aletheia::crypto::random_token();
     let target = Target { id: Some(e.id.clone()), etype: Some(EntityType::Document) };
-    let decision = core.caps().evaluate("entity.read", &target, &[forged.clone()]);
+    let decision = core.caps().evaluate("entity.read", &target, std::slice::from_ref(&forged));
     assert!(matches!(decision, aletheia::capabilities::Decision::Deny(_)), "forged handle must be denied");
     // And through the full pipeline.
     let tr = core.handle_intent(&[forged], Intent { subject: "attacker".into(), verb: Verb::Read { id: e.id } }, false);

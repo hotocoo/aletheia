@@ -133,7 +133,7 @@ impl ApprovalStore {
             .filter(|a| a.state == ApprovalState::Pending && !a.is_expired(at))
             .cloned()
             .collect();
-        v.sort_by(|a, b| b.requested_at.cmp(&a.requested_at));
+        v.sort_by_key(|a| std::cmp::Reverse(a.requested_at));
         v
     }
 

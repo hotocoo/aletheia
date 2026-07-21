@@ -184,26 +184,30 @@ impl ContextEngine {
         let mut seen: Vec<Id> = Vec::new();
 
         if let Some(fid) = &focus {
-            if let Some(e) = store.get_entity(fid) {
-                if authorized_read(caps, offered, e) {
+            // Only traverse from a focus the subject is authorized to read, and surface an edge ONLY
+            // when the neighbour is ALSO authorized — an edge reveals a neighbour id + relationship
+            // type, itself protected state. This enforces capability-before-inclusion for EDGES, not
+            // just entities (the prior version pushed the edge before the neighbour check).
+            let focus_authorized = store.get_entity(fid).map(|e| authorized_read(caps, offered, e)).unwrap_or(false);
+            if focus_authorized {
+                if let Some(e) = store.get_entity(fid) {
                     world.push(entity_ref(e));
                     seen.push(e.id.clone());
                 }
-            }
-            // Traverse edges touching the focus; include authorized neighbours only.
-            for r in store.relationships() {
-                if relationships.len() >= budget.max_relationships {
-                    break;
-                }
-                if &r.from == fid || &r.to == fid {
-                    relationships.push(EdgeRef { from: r.from.clone(), rtype: r.rtype.clone(), to: r.to.clone() });
-                    let other = if &r.from == fid { &r.to } else { &r.from };
-                    if world.len() < budget.max_entities && !seen.contains(other) {
-                        if let Some(e) = store.get_entity(other) {
-                            if authorized_read(caps, offered, e) {
-                                world.push(entity_ref(e));
-                                seen.push(e.id.clone());
-                            }
+                for r in store.relationships() {
+                    if relationships.len() >= budget.max_relationships {
+                        break;
+                    }
+                    if &r.from == fid || &r.to == fid {
+                        let other = if &r.from == fid { &r.to } else { &r.from };
+                        let ne = match store.get_entity(other) {
+                            Some(ne) if authorized_read(caps, offered, ne) => ne,
+                            _ => continue, // neighbour not authorized → do not reveal the edge
+                        };
+                        relationships.push(EdgeRef { from: r.from.clone(), rtype: r.rtype.clone(), to: r.to.clone() });
+                        if world.len() < budget.max_entities && !seen.contains(other) {
+                            world.push(entity_ref(ne));
+                            seen.push(ne.id.clone());
                         }
                     }
                 }

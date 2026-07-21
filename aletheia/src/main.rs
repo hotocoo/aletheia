@@ -135,7 +135,7 @@ fn demo(args: &[String]) {
     }
 
     // audit: the immutable event log.
-    let audit = svc.handle(Request::QueryAudit { limit: 100 });
+    let audit = svc.handle(Request::QueryAudit { caps: vec![owner.clone()], limit: 100 });
     let n = audit.data.as_array().map(|a| a.len()).unwrap_or(0);
     println!("\naudit surface: {n} immutable events recorded.");
     println!("run `aletheiad serve` for the long-running Core behind the socket boundary;");

@@ -36,6 +36,7 @@ pub struct SysCore {
     approvals: ApprovalStore,
     tasks: HashMap<Id, TaskState>,
     cancelled: HashSet<Id>,
+    root_minted: bool,
 }
 
 impl SysCore {
@@ -48,6 +49,8 @@ impl SysCore {
         for t in store.revoked_tokens() {
             caps.mark_revoked(t);
         }
+        // A root capability (action "*", no parent) already present means the owner is bootstrapped.
+        let root_minted = store.loaded_caps().iter().any(|c| c.action == "*" && c.parent.is_none());
         let mut core = SysCore {
             store,
             caps,
@@ -57,6 +60,7 @@ impl SysCore {
             approvals: ApprovalStore::new(),
             tasks: HashMap::new(),
             cancelled: HashSet::new(),
+            root_minted,
         };
         core.rebuild_approvals();
         Ok(core)
@@ -92,9 +96,16 @@ impl SysCore {
     /// Mint the human owner's root capability. Authority still comes from a HELD capability, not from
     /// merely running — this is the root of the delegation tree, not ambient authority (INV-011).
     pub fn bootstrap_owner(&mut self, subject: &str) -> Result<StoredCapability> {
+        // Guard: mint the root exactly once. Without this, an unauthenticated caller on the hosted
+        // boundary could repeatedly mint fresh root capabilities (INV-011). The token is NEVER logged
+        // — it is a bearer secret; the audit records only who received what authority.
+        if self.root_minted {
+            return Err(AlethError::conflict("owner already bootstrapped"));
+        }
         let cap = self.caps.mint(subject, "*", Scope::All, Constraints::none(), "system");
         self.store.put_capability(&cap)?;
-        self.emit("CapabilityGranted", &new_id(), "system", json!({"token": cap.token, "subject": subject, "action": "*"}));
+        self.root_minted = true;
+        self.emit("CapabilityGranted", &new_id(), "system", json!({"subject": subject, "action": "*"}));
         Ok(cap)
     }
 
@@ -184,7 +195,8 @@ impl SysCore {
             if self.caps.get(token).is_some() {
                 if let Ok(cap) = self.caps.delegate(token, subject, action, scope.clone(), constraints.clone(), subject) {
                     self.store.put_capability(&cap)?;
-                    self.emit("CapabilityGranted", &new_id(), subject, json!({"token": cap.token, "subject": subject, "action": action}));
+                    // Never log the token (bearer secret) — only the authority granted.
+                    self.emit("CapabilityGranted", &new_id(), subject, json!({"subject": subject, "action": action}));
                     return Ok(cap);
                 }
             }
@@ -379,6 +391,13 @@ impl SysCore {
             self.emit("ApprovalResolved", &new_id(), &pa.subject, json!({"approval": approval_id, "state": "Expired"}));
             return Err(AlethError::conflict("approval expired"));
         }
+        // Authorization: only a principal who could perform the bound action may resolve its
+        // approval — grant OR deny (INV-011). Approval is a second gate, never an escape from
+        // capabilities, and a zero-capability caller must not be able to force-deny (DoS) either.
+        let (action, target) = self.authz_of_intent(&pa.intent);
+        if matches!(self.caps.evaluate(action, &target, offered), Decision::Deny(_)) {
+            return Err(AlethError::authorization("not permitted to resolve this approval"));
+        }
         self.approvals.mark_state(approval_id, if granted { ApprovalState::Granted } else { ApprovalState::Denied });
         self.emit("ApprovalResolved", &new_id(), &pa.subject, json!({"approval": approval_id, "granted": granted}));
         if !granted {
@@ -392,12 +411,50 @@ impl SysCore {
         Ok(self.run_intent(&task, offered, pa.intent, true))
     }
 
-    /// All approvals still awaiting a human decision (freshest first).
-    pub fn list_pending_approvals(&self) -> Vec<PendingApproval> {
-        self.approvals.list_pending(now())
+    /// All approvals still awaiting a human decision (freshest first). Capability-gated
+    /// (`audit.read`): pending approvals reveal subjects + bound intents, so an unauthenticated
+    /// caller is denied.
+    pub fn list_pending_approvals(&self, offered: &[String]) -> Result<Vec<PendingApproval>> {
+        if matches!(self.caps.evaluate("audit.read", &Target::default(), offered), Decision::Deny(_)) {
+            return Err(AlethError::authorization("not permitted to list approvals"));
+        }
+        Ok(self.approvals.list_pending(now()))
     }
     pub fn get_approval(&self, id: &Id) -> Option<PendingApproval> {
         self.approvals.get(id).cloned()
+    }
+
+    /// Read the tail of the immutable audit log. Capability-gated (`audit.read`): the log carries
+    /// provenance, not a public feed — a caller with no covering capability is denied (fail-closed).
+    pub fn query_audit(&self, offered: &[String], limit: usize) -> Result<Vec<EventRecord>> {
+        if matches!(self.caps.evaluate("audit.read", &Target::default(), offered), Decision::Deny(_)) {
+            return Err(AlethError::authorization("not permitted to read audit"));
+        }
+        Ok(self.store.events().iter().rev().take(limit).cloned().collect())
+    }
+
+    /// Revoke a capability through the boundary — capability-gated (requires `capability.grant`
+    /// authority). Prevents an unauthenticated caller from revoking the root cap (owner lockout).
+    pub fn revoke_capability(&mut self, offered: &[String], token: &str) -> Result<()> {
+        if matches!(self.caps.evaluate("capability.grant", &Target::default(), offered), Decision::Deny(_)) {
+            return Err(AlethError::authorization("not permitted to revoke"));
+        }
+        self.revoke(token)
+    }
+
+    /// The capability action + target a bound intent would require — used to gate who may resolve
+    /// its approval (mirrors the pipeline's own authorization).
+    fn authz_of_intent(&self, intent: &Intent) -> (&'static str, Target) {
+        use crate::intent_action::Verb;
+        match &intent.verb {
+            Verb::Read { id } => ("entity.read", Target { id: Some(id.clone()), etype: self.store.get_entity(id).map(|e| e.etype) }),
+            Verb::Delete { id } => ("entity.delete", Target { id: Some(id.clone()), etype: self.store.get_entity(id).map(|e| e.etype) }),
+            Verb::Traverse { from, .. } => ("entity.read", Target { id: Some(from.clone()), etype: self.store.get_entity(from).map(|e| e.etype) }),
+            Verb::Derive { into_type, .. } => ("entity.derive", Target { id: None, etype: Some(*into_type) }),
+            Verb::RestoreVersion { .. } => ("entity.write", Target::default()),
+            Verb::Grant { .. } => ("capability.grant", Target::default()),
+            Verb::Raw { .. } => ("entity.read", Target::default()),
+        }
     }
 
     /// Rebuild the approval registry from the immutable event log on open (persistence across
@@ -552,6 +609,10 @@ impl SysCore {
                 ApprovalVerdict::Required { reason } => {
                     if approve {
                         trace.approval = format!("approved ({})", reason);
+                        // Durable approval provenance for the synchronous path — the audit log is the
+                        // source of truth (ADR-015), so a policy-required action carries a record even
+                        // when approved inline rather than via the pending-approval lifecycle.
+                        self.emit("ApprovalResolved", task_id, &intent.subject, json!({"approval": "inline", "granted": true, "reason": reason}));
                     } else {
                         // Record a durable pending approval bound to this exact intent; stop with no
                         // effect. A human later grants/denies it via `resolve_approval`.
@@ -589,7 +650,10 @@ impl SysCore {
         trace.result = json!(results);
         trace.ok = true;
         self.tasks.insert(task_id.clone(), TaskState::Completed);
-        self.emit("AIActionExecuted", task_id, &intent.subject, json!({"result": trace.result}));
+        // Audit records the FACT of execution, not the payload: trace.result can carry decrypted
+        // content or capability tokens, which must never enter the immutable log (returned to the
+        // authorized caller in the Trace instead).
+        self.emit("AIActionExecuted", task_id, &intent.subject, json!({"ok": true, "steps": plan.steps.len()}));
         trace
     }
 
