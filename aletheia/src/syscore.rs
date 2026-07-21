@@ -63,9 +63,11 @@ impl SysCore {
         Ok(core)
     }
 
-    /// Open with the local-model adapter (unhealthy in M1 → deterministic fallback, INT-004).
+    /// Open with the AI provider selected from `AiConfig` (env-configured, ADR-017): the real local
+    /// model is the primary interpreter, with the deterministic interpreter as fallback whenever the
+    /// model is unavailable (INT-004). The OS is fully functional with no resident model.
     pub fn open_default(dir: impl AsRef<std::path::Path>) -> Result<Self> {
-        Self::open(dir, Box::new(crate::intelligence::LocalModelRuntime::new("http://localhost:8080")))
+        Self::open(dir, crate::ai::select_provider(&crate::ai::config::AiConfig::from_env()))
     }
 
     pub fn store(&self) -> &Store { &self.store }

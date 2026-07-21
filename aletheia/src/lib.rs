@@ -4,6 +4,7 @@
 //! Relationship) per PRD-002. Modules mirror the SAD crate boundaries; splitting into a cargo
 //! workspace is a mechanical later step. Dependency direction points inward toward `domain`.
 pub mod agents;
+pub mod ai;
 pub mod capabilities;
 pub mod component;
 pub mod context;
