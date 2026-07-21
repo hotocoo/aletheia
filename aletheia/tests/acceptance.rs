@@ -184,8 +184,10 @@ fn c16_cancellation_stops_without_side_effects() {
 
 #[test]
 fn c17_operates_without_model() {
-    // open_default uses the local-model adapter, which is unhealthy in M1 -> deterministic fallback.
-    let mut core = SysCore::open_default(dir()).unwrap();
+    // A configured model provider that is unavailable must fall back to the deterministic
+    // interpreter (INT-004). Uses an explicitly-unreachable provider so the criterion holds
+    // regardless of whether a real llama-server happens to be running on this machine.
+    let mut core = SysCore::open(dir(), Box::new(aletheia::intelligence::LocalModelRuntime::new("http://127.0.0.1:1"))).unwrap();
     assert_eq!(core.interpreter_name(), "deterministic");
     let t = owner(&mut core);
     let e = core.create_entity(&t, "human:owner", EntityType::Document, b"data", serde_json::json!({})).unwrap();
