@@ -66,6 +66,7 @@ Plus `security.rs`: expired-capability denial, scope confinement, agent-cannot-s
   **Rust component SDK** + the **property/chaos gate** are delivered and tested; only the longer-running
   soak/adversarial stress campaigns remain.
 - **P3** Native-architecture experience layer (workspaces, dynamic interfaces, semantic search).
+  *(Started: capability-gated keyword search over the World Model is delivered — see the P3 section.)*
 - **P4** Real microkernel (Rust) on metal: capability enforcement, secure IPC, memory/address spaces,
   interrupts; System Core rehosted on it. VM-tested.
 - **P5** HAL on real devices, native on-GPU compositor, heterogeneous CPU/GPU/NPU scheduler, secure
@@ -146,6 +147,20 @@ there is nothing else to reach (no WASI, no ambient authority; ADR-014).
   `clippy -D warnings` clean on host + wasm32.
 - **Deferred (follow-on)**: an `alloc`-backed convenience layer (owned buffers for `read_entity`),
   richer parent→child data-flow, and typed entity/metadata helpers.
+
+## Delivered (2026-07-21 — P3 start: capability-gated World-Model search)
+
+The first slice of the P3 experience layer: **search over the World Model**, subject to the same
+capability discipline as everything else. `ContextEngine::search_world` (ADR-018's search seam, in
+its always-available NO-embedding form — the `SemanticRetriever` embedding path stays an optional
+extension) scores entities by keyword match across type/metadata/UTF-8 content and returns the top
+hits most-relevant-first (deterministic; ties broken by id). It is **authorization-before-inclusion**:
+only entities the caller may `entity.read` are ever considered, so an unauthorized entity never
+appears even when it matches, and a caller with no read authority gets nothing (fail closed). Exposed
+as `SysCore::search(offered, query, limit)` (read-only). Verified by `aletheia/tests/search.rs`:
+capability-gated (a reader scoped to one entity never sees another that matches), ranked (a two-term
+match outranks a one-term match), and fail-closed. Deferred (P3): embedding-backed semantic search,
+workspaces, and dynamic interfaces.
 
 ## Delivered (2026-07-21 — P2 property/chaos gate)
 

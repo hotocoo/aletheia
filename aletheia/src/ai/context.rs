@@ -251,6 +251,81 @@ fn authorized_read(caps: &CapEngine, offered: &[String], e: &Entity) -> bool {
     matches!(caps.evaluate("entity.read", &target, offered), Decision::Allow)
 }
 
+/// A capability-gated keyword-search hit over the World Model.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SearchHit {
+    pub id: Id,
+    pub etype: EntityType,
+    /// Relevance: how many DISTINCT lowercased query terms occur in the entity's type/metadata/content.
+    pub score: u32,
+    /// A short excerpt of what matched (content preferred, else metadata) — for display/trace.
+    pub snippet: String,
+}
+
+/// Capability-gated keyword search over the World Model — the always-available, no-embedding form of
+/// ADR-018's search seam (the `SemanticRetriever` embedding path stays an OPTIONAL extension). It is
+/// structured-first and CAPABILITY-BEFORE-INCLUSION: only entities the caller is authorized to READ
+/// (`authorized_read`) are ever considered, so an unauthorized entity never appears even if it would
+/// match, and a caller offering no read authority gets NOTHING (fail closed). Each candidate is scored
+/// by how many distinct query terms occur in its type name, metadata, and UTF-8 content; the top
+/// `limit` hits are returned most-relevant-first, ties broken by id for determinism (store order is
+/// not stable). Content is DATA, never instruction (SEC-003).
+pub fn search_world(
+    store: &Store,
+    caps: &CapEngine,
+    offered: &[String],
+    query: &str,
+    limit: usize,
+) -> Vec<SearchHit> {
+    let terms: Vec<String> =
+        query.split_whitespace().map(|t| t.to_lowercase()).filter(|t| !t.is_empty()).collect();
+    if terms.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+    for e in store.entities() {
+        if e.deleted || !authorized_read(caps, offered, e) {
+            continue; // capability-before-inclusion: unauthorized state is never surfaced
+        }
+        let etype_s = format!("{:?}", e.etype).to_lowercase();
+        let meta_s = e.metadata.to_string().to_lowercase();
+        let content_s: String = e
+            .content_ref
+            .as_ref()
+            .and_then(|h| store.get_blob(h))
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+
+        let score = terms
+            .iter()
+            .filter(|t| etype_s.contains(t.as_str()) || meta_s.contains(t.as_str()) || content_s.contains(t.as_str()))
+            .count() as u32;
+        if score == 0 {
+            continue;
+        }
+        hits.push(SearchHit {
+            id: e.id.clone(),
+            etype: e.etype,
+            score,
+            snippet: snippet_for(if content_s.is_empty() { &meta_s } else { &content_s }, &terms),
+        });
+    }
+    // Most relevant first; id breaks ties so the result is deterministic (store iteration is not).
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+    hits.truncate(limit);
+    hits
+}
+
+/// A short, char-boundary-safe excerpt of `hay` centered on the first matching term.
+fn snippet_for(hay: &str, terms: &[String]) -> String {
+    let pos = terms.iter().find_map(|t| hay.find(t.as_str())).unwrap_or(0);
+    let start = pos.saturating_sub(24);
+    let end = (start + 96).min(hay.len());
+    hay.char_indices().filter(|(i, _)| *i >= start && *i < end).map(|(_, c)| c).collect()
+}
+
 /// Back-compat convenience: a one-line situational brief (used by simple callers/tests). Prefer
 /// `ContextEngine::build` for capability-aware, budgeted context.
 pub fn build_brief(store: &Store, subject: &str, max_items: usize) -> String {
