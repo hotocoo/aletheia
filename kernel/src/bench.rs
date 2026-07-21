@@ -64,7 +64,11 @@ struct Ring {
 }
 impl Ring {
     fn new() -> Self {
-        Ring { buf: [0; 8], head: 0, tail: 0 }
+        Ring {
+            buf: [0; 8],
+            head: 0,
+            tail: 0,
+        }
     }
     #[inline]
     fn push(&mut self, v: u64) {
@@ -119,7 +123,12 @@ pub fn run() {
     const ITERS: u64 = 2_000_000;
 
     let mut engine = CapEngine::new(0x5eed_1234, 1000);
-    let cap = engine.mint("A", "ipc.send", Scope::All, crate::spine::Constraints::none());
+    let cap = engine.mint(
+        "A",
+        "ipc.send",
+        Scope::All,
+        crate::spine::Constraints::none(),
+    );
     let caps = [cap];
 
     // Warmup (prime i-cache / TCG translation blocks).
@@ -137,11 +146,13 @@ pub fn run() {
     kprintln!("[bench] iterations: {}", ITERS);
     kprintln!(
         "[bench] syscall floor (1x svc EL1 trap+eret)                  : {} ns/op ({} ticks)",
-        svc_ns, svc_ticks
+        svc_ns,
+        svc_ticks
     );
     kprintln!(
         "[bench] cap check + in-kernel delivery (2 checks, NO crossing): {} ns/op ({} ticks)",
-        ipc_ns, ipc_ticks
+        ipc_ns,
+        ipc_ticks
     );
     if ipc_ns > 0 && svc_ns > 0 {
         // Cost of the authority check Aletheia ADDS, relative to one real syscall crossing.
@@ -152,9 +163,17 @@ pub fn run() {
             x100 % 100
         );
     }
-    kprintln!("[bench] HONESTY: this does NOT show Aletheia IPC < Linux IPC. The measured loop runs");
-    kprintln!("[bench]   in EL1 and crosses no privilege/address-space boundary; a real microkernel");
-    kprintln!("[bench]   IPC round-trip AND a Linux pipe both pay >=2 crossings + context/AS switches.");
+    kprintln!(
+        "[bench] HONESTY: this does NOT show Aletheia IPC < Linux IPC. The measured loop runs"
+    );
+    kprintln!(
+        "[bench]   in EL1 and crosses no privilege/address-space boundary; a real microkernel"
+    );
+    kprintln!(
+        "[bench]   IPC round-trip AND a Linux pipe both pay >=2 crossings + context/AS switches."
+    );
     kprintln!("[bench]   Comparing IPC transport needs cross-AS IPC vs a Linux guest in the SAME");
-    kprintln!("[bench]   emulator (next milestone). scripts/linux_pipe_bench.sh = real-Linux baseline.");
+    kprintln!(
+        "[bench]   emulator (next milestone). scripts/linux_pipe_bench.sh = real-Linux baseline."
+    );
 }

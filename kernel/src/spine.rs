@@ -86,10 +86,17 @@ pub struct Constraints {
 
 impl Constraints {
     pub fn none() -> Self {
-        Constraints { expires_at: None, approval_required: false, local_only: true }
+        Constraints {
+            expires_at: None,
+            approval_required: false,
+            local_only: true,
+        }
     }
     pub fn approval() -> Self {
-        Constraints { approval_required: true, ..Self::none() }
+        Constraints {
+            approval_required: true,
+            ..Self::none()
+        }
     }
 }
 
@@ -311,7 +318,11 @@ pub struct Store {
 
 impl Store {
     pub fn new() -> Self {
-        Store { entities: BTreeMap::new(), events: Vec::new(), next_id: 0x1000 }
+        Store {
+            entities: BTreeMap::new(),
+            events: Vec::new(),
+            next_id: 0x1000,
+        }
     }
 
     pub fn put(&mut self, etype: EntityType, content: &str, provenance: &str) -> u64 {
@@ -447,7 +458,10 @@ pub fn run_pipeline(
     };
 
     // Authorize: derive requires an 'entity.derive' capability over the source entity.
-    let target = Target { id: Some(step.source), etype: Some(src.etype) };
+    let target = Target {
+        id: Some(step.source),
+        etype: Some(src.etype),
+    };
     r.authorization = engine.evaluate("entity.derive", &target, offered);
     match r.authorization {
         Decision::Allow => {}
@@ -503,16 +517,14 @@ pub struct Channel {
 
 impl Channel {
     pub fn new(send_action: &str) -> Self {
-        Channel { send_action: send_action.to_string(), inbox: Vec::new() }
+        Channel {
+            send_action: send_action.to_string(),
+            inbox: Vec::new(),
+        }
     }
 
     /// Authorized send. Returns the capability decision; on Allow the message is delivered.
-    pub fn send(
-        &mut self,
-        engine: &CapEngine,
-        msg: Message,
-        offered: &[CapToken],
-    ) -> Decision {
+    pub fn send(&mut self, engine: &CapEngine, msg: Message, offered: &[CapToken]) -> Decision {
         let target = Target::default();
         let decision = engine.evaluate(&self.send_action, &target, offered);
         if decision == Decision::Allow {
