@@ -362,19 +362,23 @@ an *unexpected* fault stays fatal (`exit 102`) so a real bug can never masquerad
   `TPIDR_EL0` = save-time scratch), then decodes/dispatches; `resume_frame` restores a whole frame
   and `eret`s (the same primitive starts a fresh task and resumes a preempted one). Two EL0 tasks
   `yield` (`SYS_YIELD`) under a **round-robin scheduler**, running to completion in a deterministic
-  `A,B,A,B,A,B,A,B`. Each task carries a **register-magic in a callee-saved reg** that it replays as
-  the syscall arg every slice; the kernel asserts each slice reports *its* task's magic — proving
-  the entire register file (not just the PC) rode through each context switch intact.
-- **7 EL0-boundary invariants proved live in QEMU** (exit `80+i` on failure): (1) an EL0 process
+  `A,B,A,B,A,B,A,B`. Each task runs in **its own TTBR0 address space** (the scheduler switches
+  address spaces per slice), and both tasks share ONE code VA — so a task carries a **register-magic
+  in a callee-saved reg** it replays as the syscall arg every slice, and the kernel asserting each
+  slice reports *its* task's magic proves BOTH that the entire register file (not just the PC) rode
+  through each context switch AND that the per-slice address-space switch routed the shared VA to
+  the right task's code.
+- **8 EL0-boundary invariants proved live in QEMU** (exit `80+i` on failure): (1) an EL0 process
   with **no capability** is denied at the boundary and leaves zero effect; (2) a **capability-granted**
   EL0 process is authorized via the same `CapEngine` and records exactly one event; (3) **hardware
   address-space isolation** — an EL0 read of kernel memory takes a permission Data Abort that is
   contained (proving EL0 truly cannot touch EL1 memory, not just "shouldn't"); (4) process A reaches
   a page in **its own** address space; (5) process B **cannot** reach A's page at the same VA
-  (per-process isolation); (6) the **round-robin scheduler** runs two tasks A,B,A,B,… to completion;
-  (7) each task **resumes with its own register magic** (full context preserved on switch).
-  `cargo run` now boots and re-proves **11 spine + 7 memory + 13 virtual-memory + 7 user-mode**
-  invariants + exit 0.
+  (per-process isolation); (6) the **round-robin scheduler** runs two tasks (each in its own space)
+  A,B,A,B,… to completion; (7) each task **resumes with its own register magic** at the shared VA
+  (full context + the per-slice address-space switch); (8) the two scheduled tasks occupy **distinct
+  TTBR0 address spaces**. `cargo run` now boots and re-proves **11 spine + 7 memory + 13
+  virtual-memory + 8 user-mode** invariants + exit 0.
 - **Deferred (P5 follow-on)**: **timer-driven (involuntary) preemption** (GIC + generic-timer IRQ —
   this wave is *cooperative*, tasks yield voluntarily), higher-half (TTBR1) kernel/user split, a
   frame-backed kernel heap, and the x86-64/RISC-V EL0 backends.
@@ -388,7 +392,7 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 7 EL0 user-mode invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 8 EL0 user-mode invariants + exit 0
 ./scripts/vm-e2e-riscv.sh    # same spine suite, for the RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
@@ -398,7 +402,7 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ```bash
 # The NEW P5 memory-management work (frame allocator + MMU) runs on the aarch64 dev backend.
 # Boot it directly as a -kernel ELF in QEMU (this IS the e2e VM test):
-cd kernel && cargo run          # boots Aletheia, proves 11+7+13+7 invariants live (incl. EL0 user-mode + multitasking), exits 0
+cd kernel && cargo run          # boots Aletheia, proves 11+7+13+8 invariants live (incl. EL0 user-mode + multitasking), exits 0
 
 # A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
 cd kernel-x86_64 && bash scripts/build-image.sh   # -> build/aletheia-x86_64.{img,vmdk}
