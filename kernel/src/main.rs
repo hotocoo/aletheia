@@ -23,6 +23,7 @@ global_asm!(include_str!("vectors.s"));
 mod uart;
 mod arch;
 mod bench;
+mod frames;
 mod hal;
 mod heap;
 mod selftest;
@@ -34,13 +35,27 @@ mod spine;
 pub extern "C" fn kmain() -> ! {
     use hal::{ActiveHal, Hal};
     kprintln!("========================================");
-    kprintln!(" Aletheia microkernel — HAL backend: {}", ActiveHal::arch_name());
+    kprintln!(
+        " Aletheia microkernel — HAL backend: {}",
+        ActiveHal::arch_name()
+    );
     kprintln!("========================================");
-    kprintln!("[hal] first-class targets: AMD64/x86-64, RISC-V  (aarch64 = bootstrap/dev; ADR-019)");
+    kprintln!(
+        "[hal] first-class targets: AMD64/x86-64, RISC-V  (aarch64 = bootstrap/dev; ADR-019)"
+    );
     kprintln!("[boot] OK: stack ready, BSS clear");
     kprintln!("[boot] privilege level: {}", ActiveHal::current_privilege());
     kprintln!("[boot] timer freq: {} Hz", ActiveHal::timer_freq_hz());
     kprintln!("[boot] heap: {} B used after init", heap::used_bytes());
+
+    // Physical memory: bring up the frame allocator over the RAM above the static kernel region.
+    frames::init();
+    kprintln!(
+        "[mm] frame allocator: {} frames ({} MiB) free above kernel, up to {:#x}",
+        frames::free_count(),
+        frames::free_count() * frames::FRAME_SIZE / (1024 * 1024),
+        frames::RAM_END,
+    );
 
     kprintln!("");
     kprintln!("--- invariant selftests (M1 acceptance, re-proved in kernel space) ---");
@@ -52,10 +67,24 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Physical-memory invariants (aarch64 dev backend; separate from the shared spine suite).
+    kprintln!("");
+    kprintln!("--- memory-management selftests (physical frames) ---");
+    match frames::selftest() {
+        Ok(n) => kprintln!("[mm] ALL {} MEMORY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[mm] FAILED at memory invariant {}: {}", idx, name);
+            semihosting::exit(40 + idx as i32);
+        }
+    }
+
     bench::run();
 
     kprintln!("");
-    kprintln!("[e2e] PASS — boot + spine + {} invariants + benchmark complete", 11);
+    kprintln!(
+        "[e2e] PASS — boot + spine + {} invariants + memory-management + benchmark complete",
+        11
+    );
     semihosting::exit(0);
 }
 
