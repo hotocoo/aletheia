@@ -1,0 +1,22 @@
+[package]
+name = "aletheia-kernel-riscv64"
+version = "0.1.0"
+edition = "2021"
+description = "Aletheia microkernel — bare-metal RISC-V (RV64GC, QEMU virt, S-mode via OpenSBI). Re-proves the M1 capability-secure spine invariants in kernel space on the second first-class target (ADR-019)."
+
+[[bin]]
+name = "aletheia-kernel-riscv64"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = true

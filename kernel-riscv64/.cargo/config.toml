@@ -1,0 +1,27 @@
+# Bare-metal RISC-V build for the Aletheia microkernel (RV64GC, QEMU 'virt').
+#
+# Like the aarch64 `-none` kernel, this uses build-std (nightly + rust-src) because no precompiled
+# core/alloc ships for the bare-metal target. Boot model: QEMU loads OpenSBI (`-bios default`) in
+# M-mode, which hands off to our `-kernel` ELF entry (_start) in S-mode with a0=hartid, a1=DTB.
+# `cargo run` boots the ELF in QEMU and QEMU exits via the SiFive-test device we poke, so `cargo run`
+# IS the end-to-end VM boot test — the same discipline the aarch64/x86-64 backends hold (ADR-010).
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = ["-C", "link-arg=-Tlinker.ld"]
+runner = [
+  "qemu-system-riscv64",
+  "-machine", "virt",
+  "-cpu", "rv64",
+  "-smp", "1",
+  "-m", "128M",
+  "-nographic",
+  "-bios", "default",
+  "-kernel",
+]

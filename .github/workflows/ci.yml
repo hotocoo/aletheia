@@ -31,3 +31,17 @@ jobs:
           rustup component add rust-src --toolchain nightly
       - name: Boot kernel in VM and assert 11/11 invariants + exit 0
         run: ./scripts/vm-e2e.sh
+
+  vm-e2e-riscv:
+    name: Microkernel VM boot e2e — RISC-V (QEMU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU (riscv64 system emulation)
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-misc
+      - name: Install Rust nightly + rust-src (for build-std)
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add rust-src --toolchain nightly
+      - name: Boot riscv64 kernel in VM and assert 11/11 invariants + exit 0
+        run: ./scripts/vm-e2e-riscv.sh

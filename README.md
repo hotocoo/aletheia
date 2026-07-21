@@ -46,8 +46,10 @@ SYSTEM CORE (aletheia/src)
   ├── agents            first-class, capability-bounded, revocable actors
   ├── syscore           composition root wiring the pipeline + task lifecycle + approvals
   └── service           capability-gated Service API + IPC (in-process + Unix socket) — the app boundary
-MICROKERNEL (kernel/)            no_std Rust microkernel, boots on QEMU, re-proves invariants (P4 start)
-        │  Aletheia HAL (kernel/src/hal.rs) — arch-independent contract; no Linux/macOS/POSIX imports
+MICROKERNEL                      no_std Rust microkernel, boots on QEMU, re-proves the invariants (P4)
+   kernel/ · kernel-x86_64/ ·        aarch64 (-kernel) · AMD64/x86-64 (UEFI/OVMF) · RISC-V (SBI, S-mode)
+   kernel-riscv64/                   — same shared spine.rs/selftest.rs, three CPU targets, all VM-tested
+        │  Aletheia HAL — arch-independent contract per crate; no Linux/macOS/POSIX imports
 HARDWARE                         AMD64/x86-64 · RISC-V (first-class targets) — aarch64 (bootstrap/dev)
 ```
 

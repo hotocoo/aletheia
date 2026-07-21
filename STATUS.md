@@ -1,7 +1,7 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-07-20
-**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable aarch64 microkernel, VM-tested
+**As of:** 2026-07-21
+**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..013`.
 
@@ -179,8 +179,10 @@ Elevating the M1 reference from a scripted demo toward the real layered architec
   (8 MiB) + per-connection read timeout (slow-loris/OOM); (HIGH) Context-Engine now enforces
   capability-before-inclusion for relationship EDGES, not just entities. Clippy `-D warnings` clean.
 
-Deferred (next): x86-64 + RISC-V HAL backends (VM-tested bring-up, P4/P5); the cargo-**workspace crate
-split** (SAD §4 — mechanical; module boundaries + dependency direction already match the crate list).
+Deferred (next): both first-class HAL backends are now VM-tested and executed (see the x86-64 and
+RISC-V delivered sections below); the remaining mechanical item is the cargo-**workspace crate
+split** (SAD §4 — module boundaries + dependency direction already match the crate list, and it also
+unifies the one `Hal` trait currently duplicated across the three kernel crates).
 
 ## Delivered (2026-07-21 — x86-64 bootable development image)
 
@@ -208,6 +210,35 @@ contract-honest: written outside-in and boot-verified, not blind hardware code).
 - **Deferred (P5)**: own page tables/higher-half, TSS+IST double-fault stack, APIC/HPET + calibrated
   TSC, SMP, a real page-frame allocator, and the RISC-V first-class backend.
 
+## Delivered (2026-07-21 — RISC-V first-class backend, VM-tested)
+
+The **second first-class target executed** (ADR-019): the Aletheia microkernel now boots on
+**RISC-V / RV64GC** under QEMU `virt` and re-proves the 11 capability-secure spine invariants in
+RISC-V kernel space — contract-honest (ADR-010: written outside-in and boot-verified, not blind
+hardware code). Code in `kernel-riscv64/`.
+
+- **Boot model**: QEMU loads **OpenSBI** (`-bios default`, M-mode) which hands off to our `-kernel`
+  ELF entry (`_start`) in **S-mode** with `a0`=hartid, `a1`=DTB; the kernel parks secondary harts,
+  sets its stack, clears BSS, installs an `stvec` trap vector, and runs. It drives the QEMU `virt`
+  **NS16550A UART** directly for a robust console, and genuinely exercises the **S→M SBI boundary**
+  (the RISC-V privilege-crossing interface) by calling the SBI Base extension — live boot shows
+  `spec v3.0, impl=OpenSBI`. Timer is the S-mode `rdtime` (`time` CSR, 10 MHz on `virt`), shown
+  advancing at boot.
+- **Machine exit** is the **SiFive-test device** (MMIO `0x0010_0000`), NOT SBI SRST: SRST can only
+  request a clean shutdown (exit 0) and so cannot signal a *failing* invariant, whereas the
+  SiFive-test finisher encodes a code — `FINISHER_PASS` ⇒ QEMU exit 0 (e2e PASS), `(code<<16) |
+  FINISHER_FAIL` ⇒ QEMU exit `code` (per-invariant failure / panic 101 / trap 102).
+- **Reuses** the SAME `spine.rs` / `selftest.rs` the aarch64 and x86-64 kernels compile (shared via
+  `#[path]`, no fork/copy); the aarch64 and x86-64 targets are untouched and still green. The one
+  duplicated `Hal` trait across the three kernel crates is unified by the mechanical workspace/
+  `kernel-core` split (the documented follow-up).
+- **Verified**: `scripts/vm-e2e-riscv.sh` builds the kernel, boots it in QEMU riscv64 `virt`+OpenSBI,
+  and asserts the SBI-boundary marker + `ALL 11 INVARIANTS HOLD` + `[e2e] PASS` + **exit 0** (60s
+  watchdog). Wired into CI as the `vm-e2e-riscv` job (GitHub + GitLab), alongside the aarch64 gate.
+  `clippy -D warnings` clean.
+- **Deferred (P5)**: real S-mode page tables (Sv39/Sv48) + higher-half, CLINT/`sstc` timer
+  interrupts, a page-frame allocator, PLIC/external interrupts, and SMP (secondary-hart bring-up).
+
 ## Run it
 
 ```bash
@@ -217,6 +248,7 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-./scripts/vm-e2e.sh          # build + boot the microkernel in QEMU + assert 11/11 invariants + exit 0
+./scripts/vm-e2e.sh          # build + boot the aarch64 microkernel in QEMU + assert 11/11 invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # same, for the RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
