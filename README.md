@@ -76,8 +76,11 @@ ai/
 └── llama       LlamaCppProvider — dependency-free localhost HTTP to llama-server; deterministic fallback
 ```
 
-**Hosted-dev model:** `GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF` (Q8_0), resolved from
-the local Hugging Face cache by configurable reference — **weights are never copied into the repo**.
+**Hosted-dev model:** `GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF` (Q8_0). It is a
+**declared first-party model** (pinned in [models/minicpm.toml](models/minicpm.toml)) that ships with
+Aletheia and is **provisioned on demand** — `aletheiad model pull` fetches it into the local Hugging
+Face cache. The **weights are never committed to the repo**; the repo carries the integration + the
+pinned declaration, so a fresh clone provisions the exact model on first use.
 Validated live: MiniCPM is a *thinking* model, so a strict JSON grammar collides with its `<think>`
 phase; Aletheia runs it in **no-think mode + GBNF grammar** (`enable_thinking=false`, temp 0.7),
 which yields clean, correct plan JSON. When no model is available, the **deterministic interpreter**
@@ -112,6 +115,8 @@ cargo run                        # aletheiad demo: runs UC-001..004 as a CLIENT 
 cargo run -- serve               # long-running Core Alpha behind the Unix-socket IPC boundary
 
 # Optional: use the real local model as the primary AI provider (hosted dev)
+cargo run -- model pull          # provision the first-party MiniCPM model into the HF cache (once)
+cargo run -- serve --ensure-model &   # (or start llama-server yourself:)
 llama-server -m "$(python3 -c 'import glob,os;print(glob.glob(os.path.expanduser("~/.cache/huggingface/hub/models--GnLOLot--MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF/snapshots/*/*.gguf"))[0])')" -c 8192 --port 8080
 MODEL_ENDPOINT=http://localhost:8080 cargo run   # provider becomes healthy → model interprets intents
 
