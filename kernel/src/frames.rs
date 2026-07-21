@@ -136,7 +136,7 @@ impl FrameAllocator {
     /// (returns `false`) rather than corrupting the list.
     pub fn free(&mut self, frame: PhysFrame) -> bool {
         let a = frame.addr();
-        if a < self.base || a >= self.end || a % FRAME_SIZE != 0 {
+        if a < self.base || a >= self.end || !a.is_multiple_of(FRAME_SIZE) {
             return false;
         }
         // SAFETY: `a` is a valid, aligned, in-range frame address; writing its link word is sound.
@@ -152,9 +152,6 @@ impl FrameAllocator {
     }
     pub fn base(&self) -> usize {
         self.base
-    }
-    pub fn end(&self) -> usize {
-        self.end
     }
 }
 
@@ -215,6 +212,7 @@ pub fn total_count() -> usize {
 /// A small, deterministic scratch pool used to prove exhaustion + reuse without draining the
 /// (large) real RAM pool. 4 KiB-aligned so its frames are legal frame addresses.
 #[repr(align(4096))]
+#[allow(dead_code)] // the bytes exist to reserve real, aligned address space; only its address is read
 struct Scratch([u8; FRAME_SIZE * 4]);
 static mut SCRATCH: Scratch = Scratch([0; FRAME_SIZE * 4]);
 
@@ -285,8 +283,8 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // 5 — exhaustion is fail-closed, and freeing revives allocation (deterministic scratch pool).
     {
         let mut scratch = FrameAllocator::empty();
-        // SAFETY: SCRATCH is a private 4-frame static owned solely by this test.
-        let sbase = unsafe { core::ptr::addr_of!(SCRATCH) as usize };
+        let sbase = core::ptr::addr_of!(SCRATCH) as usize;
+        // SAFETY: SCRATCH is a private, 4 KiB-aligned 4-frame static owned solely by this test.
         unsafe { scratch.init(sbase, sbase + FRAME_SIZE * 4) };
         let cap = scratch.total_count();
         let mut held = [PhysFrame(0); 4];

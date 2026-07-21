@@ -29,6 +29,7 @@ mod heap;
 mod selftest;
 mod semihosting;
 mod spine;
+mod vm;
 
 /// Kernel entry, called from `_start` (boot.s) after stack + BSS setup.
 #[no_mangle]
@@ -78,11 +79,22 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Virtual memory: build page tables, enable the MMU, prove dynamic map/unmap (aarch64 only).
+    kprintln!("");
+    kprintln!("--- virtual-memory selftests (MMU: identity map + dynamic map/unmap) ---");
+    match vm::selftest() {
+        Ok(n) => kprintln!("[vm] ALL {} VIRTUAL-MEMORY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[vm] FAILED at vm invariant {}: {}", idx, name);
+            semihosting::exit(60 + idx as i32);
+        }
+    }
+
     bench::run();
 
     kprintln!("");
     kprintln!(
-        "[e2e] PASS — boot + spine + {} invariants + memory-management + benchmark complete",
+        "[e2e] PASS — boot + spine + {} invariants + memory-management + virtual-memory + benchmark complete",
         11
     );
     semihosting::exit(0);
