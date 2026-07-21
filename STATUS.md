@@ -63,7 +63,8 @@ Plus `security.rs`: expired-capability denial, scope confinement, agent-cannot-s
 - **P2** (partially delivered — see "Delivered (P2 start)" below) WASM/WASI capability-secure
   component runtime + SDK + multi-agent composition. The runtime + app-as-capability model + fuel
   bounding + a content return-buffer (read→transform→write) + multi-agent composition (spawn) + the
-  **Rust component SDK** are delivered and tested; the gating stress/chaos campaigns remain.
+  **Rust component SDK** + the **property/chaos gate** are delivered and tested; only the longer-running
+  soak/adversarial stress campaigns remain.
 - **P3** Native-architecture experience layer (workspaces, dynamic interfaces, semantic search).
 - **P4** Real microkernel (Rust) on metal: capability enforcement, secure IPC, memory/address spaces,
   interrupts; System Core rehosted on it. VM-tested.
@@ -115,8 +116,9 @@ data end to end; a committed effect survives a later fuel-kill (a trap cannot co
 component spawns a child that runs under a delegated capability; and a spawned child cannot exceed its
 parent's authority. The untrusted host-ABI boundary is **fuzzed** (PRD §38.4): the fail-closed default
 and host robustness hold for randomized memory arguments no one enumerated. The **component SDK** is now
-delivered (Rust authoring layer over the host ABI — see its section below). Deferred (follow-on P2
-iterations): richer parent→child data-flow wiring, and the gating stress/chaos campaigns.
+delivered (Rust authoring layer over the host ABI — see its section below), and the gating
+property/chaos campaign is now green (`tests/component_chaos.rs`, below). Deferred (follow-on P2
+iterations): richer parent→child data-flow wiring, and longer-running soak/adversarial stress.
 
 ## Delivered (2026-07-21 — P2 component SDK: author components in Rust)
 
@@ -144,6 +146,16 @@ there is nothing else to reach (no WASI, no ambient authority; ADR-014).
   `clippy -D warnings` clean on host + wasm32.
 - **Deferred (follow-on)**: an `alloc`-backed convenience layer (owned buffers for `read_entity`),
   richer parent→child data-flow, and typed entity/metadata helpers.
+
+## Delivered (2026-07-21 — P2 property/chaos gate)
+
+The runtime's two load-bearing invariants, proved over the RANDOMIZED space the fixed tests don't
+enumerate — `aletheia/tests/component_chaos.rs` (3 tests, green; 2 are `proptest` campaigns of 64
+cases each): for any random (capability-set × host-call-sequence × fuel), (1) **no effect without a
+capability** and (2) **effects ⊆ grant** — and fuel exhaustion can only *reduce* effects, never
+manufacture an unauthorized one, and never hangs the OS (every run returns a verdict). Plus a
+cross-run isolation test: authority never leaks from a privileged component run to a later
+unprivileged one. Hosted suite now **66 passed**. Deferred: longer-running soak / adversarial stress.
 
 ## Delivered (P4 start — VM-tested microkernel)
 
