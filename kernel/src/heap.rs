@@ -16,7 +16,9 @@ pub struct BumpAlloc {
 
 impl BumpAlloc {
     const fn new() -> Self {
-        BumpAlloc { next: AtomicUsize::new(0) }
+        BumpAlloc {
+            next: AtomicUsize::new(0),
+        }
     }
 }
 
@@ -55,5 +57,9 @@ static ALLOCATOR: BumpAlloc = BumpAlloc::new();
 pub fn used_bytes() -> usize {
     let heap_start = unsafe { &__heap_start as *const u8 as usize };
     let cur = ALLOCATOR.next.load(Ordering::Relaxed);
-    if cur == 0 { 0 } else { cur - heap_start }
+    if cur == 0 {
+        0
+    } else {
+        cur - heap_start
+    }
 }
