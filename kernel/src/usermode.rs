@@ -1,41 +1,45 @@
-//! EL0 user-mode + the capability-gated syscall boundary (PRD P5, mm brick 3).
+//! EL0 user-mode, the capability-gated syscall boundary, and cooperative multitasking
+//! (PRD P5, mm bricks 3–5).
 //!
-//! WHY THIS MATTERS: until now every invariant was re-proved *in kernel space* (EL1). The
-//! benchmark's own honesty note says it: "the measured loop runs in EL1 and crosses no
-//! privilege/address-space boundary." So "isolation" was logical, not enforced by hardware —
-//! a bug at EL1 could touch anything. This module makes the privilege boundary REAL: it drops
-//! the CPU to **EL0** (unprivileged), runs a genuinely less-privileged instruction stream in
-//! its own EL0-only pages, and lets that stream reach the OS through *exactly one* door — an
-//! `svc` trap that lands in the EL1 vector and is authorized by the **same `CapEngine`** the
-//! deterministic pipeline uses. Same authority mechanism, now at the hardware boundary.
+//! WHY THIS MATTERS: until this layer every invariant was re-proved *in kernel space* (EL1) —
+//! the benchmark's own honesty note says the measured loop "crosses no privilege/address-space
+//! boundary," so isolation was logical, not hardware-enforced. This module makes the boundary
+//! REAL: it drops the CPU to **EL0** (unprivileged), runs genuinely less-privileged instruction
+//! streams in EL0-only pages, and lets them reach the OS through one door — an `svc` trap that
+//! lands in the EL1 vector and is authorized by the **same `CapEngine`** the deterministic
+//! pipeline uses. It then gives each process its **own TTBR0 address space** (isolation across
+//! processes, not just EL0-vs-EL1) and, finally, **context-switches** between EL0 tasks under a
+//! round-robin scheduler — the first executed Aletheia multitasking.
 //!
-//! DESIGN — one-shot excursions, not a scheduler (contract-honest, ADR-010). This is a test
-//! harness for the boundary, not multitasking. Each trial: the kernel saves its callee-saved
-//! context, `eret`s to EL0 with a tiny position-independent stub, the stub issues one `svc`
-//! (or faults), the 0x400 handler dispatches it and then resumes the kernel — it never returns
-//! to EL0. No per-task trap frame, no context switch (those are the follow-on bricks). Every
-//! line executes under QEMU and is asserted by `usermode::selftest()`; an *unexpected* fault
-//! is still fatal (`exit 102`), so a real bug can never masquerade as a passing test.
+//! ONE TRAP PATH (save-first). Every EL0 entry to `0x400` saves the FULL register file
+//! (x0–x30 + ELR + SPSR + SP_EL0) into the running task's `TrapFrame` BEFORE touching anything,
+//! then decodes `ESR_EL1.EC` and dispatches. `resume_frame` restores a whole frame and `eret`s,
+//! so a task resumes *after* its yield — the same primitive both starts a fresh task and resumes
+//! a preempted one. `TPIDR_EL1` holds the current frame pointer; `TPIDR_EL0` is the save-time
+//! scratch. This unification means the capability/isolation invariants and the scheduler all run
+//! through one audited trap path.
 //!
-//! SCOPE: aarch64 dev backend only (like `frames.rs`/`vm.rs`); the shared `spine.rs` is
-//! untouched. Higher-half/per-process address spaces and the x86-64/RISC-V EL0 backends are
-//! the documented follow-on. Requires the MMU already enabled (`vm::enable`) so that EL0-only
-//! page permissions (AP) are enforced.
+//! DESIGN — cooperative first (contract-honest, ADR-010). Tasks yield voluntarily (`SYS_YIELD`);
+//! timer-driven (involuntary) preemption + the GIC are the documented follow-on. Every line
+//! executes under QEMU and is asserted by `usermode::selftest()`; an *unexpected* fault stays
+//! fatal (`exit 102`), so a real bug can never masquerade as a pass. aarch64 dev backend only;
+//! the `#[path]`-shared `spine.rs` is untouched. Requires the MMU (`vm::enable`).
 use crate::spine::{CapEngine, CapToken, Constraints, Decision, Scope, Store, Target};
 use crate::{frames, vm};
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
+use core::ptr::{addr_of, addr_of_mut};
 
 global_asm!(
     r#"
 .section .text
 
-// fn enter_user(entry: usize /*x0*/, user_sp: usize /*x1*/, x0val: u64 /*x2*/, x8val: u64 /*x3*/) -> u64
-// Save the kernel's callee-saved context (so the 0x400 handler can resume us), then ERET to
-// EL0 with the user PC/SP and x0/x8 primed. The general registers survive ERET unchanged — it
-// only swaps PC, PSTATE, and (per SPSR.M) the stack pointer.
-.global enter_user
-enter_user:
+// resume_frame(frame: *mut TrapFrame /*x0*/)
+// Save the caller's (scheduler/trial) callee-saved context so the 0x400 handler can resume it,
+// set TPIDR_EL1 = the frame so a trap saves back into it, restore the whole frame, and ERET to
+// EL0. Starts a fresh task and resumes a yielded one identically.
+.global resume_frame
+resume_frame:
     adrp    x9, KERNEL_CTX
     add     x9, x9, :lo12:KERNEL_CTX
     mov     x10, sp
@@ -46,19 +50,36 @@ enter_user:
     stp     x27, x28, [x9, #64]
     stp     x29, x30, [x9, #80]
     str     x10, [x9, #96]
-    msr     elr_el1, x0             // return-to-EL0 PC
-    mov     x11, #0x3C0             // SPSR: M=EL0t (AArch64) + DAIF masked
-    msr     spsr_el1, x11
-    msr     sp_el0, x1              // EL0 stack pointer
-    mov     x0, x2                  // user x0
-    mov     x8, x3                  // user x8 (syscall number)
+    msr     tpidr_el1, x0           // current-frame pointer for the trap handler
+    ldr     x1, [x0, #248]          // SP_EL0
+    msr     sp_el0, x1
+    ldr     x1, [x0, #256]          // ELR_EL1 (resume PC)
+    msr     elr_el1, x1
+    ldr     x1, [x0, #264]          // SPSR_EL1 (PSTATE)
+    msr     spsr_el1, x1
+    ldp     x1,  x2,  [x0, #8]
+    ldp     x3,  x4,  [x0, #24]
+    ldp     x5,  x6,  [x0, #40]
+    ldp     x7,  x8,  [x0, #56]
+    ldp     x9,  x10, [x0, #72]
+    ldp     x11, x12, [x0, #88]
+    ldp     x13, x14, [x0, #104]
+    ldp     x15, x16, [x0, #120]
+    ldp     x17, x18, [x0, #136]
+    ldp     x19, x20, [x0, #152]
+    ldp     x21, x22, [x0, #168]
+    ldp     x23, x24, [x0, #184]
+    ldp     x25, x26, [x0, #200]
+    ldp     x27, x28, [x0, #216]
+    ldp     x29, x30, [x0, #232]
+    ldr     x0, [x0, #0]            // x0 last (was the frame base)
     isb
     eret
 
-// The 0x400 handler branches here (at EL1) with x0 = result. Restore the kernel context saved
-// above and return to enter_user's caller — a non-local resume that discards the EL0 excursion.
-.global enter_user_return
-enter_user_return:
+// resume_return: restore the caller's context saved by resume_frame and RET to it. The 0x400
+// handler branches here after dispatch — a non-local resume back into the scheduler/trial.
+.global resume_return
+resume_return:
     adrp    x9, KERNEL_CTX
     add     x9, x9, :lo12:KERNEL_CTX
     ldp     x19, x20, [x9, #0]
@@ -71,54 +92,124 @@ enter_user_return:
     mov     sp, x10
     ret
 
-// Vector 0x400 (Lower EL, AArch64, Synchronous) routes here — an EL0 `svc` AND an EL0 fault
-// land at the same vector, so decode ESR_EL1.EC: SVC(0x15) -> el0_syscall(num=x8, arg=x0);
-// Data Abort from a lower EL (0x24) -> el0_data_abort(FAR). Anything else is a real bug ->
-// default_exception (exit 102).
+// Vector 0x400 (Lower EL, AArch64, Synchronous). SAVE-FIRST: stash the full register file into
+// the current frame (TPIDR_EL1) before any clobber, using TPIDR_EL0 to bootstrap x0. Then decode
+// ESR_EL1.EC: SVC(0x15) -> el0_trap(num=x8, arg=x0); Data Abort lower-EL(0x24) -> el0_data_abort;
+// else fatal (default_exception -> exit 102).
 .global el0_sync_entry
 el0_sync_entry:
-    mrs     x9, esr_el1
-    lsr     x9, x9, #26
-    and     x9, x9, #0x3f
-    cmp     x9, #0x15
-    b.eq    10f
-    cmp     x9, #0x24
-    b.eq    20f
+    msr     tpidr_el0, x0           // scratch-stash x0 (frees it to hold the frame base)
+    mrs     x0, tpidr_el1           // x0 = current frame base
+    stp     x1,  x2,  [x0, #8]
+    stp     x3,  x4,  [x0, #24]
+    stp     x5,  x6,  [x0, #40]
+    stp     x7,  x8,  [x0, #56]
+    stp     x9,  x10, [x0, #72]
+    stp     x11, x12, [x0, #88]
+    stp     x13, x14, [x0, #104]
+    stp     x15, x16, [x0, #120]
+    stp     x17, x18, [x0, #136]
+    stp     x19, x20, [x0, #152]
+    stp     x21, x22, [x0, #168]
+    stp     x23, x24, [x0, #184]
+    stp     x25, x26, [x0, #200]
+    stp     x27, x28, [x0, #216]
+    stp     x29, x30, [x0, #232]
+    mrs     x1, tpidr_el0           // recover original x0
+    str     x1, [x0, #0]
+    mrs     x1, sp_el0
+    str     x1, [x0, #248]
+    mrs     x1, elr_el1
+    str     x1, [x0, #256]
+    mrs     x1, spsr_el1
+    str     x1, [x0, #264]
+    mrs     x1, esr_el1
+    lsr     x1, x1, #26
+    and     x1, x1, #0x3f
+    cmp     x1, #0x15
+    b.eq    30f
+    cmp     x1, #0x24
+    b.eq    40f
     b       default_exception
-10: mov     x1, x0                  // syscall arg  -> el0_syscall 2nd param
-    mov     x0, x8                  // syscall num  -> el0_syscall 1st param
-    bl      el0_syscall
-    b       enter_user_return
-20: mrs     x0, far_el1             // faulting VA -> el0_data_abort param
+30: mov     x2, x0                  // x2 = frame base
+    ldr     x0, [x2, #64]           // num = saved x8
+    ldr     x1, [x2, #0]            // arg = saved x0
+    bl      el0_trap
+    b       resume_return
+40: mrs     x0, far_el1
     bl      el0_data_abort
-    b       enter_user_return
+    b       resume_return
 "#
 );
 
 extern "C" {
-    /// Drop to EL0 at `entry` with `user_sp`, priming user `x0`/`x8`; returns when the 0x400
-    /// handler resumes the kernel with a result value.
-    fn enter_user(entry: usize, user_sp: usize, x0val: u64, x8val: u64) -> u64;
+    /// Restore a full `TrapFrame` and `eret` to EL0; returns (via `resume_return`) when the task
+    /// traps back and the handler resumes the caller.
+    fn resume_frame(frame: *mut TrapFrame);
     /// The EL1 vector table (from `vectors.s`); its address goes into `VBAR_EL1`.
     static exc_vectors: u8;
 }
 
-/// Callee-saved kernel context stash used by the asm `enter_user`/`enter_user_return` pair.
-/// 13 × u64: x19..x30 (pairs at byte offsets 0..80) then SP at offset 96.
+/// A full EL0 register context. `#[repr(C)]` fixes the byte offsets the trap asm hard-codes:
+/// `regs[N]` at `N*8`, `sp` at 248, `elr` at 256, `spsr` at 264.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TrapFrame {
+    regs: [u64; 31], // x0..x30
+    sp: u64,         // SP_EL0
+    elr: u64,        // ELR_EL1 (resume PC)
+    spsr: u64,       // SPSR_EL1 (PSTATE)
+}
+
+/// SPSR for a fresh EL0 task: M = EL0t (AArch64), DAIF masked.
+const SPSR_EL0T: u64 = 0x3C0;
+
+impl TrapFrame {
+    const fn zeroed() -> Self {
+        TrapFrame {
+            regs: [0; 31],
+            sp: 0,
+            elr: 0,
+            spsr: 0,
+        }
+    }
+    /// A fresh-task frame: entry PC, EL0 stack top, primed `x0`/`x8`, EL0t PSTATE.
+    fn new_entry(entry: usize, sp: usize, x0: u64, x8: u64) -> Self {
+        let mut f = Self::zeroed();
+        f.regs[0] = x0;
+        f.regs[8] = x8;
+        f.sp = sp as u64;
+        f.elr = entry as u64;
+        f.spsr = SPSR_EL0T;
+        f
+    }
+}
+
+/// Callee-saved kernel context stash used by `resume_frame`/`resume_return`. 13 × u64: x19..x30
+/// (pairs at byte offsets 0..80) then SP at offset 96. One resume is ever in flight, so one slot.
 #[no_mangle]
 static mut KERNEL_CTX: [u64; 13] = [0; 13];
 
 /// Syscall numbers the EL0 boundary understands. Anything else is denied (fail closed).
 const SYS_EMIT: u64 = 1;
+const SYS_YIELD: u64 = 2;
+const SYS_EXIT: u64 = 3;
 
-/// Virtual addresses for the user process's pages — past the identity-mapped RAM (so they are
-/// unmapped until we map them, proving these are real EL0-only mappings, not identity RAM).
+/// Virtual addresses for one process's pages — past the identity-mapped RAM (so they are unmapped
+/// until we map them, proving they are real EL0-only mappings, not identity RAM).
 const USER_CODE_VA: usize = 0x5000_0000;
 const USER_STACK_VA: usize = 0x5000_1000;
-const USER_STACK_TOP: usize = USER_STACK_VA + frames::FRAME_SIZE; // 16-byte aligned page top
+const USER_STACK_TOP: usize = USER_STACK_VA + frames::FRAME_SIZE;
 
-/// The live trial state, reached by the `#[no_mangle]` handlers (which the asm calls with no
-/// context pointer). Single-threaded kernel (secondary harts parked), one excursion at a time.
+/// A per-process private data page VA (same 2 MiB block, distinct L3 slot) for the cross-process
+/// isolation test: mapped in process A's space, deliberately absent from process B's.
+const VA_P: usize = 0x5000_3000;
+
+// ---------------------------------------------------------------------------
+// One-shot trial state (capability + isolation invariants) — reached by the handlers.
+// ---------------------------------------------------------------------------
+
+/// Single-threaded kernel (secondary harts parked); one excursion at a time.
 struct Trial {
     engine: CapEngine,
     store: Store,
@@ -126,7 +217,7 @@ struct Trial {
     action: &'static str,
     /// When set, a Data Abort from EL0 is the *expected* isolation test, not a fatal bug.
     armed: bool,
-    // --- outcomes, read back after `enter_user` returns ---
+    // outcomes, read back after the excursion returns
     allowed: bool,
     isolation_held: bool,
     fault_va: usize,
@@ -134,41 +225,93 @@ struct Trial {
 
 static mut CURRENT: Option<Trial> = None;
 
-/// SAFETY: single-threaded kernel; `CURRENT` is set by `run_*` immediately before `enter_user`
-/// and mutated only by the handler that same excursion drives. No concurrent access exists.
+/// SAFETY: single-threaded; `CURRENT` is set immediately before an excursion and mutated only by
+/// the handler that excursion drives. No concurrent access exists.
 #[inline]
 fn current() -> Option<&'static mut Trial> {
-    unsafe { (*core::ptr::addr_of_mut!(CURRENT)).as_mut() }
+    unsafe { (*addr_of_mut!(CURRENT)).as_mut() }
 }
 
-/// SVC dispatch — the capability-gated syscall. Authorizes through the SAME `CapEngine` the
-/// deterministic pipeline uses, against the process's granted caps. Allow ⇒ perform the effect
-/// (record an event, actor = the EL0 process) and return 0; Deny ⇒ return −1 with zero effect.
-#[no_mangle]
-pub extern "C" fn el0_syscall(num: u64, _arg: u64) -> u64 {
-    let t = match current() {
-        Some(t) => t,
-        None => return u64::MAX,
-    };
-    if num != SYS_EMIT {
-        return u64::MAX; // unknown syscall — fail closed
+// ---------------------------------------------------------------------------
+// Scheduler state (multitasking invariants).
+// ---------------------------------------------------------------------------
+
+/// What the last-resumed task did, read by the scheduler after `resume_frame` returns.
+struct SchedState {
+    last_magic: u64,
+    exited: bool,
+}
+static mut SCHED: SchedState = SchedState {
+    last_magic: 0,
+    exited: false,
+};
+
+/// A task control block: its resumable register frame and run state. (The register-magic each
+/// task must keep presenting lives in the `magics` table + the stub code, not here.)
+#[derive(Clone, Copy)]
+struct Tcb {
+    frame: TrapFrame,
+    done: bool,
+}
+impl Tcb {
+    const fn new() -> Self {
+        Tcb {
+            frame: TrapFrame::zeroed(),
+            done: false,
+        }
     }
-    match t.engine.evaluate(t.action, &Target::default(), &t.caps) {
-        Decision::Allow => {
-            t.store.record_event(t.action, "el0-process");
-            t.allowed = true;
+}
+const NTASK: usize = 2;
+static mut TCBS: [Tcb; NTASK] = [Tcb::new(); NTASK];
+
+/// Trap dispatch — the capability-gated syscall AND the scheduler hooks, over one path.
+/// `SYS_EMIT` runs the one-shot capability check (records an event on Allow); `SYS_YIELD`/
+/// `SYS_EXIT` report to the scheduler (carrying the task's register-magic as `arg`).
+#[no_mangle]
+pub extern "C" fn el0_trap(num: u64, arg: u64) -> u64 {
+    match num {
+        SYS_EMIT => {
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(t.action, &Target::default(), &t.caps) {
+                Decision::Allow => {
+                    t.store.record_event(t.action, "el0-process");
+                    t.allowed = true;
+                    0
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
+        }
+        SYS_YIELD => {
+            sched_report(arg, false);
             0
         }
-        _ => {
-            t.allowed = false;
-            u64::MAX
+        SYS_EXIT => {
+            sched_report(arg, true);
+            0
         }
+        _ => u64::MAX, // unknown syscall — fail closed
     }
 }
 
-/// Data-abort dispatch. If the trial armed the isolation test, an EL0 fault is the expected
-/// proof that EL0 cannot reach kernel memory: record it and resume. Any UNEXPECTED abort is a
-/// real fault and stays fatal (`exit 102`) so bugs cannot hide behind this handler.
+/// Record what the running task reported this slice.
+fn sched_report(magic: u64, exited: bool) {
+    // SAFETY: single-threaded; only the running task's trap writes this, read by the scheduler
+    // after the excursion returns.
+    unsafe {
+        let s = &mut *addr_of_mut!(SCHED);
+        s.last_magic = magic;
+        s.exited = exited;
+    }
+}
+
+/// Data-abort dispatch. An armed isolation trial treats an EL0 fault as the expected proof and
+/// resumes; any UNEXPECTED abort stays fatal (`exit 102`) so bugs cannot hide here.
 #[no_mangle]
 pub extern "C" fn el0_data_abort(far: u64) -> u64 {
     match current() {
@@ -191,7 +334,7 @@ fn install_vectors() {
     // SAFETY: `exc_vectors` is a valid, 2 KiB-aligned in-image vector table; writing VBAR_EL1
     // + `isb` is the architected way to install it at EL1.
     unsafe {
-        let addr = core::ptr::addr_of!(exc_vectors) as u64;
+        let addr = addr_of!(exc_vectors) as u64;
         asm!("msr vbar_el1, {a}", "isb", a = in(reg) addr, options(nostack));
     }
 }
@@ -217,8 +360,8 @@ unsafe fn sync_icache(addr: usize, len: usize) {
     asm!("dsb ish", "isb", options(nostack));
 }
 
-/// Map a fresh frame at `va` as EL0-executable code, writing `code` (aarch64 machine words)
-/// into it first. Returns the backing frame (caller unmaps+frees).
+/// Map a fresh frame at `va` as EL0-executable code, writing `code` (aarch64 machine words) into
+/// it first. Returns the backing frame (caller unmaps+frees).
 fn map_user_code(root: usize, va: usize, code: &[u32]) -> Option<frames::PhysFrame> {
     let f = frames::alloc_zeroed()?;
     let pa = f.addr();
@@ -252,32 +395,37 @@ fn drop_user_page(root: usize, va: usize, f: frames::PhysFrame) {
     frames::free(f);
 }
 
-/// Machine code for a leaf EL0 stub that issues one syscall then parks: `svc #0 ; b .`
-/// (the syscall number/arg arrive in x8/x0, primed by `enter_user`).
-const STUB_SYSCALL: [u32; 2] = [0xD400_0001, 0x1400_0000];
-/// EL0 stub that reads the kernel address handed to it in x0, then parks: `ldr x1,[x0] ; b .`
-const STUB_READ_X0: [u32; 2] = [0xF940_0001, 0x1400_0000];
-/// EL0 stub that reads the address in x0, then issues a syscall, then parks:
-/// `ldr x1,[x0] ; svc #0 ; b .`. If the read faults the `svc` is never reached — so a
-/// successful syscall is positive proof the read landed (used for the cross-process A case).
-const STUB_READ_THEN_SYSCALL: [u32; 3] = [0xF940_0001, 0xD400_0001, 0x1400_0000];
+/// Run a one-shot EL0 excursion in the current address space: build a fresh-task frame and resume
+/// it. Results land in `CURRENT`; the task is never resumed (it traps once, we return).
+fn run_one_shot(entry: usize, sp: usize, x0: u64, x8: u64) {
+    let mut f = TrapFrame::new_entry(entry, sp, x0, x8);
+    // SAFETY: the frame lives for the call; `resume_frame` restores it, runs EL0, and the trap
+    // handler resumes us. No other excursion is in flight.
+    unsafe { resume_frame(&mut f as *mut TrapFrame) };
+}
 
-/// A per-process private data page VA (same 2 MiB block as code/stack, distinct L3 slot). It is
-/// mapped in process A's address space and deliberately absent from process B's.
-const VA_P: usize = 0x5000_3000;
+/// Machine code for a leaf EL0 stub that issues one syscall then parks: `svc #0 ; b .`
+/// (the syscall number/arg arrive in x8/x0, primed by the frame).
+const STUB_SYSCALL: [u32; 2] = [0xD400_0001, 0x1400_0000];
+/// EL0 stub that reads the address handed to it in x0, then parks: `ldr x1,[x0] ; b .`
+const STUB_READ_X0: [u32; 2] = [0xF940_0001, 0x1400_0000];
+/// EL0 stub that reads x0, then issues a syscall, then parks: `ldr x1,[x0] ; svc #0 ; b .`.
+/// If the read faults the `svc` is never reached — a successful syscall is positive proof the
+/// read landed (used for the cross-process A case).
+const STUB_READ_THEN_SYSCALL: [u32; 3] = [0xF940_0001, 0xD400_0001, 0x1400_0000];
 
 /// Run one EL0 syscall excursion. `grant` decides whether the process holds the `event.emit`
 /// capability. Returns `(authorized, event_count_after)`.
 fn run_syscall(grant: bool) -> (bool, usize) {
-    let root = vm::active_root();
     let mut engine = CapEngine::new(0xA5A5, 1000);
     let mut caps = Vec::new();
     if grant {
         caps.push(engine.mint("el0-process", "event.emit", Scope::All, Constraints::none()));
     }
-    // SAFETY: single-threaded; installs the trial the handler will read this excursion.
+    let root = vm::active_root();
+    // SAFETY: single-threaded; install the trial the handler reads this excursion.
     unsafe {
-        *core::ptr::addr_of_mut!(CURRENT) = Some(Trial {
+        *addr_of_mut!(CURRENT) = Some(Trial {
             engine,
             store: Store::new(),
             caps,
@@ -288,7 +436,6 @@ fn run_syscall(grant: bool) -> (bool, usize) {
             fault_va: 0,
         });
     }
-
     let code = match map_user_code(root, USER_CODE_VA, &STUB_SYSCALL) {
         Some(f) => f,
         None => return (false, usize::MAX),
@@ -300,29 +447,23 @@ fn run_syscall(grant: bool) -> (bool, usize) {
             return (false, usize::MAX);
         }
     };
-
-    // SAFETY: code/stack pages are mapped EL0-accessible; the stub only issues `svc`.
-    let _ = unsafe { enter_user(USER_CODE_VA, USER_STACK_TOP, 0, SYS_EMIT) };
-
+    run_one_shot(USER_CODE_VA, USER_STACK_TOP, 0, SYS_EMIT);
     drop_user_page(root, USER_STACK_VA, stack);
     drop_user_page(root, USER_CODE_VA, code);
-
-    // SAFETY: excursion complete; read back and take the trial.
-    // SAFETY: single-threaded; the excursion is complete, no other access to CURRENT exists.
-    let t = unsafe { (*core::ptr::addr_of_mut!(CURRENT)).take() }.expect("trial present");
+    // SAFETY: excursion complete; take the trial.
+    let t = unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("trial present");
     (t.allowed, t.store.event_count())
 }
 
-/// Run the isolation excursion: hand the EL0 stub a kernel-only address and prove it cannot
-/// read it — the access must fault and be contained. Returns `(isolation_held, fault_va)`.
+/// Run the isolation excursion: hand the EL0 stub a kernel-only address and prove it cannot read
+/// it — the access must fault and be contained. Returns `(isolation_held, fault_va)`.
 fn run_isolation() -> (bool, usize) {
     let root = vm::active_root();
-    // A kernel-only address (this static lives in identity-mapped RAM, AP = EL1-only).
-    let kernel_va = core::ptr::addr_of!(KERNEL_CTX) as u64;
-    // SAFETY: single-threaded; arm the isolation test so the abort handler treats the fault as
-    // expected rather than fatal.
+    let kernel_va = addr_of!(KERNEL_CTX) as u64; // kernel .bss, AP = EL1-only
+                                                 // SAFETY: single-threaded; arm the isolation test so the abort handler treats the fault as
+                                                 // expected rather than fatal.
     unsafe {
-        *core::ptr::addr_of_mut!(CURRENT) = Some(Trial {
+        *addr_of_mut!(CURRENT) = Some(Trial {
             engine: CapEngine::new(0xA5A5, 1000),
             store: Store::new(),
             caps: Vec::new(),
@@ -333,7 +474,6 @@ fn run_isolation() -> (bool, usize) {
             fault_va: 0,
         });
     }
-
     let code = match map_user_code(root, USER_CODE_VA, &STUB_READ_X0) {
         Some(f) => f,
         None => return (false, 0),
@@ -345,22 +485,16 @@ fn run_isolation() -> (bool, usize) {
             return (false, 0);
         }
     };
-
-    // SAFETY: stub reads the kernel address in x0; EL0 permission fault is expected + armed.
-    let _ = unsafe { enter_user(USER_CODE_VA, USER_STACK_TOP, kernel_va, 0) };
-
+    run_one_shot(USER_CODE_VA, USER_STACK_TOP, kernel_va, 0);
     drop_user_page(root, USER_STACK_VA, stack);
     drop_user_page(root, USER_CODE_VA, code);
-
-    // SAFETY: single-threaded; the excursion is complete, no other access to CURRENT exists.
-    let t = unsafe { (*core::ptr::addr_of_mut!(CURRENT)).take() }.expect("trial present");
+    let t = unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("trial present");
     (t.isolation_held, t.fault_va)
 }
 
-/// Run one EL0 process under a *dedicated* address-space root, entering at `USER_CODE_VA` with
-/// `x0val`/`x8val`. `armed` marks whether an EL0 fault is the expected outcome. Switches the
-/// live `TTBR0` to `root` around the excursion and restores `root_main` after. Returns the taken
-/// `Trial`. Precondition: `root` replicates the kernel identity map (from `build_identity`).
+/// Run one EL0 process under a *dedicated* address-space root (switch `TTBR0` around the
+/// excursion, restore `root_main` after). `armed` marks whether an EL0 fault is expected.
+/// Returns the taken `Trial`. Precondition: `root` replicates the kernel identity map.
 fn run_in_space(
     root: usize,
     root_main: usize,
@@ -372,7 +506,7 @@ fn run_in_space(
 ) -> Trial {
     // SAFETY: single-threaded; install the trial the handler reads this excursion.
     unsafe {
-        *core::ptr::addr_of_mut!(CURRENT) = Some(Trial {
+        *addr_of_mut!(CURRENT) = Some(Trial {
             engine,
             store: Store::new(),
             caps,
@@ -383,26 +517,21 @@ fn run_in_space(
             fault_va: 0,
         });
     }
-    // SAFETY: `root` identity-maps the running kernel (built by build_identity), so switching
-    // TTBR0 mid-execution is safe; restored to root_main immediately after the excursion.
+    let mut f = TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, x0val, x8val);
+    // SAFETY: `root` identity-maps the running kernel (build_identity), so switching TTBR0
+    // mid-execution is safe; restored to root_main immediately after the excursion.
     unsafe {
         vm::switch_address_space(root);
-        let _ = enter_user(USER_CODE_VA, USER_STACK_TOP, x0val, x8val);
+        resume_frame(&mut f as *mut TrapFrame);
         vm::switch_address_space(root_main);
     }
     // SAFETY: excursion complete, no other access to CURRENT exists.
-    unsafe { (*core::ptr::addr_of_mut!(CURRENT)).take() }.expect("trial present")
+    unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("trial present")
 }
 
 /// Prove **per-process address-space isolation**: two EL0 processes in separate TTBR0 spaces,
 /// where a page private to process A is unreachable from process B — even at the *same* virtual
 /// address. Returns `(a_reached_own_page, b_isolated, b_fault_va)`.
-///
-/// Process A's space maps `VA_P`; A reads it (succeeds) then makes an authorized syscall — a
-/// completed syscall is positive proof the read landed (a fault would skip the `svc` and, being
-/// unarmed, abort to `exit 102`). Process B's space does NOT map `VA_P`; B reads the same VA and
-/// takes a translation fault that is contained. Same VA, present in A's space, absent from B's ⇒
-/// the spaces are genuinely separate, not a shared flat memory.
 fn run_cross_process_isolation() -> (bool, bool, usize) {
     let root_main = vm::active_root();
     let root_a = match vm::build_identity() {
@@ -413,7 +542,6 @@ fn run_cross_process_isolation() -> (bool, bool, usize) {
         Some(r) => r,
         None => return (false, false, 0),
     };
-
     // Process A's space: stub + stack + the private data page VA_P.
     let a_code = match map_user_code(root_a, USER_CODE_VA, &STUB_READ_THEN_SYSCALL) {
         Some(f) => f,
@@ -450,7 +578,6 @@ fn run_cross_process_isolation() -> (bool, bool, usize) {
         a_caps,
         false,
     );
-
     // B reads the SAME VA_P (unmapped in its space) -> armed translation fault, contained.
     let b = run_in_space(
         root_b,
@@ -462,8 +589,8 @@ fn run_cross_process_isolation() -> (bool, bool, usize) {
         true,
     );
 
-    // Reclaim the leaf frames (the two identity page-table trees are an intentional, bounded,
-    // one-time boot-test leak — the frame pool has ~30k frames and this runs once).
+    // Reclaim leaf frames (the two identity page-table trees are an intentional, bounded,
+    // one-time boot-test leak — the pool has ~30k frames and this runs once).
     drop_user_page(root_a, VA_P, a_data);
     drop_user_page(root_a, USER_STACK_VA, a_stack);
     drop_user_page(root_a, USER_CODE_VA, a_code);
@@ -473,7 +600,141 @@ fn run_cross_process_isolation() -> (bool, bool, usize) {
     (a.allowed, b.isolation_held, b.fault_va)
 }
 
-/// Prove the EL0 boundary invariants live. `Ok(n)` all passed; `Err((idx,name))` = failure.
+// ---------------------------------------------------------------------------
+// Cooperative multitasking: two EL0 tasks context-switch via yield under a round-robin scheduler.
+// ---------------------------------------------------------------------------
+
+/// Per-task VAs (same address space this brick; distinct pages). Timer preemption + per-task
+/// TTBR0 are the follow-on.
+const TASK_CODE_VA: [usize; NTASK] = [0x5000_0000, 0x5000_4000];
+const TASK_STACK_VA: [usize; NTASK] = [0x5000_1000, 0x5000_5000];
+
+/// EL0 task stub for a given 16-bit `magic`: set `x19 = magic` once, then yield three times and
+/// exit — replaying `magic` in `x0` (the syscall arg) before every `svc`. Because `x19` and `x8`
+/// are only ever set at the top yet survive across yields, a task that keeps presenting its own
+/// magic proves the WHOLE register file is saved/restored on each context switch.
+///
+/// `mov x19,#M ; (mov x0,x19 ; svc)×3 with x8=YIELD ; mov x8,#EXIT ; mov x0,x19 ; svc ; b .`
+fn stub_for(magic: u64) -> [u32; 12] {
+    let m = (magic & 0xFFFF) as u32;
+    [
+        0xD280_0013 | (m << 5), // movz x19, #magic
+        0xAA13_03E0,            // mov  x0, x19
+        0xD280_0048,            // movz x8, #2  (SYS_YIELD)
+        0xD400_0001,            // svc  #0      (yield 1)
+        0xAA13_03E0,            // mov  x0, x19
+        0xD400_0001,            // svc  #0      (yield 2, x8 still YIELD)
+        0xAA13_03E0,            // mov  x0, x19
+        0xD400_0001,            // svc  #0      (yield 3)
+        0xAA13_03E0,            // mov  x0, x19
+        0xD280_0068,            // movz x8, #3  (SYS_EXIT)
+        0xD400_0001,            // svc  #0      (exit)
+        0x1400_0000,            // b .          (never reached)
+    ]
+}
+
+/// Run the round-robin scheduler over two cooperative EL0 tasks. Returns
+/// `(schedule_is_round_robin_and_both_exited, every_slice_presented_its_own_magic)`.
+fn run_scheduler() -> (bool, bool) {
+    let root = vm::active_root();
+    let magics: [u64; NTASK] = [0xA1A1, 0xB2B2];
+    let mut code: [Option<frames::PhysFrame>; NTASK] = [None, None];
+    let mut stack: [Option<frames::PhysFrame>; NTASK] = [None, None];
+    for i in 0..NTASK {
+        code[i] = map_user_code(root, TASK_CODE_VA[i], &stub_for(magics[i]));
+        stack[i] = map_user_stack(root, TASK_STACK_VA[i]);
+        if code[i].is_none() || stack[i].is_none() {
+            // Best-effort cleanup of whatever mapped, then bail.
+            for j in 0..NTASK {
+                if let Some(f) = stack[j].take() {
+                    drop_user_page(root, TASK_STACK_VA[j], f);
+                }
+                if let Some(f) = code[j].take() {
+                    drop_user_page(root, TASK_CODE_VA[j], f);
+                }
+            }
+            return (false, false);
+        }
+    }
+    // SAFETY: single-threaded; initialize the TCBs before any resume.
+    unsafe {
+        let tcbs = &mut *addr_of_mut!(TCBS);
+        for i in 0..NTASK {
+            tcbs[i] = Tcb {
+                frame: TrapFrame::new_entry(
+                    TASK_CODE_VA[i],
+                    TASK_STACK_VA[i] + frames::FRAME_SIZE,
+                    0,
+                    0,
+                ),
+                done: false,
+            };
+        }
+    }
+
+    // Round-robin: after a task yields/exits, start the search at the next slot.
+    let mut order: Vec<(usize, u64)> = Vec::new();
+    let mut cur = 0usize;
+    loop {
+        let mut pick = None;
+        for k in 0..NTASK {
+            let s = (cur + k) % NTASK;
+            // SAFETY: single-threaded read of run state.
+            if !unsafe { (*addr_of!(TCBS))[s].done } {
+                pick = Some(s);
+                break;
+            }
+        }
+        let slot = match pick {
+            Some(s) => s,
+            None => break,
+        };
+        sched_report(0, false); // reset for this slice
+                                // SAFETY: single-threaded; resume this task until it yields/exits. Its frame lives in the
+                                // static TCB, so it persists across the excursion.
+        unsafe { resume_frame(&mut (*addr_of_mut!(TCBS))[slot].frame as *mut TrapFrame) };
+        let (mag, exited) = unsafe {
+            let s = &*addr_of!(SCHED);
+            (s.last_magic, s.exited)
+        };
+        order.push((slot, mag));
+        if exited {
+            // SAFETY: single-threaded write of run state.
+            unsafe { (*addr_of_mut!(TCBS))[slot].done = true };
+        }
+        cur = (slot + 1) % NTASK;
+        if order.len() > 4 * NTASK {
+            break; // safety bound — a correct run is exactly 2*NTASK*... (8) slices
+        }
+    }
+
+    for i in 0..NTASK {
+        if let Some(f) = stack[i].take() {
+            drop_user_page(root, TASK_STACK_VA[i], f);
+        }
+        if let Some(f) = code[i].take() {
+            drop_user_page(root, TASK_CODE_VA[i], f);
+        }
+    }
+
+    // Expected: 4 slices per task (3 yields + 1 exit), strictly alternating A,B,A,B,A,B,A,B.
+    let expected_slots = [0usize, 1, 0, 1, 0, 1, 0, 1];
+    let order_ok = order.len() == 8
+        && order
+            .iter()
+            .zip(expected_slots.iter())
+            .all(|((slot, _), exp)| slot == exp);
+    let both_done = unsafe {
+        let t = &*addr_of!(TCBS);
+        t[0].done && t[1].done
+    };
+    // Every slice must report the magic of the task that actually ran it — proof the full
+    // register file (x19 magic + x8 syscall number) rode through each context switch intact.
+    let magic_ok = order.len() == 8 && order.iter().all(|(slot, mag)| *mag == magics[*slot]);
+    (order_ok && both_done, magic_ok)
+}
+
+/// Prove the EL0 boundary + multitasking invariants live. `Ok(n)` all passed; `Err((idx,name))`.
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     install_vectors();
     let mut n: u32 = 0;
@@ -505,7 +766,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // 3 — hardware isolation: an EL0 read of kernel memory faults and is contained (not fatal).
     let (held, fault_va) = run_isolation();
     check!(
-        held && fault_va == core::ptr::addr_of!(KERNEL_CTX) as usize,
+        held && fault_va == addr_of!(KERNEL_CTX) as usize,
         "el0: EL0 read of kernel memory faults — address-space isolation holds"
     );
 
@@ -519,6 +780,18 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         b_isolated && b_fault_va == VA_P,
         "el0: process B cannot reach A's page at the same VA — per-process isolation holds"
+    );
+
+    // 6 & 7 — cooperative multitasking: two EL0 tasks context-switch via yield under a round-robin
+    // scheduler, each resuming with its full register state intact across every switch.
+    let (order_ok, magic_ok) = run_scheduler();
+    check!(
+        order_ok,
+        "el0: round-robin scheduler runs two tasks A,B,A,B,... to completion"
+    );
+    check!(
+        magic_ok,
+        "el0: each task resumes with its own register magic — full context preserved on switch"
     );
 
     Ok(n)
