@@ -18,3 +18,12 @@ vm-e2e:
     - rustup toolchain install nightly --profile minimal
     - rustup component add rust-src --toolchain nightly
     - ./scripts/vm-e2e.sh
+
+vm-e2e-riscv:
+  stage: test
+  image: rust:latest
+  script:
+    - apt-get update && apt-get install -y qemu-system-misc perl
+    - rustup toolchain install nightly --profile minimal
+    - rustup component add rust-src --toolchain nightly
+    - ./scripts/vm-e2e-riscv.sh
