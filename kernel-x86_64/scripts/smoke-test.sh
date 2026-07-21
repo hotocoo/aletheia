@@ -39,7 +39,9 @@ cat "$LOG"
 echo "===================="
 echo "QEMU exit code: $RC (expect 33)"
 
-if [ "$RC" -eq 33 ] && grep -q 'e2e\] PASS' "$LOG"; then
+if [ "$RC" -eq 33 ] \
+   && grep -q 'MEMORY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'e2e\] PASS' "$LOG"; then
   echo "SMOKE TEST: PASS"
   rm -rf "$WORK"
   exit 0
