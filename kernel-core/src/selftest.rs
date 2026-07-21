@@ -1,23 +1,35 @@
 //! In-kernel invariant selftests — the end-to-end VM acceptance suite.
 //!
-//! These are the M1 acceptance criteria, re-proved in kernel space against the real
-//! in-kernel spine (not a mock). The first failing check sets the VM exit code (10 + index),
-//! so `scripts/vm-e2e.sh` gets a precise, machine-checkable pass/fail per invariant.
+//! These are the M1 acceptance criteria, re-proved against the real in-kernel [`crate::spine`]
+//! (not a mock). The first failing check returns `Err((idx, name))`, and each target crate maps
+//! that to its VM exit code (10 + index), so `scripts/vm-e2e.sh` (and the RISC-V / x86-64 gates)
+//! get a precise, machine-checkable pass/fail per invariant.
+//!
+//! The suite is **arch-independent**: it lives in `kernel-core` and depends only on the spine and
+//! `alloc`. It has NO console of its own — instead it reports each check to a caller-supplied
+//! `report(index, passed, name)` logger, so every target crate formats the line with its own
+//! `kprintln!` while the invariant logic and its naming are defined exactly once here. The hosted
+//! `tests/invariants.rs` runs the same `run()` with a capturing logger, proving these invariants on
+//! the host with no QEMU.
 use crate::spine::*;
 use alloc::vec;
 
-/// Run every invariant. `Ok(n)` = all n passed; `Err((idx,name))` = check idx failed.
-pub fn run() -> Result<u32, (u32, &'static str)> {
+/// Run every invariant, reporting each check to `report(index, passed, name)` as it runs.
+/// `Ok(n)` = all `n` passed; `Err((idx, name))` = check `idx` failed (and `report` was already
+/// called for it with `passed = false`). Reporting is fully decoupled from any console: pass a
+/// no-op closure to run silently (as the hosted tests do), or a `kprintln!`-backed closure to
+/// print the familiar `  [pass NN] name` / `  [FAIL NN] name` lines (as each kernel target does).
+pub fn run(mut report: impl FnMut(u32, bool, &'static str)) -> Result<u32, (u32, &'static str)> {
     let mut n: u32 = 0;
 
     macro_rules! check {
         ($cond:expr, $name:expr) => {{
             n += 1;
-            if !($cond) {
-                kprintln!("  [FAIL {:>2}] {}", n, $name);
+            let passed = $cond;
+            report(n, passed, $name);
+            if !passed {
                 return Err((n, $name));
             }
-            kprintln!("  [pass {:>2}] {}", n, $name);
         }};
     }
 

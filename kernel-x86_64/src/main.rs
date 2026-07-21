@@ -34,12 +34,10 @@ mod serial;
 mod usermode;
 mod vm;
 
-// Shared, arch-independent Aletheia spine + invariant suite — the SAME source the aarch64 kernel
-// compiles, pulled in via `#[path]` so both targets prove identical invariants (no fork, no copy).
-#[path = "../../kernel/src/spine.rs"]
-mod spine;
-#[path = "../../kernel/src/selftest.rs"]
-mod selftest;
+// Shared, arch-independent Aletheia spine + invariant suite — now a real `kernel-core` dependency
+// (defined once there, not `#[path]`-copied per target; gap-register Issue 1). This target proves
+// the SAME invariants the aarch64 and RISC-V kernels do, from the SAME source.
+use kernel_core::{selftest, spine};
 
 use uefi::boot;
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
@@ -188,7 +186,13 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
 
     kprintln!("");
     kprintln!("--- invariant selftests (M1 acceptance, re-proved in x86-64 kernel space) ---");
-    match selftest::run() {
+    match selftest::run(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
         Ok(n) => kprintln!("[selftest] ALL {} INVARIANTS HOLD", n),
         Err((idx, name)) => {
             kprintln!("[selftest] FAILED at invariant {}: {}", idx, name);

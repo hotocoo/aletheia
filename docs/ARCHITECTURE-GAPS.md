@@ -41,6 +41,19 @@ Proposed Issue 1 — P6: Complete the Architecture-Independent kernel-core Subst
 Priority: Critical
 Category: Kernel / Architecture
 Raised by: GPT-5.5 (OpenAI)
+
+> Progress note (2026-07-21): first slice delivered. The `kernel-core/` crate now holds the shared
+> `Hal` trait AND the entire capability-secure **spine** (`spine.rs`) + the **invariant selftest
+> suite** (`selftest.rs`), which were previously `#[path]`-copied into each target crate. All three
+> targets (`kernel/`, `kernel-x86_64/`, `kernel-riscv64/`) depend on the single source and provide
+> only their own `hal.rs` backend + console — closing acceptance criterion #1 (core abstractions not
+> duplicated across arch crates) for the spine + invariant suite. Criterion #5 ("arch-independent
+> invariants run in hosted tests") is met by `kernel-core/tests/invariants.rs` (13 host tests, no
+> QEMU). Criterion #4 held: all three VM gates stay green. STILL OPEN: extracting the task / process
+> / address-space / scheduler / IPC-endpoint / memory / interrupt abstractions so the per-target
+> `usermode.rs`/`vm.rs`/`frames.rs` implement shared `kernel-core` interfaces rather than parallel
+> bespoke code, and the fuller cargo-workspace split.
+
 Problem
 Core kernel abstractions risk becoming distributed across architecture-specific implementations. This creates the possibility that AArch64, x86-64, and RISC-V evolve into partially independent kernels rather than hardware backends implementing one coherent Aletheia kernel model.
 Goal

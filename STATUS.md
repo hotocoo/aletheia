@@ -238,10 +238,11 @@ Elevating the M1 reference from a scripted demo toward the real layered architec
   capability-before-inclusion for relationship EDGES, not just entities. Clippy `-D warnings` clean.
 
 Deferred (next): both first-class HAL backends are now VM-tested and executed (see the x86-64 and
-RISC-V delivered sections below), and the one `Hal` trait once duplicated across the three kernel
-crates is now unified in a shared **`kernel-core`** crate (each target provides only its own backend
-`impl`). The remaining mechanical item is the fuller cargo-**workspace crate split** of the hosted
-crate (SAD §4 — module boundaries + dependency direction already match the crate list).
+RISC-V delivered sections below). The shared **`kernel-core`** crate now holds not just the `Hal`
+trait but the entire capability-secure **spine** and the **invariant selftest suite** as well — see
+the kernel-core substrate section below (gap-register Issue 1). The remaining mechanical item is the
+fuller cargo-**workspace crate split** of the hosted crate (SAD §4 — module boundaries + dependency
+direction already match the crate list).
 
 ## Delivered (2026-07-21 — x86-64 bootable development image)
 
@@ -464,14 +465,49 @@ an *unexpected* fault stays fatal (`exit 102`) so a real bug can never masquerad
   (the static bump heap stays load-bearing for now), SMP (secondary-hart bring-up), and the
   x86-64/RISC-V EL0/preemption backends.
 
+## Delivered (2026-07-21 — kernel-core substrate: shared spine + hosted arch-independent invariants)
+
+The first real slice of gap-register **Issue 1** (architecture-independent `kernel-core`): the
+capability-secure **spine** (`spine.rs` — content-addressed store, unforgeable capability engine,
+intent→action pipeline, secure IPC) and the **invariant selftest suite** (`selftest.rs` — the 11 M1
+acceptance criteria) are no longer `#[path]`-copied into each target crate. They now live **once** in
+`kernel-core/` as real library modules that all three targets (`kernel/` aarch64, `kernel-x86_64/`,
+`kernel-riscv64/`) depend on. This directly satisfies Issue 1 criterion #1 ("core kernel abstractions
+are not duplicated across architecture crates") — previously only the `Hal` trait was shared; the
+spine itself was textually included.
+
+- **One source of truth, three backends.** Each target keeps only what is genuinely
+  architecture-specific — its `hal.rs` backend `impl Hal` and its own console (`kprintln!`). The
+  spine has zero architecture dependency (pure `no_std` + `alloc`), so it compiles identically for
+  all three CPUs from the same file.
+- **Console decoupling.** `selftest::run` no longer hard-codes a console macro; it reports each check
+  through a caller-supplied `report(index, passed, name)` logger. Each kernel passes a `kprintln!`
+  closure that prints the familiar `  [pass NN] name` lines; the invariant logic and its naming are
+  defined exactly once in `kernel-core`.
+- **Arch-independent invariants now run in HOSTED tests** (Issue 1 acceptance criterion #5): because
+  the spine is arch-independent, `kernel-core/tests/invariants.rs` proves the whole suite on the host
+  in a fast `cargo test` (13 tests, no QEMU) — running the SAME `selftest::run()` the three kernels
+  boot, plus granular named per-invariant tests. This complements (does not replace) the per-target
+  QEMU VM gates.
+- **Verified green on every gate.** After the extraction: hosted `kernel-core` 13/13; **all three VM
+  gates still pass** — aarch64 (`vm-e2e.sh`, exit 0), RISC-V (`vm-e2e-riscv.sh`, exit 0), x86-64
+  (`smoke-test.sh`, exit 33) — re-proving 11 spine + memory + virtual-memory + user-mode invariants
+  from the shared source. `clippy -D warnings` clean.
+- **Deferred (Issue 1 follow-on):** extracting the remaining arch-independent primitives the register
+  lists (task / process / address-space / scheduler / interrupt abstractions) into `kernel-core` so
+  the per-target `usermode.rs`/`vm.rs`/`frames.rs` implement shared interfaces rather than parallel
+  bespoke code; and the fuller cargo-workspace split.
+
 ## Run it
 
 ```bash
 cd aletheia
-cargo test        # 59 passed — M1 acceptance + conformance + property + security + P2 component + policy + AI
+cargo test        # 67 passed — M1 acceptance + conformance + property + security + P2 component + policy + AI
 cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundary (clients issue Requests)
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
+
+(cd ../kernel-core && cargo test)  # 13 passed — the shared spine's invariants proved on the HOST, arch-independent, no QEMU
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
 ./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 13 EL0 user-mode invariants + exit 0

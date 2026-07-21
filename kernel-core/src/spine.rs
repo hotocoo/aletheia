@@ -102,10 +102,17 @@ impl Constraints {
 
 #[derive(Clone, Debug)]
 struct StoredCapability {
+    // `subject` (the holder) and `parent` (the delegation ancestor) are part of the capability
+    // record for model fidelity and auditability, but the minimal kernel `evaluate` path does not
+    // read them (revocation walks the separate `children` map, not `parent`). Retained rather than
+    // dropped so the kernel spine mirrors the hosted System Core's capability shape; allowed here so
+    // `clippy -D warnings` stays clean now that the spine is a shared library crate.
+    #[allow(dead_code)]
     subject: String,
     action: String,
     scope: Scope,
     constraints: Constraints,
+    #[allow(dead_code)]
     parent: Option<u64>,
 }
 
