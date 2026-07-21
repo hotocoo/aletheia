@@ -25,7 +25,30 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()).unwrap_or("demo") {
         "serve" => serve(&args),
+        "model" => model_cmd(&args),
         _ => demo(&args),
+    }
+}
+
+/// `aletheiad model [pull]` — Aletheia-owned model provisioning (ADR-017). `pull` fetches the
+/// first-party model (models/minicpm.toml) into the local cache if missing; no arg reports status.
+fn model_cmd(args: &[String]) {
+    let cfg = aletheia::ai::config::AiConfig::from_env();
+    match args.get(2).map(|s| s.as_str()) {
+        Some("pull") => {
+            println!("provisioning model {} ({})...", cfg.model_ref, aletheia::ai::config::DEFAULT_MODEL_FILE);
+            match aletheia::ai::runtime::ensure_model(&cfg) {
+                Ok(p) => println!("model ready: {}", p.display()),
+                Err(e) => {
+                    eprintln!("provisioning failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => match aletheia::ai::runtime::resolve_model_path(&cfg) {
+            Some(p) => println!("model present: {}", p.display()),
+            None => println!("model not present — run: aletheiad model pull"),
+        },
     }
 }
 

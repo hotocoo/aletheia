@@ -1,0 +1,31 @@
+# Aletheia first-party AI model manifest (ADR-017).
+#
+# The model INTEGRATION ships in-repo (aletheia/src/ai/); the WEIGHTS are an external artifact
+# provisioned ON DEMAND into the local Hugging Face cache by `aletheiad model pull`
+# (aletheia/src/ai/runtime.rs::ensure_model) — never committed to git. This manifest is the pinned,
+# authoritative declaration of the default model so it "comes with" Aletheia without a 1.1 GB blob
+# in the repository.
+
+[model]
+name        = "MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking"
+repo        = "GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF"
+file        = "MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-Q8_0.gguf"
+quant       = "Q8_0"
+sha256      = "fc3ee1eddd305c155f63b6bd7bb189daa4d5f226ca325ab219bd7acd3b00ec77"
+size_bytes  = 1153529184
+
+[runtime]
+backend           = "llama_cpp"
+endpoint          = "http://localhost:8080"
+context           = 8192            # typical; the model supports up to 131072
+thinking          = false           # no-think mode: a strict grammar collides with the <think> phase
+temperature       = 0.7
+top_p             = 0.95
+structured_output = "gbnf-grammar"  # constrains generation to the Aletheia Plan schema
+
+[provision]
+# Weights are NOT in git. Provision them into the local HF cache with either:
+#   aletheiad model pull      # Aletheia-owned provisioning (huggingface-cli / hf, else curl)
+#   huggingface-cli download GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-Q8_0.gguf
+# Or set MODEL_PATH to an existing .gguf. The provider falls back to the deterministic interpreter
+# whenever no model is available (the OS stays fully functional without a resident model).
