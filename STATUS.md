@@ -489,10 +489,17 @@ spine itself was textually included.
   in a fast `cargo test` (13 tests, no QEMU) — running the SAME `selftest::run()` the three kernels
   boot, plus granular named per-invariant tests. This complements (does not replace) the per-target
   QEMU VM gates.
-- **Verified green on every gate.** After the extraction: hosted `kernel-core` 13/13; **all three VM
-  gates still pass** — aarch64 (`vm-e2e.sh`, exit 0), RISC-V (`vm-e2e-riscv.sh`, exit 0), x86-64
-  (`smoke-test.sh`, exit 33) — re-proving 11 spine + memory + virtual-memory + user-mode invariants
-  from the shared source. `clippy -D warnings` clean.
+- **Capability transfer through IPC + bounded queues** (gap-register Issue 2) now live in the shared
+  spine, so all three targets gain them at once: `Channel::send_transfer` authorizes a send AND
+  delegates a capability from sender to recipient, **attenuated** by the same rules as
+  `CapEngine::delegate` (a transfer can never amplify); the recipient receives a real, auditable,
+  revocable registry token in `Message.cap`. `Channel::bounded` refuses a send to a full inbox
+  fail-closed. All-or-nothing: an unauthorized send, an amplifying grant, or a full queue enqueues
+  nothing and mints no token. Proved in `kernel-core/tests/invariants.rs`.
+- **Verified green on every gate.** After the extraction + IPC extension: hosted `kernel-core` 17/17;
+  **all three VM gates still pass** — aarch64 (`vm-e2e.sh`, exit 0), RISC-V (`vm-e2e-riscv.sh`, exit
+  0), x86-64 (`smoke-test.sh`, exit 33) — re-proving 11 spine + memory + virtual-memory + user-mode
+  invariants from the shared source. `clippy -D warnings` clean.
 - **Deferred (Issue 1 follow-on):** extracting the remaining arch-independent primitives the register
   lists (task / process / address-space / scheduler / interrupt abstractions) into `kernel-core` so
   the per-target `usermode.rs`/`vm.rs`/`frames.rs` implement shared interfaces rather than parallel
@@ -507,7 +514,7 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 13 passed — the shared spine's invariants proved on the HOST, arch-independent, no QEMU
+(cd ../kernel-core && cargo test)  # 17 passed — the shared spine's invariants (incl. IPC capability transfer + bounded queues) proved on the HOST, arch-independent, no QEMU
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
 ./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 13 EL0 user-mode invariants + exit 0

@@ -169,13 +169,110 @@ fn invariant_secure_ipc_is_capability_gated() {
     let mut e = CapEngine::new(0xA5A5, 1000);
     let mut ch = Channel::new("ipc.send");
     // unauthorized send is dropped fail-closed; receiver never observes it
-    let d0 = ch.send(&e, Message { from: "A".into(), to: "B".into(), body: 1 }, &[]);
+    let d0 = ch.send(&e, Message::new("A", "B", 1), &[]);
     assert!(matches!(d0, Decision::Deny(_)) && ch.recv().is_none());
     // authorized send is delivered
     let cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
-    let d1 = ch.send(&e, Message { from: "A".into(), to: "B".into(), body: 2 }, &[cap]);
+    let d1 = ch.send(&e, Message::new("A", "B", 2), &[cap]);
     assert_eq!(d1, Decision::Allow);
     assert!(ch.recv().is_some());
+}
+
+// ---------------------------------------------------------------------------
+// IPC capability transfer + bounded queues (gap-register Issue 2).
+// ---------------------------------------------------------------------------
+
+fn grant(action: &str, scope: Scope) -> CapGrant {
+    CapGrant { action: action.into(), scope, constraints: Constraints::none() }
+}
+
+#[test]
+fn ipc_capability_transfer_is_attenuated_and_usable_by_recipient() {
+    let mut e = CapEngine::new(0xA5A5, 1000);
+    let mut ch = Channel::new("ipc.send");
+    // Sender holds broad authority and an ipc.send cap; it transfers a NARROWER capability.
+    let root = e.mint("A", "entity.*", Scope::All, Constraints::none());
+    let send_cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
+    let token = ch
+        .send_transfer(
+            &mut e,
+            Message::new("A", "B", 7),
+            root,
+            grant("entity.derive", Scope::Type(EntityType::Document)),
+            &[send_cap],
+        )
+        .expect("authorized transfer succeeds");
+    // The delivered message carries the minted token, and it equals the returned handle.
+    let msg = ch.recv().expect("message delivered");
+    assert_eq!(msg.cap, Some(token), "recipient receives the transferred capability");
+    // The recipient can use it for exactly the granted action/scope...
+    assert_eq!(
+        e.evaluate(
+            "entity.derive",
+            &Target { id: None, etype: Some(EntityType::Document) },
+            &[token],
+        ),
+        Decision::Allow
+    );
+    // ...but not beyond it (attenuation: no delete, and not on other entity types).
+    assert!(matches!(
+        e.evaluate("entity.delete", &Target::default(), &[token]),
+        Decision::Deny(_)
+    ));
+    assert!(matches!(
+        e.evaluate(
+            "entity.derive",
+            &Target { id: None, etype: Some(EntityType::Summary) },
+            &[token]
+        ),
+        Decision::Deny(_)
+    ));
+}
+
+#[test]
+fn ipc_capability_transfer_cannot_amplify_fail_closed() {
+    let mut e = CapEngine::new(0xA5A5, 1000);
+    let mut ch = Channel::new("ipc.send");
+    // Sender holds only a NARROW capability but tries to transfer a BROADER one.
+    let narrow = e.mint("A", "entity.derive", Scope::Type(EntityType::Document), Constraints::none());
+    let send_cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
+    let result = ch.send_transfer(
+        &mut e,
+        Message::new("A", "B", 1),
+        narrow,
+        grant("entity.delete", Scope::All), // amplification
+        &[send_cap],
+    );
+    assert!(matches!(result, Err(Decision::Deny(_))), "amplifying transfer is denied");
+    // Fail-closed: nothing enqueued, and no usable token leaked to the recipient.
+    assert!(ch.recv().is_none(), "no message enqueued on a denied transfer");
+}
+
+#[test]
+fn ipc_capability_transfer_denied_when_send_unauthorized() {
+    let mut e = CapEngine::new(0xA5A5, 1000);
+    let mut ch = Channel::new("ipc.send");
+    let root = e.mint("A", "entity.*", Scope::All, Constraints::none());
+    // No ipc.send capability offered => the send itself is unauthorized; no delegation occurs.
+    let result =
+        ch.send_transfer(&mut e, Message::new("A", "B", 1), root, grant("entity.derive", Scope::All), &[]);
+    assert!(matches!(result, Err(Decision::Deny(_))));
+    assert!(ch.recv().is_none());
+}
+
+#[test]
+fn ipc_bounded_channel_refuses_when_full_fail_closed() {
+    let mut e = CapEngine::new(0xA5A5, 1000);
+    let cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
+    let mut ch = Channel::bounded("ipc.send", 1);
+    // First authorized send fills the single slot.
+    assert_eq!(ch.send(&e, Message::new("A", "B", 1), &[cap]), Decision::Allow);
+    // Second send is refused fail-closed even though it is authorized — the queue is full.
+    assert!(matches!(ch.send(&e, Message::new("A", "B", 2), &[cap]), Decision::Deny(_)));
+    // Draining one frees a slot again.
+    assert_eq!(ch.recv().map(|m| m.body), Some(1));
+    assert_eq!(ch.send(&e, Message::new("A", "B", 3), &[cap]), Decision::Allow);
+    assert_eq!(ch.recv().map(|m| m.body), Some(3));
 }
 
 #[test]

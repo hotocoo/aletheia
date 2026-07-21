@@ -99,11 +99,22 @@ Raised by: GPT-5.5 (OpenAI)
 
 > Progress note (2026-07-21): a first kernel-mediated IPC endpoint is delivered on BOTH user-mode
 > targets — aarch64 (`kernel/src/usermode.rs`, EL0 invariants 11-13) and x86-64
-> (`kernel-x86_64/src/usermode.rs`, ring-3 invariants 11-13), VM-gated. Two processes in separate
+> (`kernel-x86_64/src/usermode.rs`, ring-3 invariants 11-13) and RISC-V
+> (`kernel-riscv64/src/usermode.rs`, U-mode invariants 11-13), VM-gated. Two processes in separate
 > address spaces exchange a message body through a kernel endpoint, authorized by the same
-> `CapEngine` (`ipc.send`/`ipc.recv`); unauthorized send/recv is rejected fail-closed. STILL OPEN:
-> capability *transfer* through IPC + attenuation, asynchronous notifications, bounded queues,
-> timeout/cancellation, zero-copy shared-memory channels, priority inheritance, and IPC trace/replay.
+> `CapEngine` (`ipc.send`/`ipc.recv`); unauthorized send/recv is rejected fail-closed.
+>
+> Progress note #2 (2026-07-21): **capability transfer through IPC + attenuation** and **bounded
+> message queues** are now delivered in the shared `kernel-core` spine (`Channel::send_transfer`,
+> `Channel::bounded`, `Message.cap`, `CapGrant`). A capability-transferring send authorizes the send
+> AND delegates a capability from the sender to the recipient, attenuated by the SAME rules as
+> `CapEngine::delegate` — so a transfer can never amplify beyond what the sender holds; the recipient
+> receives a real, auditable, revocable registry token in `msg.cap`. All-or-nothing + fail-closed: an
+> unauthorized send, an amplifying grant, or a full bounded queue enqueues nothing and mints no token.
+> Proved in hosted arch-independent tests (`kernel-core/tests/invariants.rs`). Because it lives in the
+> shared spine, all three targets gain it at once. STILL OPEN: asynchronous notifications,
+> timeout/cancellation, zero-copy shared-memory channels, priority inheritance, IPC trace/replay, and
+> wiring `send_transfer` into the per-target cross-address-space usermode IPC path.
 Problem
 Aletheia's microkernel architecture requires IPC to be a first-class kernel primitive. Higher-level services, components, applications, AI agents, and device services must communicate through explicit capability-authorized boundaries rather than ad hoc hosted APIs or Unix-socket-style abstractions.
 Goal
