@@ -7,8 +7,9 @@ use crate::context;
 use crate::domain::*;
 use crate::intelligence::{DeterministicRuntime, ModelRuntime};
 use crate::intent_action::{parse_plan, validate_plan, Intent, Step, Trace};
+use crate::policy::{ApprovalState, ApprovalStore, ApprovalVerdict, PendingApproval, PolicyEngine};
 use crate::storage::Store;
-use crate::tools::{self, Risk};
+use crate::tools;
 use crate::worldmodel::{self, Dir};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -32,6 +33,8 @@ pub struct SysCore {
     caps: CapEngine,
     model: Box<dyn ModelRuntime>,
     fallback: DeterministicRuntime,
+    policy: PolicyEngine,
+    approvals: ApprovalStore,
     tasks: HashMap<Id, TaskState>,
     cancelled: HashSet<Id>,
 }
@@ -46,7 +49,18 @@ impl SysCore {
         for t in store.revoked_tokens() {
             caps.mark_revoked(t);
         }
-        Ok(SysCore { store, caps, model, fallback: DeterministicRuntime, tasks: HashMap::new(), cancelled: HashSet::new() })
+        let mut core = SysCore {
+            store,
+            caps,
+            model,
+            fallback: DeterministicRuntime,
+            policy: PolicyEngine::new(),
+            approvals: ApprovalStore::new(),
+            tasks: HashMap::new(),
+            cancelled: HashSet::new(),
+        };
+        core.rebuild_approvals();
+        Ok(core)
     }
 
     /// Open with the local-model adapter (unhealthy in M1 → deterministic fallback, INT-004).
@@ -339,6 +353,80 @@ impl SysCore {
         self.tasks.insert(id.clone(), TaskState::Cancelled);
     }
 
+    // --- approvals (policy layer, ADR-015; SAD §10 `approve()`) ---
+
+    /// Record a durable pending approval bound to the exact intent. The immutable event log is the
+    /// source of truth (`ApprovalRequested` carries the full serialized record); the in-memory
+    /// registry is a replayable projection of it.
+    fn record_pending_approval(&mut self, intent: &Intent, reason: &str) -> PendingApproval {
+        let pa = PendingApproval::new(&intent.subject, intent.clone(), reason);
+        self.approvals.insert(pa.clone());
+        self.emit("ApprovalRequested", &new_id(), &pa.subject, serde_json::to_value(&pa).unwrap_or(Value::Null));
+        pa
+    }
+
+    /// A human grants or denies a pending approval. Granting re-runs the EXACT bound intent with
+    /// approval satisfied — approval confers no authority, so the offered capabilities are still
+    /// re-evaluated and can independently deny. Denying records the decision and executes nothing.
+    pub fn resolve_approval(&mut self, offered: &[String], approval_id: &Id, granted: bool) -> Result<Trace> {
+        let pa = self.approvals.get(approval_id).cloned().ok_or_else(|| AlethError::not_found("approval not found"))?;
+        if pa.state != ApprovalState::Pending {
+            return Err(AlethError::conflict("approval already resolved"));
+        }
+        if pa.is_expired(now()) {
+            self.approvals.mark_state(approval_id, ApprovalState::Expired);
+            self.emit("ApprovalResolved", &new_id(), &pa.subject, json!({"approval": approval_id, "state": "Expired"}));
+            return Err(AlethError::conflict("approval expired"));
+        }
+        self.approvals.mark_state(approval_id, if granted { ApprovalState::Granted } else { ApprovalState::Denied });
+        self.emit("ApprovalResolved", &new_id(), &pa.subject, json!({"approval": approval_id, "granted": granted}));
+        if !granted {
+            let mut trace = Trace::new(&pa.subject, new_id());
+            trace.intent = format!("{:?}", pa.intent.verb);
+            trace.approval = "denied by human".into();
+            trace.execution = "not executed — approval denied".into();
+            return Ok(trace);
+        }
+        let task = self.begin_task(&pa.subject);
+        Ok(self.run_intent(&task, offered, pa.intent, true))
+    }
+
+    /// All approvals still awaiting a human decision (freshest first).
+    pub fn list_pending_approvals(&self) -> Vec<PendingApproval> {
+        self.approvals.list_pending(now())
+    }
+    pub fn get_approval(&self, id: &Id) -> Option<PendingApproval> {
+        self.approvals.get(id).cloned()
+    }
+
+    /// Rebuild the approval registry from the immutable event log on open (persistence across
+    /// restart, AT-003). `ApprovalRequested` carries the full serialized `PendingApproval`;
+    /// `ApprovalResolved` carries the terminal state.
+    fn rebuild_approvals(&mut self) {
+        let events: Vec<EventRecord> = self.store.events().to_vec();
+        for ev in &events {
+            match ev.etype.as_str() {
+                "ApprovalRequested" => {
+                    if let Ok(pa) = serde_json::from_value::<PendingApproval>(ev.payload.clone()) {
+                        self.approvals.insert(pa);
+                    }
+                }
+                "ApprovalResolved" => {
+                    if let Some(id) = ev.payload.get("approval").and_then(|v| v.as_str()) {
+                        let state = match (ev.payload.get("granted").and_then(|v| v.as_bool()), ev.payload.get("state").and_then(|v| v.as_str())) {
+                            (Some(true), _) => ApprovalState::Granted,
+                            (Some(false), _) => ApprovalState::Denied,
+                            (_, Some("Expired")) => ApprovalState::Expired,
+                            _ => ApprovalState::Denied,
+                        };
+                        self.approvals.mark_state(&id.to_string(), state);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Convenience: begin a task and run one intent through the full pipeline.
     pub fn handle_intent(&mut self, offered: &[String], intent: Intent, approve: bool) -> Trace {
         let subject = intent.subject.clone();
@@ -438,23 +526,30 @@ impl SysCore {
                 self.emit("CapabilityDenied", task_id, &intent.subject, json!({"action": meta.action}));
                 return trace;
             }
-            let destructive = meta.risk == Risk::Destructive;
-            if matches!(decision, Decision::RequireApproval) || destructive {
-                trace.capability_decision = if destructive {
-                    format!("ALLOW but DESTRUCTIVE ({})", meta.action)
-                } else {
-                    format!("REQUIRE_APPROVAL ({})", meta.action)
-                };
-                if !approve {
-                    trace.approval = "pending — awaiting human approval".into();
-                    self.tasks.insert(task_id.clone(), TaskState::AwaitingApproval);
-                    self.emit("AIActionProposed", task_id, &intent.subject, json!({"action": meta.action, "needs_approval": true}));
-                    return trace;
+            // Authority axis (capability engine): what the held capabilities permit.
+            trace.capability_decision = match &decision {
+                Decision::Allow => format!("ALLOW ({})", meta.action),
+                Decision::RequireApproval => format!("REQUIRE_APPROVAL ({})", meta.action),
+                Decision::Deny(_) => unreachable!("deny handled above"),
+            };
+            // Governance axis (policy engine), INDEPENDENT of authority (ADR-015): even an authorized
+            // action may need a human to approve it (destructive risk, or an approval-constrained cap).
+            match self.policy.evaluate(&decision, meta.risk) {
+                ApprovalVerdict::NotRequired => trace.approval = "not required".into(),
+                ApprovalVerdict::Required { reason } => {
+                    if approve {
+                        trace.approval = format!("approved ({})", reason);
+                    } else {
+                        // Record a durable pending approval bound to this exact intent; stop with no
+                        // effect. A human later grants/denies it via `resolve_approval`.
+                        let pa = self.record_pending_approval(&intent, &reason);
+                        trace.approval = format!("pending [{}] — {}", pa.id, reason);
+                        trace.approval_id = Some(pa.id.clone());
+                        self.tasks.insert(task_id.clone(), TaskState::AwaitingApproval);
+                        self.emit("AIActionProposed", task_id, &intent.subject, json!({"action": meta.action, "needs_approval": true, "approval": pa.id}));
+                        return trace;
+                    }
                 }
-                trace.approval = "approved".into();
-            } else {
-                trace.capability_decision = format!("ALLOW ({})", meta.action);
-                trace.approval = "not required".into();
             }
 
             // Cancellation checkpoint before any effect.
