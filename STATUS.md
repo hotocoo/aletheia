@@ -320,11 +320,47 @@ hardware code). Code in `kernel-riscv64/`.
   duplicated `Hal` trait across the three kernel crates is unified by the mechanical workspace/
   `kernel-core` split (the documented follow-up).
 - **Verified**: `scripts/vm-e2e-riscv.sh` builds the kernel, boots it in QEMU riscv64 `virt`+OpenSBI,
-  and asserts the SBI-boundary marker + `ALL 11 INVARIANTS HOLD` + `[e2e] PASS` + **exit 0** (60s
-  watchdog). Wired into CI as the `vm-e2e-riscv` job (GitHub + GitLab), alongside the aarch64 gate.
-  `clippy -D warnings` clean.
-- **Deferred (P5)**: real S-mode page tables (Sv39/Sv48) + higher-half, CLINT/`sstc` timer
-  interrupts, a page-frame allocator, PLIC/external interrupts, and SMP (secondary-hart bring-up).
+  and asserts the SBI-boundary marker + `ALL 11 INVARIANTS HOLD` + the memory / virtual-memory /
+  user-mode markers (below) + `[e2e] PASS` + **exit 0** (60s watchdog). Wired into CI as the
+  `vm-e2e-riscv` job (GitHub + GitLab), alongside the aarch64 gate. `clippy -D warnings` clean.
+- **Deferred (P5 follow-on)**: Sv48 + higher-half, PLIC/external interrupts, a frame-backed kernel
+  heap, and SMP (secondary-hart bring-up). (Sv39 MMU + frame allocator + U-mode + per-process
+  address spaces + timer preemption are now DELIVERED — see the RISC-V P5 parity section below.)
+
+## Delivered (2026-07-21 — RISC-V P5 parity: Sv39 MMU, U-mode, per-process spaces, preemption, IPC)
+
+The RISC-V backend now proves the **same memory-management + user-mode invariant suite** the aarch64
+dev backend and the x86-64 image do — closing the cross-architecture process-isolation gap
+(ARCHITECTURE-GAPS Issue 3): the RISC-V column of the capability matrix (physical allocator, MMU,
+user mode, per-process address space, preemption) is no longer a gap. Contract-honest (ADR-010):
+every module was written outside-in and boot-verified in QEMU; a wrong page table / bad trap faults
+to `exit 102`, never a silent hang. All three new modules are riscv64-crate-only; the `#[path]`-shared
+`spine.rs`/`selftest.rs` are untouched and the aarch64 + x86-64 targets stay green.
+
+- **Physical page-frame allocator** (`frames.rs`) — intrusive LIFO free-list over RAM above the
+  kernel image (QEMU `virt` DRAM base 0x8000_0000; `-m 128M`), identical in shape to the aarch64
+  allocator. **7 memory invariants** proved live (distinct/aligned/in-range alloc, real R/W frame,
+  misaligned-free rejected, exhaustion fail-closed, free revives allocation).
+- **Sv39 virtual memory** (`vm.rs`) — 3-level Sv39 page tables built from frames: peripheral GiB as a
+  Device gigapage leaf, RAM as 2 MiB megapage leaves; A/D set on every leaf (the RISC-V analogue of
+  the aarch64 Access-Flag anti-hang move). The identity map is asserted by a **software page-table
+  walk BEFORE `satp` is written**; then dynamic map/unmap is proved by writing through a fresh VA and
+  observing the bytes in the mapped physical frame. **13 virtual-memory invariants** live.
+- **U-mode + preemption + IPC** (`usermode.rs`) — drops the CPU to **U-mode** and reaches the OS
+  through exactly one door: an `ecall` authorized by the **same `CapEngine`** the deterministic
+  pipeline uses (`sscratch` holds the current task's save-first trap frame; `sepc`/`sstatus` carry
+  the resume PC/privilege; `fence.i` makes freshly written user code fetchable). Proves **13 U-mode
+  boundary invariants**: cap-gated syscall (deny w/o cap, allow ⇒ one event); hardware isolation (a
+  U-mode load of a supervisor-only page faults, contained); **per-process `satp` address spaces** (A
+  reaches its own page, B cannot reach A's VA); a **cooperative round-robin scheduler** (two tasks in
+  distinct spaces run A,B,A,B… to exit, each echoing its own register magic through the shared code
+  VA); **timer preemption** (the S-mode timer IRQ — armed via the **SBI TIME extension** + `sie.STIE`,
+  cleared purely by re-arming, no interrupt-controller dance — preempts two non-yielding tasks and
+  each resumes with its progress counter advanced); and **capability-secure kernel-mediated IPC**
+  across distinct address spaces (send/recv fail-closed without the `ipc.send`/`ipc.recv` capability).
+  A dead-timer escape (bounded spin countdown → self-exit) keeps the preemption test from ever
+  hanging. `cargo run` now re-proves **11 spine + 7 memory + 13 virtual-memory + 13 user-mode**
+  invariants + exit 0; `clippy -D warnings` clean.
 
 ## Delivered (2026-07-21 — P5 start: physical frame allocator + MMU virtual memory)
 

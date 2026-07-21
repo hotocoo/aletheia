@@ -22,10 +22,13 @@ global_asm!(include_str!("boot.s"));
 mod console;
 mod arch;
 mod exit;
+mod frames;
 mod hal;
 mod heap;
 mod sbi;
 mod trap;
+mod usermode;
+mod vm;
 
 // Shared, arch-independent Aletheia spine + invariant suite — the SAME source the aarch64 and
 // x86-64 kernels compile, pulled in via `#[path]` so every target proves identical invariants
@@ -83,6 +86,15 @@ pub extern "C" fn kmain() -> ! {
     );
     kprintln!("[boot] heap: {} B used after init", heap::used_bytes());
 
+    // Physical memory: bring up the frame allocator over the RAM above the static kernel region.
+    frames::init();
+    kprintln!(
+        "[mm] frame allocator: {} frames ({} MiB) free above kernel, up to {:#x}",
+        frames::free_count(),
+        frames::free_count() * frames::FRAME_SIZE / (1024 * 1024),
+        frames::RAM_END,
+    );
+
     kprintln!("");
     kprintln!("--- invariant selftests (M1 acceptance, re-proved in RISC-V kernel space) ---");
     match selftest::run() {
@@ -93,8 +105,45 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Physical-memory invariants (riscv64 backend; separate from the shared spine suite).
     kprintln!("");
-    kprintln!("[e2e] PASS — RISC-V S-mode boot + SBI + rdtime + 11 spine invariants");
+    kprintln!("--- memory-management selftests (physical frames) ---");
+    match frames::selftest() {
+        Ok(n) => kprintln!("[mm] ALL {} MEMORY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[mm] FAILED at memory invariant {}: {}", idx, name);
+            ActiveHal::exit(40 + idx as i32);
+        }
+    }
+
+    // Virtual memory: build Sv39 tables, enable paging, prove dynamic map/unmap (riscv64 backend).
+    kprintln!("");
+    kprintln!("--- virtual-memory selftests (Sv39 MMU: identity map + dynamic map/unmap) ---");
+    match vm::selftest() {
+        Ok(n) => kprintln!("[vm] ALL {} VIRTUAL-MEMORY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[vm] FAILED at vm invariant {}: {}", idx, name);
+            ActiveHal::exit(60 + idx as i32);
+        }
+    }
+
+    // U-mode: drop to unprivileged U-mode and prove the capability-gated ecall boundary, hardware
+    // address-space isolation, per-process satp spaces, cooperative + timer-preemptive scheduling,
+    // and kernel-mediated IPC (riscv64 backend; requires the MMU, enabled above).
+    kprintln!("");
+    kprintln!("--- user-mode selftests (U-mode boundary: cap-gated ecall + isolation + preemption + IPC) ---");
+    match usermode::selftest() {
+        Ok(n) => kprintln!("[usermode] ALL {} USER-MODE BOUNDARY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[usermode] FAILED at user-mode invariant {}: {}", idx, name);
+            ActiveHal::exit(80 + idx as i32);
+        }
+    }
+
+    kprintln!("");
+    kprintln!(
+        "[e2e] PASS — RISC-V S-mode boot + SBI + rdtime + 11 spine + memory + virtual-memory + user-mode invariants"
+    );
     kprintln!("[e2e] Aletheia re-proved its invariants on its second first-class target. Halting.");
     ActiveHal::exit(0)
 }
