@@ -211,6 +211,11 @@ static mut KERNEL_CTX: [u64; 13] = [0; 13];
 const SYS_EMIT: u64 = 1;
 const SYS_YIELD: u64 = 2;
 const SYS_EXIT: u64 = 3;
+/// Capability-secure kernel IPC: send a message body to the kernel endpoint / receive one from it.
+/// Both are authorized by the SAME `CapEngine` (`ipc.send` / `ipc.recv` capabilities) — the message
+/// crosses process boundaries only through the kernel, never shared memory.
+const SYS_SEND: u64 = 4;
+const SYS_RECV: u64 = 5;
 
 /// Virtual addresses for one process's pages — past the identity-mapped RAM (so they are unmapped
 /// until we map them, proving they are real EL0-only mappings, not identity RAM).
@@ -248,6 +253,17 @@ static mut CURRENT: Option<Trial> = None;
 fn current() -> Option<&'static mut Trial> {
     unsafe { (*addr_of_mut!(CURRENT)).as_mut() }
 }
+
+// ---------------------------------------------------------------------------
+// Capability-secure kernel IPC endpoint (a single-slot mailbox). A `SYS_SEND` deposits a body here;
+// a `SYS_RECV` drains it. Because sender and receiver run in SEPARATE TTBR0 address spaces, the
+// only path the body can travel is THROUGH this kernel object — never shared user memory.
+// ---------------------------------------------------------------------------
+
+/// The kernel endpoint's single message slot (`None` = empty).
+static mut ENDPOINT: Option<u64> = None;
+/// The body the most recent authorized `SYS_RECV` drained from the endpoint.
+static mut IPC_RECEIVED: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // Scheduler state (multitasking invariants).
@@ -314,6 +330,50 @@ pub extern "C" fn el0_trap(num: u64, arg: u64) -> u64 {
         SYS_EXIT => {
             sched_report(arg, true);
             0
+        }
+        SYS_SEND => {
+            // Authorize with the SAME CapEngine, then deposit `arg` into the kernel endpoint.
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(t.action, &Target::default(), &t.caps) {
+                Decision::Allow => {
+                    // SAFETY: single-threaded; only the running task's trap writes the endpoint.
+                    unsafe { *addr_of_mut!(ENDPOINT) = Some(arg) };
+                    t.allowed = true;
+                    0
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
+        }
+        SYS_RECV => {
+            // Authorize, then drain the kernel endpoint into IPC_RECEIVED and hand the body back.
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(t.action, &Target::default(), &t.caps) {
+                Decision::Allow => {
+                    t.allowed = true;
+                    // SAFETY: single-threaded; only the running task's trap touches the endpoint.
+                    let msg = unsafe { (*addr_of_mut!(ENDPOINT)).take() };
+                    match msg {
+                        Some(body) => {
+                            unsafe { *addr_of_mut!(IPC_RECEIVED) = body };
+                            body
+                        }
+                        None => u64::MAX, // authorized, but the endpoint was empty
+                    }
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
         }
         _ => u64::MAX, // unknown syscall — fail closed
     }
@@ -728,6 +788,125 @@ fn run_cross_process_isolation() -> (bool, bool, usize) {
 }
 
 // ---------------------------------------------------------------------------
+// Capability-secure kernel IPC (architecture gap register, Issue 2). Two EL0 processes in SEPARATE
+// address spaces exchange a message through a kernel endpoint — the message crosses the boundary
+// only via the kernel, authorized by the SAME `CapEngine`, never through shared user memory.
+// ---------------------------------------------------------------------------
+
+/// Run one endpoint excursion in address space `root`: an EL0 process with (optionally) an `action`
+/// capability issues `x8`(syscall)/`x0`(arg) and traps once. Returns whether the syscall was
+/// authorized. Precondition: `root` already maps the syscall stub + stack at the user VAs.
+fn run_endpoint_excursion(
+    root: usize,
+    root_main: usize,
+    action: &'static str,
+    grant: bool,
+    x0: u64,
+    x8: u64,
+) -> bool {
+    let mut engine = CapEngine::new(0xA5A5, 1000);
+    let mut caps = Vec::new();
+    if grant {
+        caps.push(engine.mint("ipc-process", action, Scope::All, Constraints::none()));
+    }
+    // SAFETY: single-threaded; install the trial the handler reads for this excursion.
+    unsafe {
+        *addr_of_mut!(CURRENT) = Some(Trial {
+            engine,
+            store: Store::new(),
+            caps,
+            action,
+            armed: false,
+            allowed: false,
+            isolation_held: false,
+            fault_va: 0,
+        });
+    }
+    let mut f = TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, x0, x8);
+    // SAFETY: `root` identity-maps the running kernel; switch into it, run the EL0 excursion until
+    // it traps, restore the caller's space. The frame lives in kernel RAM (identity-mapped in root).
+    unsafe {
+        vm::switch_address_space(root);
+        resume_frame(&mut f as *mut TrapFrame);
+        vm::switch_address_space(root_main);
+    }
+    let t = unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("trial present");
+    t.allowed
+}
+
+/// Prove **capability-secure kernel IPC**: a message sent by one EL0 process is delivered to another
+/// EL0 process in a DIFFERENT address space, through the kernel endpoint, only when both hold the
+/// authorizing capability. Returns `(delivered_across_spaces, uncapable_send_denied,
+/// uncapable_recv_denied)`.
+fn run_ipc() -> (bool, bool, bool) {
+    let root_main = vm::active_root();
+    let root_a = match vm::build_identity() {
+        Some(r) => r,
+        None => return (false, false, false),
+    };
+    let root_b = match vm::build_identity() {
+        Some(r) => r,
+        None => return (false, false, false),
+    };
+    // Sender (A) and receiver (B) each get the syscall stub + a stack in their OWN space.
+    let a_code = map_user_code(root_a, USER_CODE_VA, &STUB_SYSCALL);
+    let a_stack = map_user_stack(root_a, USER_STACK_VA);
+    let b_code = map_user_code(root_b, USER_CODE_VA, &STUB_SYSCALL);
+    let b_stack = map_user_stack(root_b, USER_STACK_VA);
+    if a_code.is_none() || a_stack.is_none() || b_code.is_none() || b_stack.is_none() {
+        if let Some(f) = a_stack {
+            drop_user_page(root_a, USER_STACK_VA, f);
+        }
+        if let Some(f) = a_code {
+            drop_user_page(root_a, USER_CODE_VA, f);
+        }
+        if let Some(f) = b_stack {
+            drop_user_page(root_b, USER_STACK_VA, f);
+        }
+        if let Some(f) = b_code {
+            drop_user_page(root_b, USER_CODE_VA, f);
+        }
+        return (false, false, false);
+    }
+
+    let body: u64 = 0xC0FF_EE42;
+
+    // 1 — capability-secure delivery: capable sender deposits, capable receiver drains, and the body
+    // survives the trip through the kernel between two genuinely distinct address spaces.
+    // SAFETY: single-threaded reset of the endpoint before the exchange.
+    unsafe {
+        *addr_of_mut!(ENDPOINT) = None;
+        *addr_of_mut!(IPC_RECEIVED) = 0;
+    }
+    let send_ok = run_endpoint_excursion(root_a, root_main, "ipc.send", true, body, SYS_SEND);
+    let recv_ok = run_endpoint_excursion(root_b, root_main, "ipc.recv", true, 0, SYS_RECV);
+    let received = unsafe { *addr_of!(IPC_RECEIVED) };
+    let spaces_distinct = root_a != root_b && root_a != root_main && root_b != root_main;
+    let delivered = send_ok && recv_ok && received == body && spaces_distinct;
+
+    // 2 — an EL0 process WITHOUT `ipc.send` cannot post to the endpoint (fail-closed, slot untouched).
+    // SAFETY: single-threaded reset.
+    unsafe { *addr_of_mut!(ENDPOINT) = None };
+    let bad_send = run_endpoint_excursion(root_a, root_main, "ipc.send", false, body, SYS_SEND);
+    let send_denied = !bad_send && unsafe { (*addr_of!(ENDPOINT)).is_none() };
+
+    // 3 — an EL0 process WITHOUT `ipc.recv` cannot drain a queued message (fail-closed, slot intact).
+    // SAFETY: single-threaded seed of a queued message.
+    unsafe { *addr_of_mut!(ENDPOINT) = Some(body) };
+    let bad_recv = run_endpoint_excursion(root_b, root_main, "ipc.recv", false, 0, SYS_RECV);
+    let recv_denied = !bad_recv && unsafe { (*addr_of!(ENDPOINT)).is_some() };
+
+    // SAFETY: excursions complete; reclaim the leaf pages (the table trees are the same intentional
+    // bounded one-time boot-test leak the other multi-space tests take).
+    drop_user_page(root_a, USER_STACK_VA, a_stack.expect("mapped"));
+    drop_user_page(root_a, USER_CODE_VA, a_code.expect("mapped"));
+    drop_user_page(root_b, USER_STACK_VA, b_stack.expect("mapped"));
+    drop_user_page(root_b, USER_CODE_VA, b_code.expect("mapped"));
+
+    (delivered, send_denied, recv_denied)
+}
+
+// ---------------------------------------------------------------------------
 // Cooperative multitasking: two EL0 tasks context-switch via yield under a round-robin scheduler.
 // ---------------------------------------------------------------------------
 
@@ -1058,6 +1237,23 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         preempt_progress,
         "el0: each task's register counter advances across timer preemptions — state preserved"
+    );
+
+    // 11, 12 & 13 — capability-secure kernel IPC (gap register Issue 2): a message crosses from one
+    // EL0 process to another in a DIFFERENT address space only through the kernel endpoint, gated by
+    // the same CapEngine; an uncapable sender/receiver is denied fail-closed.
+    let (delivered, send_denied, recv_denied) = run_ipc();
+    check!(
+        delivered,
+        "el0: capability-secure IPC — message delivered kernel-mediated across distinct address spaces"
+    );
+    check!(
+        send_denied,
+        "el0: IPC send without the ipc.send capability is denied — endpoint untouched (fail-closed)"
+    );
+    check!(
+        recv_denied,
+        "el0: IPC recv without the ipc.recv capability is denied — queued message intact (fail-closed)"
     );
 
     Ok(n)
