@@ -1,0 +1,8 @@
+[package]
+name = "kernel-core"
+version = "0.1.0"
+edition = "2021"
+description = "Aletheia kernel core — arch-independent contracts shared by every bare-metal kernel target (the Hal trait; ADR-019). no_std, no IO, no arch-specific code; each target crate provides its own backend impl."
+
+[lib]
+crate-type = ["rlib"]

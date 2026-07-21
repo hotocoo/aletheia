@@ -10,6 +10,10 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[dependencies]
+# The single shared Hal trait (defined once in kernel-core, not copied per target).
+kernel-core = { path = "../kernel-core" }
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

@@ -220,9 +220,10 @@ Elevating the M1 reference from a scripted demo toward the real layered architec
   capability-before-inclusion for relationship EDGES, not just entities. Clippy `-D warnings` clean.
 
 Deferred (next): both first-class HAL backends are now VM-tested and executed (see the x86-64 and
-RISC-V delivered sections below); the remaining mechanical item is the cargo-**workspace crate
-split** (SAD §4 — module boundaries + dependency direction already match the crate list, and it also
-unifies the one `Hal` trait currently duplicated across the three kernel crates).
+RISC-V delivered sections below), and the one `Hal` trait once duplicated across the three kernel
+crates is now unified in a shared **`kernel-core`** crate (each target provides only its own backend
+`impl`). The remaining mechanical item is the fuller cargo-**workspace crate split** of the hosted
+crate (SAD §4 — module boundaries + dependency direction already match the crate list).
 
 ## Delivered (2026-07-21 — x86-64 bootable development image)
 

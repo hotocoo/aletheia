@@ -11,6 +11,8 @@ test = false
 bench = false
 
 [dependencies]
+# The single shared Hal trait (defined once in kernel-core, not copied per target).
+kernel-core = { path = "../kernel-core" }
 # `alloc` gives us the alloc-backed UEFI types (e.g. MemoryMapOwned). We provide our OWN
 # #[global_allocator] and #[panic_handler] (valid after ExitBootServices), so the uefi crate's
 # `global_allocator` / `panic_handler` features are intentionally OFF.
