@@ -74,6 +74,19 @@ impl SysCore {
     }
 
     pub fn store(&self) -> &Store { &self.store }
+
+    /// Capability-gated keyword search over the World Model (ADR-018 search seam; no embeddings
+    /// required). `offered` are the caller's capability tokens; only entities they are authorized to
+    /// READ are returned, ranked most-relevant-first — a caller with no read authority gets an empty
+    /// result (fail closed). Read-only: it records nothing and mutates no state.
+    pub fn search(
+        &self,
+        offered: &[String],
+        query: &str,
+        limit: usize,
+    ) -> Vec<crate::ai::context::SearchHit> {
+        crate::ai::context::search_world(&self.store, &self.caps, offered, query, limit)
+    }
     pub fn caps(&self) -> &CapEngine { &self.caps }
     pub fn caps_mut(&mut self) -> &mut CapEngine { &mut self.caps }
     pub fn interpreter_name(&self) -> String {

@@ -168,6 +168,8 @@ impl Store {
     // --- read API ---
 
     pub fn get_entity(&self, id: &Id) -> Option<&Entity> { self.entities.get(id) }
+    /// Enumerate every stored entity (unordered — callers needing determinism must sort).
+    pub fn entities(&self) -> impl Iterator<Item = &Entity> { self.entities.values() }
     pub fn latest_of_chain(&self, chain: &Id) -> Option<&Entity> {
         self.latest_by_chain.get(chain).and_then(|id| self.entities.get(id))
     }
