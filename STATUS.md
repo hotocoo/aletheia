@@ -405,6 +405,7 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
+./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
 ./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 10 EL0 user-mode invariants + exit 0
 ./scripts/vm-e2e-riscv.sh    # same spine suite, for the RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
