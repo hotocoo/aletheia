@@ -1,7 +1,7 @@
 # Aletheia — Implementation Status
 
 **As of:** 2026-07-21
-**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap), VM-tested on the aarch64 dev backend
+**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary and hardware address-space isolation**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..013`.
 
@@ -326,6 +326,38 @@ modules (`kernel/src/frames.rs`, `kernel/src/vm.rs`) are aarch64-crate-only; the
   EL0 user-mode + capability-gated syscall boundary, a frame-backed kernel heap (the static bump heap
   stays load-bearing for now), and the x86-64/RISC-V MMU backends.
 
+## Delivered (2026-07-21 — P5: EL0 user-mode + capability-gated syscall boundary)
+
+The brick that makes the privilege boundary **real**. Until now every invariant was re-proved
+*in kernel space* (EL1) — the benchmark's own honesty note says the measured loop "crosses no
+privilege/address-space boundary," so isolation was logical, not hardware-enforced. This wave
+drops the CPU to **EL0** (unprivileged), runs a genuinely less-privileged instruction stream in
+its own EL0-only pages, and lets it reach the OS through *exactly one door*: an `svc` trap that
+lands in the EL1 vector and is authorized by the **same `CapEngine`** the deterministic pipeline
+uses. Code in `kernel/src/usermode.rs` (aarch64 dev backend; `#[path]`-shared `spine.rs` untouched,
+x86-64 + RISC-V re-verified green). Contract-honest (ADR-010): written outside-in, boot-verified;
+an *unexpected* fault stays fatal (`exit 102`) so a real bug can never masquerade as a pass.
+
+- **Real EL0 excursions, one-shot** (not a scheduler — that is the follow-on multitasking brick).
+  `enter_user` saves the kernel's callee-saved context and `eret`s to EL0 with a tiny
+  position-independent stub in a fresh EL0-executable page (new `vm::USER_CODE`/`USER_DATA` AP
+  bits = EL0 R/W, PXN); the stub issues one `svc` (or faults); the **0x400 vector** (`Lower EL,
+  AArch64, Synchronous`, previously fatal) decodes `ESR_EL1.EC` — SVC `0x15` vs Data-Abort-lower-EL
+  `0x24` — dispatches, then resumes the kernel via `enter_user_return`. The 0x200 EL1 `svc`
+  bench fast-path is untouched. User pages are mapped into the **live** TTBR0 (`vm::active_root`).
+- **Same authority mechanism at the boundary.** The syscall handler authorizes through
+  `CapEngine::evaluate` against the process's granted capabilities — nothing ambient. Allow ⇒ the
+  effect happens (an event recorded in the Store, actor = the EL0 process); Deny ⇒ −1, zero effect.
+- **3 EL0-boundary invariants proved live in QEMU** (exit `80+i` on failure): (1) an EL0 process
+  with **no capability** is denied at the boundary and leaves zero effect; (2) a **capability-granted**
+  EL0 process is authorized via the same `CapEngine` and records exactly one event; (3) **hardware
+  address-space isolation** — an EL0 read of kernel memory takes a permission Data Abort that is
+  contained (proving EL0 truly cannot touch EL1 memory, not just "shouldn't"). `cargo run` now
+  boots and re-proves **11 spine + 7 memory + 13 virtual-memory + 3 user-mode** invariants + exit 0.
+- **Deferred (P5 follow-on)**: per-process address spaces + higher-half (TTBR1) kernel/user split,
+  a full trap-frame save/restore/resume (multitasking), the frame-backed kernel heap, and the
+  x86-64/RISC-V EL0 backends.
+
 ## Run it
 
 ```bash
@@ -335,7 +367,7 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 3 EL0 user-mode invariants + exit 0
 ./scripts/vm-e2e-riscv.sh    # same spine suite, for the RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
@@ -345,7 +377,7 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ```bash
 # The NEW P5 memory-management work (frame allocator + MMU) runs on the aarch64 dev backend.
 # Boot it directly as a -kernel ELF in QEMU (this IS the e2e VM test):
-cd kernel && cargo run          # boots Aletheia, proves 11+7+13 invariants live, exits 0
+cd kernel && cargo run          # boots Aletheia, proves 11+7+13+3 invariants live (incl. EL0 user-mode), exits 0
 
 # A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
 cd kernel-x86_64 && bash scripts/build-image.sh   # -> build/aletheia-x86_64.{img,vmdk}

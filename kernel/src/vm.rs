@@ -40,6 +40,7 @@ const DESC_BLOCK: u64 = 0b01; // block descriptor (L1/L2)
 const AF: u64 = 1 << 10; // Access Flag — MUST be set or first access faults
 const SH_INNER: u64 = 0b11 << 8; // inner shareable (Normal cacheable memory)
 const AP_RW_EL1: u64 = 0b00 << 6; // EL1 read/write, no EL0 access
+const AP_RW_EL0: u64 = 0b01 << 6; // EL1 + EL0 read/write (user-accessible)
 const PXN: u64 = 1 << 53; // privileged execute-never
 const UXN: u64 = 1 << 54; // unprivileged execute-never
 const ATTR_NORMAL: u64 = 0 << 2; // AttrIndx = 0 (MAIR attr0, Normal)
@@ -54,6 +55,10 @@ const NORMAL_BLOCK: u64 = DESC_BLOCK | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF |
 const DEVICE_BLOCK: u64 = DESC_BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | UXN | PXN;
 /// Attributes for a Normal-memory 4 KiB page (dynamic mappings).
 const NORMAL_PAGE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF | UXN;
+/// EL0-executable user code page: EL0 RW+X (AP_RW_EL0, UXN clear), EL1 execute-never (PXN).
+pub const USER_CODE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL0 | SH_INNER | AF | PXN;
+/// EL0 data/stack page: EL0 RW, never executable at either level.
+pub const USER_DATA: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL0 | SH_INNER | AF | UXN | PXN;
 
 #[inline]
 unsafe fn read_entry(table: usize, idx: usize) -> u64 {
@@ -236,6 +241,16 @@ pub unsafe fn enable(root: usize) {
     asm!("mrs {v}, sctlr_el1", v = out(reg) sctlr, options(nostack));
     sctlr |= 1 << 0; // M — enable stage-1 MMU
     asm!("msr sctlr_el1, {v}", "isb", v = in(reg) sctlr, options(nostack));
+}
+
+/// The live page-table root in use by the CPU (`TTBR0_EL1`, base address masked). Lets a later
+/// brick (EL0 user-mode) map fresh user pages into the *active* address space rather than a
+/// throwaway table built for a test. Only meaningful after `enable`.
+pub fn active_root() -> usize {
+    let ttbr0: u64;
+    // SAFETY: reading TTBR0_EL1 is always sound at EL1.
+    unsafe { asm!("mrs {v}, ttbr0_el1", v = out(reg) ttbr0, options(nomem, nostack)) };
+    (ttbr0 & ADDR_MASK) as usize
 }
 
 /// Whether the MMU is currently enabled (`SCTLR_EL1.M`).
