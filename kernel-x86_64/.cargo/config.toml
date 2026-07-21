@@ -1,0 +1,13 @@
+# Aletheia x86-64 UEFI kernel — bare-metal AMD64 bring-up (ADR-019 first-class target).
+#
+# Target `x86_64-unknown-uefi` ships PRECOMPILED core/alloc (tier-2), so — unlike the aarch64
+# `-none` kernel — NO `build-std` / `rust-src` is needed. The build artifact is a PE `.efi`
+# executable placed at `EFI/BOOT/BOOTX64.EFI` on a FAT ESP; the firmware (OVMF in QEMU, native
+# UEFI in VMware) loads it. Aletheia then calls ExitBootServices and OWNS the machine — the
+# firmware is the hardware/platform integration layer, not an OS underneath us (ADR-019).
+#
+# We do NOT use `cargo run`: a single `.efi` is not directly bootable; `scripts/x86-image.sh`
+# assembles the reproducible disk image and `scripts/x86-smoke.sh` boots it under OVMF.
+
+[build]
+target = "x86_64-unknown-uefi"
