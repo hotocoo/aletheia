@@ -83,6 +83,14 @@ Proposed Issue 2 — Implement Real Capability-Secure Kernel IPC
 Priority: Critical
 Category: Kernel / Security
 Raised by: GPT-5.5 (OpenAI)
+
+> Progress note (2026-07-21): a first kernel-mediated IPC endpoint is delivered on BOTH user-mode
+> targets — aarch64 (`kernel/src/usermode.rs`, EL0 invariants 11-13) and x86-64
+> (`kernel-x86_64/src/usermode.rs`, ring-3 invariants 11-13), VM-gated. Two processes in separate
+> address spaces exchange a message body through a kernel endpoint, authorized by the same
+> `CapEngine` (`ipc.send`/`ipc.recv`); unauthorized send/recv is rejected fail-closed. STILL OPEN:
+> capability *transfer* through IPC + attenuation, asynchronous notifications, bounded queues,
+> timeout/cancellation, zero-copy shared-memory channels, priority inheritance, and IPC trace/replay.
 Problem
 Aletheia's microkernel architecture requires IPC to be a first-class kernel primitive. Higher-level services, components, applications, AI agents, and device services must communicate through explicit capability-authorized boundaries rather than ad hoc hosted APIs or Unix-socket-style abstractions.
 Goal
