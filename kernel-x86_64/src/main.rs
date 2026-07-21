@@ -23,6 +23,7 @@ mod console;
 mod cell;
 mod exit;
 mod framebuffer;
+mod frames;
 mod gdt;
 mod hal;
 mod heap;
@@ -154,6 +155,24 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     kprintln!("[timer] OK: {} ticks via IRQ0 — interrupts + timer are LIVE", pit::ticks());
     kprintln!("[hal] rdtsc monotonic sample: {}", ActiveHal::timer_ticks());
 
+    // --- physical memory management (P5): take ownership of the RAM the firmware handed us ---
+    let (fbase, fcount) = frames::init_from_uefi(memory_map);
+    kprintln!(
+        "[mm] frame allocator: {} frames ({} MiB) from the largest conventional region @ {:#x}",
+        fcount,
+        fcount * frames::FRAME_SIZE / (1024 * 1024),
+        fbase
+    );
+    kprintln!("");
+    kprintln!("--- memory-management selftests (physical frames, from the UEFI map) ---");
+    match frames::selftest() {
+        Ok(n) => kprintln!("[mm] ALL {} MEMORY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[mm] FAILED at memory invariant {}: {}", idx, name);
+            ActiveHal::exit(30 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("--- invariant selftests (M1 acceptance, re-proved in x86-64 kernel space) ---");
     match selftest::run() {
@@ -165,7 +184,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     }
 
     kprintln!("");
-    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + 11 spine invariants");
+    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + 11 spine invariants");
     kprintln!("[e2e] Aletheia booted as its own OS on AMD64. Halting.");
     ActiveHal::exit(0)
 }
