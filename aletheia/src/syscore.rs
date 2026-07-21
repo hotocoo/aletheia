@@ -3,7 +3,6 @@
 //! and records. The only probabilistic step is interpretation; everything after is deterministic.
 use crate::agents::Agent;
 use crate::capabilities::{CapEngine, Constraints, Decision, Scope, StoredCapability, Target};
-use crate::context;
 use crate::domain::*;
 use crate::intelligence::{DeterministicRuntime, ModelRuntime};
 use crate::intent_action::{parse_plan, validate_plan, Intent, Step, Trace};
@@ -448,9 +447,19 @@ impl SysCore {
             return trace;
         }
 
-        // Context (bounded, provenance-tracked).
-        let ctx = context::assemble(&self.store, &intent.subject, &intent);
-        trace.context_provenance = ctx.items.iter().map(|i| format!("{}:{}", i.source_type, i.source_id)).collect();
+        // Context via the native capability-aware Context Engine (ADR-018): structured world +
+        // relationship + memory retrieval, each entity authorized BEFORE inclusion, budgeted for the
+        // small model. Not RAG — the World Model is the source of truth. The model receives a compact
+        // rendering of this, never a raw store dump.
+        let aictx = crate::ai::context::ContextEngine::new().build(
+            &self.store,
+            &self.caps,
+            offered,
+            &intent.subject,
+            &intent,
+            crate::ai::context::ContextBudget::small(),
+        );
+        trace.context_provenance = aictx.provenance();
 
         // Interpretation — the ONLY probabilistic stage. Model-unhealthy → deterministic fallback.
         // Model-healthy-but-errored → this request fails (no silent fallback); state stays intact.

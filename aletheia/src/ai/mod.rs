@@ -98,33 +98,7 @@ pub mod config {
     }
 }
 
-pub mod context {
-    //! AI context construction (SAD §9). Turns authoritative Aletheia state — the world model,
-    //! the subject's held capabilities, and recent audit history — into a bounded, provenance-tagged
-    //! brief the model reasons over. Never dumps the store; the model receives a summary, not raw
-    //! authority, and content is always DATA (SEC-003), never instructions.
-    use crate::storage::Store;
-
-    /// A compact, capability-scoped situational brief for the model. Bounded by `max_items`.
-    pub fn build_brief(store: &Store, subject: &str, max_items: usize) -> String {
-        let mut s = String::new();
-        s.push_str(&format!("subject: {subject}\n"));
-        s.push_str("world (recent relationships):\n");
-        for r in store.relationships().take(max_items) {
-            s.push_str(&format!("  {} --{}--> {}\n", short(&r.from), r.rtype, short(&r.to)));
-        }
-        s.push_str("recent events:\n");
-        let ev = store.events();
-        for e in ev.iter().rev().take(max_items) {
-            s.push_str(&format!("  {} by {}\n", e.etype, e.actor));
-        }
-        s
-    }
-
-    fn short(id: &str) -> String {
-        if id.len() > 8 { id[id.len() - 8..].to_string() } else { id.to_string() }
-    }
-}
+pub mod context;
 
 pub mod prompt {
     //! Prompt / response protocol + structured-output strategy (intent + planner schema).
