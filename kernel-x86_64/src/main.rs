@@ -31,6 +31,7 @@ mod idt;
 mod pic;
 mod pit;
 mod serial;
+mod vm;
 
 // Shared, arch-independent Aletheia spine + invariant suite — the SAME source the aarch64 kernel
 // compiles, pulled in via `#[path]` so both targets prove identical invariants (no fork, no copy).
@@ -173,6 +174,17 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // --- virtual memory (P5): walk + edit the live UEFI page-table hierarchy we now own ---
+    kprintln!("");
+    kprintln!("--- virtual-memory selftests (MMU: map/unmap over the live UEFI hierarchy) ---");
+    match vm::selftest() {
+        Ok(n) => kprintln!("[vm] ALL {} VIRTUAL-MEMORY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[vm] FAILED at virtual-memory invariant {}: {}", idx, name);
+            ActiveHal::exit(40 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("--- invariant selftests (M1 acceptance, re-proved in x86-64 kernel space) ---");
     match selftest::run() {
@@ -184,7 +196,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     }
 
     kprintln!("");
-    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + 11 spine invariants");
+    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants");
     kprintln!("[e2e] Aletheia booted as its own OS on AMD64. Halting.");
     ActiveHal::exit(0)
 }
