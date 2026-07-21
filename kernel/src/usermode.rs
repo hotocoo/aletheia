@@ -604,10 +604,9 @@ fn run_cross_process_isolation() -> (bool, bool, usize) {
 // Cooperative multitasking: two EL0 tasks context-switch via yield under a round-robin scheduler.
 // ---------------------------------------------------------------------------
 
-/// Per-task VAs (same address space this brick; distinct pages). Timer preemption + per-task
-/// TTBR0 are the follow-on.
-const TASK_CODE_VA: [usize; NTASK] = [0x5000_0000, 0x5000_4000];
-const TASK_STACK_VA: [usize; NTASK] = [0x5000_1000, 0x5000_5000];
+// Scheduler tasks share the SAME user VAs (`USER_CODE_VA`/`USER_STACK_VA`) but live in SEPARATE
+// address spaces — so the per-slice TTBR0 switch is the ONLY thing routing that VA to the right
+// task's code. Timer-driven preemption is the follow-on.
 
 /// EL0 task stub for a given 16-bit `magic`: set `x19 = magic` once, then yield three times and
 /// exit — replaying `magic` in `x0` (the syscall arg) before every `svc`. Because `x19` and `x8`
@@ -633,40 +632,54 @@ fn stub_for(magic: u64) -> [u32; 12] {
     ]
 }
 
-/// Run the round-robin scheduler over two cooperative EL0 tasks. Returns
-/// `(schedule_is_round_robin_and_both_exited, every_slice_presented_its_own_magic)`.
-fn run_scheduler() -> (bool, bool) {
-    let root = vm::active_root();
-    let magics: [u64; NTASK] = [0xA1A1, 0xB2B2];
-    let mut code: [Option<frames::PhysFrame>; NTASK] = [None, None];
-    let mut stack: [Option<frames::PhysFrame>; NTASK] = [None, None];
+/// Unmap+free each task's mapped leaf pages in its own root. (The identity page-table trees are an
+/// intentional, bounded, one-time boot-test leak — the pool has ~30k frames, this runs once.)
+fn cleanup_tasks(
+    roots: &[usize; NTASK],
+    code: &mut [Option<frames::PhysFrame>; NTASK],
+    stack: &mut [Option<frames::PhysFrame>; NTASK],
+) {
     for i in 0..NTASK {
-        code[i] = map_user_code(root, TASK_CODE_VA[i], &stub_for(magics[i]));
-        stack[i] = map_user_stack(root, TASK_STACK_VA[i]);
-        if code[i].is_none() || stack[i].is_none() {
-            // Best-effort cleanup of whatever mapped, then bail.
-            for j in 0..NTASK {
-                if let Some(f) = stack[j].take() {
-                    drop_user_page(root, TASK_STACK_VA[j], f);
-                }
-                if let Some(f) = code[j].take() {
-                    drop_user_page(root, TASK_CODE_VA[j], f);
-                }
-            }
-            return (false, false);
+        if let Some(f) = stack[i].take() {
+            drop_user_page(roots[i], USER_STACK_VA, f);
+        }
+        if let Some(f) = code[i].take() {
+            drop_user_page(roots[i], USER_CODE_VA, f);
         }
     }
-    // SAFETY: single-threaded; initialize the TCBs before any resume.
+}
+
+/// Run the round-robin scheduler over two cooperative EL0 tasks, EACH IN ITS OWN ADDRESS SPACE.
+/// Returns `(round_robin_and_both_exited, every_slice_presented_its_own_magic, spaces_distinct)`.
+fn run_scheduler() -> (bool, bool, bool) {
+    let root_main = vm::active_root();
+    let magics: [u64; NTASK] = [0xA1A1, 0xB2B2];
+    let mut roots = [0usize; NTASK];
+    let mut code: [Option<frames::PhysFrame>; NTASK] = [None, None];
+    let mut stack: [Option<frames::PhysFrame>; NTASK] = [None, None];
+    // Each task gets its own TTBR0 root; both use the SAME user VAs (isolated only by the space).
+    for i in 0..NTASK {
+        roots[i] = match vm::build_identity() {
+            Some(r) => r,
+            None => {
+                cleanup_tasks(&roots, &mut code, &mut stack);
+                return (false, false, false);
+            }
+        };
+        code[i] = map_user_code(roots[i], USER_CODE_VA, &stub_for(magics[i]));
+        stack[i] = map_user_stack(roots[i], USER_STACK_VA);
+        if code[i].is_none() || stack[i].is_none() {
+            cleanup_tasks(&roots, &mut code, &mut stack);
+            return (false, false, false);
+        }
+    }
+    // SAFETY: single-threaded; init the TCBs before any resume. Same entry/stack VA for both —
+    // the distinct roots are what make them separate address spaces.
     unsafe {
         let tcbs = &mut *addr_of_mut!(TCBS);
         for i in 0..NTASK {
             tcbs[i] = Tcb {
-                frame: TrapFrame::new_entry(
-                    TASK_CODE_VA[i],
-                    TASK_STACK_VA[i] + frames::FRAME_SIZE,
-                    0,
-                    0,
-                ),
+                frame: TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, 0, 0),
                 done: false,
             };
         }
@@ -690,9 +703,14 @@ fn run_scheduler() -> (bool, bool) {
             None => break,
         };
         sched_report(0, false); // reset for this slice
-                                // SAFETY: single-threaded; resume this task until it yields/exits. Its frame lives in the
-                                // static TCB, so it persists across the excursion.
-        unsafe { resume_frame(&mut (*addr_of_mut!(TCBS))[slot].frame as *mut TrapFrame) };
+                                // SAFETY: roots[slot] identity-maps the kernel; switch into the task's space, resume it
+                                // until it yields/exits, then restore the scheduler's space. The frame lives in the static
+                                // TCB (kernel data, identity-mapped in every root), so the entry-time save works pre-switch.
+        unsafe {
+            vm::switch_address_space(roots[slot]);
+            resume_frame(&mut (*addr_of_mut!(TCBS))[slot].frame as *mut TrapFrame);
+            vm::switch_address_space(root_main);
+        }
         let (mag, exited) = unsafe {
             let s = &*addr_of!(SCHED);
             (s.last_magic, s.exited)
@@ -708,14 +726,7 @@ fn run_scheduler() -> (bool, bool) {
         }
     }
 
-    for i in 0..NTASK {
-        if let Some(f) = stack[i].take() {
-            drop_user_page(root, TASK_STACK_VA[i], f);
-        }
-        if let Some(f) = code[i].take() {
-            drop_user_page(root, TASK_CODE_VA[i], f);
-        }
-    }
+    cleanup_tasks(&roots, &mut code, &mut stack);
 
     // Expected: 4 slices per task (3 yields + 1 exit), strictly alternating A,B,A,B,A,B,A,B.
     let expected_slots = [0usize, 1, 0, 1, 0, 1, 0, 1];
@@ -728,10 +739,13 @@ fn run_scheduler() -> (bool, bool) {
         let t = &*addr_of!(TCBS);
         t[0].done && t[1].done
     };
-    // Every slice must report the magic of the task that actually ran it — proof the full
-    // register file (x19 magic + x8 syscall number) rode through each context switch intact.
+    // Every slice must report the magic of the task that actually ran it — proof the full register
+    // file (x19 magic + x8 syscall number) rode through each context switch intact. And because
+    // both tasks share ONE code VA in DIFFERENT spaces, a correct magic each slice ALSO proves the
+    // per-slice TTBR0 switch happened (else a task would execute the other's stub at that VA).
     let magic_ok = order.len() == 8 && order.iter().all(|(slot, mag)| *mag == magics[*slot]);
-    (order_ok && both_done, magic_ok)
+    let spaces_distinct = roots[0] != roots[1] && roots[0] != root_main && roots[1] != root_main;
+    (order_ok && both_done, magic_ok, spaces_distinct)
 }
 
 /// Prove the EL0 boundary + multitasking invariants live. `Ok(n)` all passed; `Err((idx,name))`.
@@ -782,16 +796,21 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "el0: process B cannot reach A's page at the same VA — per-process isolation holds"
     );
 
-    // 6 & 7 — cooperative multitasking: two EL0 tasks context-switch via yield under a round-robin
-    // scheduler, each resuming with its full register state intact across every switch.
-    let (order_ok, magic_ok) = run_scheduler();
+    // 6, 7 & 8 — cooperative multitasking with per-task address spaces: two EL0 tasks in SEPARATE
+    // TTBR0 spaces context-switch via yield under a round-robin scheduler, each resuming with full
+    // register state, and the two tasks occupy genuinely distinct address spaces.
+    let (order_ok, magic_ok, spaces_distinct) = run_scheduler();
     check!(
         order_ok,
-        "el0: round-robin scheduler runs two tasks A,B,A,B,... to completion"
+        "el0: round-robin scheduler runs two tasks (each in its own space) A,B,A,B,... to completion"
     );
     check!(
         magic_ok,
-        "el0: each task resumes with its own register magic — full context preserved on switch"
+        "el0: each task resumes with its own magic at the shared VA — full context + per-slice AS switch"
+    );
+    check!(
+        spaces_distinct,
+        "el0: the two scheduled tasks occupy distinct TTBR0 address spaces"
     );
 
     Ok(n)
