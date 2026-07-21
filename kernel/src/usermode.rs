@@ -257,6 +257,14 @@ fn drop_user_page(root: usize, va: usize, f: frames::PhysFrame) {
 const STUB_SYSCALL: [u32; 2] = [0xD400_0001, 0x1400_0000];
 /// EL0 stub that reads the kernel address handed to it in x0, then parks: `ldr x1,[x0] ; b .`
 const STUB_READ_X0: [u32; 2] = [0xF940_0001, 0x1400_0000];
+/// EL0 stub that reads the address in x0, then issues a syscall, then parks:
+/// `ldr x1,[x0] ; svc #0 ; b .`. If the read faults the `svc` is never reached — so a
+/// successful syscall is positive proof the read landed (used for the cross-process A case).
+const STUB_READ_THEN_SYSCALL: [u32; 3] = [0xF940_0001, 0xD400_0001, 0x1400_0000];
+
+/// A per-process private data page VA (same 2 MiB block as code/stack, distinct L3 slot). It is
+/// mapped in process A's address space and deliberately absent from process B's.
+const VA_P: usize = 0x5000_3000;
 
 /// Run one EL0 syscall excursion. `grant` decides whether the process holds the `event.emit`
 /// capability. Returns `(authorized, event_count_after)`.
@@ -349,6 +357,122 @@ fn run_isolation() -> (bool, usize) {
     (t.isolation_held, t.fault_va)
 }
 
+/// Run one EL0 process under a *dedicated* address-space root, entering at `USER_CODE_VA` with
+/// `x0val`/`x8val`. `armed` marks whether an EL0 fault is the expected outcome. Switches the
+/// live `TTBR0` to `root` around the excursion and restores `root_main` after. Returns the taken
+/// `Trial`. Precondition: `root` replicates the kernel identity map (from `build_identity`).
+fn run_in_space(
+    root: usize,
+    root_main: usize,
+    x0val: u64,
+    x8val: u64,
+    engine: CapEngine,
+    caps: Vec<CapToken>,
+    armed: bool,
+) -> Trial {
+    // SAFETY: single-threaded; install the trial the handler reads this excursion.
+    unsafe {
+        *core::ptr::addr_of_mut!(CURRENT) = Some(Trial {
+            engine,
+            store: Store::new(),
+            caps,
+            action: "event.emit",
+            armed,
+            allowed: false,
+            isolation_held: false,
+            fault_va: 0,
+        });
+    }
+    // SAFETY: `root` identity-maps the running kernel (built by build_identity), so switching
+    // TTBR0 mid-execution is safe; restored to root_main immediately after the excursion.
+    unsafe {
+        vm::switch_address_space(root);
+        let _ = enter_user(USER_CODE_VA, USER_STACK_TOP, x0val, x8val);
+        vm::switch_address_space(root_main);
+    }
+    // SAFETY: excursion complete, no other access to CURRENT exists.
+    unsafe { (*core::ptr::addr_of_mut!(CURRENT)).take() }.expect("trial present")
+}
+
+/// Prove **per-process address-space isolation**: two EL0 processes in separate TTBR0 spaces,
+/// where a page private to process A is unreachable from process B — even at the *same* virtual
+/// address. Returns `(a_reached_own_page, b_isolated, b_fault_va)`.
+///
+/// Process A's space maps `VA_P`; A reads it (succeeds) then makes an authorized syscall — a
+/// completed syscall is positive proof the read landed (a fault would skip the `svc` and, being
+/// unarmed, abort to `exit 102`). Process B's space does NOT map `VA_P`; B reads the same VA and
+/// takes a translation fault that is contained. Same VA, present in A's space, absent from B's ⇒
+/// the spaces are genuinely separate, not a shared flat memory.
+fn run_cross_process_isolation() -> (bool, bool, usize) {
+    let root_main = vm::active_root();
+    let root_a = match vm::build_identity() {
+        Some(r) => r,
+        None => return (false, false, 0),
+    };
+    let root_b = match vm::build_identity() {
+        Some(r) => r,
+        None => return (false, false, 0),
+    };
+
+    // Process A's space: stub + stack + the private data page VA_P.
+    let a_code = match map_user_code(root_a, USER_CODE_VA, &STUB_READ_THEN_SYSCALL) {
+        Some(f) => f,
+        None => return (false, false, 0),
+    };
+    let a_stack = match map_user_stack(root_a, USER_STACK_VA) {
+        Some(f) => f,
+        None => return (false, false, 0),
+    };
+    let a_data = match map_user_stack(root_a, VA_P) {
+        Some(f) => f,
+        None => return (false, false, 0),
+    };
+    // Process B's space: stub + stack only — VA_P deliberately left unmapped.
+    let b_code = match map_user_code(root_b, USER_CODE_VA, &STUB_READ_THEN_SYSCALL) {
+        Some(f) => f,
+        None => return (false, false, 0),
+    };
+    let b_stack = match map_user_stack(root_b, USER_STACK_VA) {
+        Some(f) => f,
+        None => return (false, false, 0),
+    };
+
+    // A reads its own VA_P (mapped) then makes an authorized syscall -> allowed proves both.
+    let mut a_engine = CapEngine::new(0xA5A5, 1000);
+    let a_caps =
+        alloc::vec![a_engine.mint("process-a", "event.emit", Scope::All, Constraints::none())];
+    let a = run_in_space(
+        root_a,
+        root_main,
+        VA_P as u64,
+        SYS_EMIT,
+        a_engine,
+        a_caps,
+        false,
+    );
+
+    // B reads the SAME VA_P (unmapped in its space) -> armed translation fault, contained.
+    let b = run_in_space(
+        root_b,
+        root_main,
+        VA_P as u64,
+        0,
+        CapEngine::new(0xA5A5, 1000),
+        Vec::new(),
+        true,
+    );
+
+    // Reclaim the leaf frames (the two identity page-table trees are an intentional, bounded,
+    // one-time boot-test leak — the frame pool has ~30k frames and this runs once).
+    drop_user_page(root_a, VA_P, a_data);
+    drop_user_page(root_a, USER_STACK_VA, a_stack);
+    drop_user_page(root_a, USER_CODE_VA, a_code);
+    drop_user_page(root_b, USER_STACK_VA, b_stack);
+    drop_user_page(root_b, USER_CODE_VA, b_code);
+
+    (a.allowed, b.isolation_held, b.fault_va)
+}
+
 /// Prove the EL0 boundary invariants live. `Ok(n)` all passed; `Err((idx,name))` = failure.
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     install_vectors();
@@ -383,6 +507,18 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         held && fault_va == core::ptr::addr_of!(KERNEL_CTX) as usize,
         "el0: EL0 read of kernel memory faults — address-space isolation holds"
+    );
+
+    // 4 & 5 — per-process address spaces: a page private to process A is reachable by A but NOT
+    // by process B at the SAME virtual address (each process has its own TTBR0 space).
+    let (a_reached, b_isolated, b_fault_va) = run_cross_process_isolation();
+    check!(
+        a_reached,
+        "el0: process A reaches a page in its own address space (mapped VA resolves)"
+    );
+    check!(
+        b_isolated && b_fault_va == VA_P,
+        "el0: process B cannot reach A's page at the same VA — per-process isolation holds"
     );
 
     Ok(n)

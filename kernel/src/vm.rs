@@ -253,6 +253,29 @@ pub fn active_root() -> usize {
     (ttbr0 & ADDR_MASK) as usize
 }
 
+/// Switch the active user address space by pointing `TTBR0_EL1` at `root`, then flushing the
+/// TLB so no stale translation from the previous space survives. This is what gives each
+/// process its own view of memory: after the switch, the SAME virtual address resolves through
+/// `root`'s tables (or faults if `root` does not map it).
+///
+/// PRECONDITION (load-bearing): `root` MUST replicate the kernel identity map (code, stack,
+/// `exc_vectors`, UART, and all kernel statics at their identity PAs) — otherwise the `isb`
+/// after the write faults, because the very instruction stream doing the switch would become
+/// unmapped. `build_identity()` guarantees this. The `tlbi vmalle1` is mandatory: reusing one
+/// user VA across processes backed by different frames would otherwise resolve to a stale entry.
+///
+/// SAFETY: caller guarantees `root` identity-maps the running kernel (see precondition).
+pub unsafe fn switch_address_space(root: usize) {
+    asm!("msr ttbr0_el1, {v}", v = in(reg) root as u64, options(nostack));
+    asm!(
+        "dsb ish",
+        "tlbi vmalle1",
+        "dsb ish",
+        "isb",
+        options(nostack)
+    );
+}
+
 /// Whether the MMU is currently enabled (`SCTLR_EL1.M`).
 pub fn mmu_enabled() -> bool {
     let sctlr: u64;
