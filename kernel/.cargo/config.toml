@@ -14,7 +14,7 @@ target = "aarch64-unknown-none-softfloat"
 rustflags = ["-C", "link-arg=-Tlinker.ld"]
 runner = [
   "qemu-system-aarch64",
-  "-machine", "virt",
+  "-machine", "virt,gic-version=2",
   "-cpu", "cortex-a72",
   "-smp", "1",
   "-m", "128M",

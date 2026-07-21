@@ -31,7 +31,7 @@ exc_vectors:
     .balign 0x80
     b   el0_sync_entry             // 0x400 Synchronous  <-- EL0 svc / fault -> cap-gated boundary
     .balign 0x80
-    b   default_exception          // 0x480 IRQ
+    b   el0_irq_entry              // 0x480 IRQ          <-- timer IRQ -> preemptive scheduler
     .balign 0x80
     b   default_exception          // 0x500 FIQ
     .balign 0x80
