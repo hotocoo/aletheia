@@ -19,11 +19,13 @@
 //! scratch. This unification means the capability/isolation invariants and the scheduler all run
 //! through one audited trap path.
 //!
-//! DESIGN — cooperative first (contract-honest, ADR-010). Tasks yield voluntarily (`SYS_YIELD`);
-//! timer-driven (involuntary) preemption + the GIC are the documented follow-on. Every line
-//! executes under QEMU and is asserted by `usermode::selftest()`; an *unexpected* fault stays
-//! fatal (`exit 102`), so a real bug can never masquerade as a pass. aarch64 dev backend only;
-//! the `#[path]`-shared `spine.rs` is untouched. Requires the MMU (`vm::enable`).
+//! SCHEDULING — both cooperative (tasks `SYS_YIELD`) and PREEMPTIVE: a GICv2 + EL1 generic-timer
+//! IRQ (vector `0x480`) preempts non-yielding EL0 tasks and the round-robin scheduler switches
+//! them, each resuming with full register state. Contract-honest (ADR-010): every line executes
+//! under QEMU and is asserted by `usermode::selftest()`; an *unexpected* fault stays fatal
+//! (`exit 102`), the preemption test's task loop is *bounded* so a dead timer fails cleanly rather
+//! than hanging, and `-machine virt,gic-version=2` is pinned. aarch64 dev backend only; the
+//! `#[path]`-shared `spine.rs` is untouched. Requires the MMU (`vm::enable`).
 use crate::spine::{CapEngine, CapToken, Constraints, Decision, Scope, Store, Target};
 use crate::{frames, vm};
 use alloc::vec::Vec;
@@ -92,12 +94,9 @@ resume_return:
     mov     sp, x10
     ret
 
-// Vector 0x400 (Lower EL, AArch64, Synchronous). SAVE-FIRST: stash the full register file into
-// the current frame (TPIDR_EL1) before any clobber, using TPIDR_EL0 to bootstrap x0. Then decode
-// ESR_EL1.EC: SVC(0x15) -> el0_trap(num=x8, arg=x0); Data Abort lower-EL(0x24) -> el0_data_abort;
-// else fatal (default_exception -> exit 102).
-.global el0_sync_entry
-el0_sync_entry:
+// SAVE-FIRST: stash the full register file into the current frame (TPIDR_EL1) before any clobber,
+// using TPIDR_EL0 to bootstrap x0. Shared by the synchronous (svc/fault) and IRQ entries.
+.macro SAVE_EL0_FRAME
     msr     tpidr_el0, x0           // scratch-stash x0 (frees it to hold the frame base)
     mrs     x0, tpidr_el1           // x0 = current frame base
     stp     x1,  x2,  [x0, #8]
@@ -123,6 +122,13 @@ el0_sync_entry:
     str     x1, [x0, #256]
     mrs     x1, spsr_el1
     str     x1, [x0, #264]
+.endm
+
+// Vector 0x400 (Lower EL, AArch64, Synchronous). Save, then decode ESR_EL1.EC: SVC(0x15) ->
+// el0_trap(num=x8, arg=x0); Data Abort lower-EL(0x24) -> el0_data_abort; else fatal (exit 102).
+.global el0_sync_entry
+el0_sync_entry:
+    SAVE_EL0_FRAME
     mrs     x1, esr_el1
     lsr     x1, x1, #26
     and     x1, x1, #0x3f
@@ -138,6 +144,14 @@ el0_sync_entry:
     b       resume_return
 40: mrs     x0, far_el1
     bl      el0_data_abort
+    b       resume_return
+
+// Vector 0x480 (Lower EL, AArch64, IRQ). Save the preempted task's full frame, then hand off to
+// the Rust IRQ handler (ack GIC, re-arm timer, EOI, mark preempted) and resume the scheduler.
+.global el0_irq_entry
+el0_irq_entry:
+    SAVE_EL0_FRAME
+    bl      el0_irq
     b       resume_return
 "#
 );
@@ -163,6 +177,9 @@ struct TrapFrame {
 
 /// SPSR for a fresh EL0 task: M = EL0t (AArch64), DAIF masked.
 const SPSR_EL0T: u64 = 0x3C0;
+/// SPSR for a *preemptible* EL0 task: EL0t with the IRQ mask (I, bit 7) CLEAR, so the timer
+/// interrupt is delivered while the task runs. D/A/F stay masked.
+const SPSR_EL0T_IRQ: u64 = 0x340;
 
 impl TrapFrame {
     const fn zeroed() -> Self {
@@ -240,10 +257,13 @@ fn current() -> Option<&'static mut Trial> {
 struct SchedState {
     last_magic: u64,
     exited: bool,
+    /// Set by the IRQ handler: the task was involuntarily preempted by the timer (not a yield/exit).
+    preempted: bool,
 }
 static mut SCHED: SchedState = SchedState {
     last_magic: 0,
     exited: false,
+    preempted: false,
 };
 
 /// A task control block: its resumable register frame and run state. (The register-magic each
@@ -325,6 +345,113 @@ pub extern "C" fn el0_data_abort(far: u64) -> u64 {
             kprintln!("[usermode] UNEXPECTED EL0 data abort at {:#x}", far);
             crate::semihosting::exit(102);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GICv2 + generic timer — the interrupt path that drives INVOLUNTARY preemption.
+// QEMU 'virt' GICv2: distributor @ 0x0800_0000, CPU interface @ 0x0801_0000 (already Device-mapped
+// in the peripheral GiB by vm.rs). The EL1 physical timer is PPI INTID 30. Requires the machine to
+// expose a GICv2 (pin `-machine virt,gic-version=2`).
+// ---------------------------------------------------------------------------
+
+const GICD_BASE: usize = 0x0800_0000;
+const GICC_BASE: usize = 0x0801_0000;
+const GICD_CTLR: usize = 0x000;
+const GICD_ISENABLER: usize = 0x100;
+const GICD_ICENABLER: usize = 0x180;
+const GICD_IPRIORITYR: usize = 0x400;
+const GICC_CTLR: usize = 0x000;
+const GICC_PMR: usize = 0x004;
+const GICC_IAR: usize = 0x00C;
+const GICC_EOIR: usize = 0x010;
+const TIMER_INTID: u32 = 30; // EL1 physical timer PPI
+const SPURIOUS: u32 = 1023;
+/// Preemption slice length in timer ticks (CNTFRQ ~62.5 MHz on QEMU 'virt' → ~8 ms). Value is not
+/// correctness-critical: a deadline missed while the scheduler runs at EL1 just fires on the next
+/// `eret` to EL0 — re-arming `CNTP_TVAL` each IRQ guarantees the next task gets a fresh full slice.
+const TIMER_SLICE: u64 = 500_000;
+
+#[inline]
+fn gicd_w32(off: usize, v: u32) {
+    // SAFETY: GICD is a valid Device-mapped MMIO register at a fixed platform address.
+    unsafe { core::ptr::write_volatile((GICD_BASE + off) as *mut u32, v) };
+}
+#[inline]
+fn gicc_w32(off: usize, v: u32) {
+    // SAFETY: GICC is a valid Device-mapped MMIO register at a fixed platform address.
+    unsafe { core::ptr::write_volatile((GICC_BASE + off) as *mut u32, v) };
+}
+#[inline]
+fn gicc_r32(off: usize) -> u32 {
+    // SAFETY: GICC is a valid Device-mapped MMIO register at a fixed platform address.
+    unsafe { core::ptr::read_volatile((GICC_BASE + off) as *const u32) }
+}
+
+/// Bring up the GIC to deliver the timer PPI. Order matters (advisor + GICv2 spec): enable the
+/// distributor, give the timer INTID top priority (0x00), enable that INTID, open the CPU
+/// interface's priority mask (PMR=0xF0; a source is delivered only if its priority < PMR), then
+/// enable the CPU interface.
+fn gic_init() {
+    gicd_w32(GICD_CTLR, 1); // enable group 0
+                            // IPRIORITYR is byte-addressed per INTID.
+                            // SAFETY: valid Device-mapped byte register for INTID 30.
+    unsafe {
+        core::ptr::write_volatile(
+            (GICD_BASE + GICD_IPRIORITYR + TIMER_INTID as usize) as *mut u8,
+            0x00,
+        )
+    };
+    gicd_w32(
+        GICD_ISENABLER + (TIMER_INTID as usize / 32) * 4,
+        1 << (TIMER_INTID % 32),
+    );
+    gicc_w32(GICC_PMR, 0xF0);
+    gicc_w32(GICC_CTLR, 1);
+}
+
+/// Tear the GIC + timer back down so the later benchmark (EL1, IRQ-masked) is unperturbed.
+fn gic_teardown() {
+    timer_disable();
+    gicd_w32(
+        GICD_ICENABLER + (TIMER_INTID as usize / 32) * 4,
+        1 << (TIMER_INTID % 32),
+    );
+    gicc_w32(GICC_CTLR, 0);
+    gicd_w32(GICD_CTLR, 0);
+}
+
+/// Arm the EL1 physical timer to fire `TIMER_SLICE` ticks from now (enabled, unmasked).
+fn timer_arm() {
+    // SAFETY: CNTP_TVAL_EL0 / CNTP_CTL_EL0 are accessible at EL1 (NS-EL1, no EL2 here).
+    unsafe {
+        asm!("msr cntp_tval_el0, {v}", v = in(reg) TIMER_SLICE, options(nomem, nostack));
+        asm!("msr cntp_ctl_el0, {v}", v = in(reg) 1u64, options(nomem, nostack));
+        // ENABLE, IMASK=0
+    }
+}
+
+/// Disable the EL1 physical timer.
+fn timer_disable() {
+    // SAFETY: CNTP_CTL_EL0 is accessible at EL1.
+    unsafe { asm!("msr cntp_ctl_el0, {v}", v = in(reg) 0u64, options(nomem, nostack)) };
+}
+
+/// IRQ dispatch (from vector 0x480). Acknowledge the interrupt, RE-ARM the timer BEFORE EOI (the
+/// timer condition is level-triggered — EOI without a fresh deadline re-asserts instantly → storm),
+/// then mark the running task preempted so the scheduler round-robins to the next one.
+#[no_mangle]
+pub extern "C" fn el0_irq() {
+    let iar = gicc_r32(GICC_IAR) & 0x3FF;
+    if iar == SPURIOUS {
+        return; // spurious read — no EOI, just resume
+    }
+    timer_arm(); // re-arm FIRST (level-triggered), before EOI
+    gicc_w32(GICC_EOIR, iar);
+    // SAFETY: single-threaded; only the running task's IRQ writes this, read by the scheduler.
+    unsafe {
+        let s = &mut *addr_of_mut!(SCHED);
+        s.preempted = true;
     }
 }
 
@@ -748,6 +875,114 @@ fn run_scheduler() -> (bool, bool, bool) {
     (order_ok && both_done, magic_ok, spaces_distinct)
 }
 
+/// EL0 spin-task stub for the preemption test: increment x19 (progress) while counting x20 down;
+/// if it ever drains x20 it exits (`SYS_EXIT`) — a *bounded* fallback so a NEVER-FIRING timer fails
+/// cleanly (the task self-exits, the scheduler sees an unexpected exit) instead of hanging. A
+/// working timer preempts long before x20 drains.
+/// `loop: add x19,x19,#1 ; subs x20,x20,#1 ; b.ne loop ; mov x8,#EXIT ; svc ; b .`
+const STUB_SPIN: [u32; 6] = [
+    0x9100_0673, // add  x19, x19, #1   (loop:)
+    0xF100_0694, // subs x20, x20, #1
+    0x54FF_FFC1, // b.ne loop  (-8)
+    0xD280_0068, // movz x8, #3 (SYS_EXIT)
+    0xD400_0001, // svc  #0
+    0x1400_0000, // b .
+];
+
+/// Countdown preloaded into x20: large enough that a working timer preempts before it drains,
+/// small enough that a BROKEN timer drains it (task self-exits) well within the VM watchdog.
+const SPIN_COUNTDOWN: u64 = 0x2000_0000;
+
+/// Prove **timer-driven (involuntary) preemption**: two EL0 tasks that never yield (tight
+/// increment loops, IRQ unmasked) are preempted by the generic-timer IRQ and round-robined by the
+/// scheduler. Returns `(both_tasks_preempted_fairly, each_task_progressed_across_preemptions)`.
+fn run_preemptive() -> (bool, bool) {
+    let root_main = vm::active_root();
+    let mut roots = [0usize; NTASK];
+    let mut code: [Option<frames::PhysFrame>; NTASK] = [None, None];
+    let mut stack: [Option<frames::PhysFrame>; NTASK] = [None, None];
+    for i in 0..NTASK {
+        roots[i] = match vm::build_identity() {
+            Some(r) => r,
+            None => {
+                cleanup_tasks(&roots, &mut code, &mut stack);
+                return (false, false);
+            }
+        };
+        code[i] = map_user_code(roots[i], USER_CODE_VA, &STUB_SPIN);
+        stack[i] = map_user_stack(roots[i], USER_STACK_VA);
+        if code[i].is_none() || stack[i].is_none() {
+            cleanup_tasks(&roots, &mut code, &mut stack);
+            return (false, false);
+        }
+    }
+    // Preemptible frames: IRQ unmasked (SPSR 0x340), x20 = bounded fallback countdown.
+    // SAFETY: single-threaded; init the TCBs before any resume.
+    unsafe {
+        let tcbs = &mut *addr_of_mut!(TCBS);
+        for i in 0..NTASK {
+            let mut f = TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, 0, 0);
+            f.spsr = SPSR_EL0T_IRQ;
+            f.regs[20] = SPIN_COUNTDOWN;
+            tcbs[i] = Tcb {
+                frame: f,
+                done: false,
+            };
+        }
+    }
+
+    gic_init();
+    timer_arm();
+
+    const SLICES: usize = 6;
+    let mut counts = [0usize; NTASK];
+    let mut last_x19 = [0u64; NTASK];
+    let mut seen = [false; NTASK];
+    let mut progress_ok = true;
+    let mut clean = true; // no task self-exited (i.e. the timer actually fired every slice)
+    let mut cur = 0usize;
+    for _ in 0..SLICES {
+        let slot = cur % NTASK;
+        // SAFETY: single-threaded reset of the slice report.
+        unsafe {
+            let s = &mut *addr_of_mut!(SCHED);
+            s.preempted = false;
+            s.exited = false;
+        }
+        // SAFETY: roots[slot] identity-maps the kernel; run the task until the timer preempts it.
+        unsafe {
+            vm::switch_address_space(roots[slot]);
+            resume_frame(&mut (*addr_of_mut!(TCBS))[slot].frame as *mut TrapFrame);
+            vm::switch_address_space(root_main);
+        }
+        let (was_preempt, was_exit, x19) = unsafe {
+            let s = &*addr_of!(SCHED);
+            (
+                s.preempted,
+                s.exited,
+                (*addr_of!(TCBS))[slot].frame.regs[19],
+            )
+        };
+        if was_exit || !was_preempt {
+            clean = false; // timer never fired (countdown drained) or an unexpected return
+            break;
+        }
+        if seen[slot] && x19 <= last_x19[slot] {
+            progress_ok = false; // counter did not advance across the involuntary switch
+        }
+        seen[slot] = true;
+        last_x19[slot] = x19;
+        counts[slot] += 1;
+        cur = (cur + 1) % NTASK;
+    }
+
+    gic_teardown();
+    cleanup_tasks(&roots, &mut code, &mut stack);
+
+    let fair = clean && counts.iter().all(|&c| c > 0);
+    (fair, progress_ok && clean)
+}
+
 /// Prove the EL0 boundary + multitasking invariants live. `Ok(n)` all passed; `Err((idx,name))`.
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     install_vectors();
@@ -811,6 +1046,18 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         spaces_distinct,
         "el0: the two scheduled tasks occupy distinct TTBR0 address spaces"
+    );
+
+    // 9 & 10 — timer-driven (involuntary) preemption: two non-yielding EL0 tasks are preempted by
+    // the generic-timer IRQ and round-robined; each resumes with its progress counter intact.
+    let (preempt_fair, preempt_progress) = run_preemptive();
+    check!(
+        preempt_fair,
+        "el0: generic-timer IRQ preempts two non-yielding tasks — scheduler round-robins both"
+    );
+    check!(
+        preempt_progress,
+        "el0: each task's register counter advances across timer preemptions — state preserved"
     );
 
     Ok(n)

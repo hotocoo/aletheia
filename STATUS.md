@@ -1,7 +1,7 @@
 # Aletheia — Implementation Status
 
 **As of:** 2026-07-21
-**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and cooperative multitasking (full trap-frame context switch + round-robin scheduler)**, VM-tested on the aarch64 dev backend
+**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..013`.
 
@@ -328,7 +328,7 @@ modules (`kernel/src/frames.rs`, `kernel/src/vm.rs`) are aarch64-crate-only; the
   boundary + per-process address spaces + cooperative multitasking are now delivered — see the EL0
   section.)
 
-## Delivered (2026-07-21 — P5: EL0 user-mode, per-process address spaces, cooperative multitasking)
+## Delivered (2026-07-21 — P5: EL0 user-mode, per-process address spaces, preemptive multitasking)
 
 The brick that makes the privilege boundary **real**. Until now every invariant was re-proved
 *in kernel space* (EL1) — the benchmark's own honesty note says the measured loop "crosses no
@@ -368,7 +368,18 @@ an *unexpected* fault stays fatal (`exit 102`) so a real bug can never masquerad
   slice reports *its* task's magic proves BOTH that the entire register file (not just the PC) rode
   through each context switch AND that the per-slice address-space switch routed the shared VA to
   the right task's code.
-- **8 EL0-boundary invariants proved live in QEMU** (exit `80+i` on failure): (1) an EL0 process
+- **Timer-driven (involuntary) preemption** — a real preemptive scheduler. A **GICv2** (distributor
+  `0x0800_0000`, CPU interface `0x0801_0000`) + the **EL1 generic timer** (PPI INTID 30) deliver a
+  periodic IRQ to vector `0x480`; the handler saves the preempted task's frame (the same save-first
+  prologue as `svc`, shared via an asm macro), re-arms `CNTP_TVAL` **before** EOI (the timer
+  condition is level-triggered — EOI-without-rearm would storm), and the scheduler round-robins. The
+  two tasks run with IRQs unmasked (SPSR `0x340`) and **never yield** — a tight `add x19; subs x20;
+  b.ne` loop — yet the timer preempts them and each resumes with its counter (`x19`) advanced,
+  proving state survives an *involuntary* switch. Contract-honest anti-hang: the loop is **bounded**
+  (`x20` countdown) so a timer that never fires makes the task self-exit → a clean failure, never a
+  spin; and `-machine virt,gic-version=2` is pinned so a GICv3 can't silently swallow the MMIO CPU
+  interface. The GIC/timer are torn down after the test so the benchmark is unperturbed.
+- **10 EL0-boundary invariants proved live in QEMU** (exit `80+i` on failure): (1) an EL0 process
   with **no capability** is denied at the boundary and leaves zero effect; (2) a **capability-granted**
   EL0 process is authorized via the same `CapEngine` and records exactly one event; (3) **hardware
   address-space isolation** — an EL0 read of kernel memory takes a permission Data Abort that is
@@ -377,11 +388,13 @@ an *unexpected* fault stays fatal (`exit 102`) so a real bug can never masquerad
   (per-process isolation); (6) the **round-robin scheduler** runs two tasks (each in its own space)
   A,B,A,B,… to completion; (7) each task **resumes with its own register magic** at the shared VA
   (full context + the per-slice address-space switch); (8) the two scheduled tasks occupy **distinct
-  TTBR0 address spaces**. `cargo run` now boots and re-proves **11 spine + 7 memory + 13
-  virtual-memory + 8 user-mode** invariants + exit 0.
-- **Deferred (P5 follow-on)**: **timer-driven (involuntary) preemption** (GIC + generic-timer IRQ —
-  this wave is *cooperative*, tasks yield voluntarily), higher-half (TTBR1) kernel/user split, a
-  frame-backed kernel heap, and the x86-64/RISC-V EL0 backends.
+  TTBR0 address spaces**; (9) the **generic-timer IRQ preempts** two non-yielding tasks and the
+  scheduler round-robins both; (10) each task's **register counter advances across preemptions**
+  (state preserved under an involuntary switch). `cargo run` now boots and re-proves **11 spine +
+  7 memory + 13 virtual-memory + 10 user-mode** invariants + exit 0.
+- **Deferred (P5 follow-on)**: higher-half (TTBR1) kernel/user split, a frame-backed kernel heap
+  (the static bump heap stays load-bearing for now), SMP (secondary-hart bring-up), and the
+  x86-64/RISC-V EL0/preemption backends.
 
 ## Run it
 
@@ -392,7 +405,7 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 8 EL0 user-mode invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 10 EL0 user-mode invariants + exit 0
 ./scripts/vm-e2e-riscv.sh    # same spine suite, for the RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
@@ -402,7 +415,7 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ```bash
 # The NEW P5 memory-management work (frame allocator + MMU) runs on the aarch64 dev backend.
 # Boot it directly as a -kernel ELF in QEMU (this IS the e2e VM test):
-cd kernel && cargo run          # boots Aletheia, proves 11+7+13+8 invariants live (incl. EL0 user-mode + multitasking), exits 0
+cd kernel && cargo run          # boots Aletheia, proves 11+7+13+10 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
 
 # A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
 cd kernel-x86_64 && bash scripts/build-image.sh   # -> build/aletheia-x86_64.{img,vmdk}

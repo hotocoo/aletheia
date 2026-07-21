@@ -20,7 +20,7 @@ cargo build || { echo "FAIL: build"; exit 3; }
 
 echo "==> booting in QEMU (60s watchdog)"
 OUT="$(perl -e 'alarm 60; exec @ARGV or die' \
-  qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 1 -m 128M -nographic \
+  qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 1 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF")"
 CODE=$?
 
