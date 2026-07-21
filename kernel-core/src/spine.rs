@@ -511,15 +511,46 @@ pub struct Message {
     pub from: String,
     pub to: String,
     pub body: u64,
+    /// A capability *transferred* to the recipient along with this message, if any. It is a real
+    /// registry token (minted by the engine as an attenuated delegate of the sender's authority),
+    /// so the recipient can use it exactly like any granted capability — and, because it is a
+    /// registry entry, the transfer is auditable and revocable. `None` for an ordinary message.
+    pub cap: Option<CapToken>,
+}
+
+impl Message {
+    /// An ordinary message carrying no transferred capability.
+    pub fn new(from: &str, to: &str, body: u64) -> Self {
+        Message {
+            from: from.to_string(),
+            to: to.to_string(),
+            body,
+            cap: None,
+        }
+    }
+}
+
+/// The capability a sender asks the kernel to transfer to a recipient over a channel. The engine
+/// delegates it from one of the sender's held capabilities, so it is bounded by attenuation.
+#[derive(Clone, Debug)]
+pub struct CapGrant {
+    pub action: String,
+    pub scope: Scope,
+    pub constraints: Constraints,
 }
 
 /// A capability-gated channel. A send is authorized by the capability engine against the
 /// `send_action` before the message is delivered; an unauthorized send is dropped (fail
 /// closed) and the receiver never observes it. This models the microkernel IPC fast-path:
 /// authority check + authenticated delivery, no ambient send rights.
+///
+/// A channel may be **bounded** (`Channel::bounded`) — a send to a full inbox is refused
+/// fail-closed rather than growing without limit, giving the IPC substrate the bounded-queue
+/// property a real kernel needs (gap-register Issue 2). `Channel::new` is unbounded.
 pub struct Channel {
     pub send_action: String,
     inbox: Vec<Message>,
+    capacity: Option<usize>,
 }
 
 impl Channel {
@@ -527,17 +558,79 @@ impl Channel {
         Channel {
             send_action: send_action.to_string(),
             inbox: Vec::new(),
+            capacity: None,
         }
     }
 
+    /// A channel whose inbox holds at most `capacity` undelivered messages; further sends are
+    /// refused fail-closed until the receiver drains one.
+    pub fn bounded(send_action: &str, capacity: usize) -> Self {
+        Channel {
+            send_action: send_action.to_string(),
+            inbox: Vec::new(),
+            capacity: Some(capacity),
+        }
+    }
+
+    /// True when a bounded channel's inbox is full (an unbounded channel is never full).
+    fn is_full(&self) -> bool {
+        matches!(self.capacity, Some(cap) if self.inbox.len() >= cap)
+    }
+
     /// Authorized send. Returns the capability decision; on Allow the message is delivered.
+    /// A full bounded channel refuses fail-closed (`Deny("inbox full")`) before any authorization
+    /// check, and nothing is enqueued.
     pub fn send(&mut self, engine: &CapEngine, msg: Message, offered: &[CapToken]) -> Decision {
+        if self.is_full() {
+            return Decision::Deny("inbox full".to_string());
+        }
         let target = Target::default();
         let decision = engine.evaluate(&self.send_action, &target, offered);
         if decision == Decision::Allow {
             self.inbox.push(msg);
         }
         decision
+    }
+
+    /// Capability-transferring send. Authorizes the send via the channel's `send_action`, then
+    /// delegates `grant` from `parent` (one of the sender's held capabilities) to the message's
+    /// recipient (`msg.to`), attenuated by the SAME rules as [`CapEngine::delegate`] — so a transfer
+    /// can never grant more than the sender holds. All-or-nothing + fail-closed: if the channel is
+    /// full, the send is unauthorized, or the delegation would amplify (or `parent` is
+    /// revoked/unknown), NOTHING is enqueued and NO token is minted. On success the delivered
+    /// message carries the freshly minted attenuated recipient token in its `cap` field (any `cap`
+    /// the caller set on `msg` is replaced), and that token is returned to the sender too.
+    pub fn send_transfer(
+        &mut self,
+        engine: &mut CapEngine,
+        mut msg: Message,
+        parent: CapToken,
+        grant: CapGrant,
+        offered: &[CapToken],
+    ) -> Result<CapToken, Decision> {
+        if self.is_full() {
+            return Err(Decision::Deny("inbox full".to_string()));
+        }
+        // Authorize the send itself first — no delegation happens on an unauthorized send.
+        let decision = engine.evaluate(&self.send_action, &Target::default(), offered);
+        if decision != Decision::Allow {
+            return Err(decision);
+        }
+        // Delegate the transferred capability, attenuated. Amplification / revoked / unknown parent
+        // => fail closed: nothing is minted and nothing is enqueued.
+        let token = match engine.delegate(
+            parent,
+            &msg.to,
+            &grant.action,
+            grant.scope,
+            grant.constraints,
+        ) {
+            Ok(t) => t,
+            Err(e) => return Err(Decision::Deny(e)),
+        };
+        msg.cap = Some(token);
+        self.inbox.push(msg);
+        Ok(token)
     }
 
     pub fn recv(&mut self) -> Option<Message> {

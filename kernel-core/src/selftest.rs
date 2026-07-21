@@ -197,26 +197,10 @@ pub fn run(mut report: impl FnMut(u32, bool, &'static str)) -> Result<u32, (u32,
     {
         let mut e = CapEngine::new(0xA5A5, 1000);
         let mut ch = Channel::new("ipc.send");
-        let d0 = ch.send(
-            &e,
-            Message {
-                from: "A".into(),
-                to: "B".into(),
-                body: 1,
-            },
-            &[],
-        );
+        let d0 = ch.send(&e, Message::new("A", "B", 1), &[]);
         let dropped = matches!(d0, Decision::Deny(_)) && ch.recv().is_none();
         let cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
-        let d1 = ch.send(
-            &e,
-            Message {
-                from: "A".into(),
-                to: "B".into(),
-                body: 2,
-            },
-            &[cap],
-        );
+        let d1 = ch.send(&e, Message::new("A", "B", 2), &[cap]);
         let delivered = d1 == Decision::Allow && ch.recv().is_some();
         check!(
             dropped && delivered,
