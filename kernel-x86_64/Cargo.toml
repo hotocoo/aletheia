@@ -1,0 +1,31 @@
+[package]
+name = "aletheia-kernel-x86_64"
+version = "0.1.0"
+edition = "2021"
+description = "Aletheia microkernel — bare-metal AMD64/x86-64 (UEFI). Boots as its own OS via OVMF/UEFI firmware handoff, then re-proves the M1 capability-secure spine invariants in kernel space (ADR-019 first-class target)."
+
+[[bin]]
+name = "aletheia-kernel-x86_64"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+# `alloc` gives us the alloc-backed UEFI types (e.g. MemoryMapOwned). We provide our OWN
+# #[global_allocator] and #[panic_handler] (valid after ExitBootServices), so the uefi crate's
+# `global_allocator` / `panic_handler` features are intentionally OFF.
+uefi = { version = "0.39.0", features = ["alloc"] }
+# Safe wrappers for GDT/IDT/segment/port intrinsics + the x86-interrupt handler ABI.
+x86_64 = "0.15"
+# Public-domain 8x8 bitmap glyphs for the framebuffer console (no_std).
+font8x8 = { version = "0.3", default-features = false }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,5 @@
+[toolchain]
+# Nightly for `#![feature(abi_x86_interrupt)]` (the x86-interrupt calling convention used by the
+# IDT handlers). The `x86_64-unknown-uefi` std is precompiled, so no `rust-src`/build-std here.
+channel = "nightly"
+targets = ["x86_64-unknown-uefi"]

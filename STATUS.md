@@ -182,6 +182,32 @@ Elevating the M1 reference from a scripted demo toward the real layered architec
 Deferred (next): x86-64 + RISC-V HAL backends (VM-tested bring-up, P4/P5); the cargo-**workspace crate
 split** (SAD §4 — mechanical; module boundaries + dependency direction already match the crate list).
 
+## Delivered (2026-07-21 — x86-64 bootable development image)
+
+The first **bootable Aletheia disk image**: Aletheia boots as its own OS on **AMD64/x86-64** under
+UEFI firmware, calls `ExitBootServices` to take the machine, brings up its own GDT/IDT + 8259 PIC +
+8254 PIT, proves a timer IRQ actually fires, and re-proves the 11 capability-secure spine invariants
+in x86-64 kernel space. Code in `kernel-x86_64/` (ADR-019 first-class AMD64 target, now executed —
+contract-honest: written outside-in and boot-verified, not blind hardware code).
+
+- **Boot model**: `x86_64-unknown-uefi` PE at `\EFI\BOOT\BOOTX64.EFI` on a GPT **EFI System
+  Partition**; own COM1 serial + GOP framebuffer console; own `#[global_allocator]` (8 MiB static
+  bump heap) + `#[panic_handler]` that stay valid after ExitBootServices; firmware identity paging
+  kept (no page tables yet). UEFI is the hardware/platform integration layer (ADR-019); the OS above
+  it is entirely Aletheia-owned — no Linux/macOS/POSIX, no third-party OS framework.
+- **Artifacts** (from `kernel-x86_64/scripts/build-image.sh`, macOS host, no mtools/xorriso/grub —
+  only rust + hdiutil/diskutil + python3 + qemu-img): `build/aletheia-x86_64.img` (raw GPT/ESP) +
+  `build/aletheia-x86_64.vmdk` (VMware) + `aletheia-x86_64.vmx`.
+- **Verified**: boots in **QEMU 11 under OVMF/UEFI** (`edk2-x86_64-code.fd`) → full serial boot log
+  + QEMU exit 33 = `[e2e] PASS`; `scripts/smoke-test.sh` is the automated boot gate (exit 33 +
+  "[e2e] PASS"). QEMU-under-OVMF is the same UEFI firmware family VMware uses; VMware itself was not
+  driven from the build host — attach the `.vmdk`/`.vmx` (UEFI firmware) to run it there.
+- **Reuses** the SAME `spine.rs` / `selftest.rs` the aarch64 kernel compiles (shared via `#[path]`,
+  no fork/copy); the aarch64 `-kernel` target is untouched and still green. The workspace/`kernel-core`
+  crate split that unifies the one duplicated `Hal` trait is the mechanical follow-up.
+- **Deferred (P5)**: own page tables/higher-half, TSS+IST double-fault stack, APIC/HPET + calibrated
+  TSC, SMP, a real page-frame allocator, and the RISC-V first-class backend.
+
 ## Run it
 
 ```bash

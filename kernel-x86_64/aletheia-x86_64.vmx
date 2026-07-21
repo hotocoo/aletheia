@@ -1,0 +1,31 @@
+# VMware (Fusion / Workstation) config for the Aletheia x86-64 bootable image.
+# Usage: run scripts/build-image.sh to produce build/aletheia-x86_64.vmdk, then open this .vmx
+# in VMware. Adjust the vmdk path if you move it. Boot is pure UEFI (firmware = "efi"); Aletheia's
+# \EFI\BOOT\BOOTX64.EFI on the ESP is the fallback bootloader the firmware launches.
+.encoding = "UTF-8"
+config.version = "8"
+virtualHW.version = "20"
+displayName = "Aletheia x86-64 (AI-native OS)"
+guestOS = "otherlinux-64"
+
+# --- UEFI firmware (NOT legacy BIOS) ---
+firmware = "efi"
+
+memsize = "256"
+numvcpus = "1"
+
+# --- boot disk: the Aletheia GPT/ESP image as a SATA disk ---
+sata0.present = "TRUE"
+sata0:0.present = "TRUE"
+sata0:0.deviceType = "disk"
+sata0:0.fileName = "build/aletheia-x86_64.vmdk"
+
+# --- serial console -> file (Aletheia's machine-checkable log; the framebuffer is on the display) ---
+serial0.present = "TRUE"
+serial0.fileType = "file"
+serial0.fileName = "aletheia-serial.log"
+serial0.tryNoRxLoss = "FALSE"
+
+# no network / sound needed for the bring-up milestone
+ethernet0.present = "FALSE"
+sound.present = "FALSE"
