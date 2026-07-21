@@ -48,6 +48,9 @@ pub struct Trace {
     pub result: serde_json::Value,
     pub ok: bool,
     pub error: Option<AlethError>,
+    /// Set when the action stopped awaiting human approval — the id of the recorded pending
+    /// approval a human can later grant or deny (SAD §10 `approve()`, ADR-015).
+    pub approval_id: Option<Id>,
 }
 impl Trace {
     pub fn new(subject: &str, correlation_id: Id) -> Self {
@@ -66,6 +69,7 @@ impl Trace {
             result: serde_json::Value::Null,
             ok: false,
             error: None,
+            approval_id: None,
         }
     }
 }
