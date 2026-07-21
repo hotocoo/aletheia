@@ -47,9 +47,13 @@ SYSTEM CORE (aletheia/src)
   ├── syscore           composition root wiring the pipeline + task lifecycle + approvals
   └── service           capability-gated Service API + IPC (in-process + Unix socket) — the app boundary
 MICROKERNEL (kernel/)            no_std Rust microkernel, boots on QEMU, re-proves invariants (P4 start)
+        │  Aletheia HAL (kernel/src/hal.rs) — arch-independent contract; no Linux/macOS/POSIX imports
+HARDWARE                         AMD64/x86-64 · RISC-V (first-class targets) — aarch64 (bootstrap/dev)
 ```
 
 Dependency direction points inward toward `domain`; nothing reaches around the capability engine.
+Aletheia is its own OS: AMD64 and RISC-V are hardware targets, Rust is the implementation language,
+and every OS abstraction belongs to Aletheia (ADR-019).
 
 ### Authority vs. governance (two independent axes)
 
