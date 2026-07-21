@@ -460,12 +460,14 @@ impl SysCore {
             crate::ai::context::ContextBudget::small(),
         );
         trace.context_provenance = aictx.provenance();
+        // Compact, budgeted rendering handed to the model (never a raw store dump).
+        let ctx_brief = aictx.render(crate::ai::context::ContextBudget::small().max_chars);
 
         // Interpretation — the ONLY probabilistic stage. Model-unhealthy → deterministic fallback.
         // Model-healthy-but-errored → this request fails (no silent fallback); state stays intact.
         let raw = if self.model.healthy() {
             trace.interpreter = self.model.name().into();
-            match self.model.interpret(&intent) {
+            match self.model.interpret_with_context(&intent, &ctx_brief) {
                 Ok(r) => r,
                 Err(e) => {
                     trace.error = Some(AlethError::model(&format!("interpretation failed: {:?}", e)));
@@ -477,7 +479,7 @@ impl SysCore {
             }
         } else {
             trace.interpreter = self.fallback.name().into();
-            match self.fallback.interpret(&intent) {
+            match self.fallback.interpret_with_context(&intent, &ctx_brief) {
                 Ok(r) => r,
                 Err(e) => {
                     trace.error = Some(AlethError::model(&format!("no valid plan: {:?}", e)));

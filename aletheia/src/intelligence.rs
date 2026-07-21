@@ -19,6 +19,13 @@ pub trait ModelRuntime {
     fn healthy(&self) -> bool;
     /// Interpret intent into RAW plan JSON (untrusted string). Errors are handled by the pipeline.
     fn interpret(&self, intent: &Intent) -> Result<String, ModelError>;
+    /// Interpret with an assembled, capability-scoped context brief (ADR-018). The default ignores
+    /// context — the deterministic interpreter needs none — so existing providers are unaffected;
+    /// model-backed providers override this to include the brief in the prompt. Output is still
+    /// untrusted and flows through the identical downstream pipeline.
+    fn interpret_with_context(&self, intent: &Intent, _context: &str) -> Result<String, ModelError> {
+        self.interpret(intent)
+    }
 }
 
 /// Deterministic interpreter: maps the bounded structured intent set (tests + UC-001..004) to plans.
