@@ -271,6 +271,32 @@ contract-honest: written outside-in and boot-verified, not blind hardware code).
 - **Deferred (P5)**: own page tables/higher-half, TSS+IST double-fault stack, APIC/HPET + calibrated
   TSC, SMP, a real page-frame allocator, and the RISC-V first-class backend.
 
+## Delivered (2026-07-21 — x86-64 ring-3 user-mode + PIT-driven preemption)
+
+The x86-64 backend now proves the **same 10 user-mode invariants** the aarch64 EL0 suite does — the
+first executed ring-3 privilege boundary on the first-class AMD64 target. Code in
+`kernel-x86_64/src/usermode.rs` (+ ring-3 GDT segments & TSS in `gdt.rs`, per-process address spaces
+in `vm.rs`, DPL=3 syscall/#PF/timer vectors in `idt.rs`). `scripts/smoke-test.sh` now also gates on
+`RING-3 BOUNDARY INVARIANTS HOLD`; QEMU exit 33 + `[e2e] PASS` still hold (10/10 green).
+
+- **Real ring 3 (CPL 3)**: `iretq` drops to unprivileged code in USER-only pages; the one door back
+  is an `int 0x80` DPL=3 gate authorized by the SAME `CapEngine` the deterministic pipeline uses. A
+  save-first trap path stores the full register file into the running task's `TrapFrame`; a single
+  `resume_frame`/`resume_return` primitive both starts a fresh task and resumes a preempted one.
+- **Hardware isolation** (a ring-3 read of a supervisor-only page faults and is contained) and
+  **per-process PML4 address spaces** (a page private to process A is unreachable from B at the same
+  VA) — each process gets a private copy of the low PDPT with its 1 GiB user slot cleared, while the
+  kernel/RAM/framebuffer identity mappings stay shared.
+- **Preemptive multitasking**: the free-running 8254 **PIT IRQ0**, taken in ring 3, preempts two
+  non-yielding tasks; the round-robin scheduler switches them and each resumes with its register
+  state (progress counter) intact. Cooperative (`SYS_YIELD`) scheduling is proven too.
+- **Two hard-won gotchas (documented in-code)**: (1) `x86_64-unknown-uefi` makes `extern "C"` the
+  **Microsoft x64 ABI** — the trap assembly and its boundary fns are `extern "sysv64"` so the frame
+  pointer arrives in RDI, not RCX. (2) QEMU/OVMF enforce the ring-3 code segment's **4 GiB limit** on
+  the `iret` target, so the user region lives in the **1..2 GiB** range (below 4 GiB), not a high slot.
+- **Deferred (P5)**: higher-half kernel, TSS+IST double-fault stack, APIC/HPET + calibrated TSC, SMP,
+  and the RISC-V ring-3 backend.
+
 ## Delivered (2026-07-21 — RISC-V first-class backend, VM-tested)
 
 The **second first-class target executed** (ADR-019): the Aletheia microkernel now boots on
