@@ -30,7 +30,7 @@ hr() { printf '=================================================================
 hr; echo "==> [1/3] aarch64 vm-e2e (full depth: spine + mm + vm + EL0/preemption)"; hr
 if bash "$ROOT/scripts/vm-e2e.sh"; then aarch64_res="PASS"; else aarch64_res="FAIL"; fi
 
-hr; echo "==> [2/3] RISC-V/RV64GC vm-e2e (S-mode + SBI + rdtime + spine)"; hr
+hr; echo "==> [2/3] RISC-V/RV64GC vm-e2e (S-mode + SBI + rdtime + spine + mm + Sv39 vm + U-mode)"; hr
 if bash "$ROOT/scripts/vm-e2e-riscv.sh"; then riscv_res="PASS"; else riscv_res="FAIL"; fi
 
 hr; echo "==> [3/3] AMD64/x86-64 disk-image boot smoke-test (UEFI + timer IRQ + spine)"; hr
@@ -51,7 +51,7 @@ fi
 
 hr; echo "E2E SUMMARY"; hr
 printf '  aarch64 (full)      : %s\n' "$aarch64_res"
-printf '  riscv64 (spine)     : %s\n' "$riscv_res"
+printf '  riscv64 (full)      : %s\n' "$riscv_res"
 printf '  x86-64  (image)     : %s\n' "$x86_res"
 hr
 
