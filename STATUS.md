@@ -1,7 +1,7 @@
 # Aletheia — Implementation Status
 
 **As of:** 2026-07-21
-**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**
+**Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap), VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..013`.
 
@@ -69,8 +69,11 @@ Plus `security.rs`: expired-capability denial, scope confinement, agent-cannot-s
   *(Started: capability-gated keyword search over the World Model is delivered — see the P3 section.)*
 - **P4** Real microkernel (Rust) on metal: capability enforcement, secure IPC, memory/address spaces,
   interrupts; System Core rehosted on it. VM-tested.
-- **P5** HAL on real devices, native on-GPU compositor, heterogeneous CPU/GPU/NPU scheduler, secure
-  boot, rollback/recovery.
+- **P5** (partially delivered — see "Delivered (P5 start)" below) real memory management: a physical
+  page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) are delivered and
+  VM-tested on the aarch64 dev backend. Still deferred: higher-half + per-process address spaces,
+  EL0 user-mode, HAL on real devices, native on-GPU compositor, heterogeneous CPU/GPU/NPU scheduler,
+  secure boot, rollback/recovery.
 - **P6** Optional sandboxed Linux/POSIX compatibility environment (see Compatibility Appendix).
 
 These require hardware/GPU/kernel and are not testable in a hosted dev environment; they get
@@ -295,6 +298,34 @@ hardware code). Code in `kernel-riscv64/`.
 - **Deferred (P5)**: real S-mode page tables (Sv39/Sv48) + higher-half, CLINT/`sstc` timer
   interrupts, a page-frame allocator, PLIC/external interrupts, and SMP (secondary-hart bring-up).
 
+## Delivered (2026-07-21 — P5 start: physical frame allocator + MMU virtual memory)
+
+The first **real memory management** in kernel space, on the aarch64 dev backend — the layer that
+turns "a capability-secure spine that boots" into an OS that can own physical memory and translate
+addresses. Two bricks, each landed green and VM-asserted (ADR-010: written outside-in, boot-verified,
+never blind hardware code; a wrong page table faults to `exit 102`, never a silent hang). Both new
+modules (`kernel/src/frames.rs`, `kernel/src/vm.rs`) are aarch64-crate-only; the `#[path]`-shared
+`spine.rs`/`selftest.rs` are untouched, and the x86-64 + RISC-V targets are re-verified green.
+
+- **Physical page-frame allocator** (`frames.rs`) — an intrusive LIFO free-list over the RAM *above*
+  the kernel image/stack/bump-heap (each free frame stores the next-free link in its own first 8
+  bytes, so there is no side table). 4 KiB frames; `alloc` / `alloc_zeroed` (page-table shape) /
+  `free`; fail-closed on exhaustion; rejects misaligned/out-of-range frees. **7 memory invariants**
+  proved live in QEMU: real read/write frame, distinct/aligned/in-range allocation, misaligned-free
+  rejected, exhaustion denies (fail-closed), freeing revives allocation.
+- **MMU virtual memory** (`vm.rs`) — the first live address-translation regime. Builds an identity map
+  from frame-allocator frames (peripheral GiB = Device, RAM = Normal; **Access Flag set in every
+  descriptor**; 4 KiB granule, 39-bit VA, TTBR0). It **asserts the map with a software page-table walk
+  BEFORE flipping `SCTLR.M`** (the single highest-leverage anti-hang move), enables translation with
+  the MAIR/TCR/TTBR0 + invalidate/barrier dance, then proves **dynamic** virtual memory: map a fresh
+  frame at a brand-new VA, write through the VA, observe the bytes land in the *different* physical
+  frame the VA points at, unmap, confirm it no longer resolves. **13 virtual-memory invariants** green
+  live in QEMU. `scripts/vm-e2e.sh` now asserts the memory + virtual-memory markers alongside the 11
+  spine invariants.
+- **Deferred (P5 follow-on)**: higher-half (TTBR1) kernel/user split, per-process address spaces,
+  EL0 user-mode + capability-gated syscall boundary, a frame-backed kernel heap (the static bump heap
+  stays load-bearing for now), and the x86-64/RISC-V MMU backends.
+
 ## Run it
 
 ```bash
@@ -304,7 +335,24 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-./scripts/vm-e2e.sh          # build + boot the aarch64 microkernel in QEMU + assert 11/11 invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # same, for the RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # same spine suite, for the RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
+```
+
+### Boot the OS end-to-end
+
+```bash
+# The NEW P5 memory-management work (frame allocator + MMU) runs on the aarch64 dev backend.
+# Boot it directly as a -kernel ELF in QEMU (this IS the e2e VM test):
+cd kernel && cargo run          # boots Aletheia, proves 11+7+13 invariants live, exits 0
+
+# A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
+cd kernel-x86_64 && bash scripts/build-image.sh   # -> build/aletheia-x86_64.{img,vmdk}
+bash scripts/smoke-test.sh                         # boot the image in QEMU+OVMF, assert exit 33
+#   • QEMU:       qemu-system-x86_64 -bios <OVMF_CODE.fd> -drive format=raw,file=build/aletheia-x86_64.img -serial stdio
+#   • VMware:     attach build/aletheia-x86_64.vmdk to a UEFI VM
+#   • VirtualBox: attach build/aletheia-x86_64.img (see scripts/build-vbox.sh)
+# NOTE: the x86-64 image boots the OS + re-proves the 11 spine invariants; the frame-allocator/MMU
+# bricks are aarch64-only this wave (their x86-64 backend is the documented P5 follow-on).
 ```
