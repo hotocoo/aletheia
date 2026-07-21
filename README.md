@@ -32,8 +32,8 @@ The AI is the only probabilistic stage. Everything after it is deterministic and
 ## Layered architecture
 
 ```text
-EXPERIENCE / APPLICATIONS        explainable traces, world view, audit
-        │  (capability-gated API / IPC — service boundary: planned)
+EXPERIENCE / APPLICATIONS        explainable traces, world view, audit — CLIENTS of the boundary
+        │  Service API / IPC boundary (service.rs): Request/Response over in-proc + Unix socket
 SYSTEM CORE (aletheia/src)
   ├── domain            seven primitives: Entity·Capability·Context·Intent·Action·Memory·Relationship
   ├── storage           content-addressed, versioned, encrypted-at-rest, durable semantic store
@@ -44,7 +44,8 @@ SYSTEM CORE (aletheia/src)
   ├── ai/               the AI subsystem (below) — model-agnostic
   ├── component         capability-secure WASM component runtime (no ambient authority)
   ├── agents            first-class, capability-bounded, revocable actors
-  └── syscore           composition root wiring the pipeline + task lifecycle + approvals
+  ├── syscore           composition root wiring the pipeline + task lifecycle + approvals
+  └── service           capability-gated Service API + IPC (in-process + Unix socket) — the app boundary
 MICROKERNEL (kernel/)            no_std Rust microkernel, boots on QEMU, re-proves invariants (P4 start)
 ```
 
@@ -107,7 +108,8 @@ embedding server or vector database is required** for normal OS operation.
 ```bash
 cd aletheia
 cargo test                       # full conformance + unit suite (deterministic; no model needed)
-cargo run                        # aletheiad: boots the hosted System Core + runs the UC-001..004 demo
+cargo run                        # aletheiad demo: runs UC-001..004 as a CLIENT over the service boundary
+cargo run -- serve               # long-running Core Alpha behind the Unix-socket IPC boundary
 
 # Optional: use the real local model as the primary AI provider (hosted dev)
 llama-server -m "$(python3 -c 'import glob,os;print(glob.glob(os.path.expanduser("~/.cache/huggingface/hub/models--GnLOLot--MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF/snapshots/*/*.gguf"))[0])')" -c 8192 --port 8080
@@ -129,8 +131,8 @@ MODEL_REF=GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF
 ## Status
 
 See [STATUS.md](STATUS.md) for the delivered milestones and test counts, and
-[docs/](docs/) for the PRD, SAD, and ADRs (ADR-015 policy/approval separation, ADR-017 AI subsystem,
-ADR-018 Context Engine).
+[docs/](docs/) for the PRD, SAD, and ADRs (ADR-015 policy/approval separation, ADR-016 Service
+API/IPC boundary, ADR-017 AI subsystem, ADR-018 Context Engine).
 
 ## Strategic path
 

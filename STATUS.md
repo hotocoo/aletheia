@@ -158,15 +158,22 @@ Elevating the M1 reference from a scripted demo toward the real layered architec
   memory); authorization enforced BEFORE any entity enters context; budgeted for the small model;
   semantic/vector + document knowledge are OPTIONAL seams (no embedding server / vector DB required).
 
-Deferred (next): the capability-gated **Service API / IPC boundary** + long-running Core Alpha daemon
-(apps/tests as clients over a boundary instead of internal calls), and the cargo-**workspace crate
-split** (SAD §4, mechanical).
+- **Service API / IPC boundary + Core Alpha daemon** (`service.rs`, ADR-016) — `Request`/`Response`
+  across all six surfaces (world/capabilities/policy/audit/components/intents); in-process + Unix-
+  socket transports (length-prefixed JSON, std-only, no async/deps). Authorization stays inside the
+  Core (fail-closed); the boundary only marshals. `aletheiad serve` = the long-running Core;
+  `aletheiad demo` = a client over the boundary. The M1 scenario is reproduced as conformance tests
+  THAT TRANSIT THE API (+ a socket round-trip) — apps/tests no longer call Core internals.
+
+Deferred (next): the cargo-**workspace crate split** (SAD §4 — mechanical; module boundaries +
+dependency direction already match the target crate list).
 
 ## Run it
 
 ```bash
 cd aletheia
-cargo test        # 53 passed — M1 acceptance + property + security + P2 component + policy + AI units
+cargo test        # 59 passed — M1 acceptance + conformance + property + security + P2 component + policy + AI
+cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundary (clients issue Requests)
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
