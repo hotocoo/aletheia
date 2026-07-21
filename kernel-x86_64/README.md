@@ -24,7 +24,11 @@ firmware #[entry]  ->  capture GOP framebuffer  ->  ExitBootServices   (Aletheia
   ->  load own GDT (flat 64-bit)  ->  load IDT (CPU exceptions + IRQ0)
   ->  remap 8259 PIC  ->  program 8254 PIT @100Hz  ->  parse UEFI memory map
   ->  sti + PROVE a timer IRQ fires (tick count > 0)
-  ->  re-prove 11 capability-secure spine invariants in kernel space  ->  [e2e] PASS
+  ->  seed the physical frame allocator from the UEFI map  ->  prove memory-management invariants
+  ->  map/unmap over the live page-table hierarchy  ->  prove virtual-memory invariants
+  ->  re-prove 11 capability-secure spine invariants in kernel space
+  ->  drop to RING 3 + prove the 10 user-mode invariants (cap-gated syscall, isolation,
+      per-process PML4 spaces, cooperative + PIT-preemptive multitasking)  ->  [e2e] PASS
 ```
 
 Two output channels: **serial (COM1)** is the machine-checkable log the smoke test asserts on;
@@ -71,9 +75,16 @@ after printing `[e2e] PASS` to serial + framebuffer.
 3. Power on. The framebuffer shows the boot log ending in `[e2e] PASS`; serial is written to
    `aletheia-serial.log`.
 
-## Scope (first bootable milestone)
+## Scope
 
-Delivered: UEFI boot + framebuffer/serial console + GDT/IDT + PIC/PIT interrupt & timer + memory-map
-parse + 8 MiB heap + the 11 kernel-space spine invariants. **Deferred (P5):** own page tables /
-higher-half, TSS+IST double-fault stack, APIC/HPET + calibrated TSC, SMP, a real page-frame
-allocator, and the RISC-V first-class backend. See `../docs/adr/ADR-019-hal-amd64-riscv-targets.md`.
+Delivered: UEFI boot + framebuffer/serial console + GDT (with ring-3 segments + TSS) + IDT +
+PIC/PIT interrupt & timer + memory-map parse + 8 MiB heap + a UEFI-seeded **physical frame
+allocator** + **MMU map/unmap** over the live page-table hierarchy + the 11 kernel-space spine
+invariants + **ring-3 (CPL 3) user-mode**: the capability-gated `int 0x80` syscall boundary,
+hardware address-space isolation, **per-process PML4 address spaces**, and cooperative **plus
+PIT-driven preemptive** multitasking (the x86-64 twin of the aarch64 EL0 suite — the same 10
+invariants). ABI note: `x86_64-unknown-uefi` makes `extern "C"` the Microsoft x64 ABI, so the
+hand-written trap assembly and its boundary functions are declared `extern "sysv64"`.
+
+**Deferred (P5):** higher-half kernel, TSS+IST double-fault stack, APIC/HPET + calibrated TSC, SMP,
+and the RISC-V first-class backend. See `../docs/adr/ADR-019-hal-amd64-riscv-targets.md`.

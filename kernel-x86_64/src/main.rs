@@ -31,6 +31,7 @@ mod idt;
 mod pic;
 mod pit;
 mod serial;
+mod usermode;
 mod vm;
 
 // Shared, arch-independent Aletheia spine + invariant suite — the SAME source the aarch64 kernel
@@ -195,8 +196,24 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // Ring-3 user-mode: drop to unprivileged ring 3 and prove the capability-gated syscall boundary,
+    // hardware address-space isolation, per-process PML4 spaces, and PIT-driven preemptive
+    // multitasking (the x86-64 twin of the aarch64 EL0 suite). Masks interrupts for its duration.
     kprintln!("");
-    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants");
+    kprintln!("--- user-mode selftests (ring-3 privilege boundary: cap-gated syscall + isolation + preemption) ---");
+    match usermode::selftest() {
+        Ok(n) => {
+            kprintln!("[usermode] ALL {} RING-3 BOUNDARY INVARIANTS HOLD", n);
+            x86_64::instructions::interrupts::enable();
+        }
+        Err((idx, name)) => {
+            kprintln!("[usermode] FAILED at ring-3 invariant {}: {}", idx, name);
+            ActiveHal::exit(80 + idx as i32);
+        }
+    }
+
+    kprintln!("");
+    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants + ring-3 user-mode");
     kprintln!("[e2e] Aletheia booted as its own OS on AMD64. Halting.");
     ActiveHal::exit(0)
 }

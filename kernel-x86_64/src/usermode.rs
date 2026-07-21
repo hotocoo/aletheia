@@ -1,0 +1,1037 @@
+//! Ring-3 user-mode, the capability-gated syscall boundary, and preemptive multitasking
+//! (PRD P5) — the x86-64 twin of the aarch64 backend's EL0 layer (`kernel/src/usermode.rs`).
+//!
+//! WHY THIS MATTERS: until this layer the x86-64 kernel re-proved every invariant *in ring 0* —
+//! isolation was logical, not hardware-enforced. This module makes the boundary REAL: it drops the
+//! CPU to **ring 3** (unprivileged) via `iretq`, runs genuinely less-privileged instruction streams
+//! in user-only pages, and lets them reach the OS through one door — an `int 0x80` trap that lands
+//! in a DPL=3 IDT gate and is authorized by the **same `CapEngine`** the deterministic pipeline
+//! uses. It then gives each process its **own PML4 address space** (isolation across processes, not
+//! just ring-3-vs-ring-0) and finally **context-switches** between ring-3 tasks — cooperatively
+//! (tasks `SYS_YIELD`) and PREEMPTIVELY (the 8254 PIT's IRQ0, taken in ring 3, preempts a
+//! non-yielding task and the round-robin scheduler switches it).
+//!
+//! ONE TRAP PATH (save-first). Every ring3->ring0 entry (`int 0x80`, timer IRQ) saves the FULL
+//! register file into the running task's `TrapFrame` — pointed at by `CURRENT_FRAME` — BEFORE
+//! touching anything, then dispatches. `resume_frame` restores a whole frame and `iretq`s, so a
+//! task resumes *after* its trap; the same primitive starts a fresh task and resumes a preempted
+//! one. `resume_return` restores the scheduler's callee-saved context (`KERNEL_CTX`) and returns to
+//! it. This unification means the capability/isolation invariants and the scheduler run one path.
+//!
+//! ISOLATION, HONESTLY (advisor): aarch64 has separate "lower-EL" vectors, so an IRQ taken in EL1
+//! never reaches the EL0 handler. x86 has ONE IDT entry per vector regardless of source ring, so
+//! the discipline that replaces the vector split is: the kernel runs with **IF=0** for the whole
+//! suite; only a ring-3 task's `RFLAGS` sets IF, so a timer IRQ is delivered *only* while a task
+//! runs. The entries additionally fail closed if a saved `CS` shows ring 0 (would-be corruption).
+//! And the ring-3 isolation proof reads a page WE mapped supervisor-only (not an OVMF-dependent
+//! kernel address), so the `#PF` is guaranteed rather than a bet on firmware's U/S bits.
+//!
+//! Contract-honest (ADR-010): every line executes under QEMU and is asserted by `selftest()`; an
+//! *unexpected* fault stays fatal, and the preemption test's loops are *bounded* so a dead timer
+//! fails cleanly rather than hanging. Requires the frame allocator + live paging (both up by now).
+
+use crate::spine::{CapEngine, CapToken, Constraints, Decision, Scope, Store, Target};
+use crate::{frames, gdt, idt, vm};
+use alloc::vec::Vec;
+use core::ptr::{addr_of, addr_of_mut};
+
+core::arch::global_asm!(
+    r#"
+.section .text
+
+// ---- resume_frame(frame: *mut TrapFrame /* rdi */) -------------------------------------------
+// Save the scheduler's callee-saved context into KERNEL_CTX so a trap can return to it, publish the
+// frame in CURRENT_FRAME (so an entry saves back into it), build an iretq frame from *frame, load
+// the whole register file, and iretq to ring 3. Starts a fresh task and resumes a yielded/preempted
+// one identically.
+.global resume_frame
+resume_frame:
+    lea     rax, [rip + KERNEL_CTX]
+    mov     [rax + 0], rbx
+    mov     [rax + 8], rbp
+    mov     [rax + 16], r12
+    mov     [rax + 24], r13
+    mov     [rax + 32], r14
+    mov     [rax + 40], r15
+    mov     [rax + 48], rsp          // scheduler rsp (points at resume_frame's return addr)
+    lea     rax, [rip + CURRENT_FRAME]
+    mov     [rax], rdi               // current frame ptr for the entry's save-first
+    // build the iretq frame: push SS, RSP, RFLAGS, CS, RIP (reverse of pop order)
+    mov     rax, [rdi + 152]
+    push    rax                      // SS
+    mov     rax, [rdi + 144]
+    push    rax                      // RSP
+    mov     rax, [rdi + 136]
+    push    rax                      // RFLAGS
+    mov     rax, [rdi + 128]
+    push    rax                      // CS
+    mov     rax, [rdi + 120]
+    push    rax                      // RIP
+    // load the general-purpose register file (rdi loaded last — it holds the frame base)
+    mov     rbx, [rdi + 8]
+    mov     rcx, [rdi + 16]
+    mov     rdx, [rdi + 24]
+    mov     rsi, [rdi + 32]
+    mov     rbp, [rdi + 48]
+    mov     r8,  [rdi + 56]
+    mov     r9,  [rdi + 64]
+    mov     r10, [rdi + 72]
+    mov     r11, [rdi + 80]
+    mov     r12, [rdi + 88]
+    mov     r13, [rdi + 96]
+    mov     r14, [rdi + 104]
+    mov     r15, [rdi + 112]
+    mov     rax, [rdi + 0]
+    mov     rdi, [rdi + 40]
+    iretq
+
+// ---- resume_return: restore KERNEL_CTX and RET to the caller of resume_frame -----------------
+.global resume_return
+resume_return:
+    lea     rax, [rip + KERNEL_CTX]
+    mov     rbx, [rax + 0]
+    mov     rbp, [rax + 8]
+    mov     r12, [rax + 16]
+    mov     r13, [rax + 24]
+    mov     r14, [rax + 32]
+    mov     r15, [rax + 40]
+    mov     rsp, [rax + 48]
+    ret
+
+// ---- SAVE-FIRST macro: stash the full register file of the trapping task into CURRENT_FRAME ----
+// On entry the CPU has switched to RSP0 and pushed [SS][RSP][RFLAGS][CS][RIP] (no error code for an
+// int gate / hardware IRQ). Leaves rbx = frame base, rsp = the CPU frame. Fails closed if the trap
+// came from ring 0 (saved CS.RPL != 3) — the x86 stand-in for aarch64's lower-EL vector split.
+.macro save_frame
+    push    rax                      // scratch A
+    push    rbx                      // scratch B
+    lea     rax, [rip + CURRENT_FRAME]
+    mov     rbx, [rax]               // rbx = *mut TrapFrame
+    mov     [rbx + 16], rcx
+    mov     [rbx + 24], rdx
+    mov     [rbx + 32], rsi
+    mov     [rbx + 40], rdi
+    mov     [rbx + 48], rbp
+    mov     [rbx + 56], r8
+    mov     [rbx + 64], r9
+    mov     [rbx + 72], r10
+    mov     [rbx + 80], r11
+    mov     [rbx + 88], r12
+    mov     [rbx + 96], r13
+    mov     [rbx + 104], r14
+    mov     [rbx + 112], r15
+    mov     rax, [rsp + 0]           // original rbx
+    mov     [rbx + 8], rax
+    mov     rax, [rsp + 8]           // original rax
+    mov     [rbx + 0], rax
+    add     rsp, 16                  // drop the two scratch words; rsp -> CPU iretq frame
+    mov     rax, [rsp + 0]
+    mov     [rbx + 120], rax         // RIP
+    mov     rax, [rsp + 8]
+    mov     [rbx + 128], rax         // CS
+    mov     rax, [rsp + 16]
+    mov     [rbx + 136], rax         // RFLAGS
+    mov     rax, [rsp + 24]
+    mov     [rbx + 144], rax         // RSP
+    mov     rax, [rsp + 32]
+    mov     [rbx + 152], rax         // SS
+    mov     rax, [rbx + 128]
+    and     rax, 3
+    cmp     rax, 3
+    jne     from_ring0_fatal
+.endm
+
+// ---- isr_syscall_entry (int 0x80, DPL=3): dispatch x86_syscall(num = rax, arg = rdi) ----------
+.global isr_syscall_entry
+isr_syscall_entry:
+    save_frame
+    mov     rdi, [rbx + 0]           // num  = saved rax
+    mov     rsi, [rbx + 40]          // arg  = saved rdi
+    and     rsp, -16                 // 16-align before a System V call
+    call    x86_syscall
+    jmp     resume_return
+
+// ---- isr_timer_entry (IRQ0): acknowledge + mark preempted, then resume the scheduler ----------
+.global isr_timer_entry
+isr_timer_entry:
+    save_frame
+    and     rsp, -16
+    call    x86_irq
+    jmp     resume_return
+
+// ---- isr_pf_entry (#PF): the faulting task is abandoned; hand CR2 to the armed-isolation check --
+// #PF pushes an error code then the frame; we neither save nor unwind that stack (resume_return
+// restores rsp from KERNEL_CTX), so we just read CR2 and dispatch.
+.global isr_pf_entry
+isr_pf_entry:
+    mov     rdi, cr2
+    and     rsp, -16
+    call    x86_page_fault
+    jmp     resume_return
+
+// A trap arrived from ring 0 (should be impossible: the kernel runs IF=0). Fail closed.
+from_ring0_fatal:
+    mov     edi, 111
+    and     rsp, -16
+    call    usermode_fatal
+    ud2
+
+// ---- ring-3 stubs -----------------------------------------------------------------------------
+// Assembler-encoded (no hand-hex), position-independent (only int/jmp-rel/reg-rel). Copied verbatim
+// into a user code page and executed at USER_CODE_VA. Magic/counters are primed via the initial
+// TrapFrame registers, so ONE stub serves every task.
+
+// One syscall then park. Number in rax, arg in rdi (both primed by the frame).
+.global stub_syscall_start
+stub_syscall_start:
+    int     0x80
+10: jmp     10b
+.global stub_syscall_end
+stub_syscall_end:
+
+// Read the address handed in rdi, then park. If rdi is unreadable the read faults first.
+.global stub_read_start
+stub_read_start:
+    mov     rcx, [rdi]
+11: jmp     11b
+.global stub_read_end
+stub_read_end:
+
+// Read [rdi], then syscall (rax primed), then park. A successful syscall proves the read landed.
+.global stub_read_syscall_start
+stub_read_syscall_start:
+    mov     rcx, [rdi]
+    int     0x80
+12: jmp     12b
+.global stub_read_syscall_end
+stub_read_syscall_end:
+
+// Cooperative task: replay rbx (the frame-primed magic) into the syscall arg before each of three
+// yields and one exit. rbx is NEVER written here, so a task presenting its own magic each slice
+// proves the whole register file rides through every context switch.
+.global stub_coop_start
+stub_coop_start:
+    mov     eax, 2                   // SYS_YIELD
+    mov     rdi, rbx
+    int     0x80
+    mov     eax, 2
+    mov     rdi, rbx
+    int     0x80
+    mov     eax, 2
+    mov     rdi, rbx
+    int     0x80
+    mov     eax, 3                   // SYS_EXIT
+    mov     rdi, rbx
+    int     0x80
+13: jmp     13b
+.global stub_coop_end
+stub_coop_end:
+
+// Preemption task: a tight loop incrementing rbx (progress) while draining rcx (a bounded
+// fallback). If rcx ever hits zero the task self-exits, so a NEVER-FIRING timer fails cleanly
+// instead of hanging. A working timer preempts long before rcx drains.
+.global stub_spin_start
+stub_spin_start:
+14: inc     rbx
+    dec     rcx
+    jnz     14b
+    mov     eax, 3                   // SYS_EXIT
+    mov     rdi, rbx
+    int     0x80
+15: jmp     15b
+.global stub_spin_end
+stub_spin_end:
+"#
+);
+
+// NOTE: `x86_64-unknown-uefi` makes `extern "C"` the Microsoft x64 ABI (args in RCX/RDX/R8/R9). Our
+// hand-written trap assembly uses the System V ABI (arg0 in RDI, arg1 in RSI), so every function on
+// the asm boundary is declared `sysv64` — otherwise `resume_frame` would read its frame pointer
+// from the wrong register.
+extern "sysv64" {
+    /// Restore a full `TrapFrame` and `iretq` to ring 3; returns (via `resume_return`) when the
+    /// task traps back and the handler resumes the caller.
+    fn resume_frame(frame: *mut TrapFrame);
+    static isr_syscall_entry: u8;
+    static isr_timer_entry: u8;
+    static isr_pf_entry: u8;
+    static stub_syscall_start: u8;
+    static stub_syscall_end: u8;
+    static stub_read_start: u8;
+    static stub_read_end: u8;
+    static stub_read_syscall_start: u8;
+    static stub_read_syscall_end: u8;
+    static stub_coop_start: u8;
+    static stub_coop_end: u8;
+    static stub_spin_start: u8;
+    static stub_spin_end: u8;
+}
+
+/// The running task's frame, published by `resume_frame` and saved into by every entry. One
+/// excursion is ever in flight (single-core, no preemption of the kernel), so one slot.
+#[no_mangle]
+#[used]
+static mut CURRENT_FRAME: u64 = 0;
+
+/// The scheduler's callee-saved context (rbx, rbp, r12–r15, rsp) stashed by `resume_frame` and
+/// restored by `resume_return`. One resume is ever in flight, so one slot.
+#[no_mangle]
+#[used]
+static mut KERNEL_CTX: [u64; 7] = [0; 7];
+
+// Register slot indices into `TrapFrame::regs` (byte offset = index * 8). The trap assembly
+// hard-codes these offsets; the `const _` block below fails the build if the layout drifts.
+const RAX: usize = 0;
+const RBX: usize = 1;
+const RCX: usize = 2;
+const RDI: usize = 5;
+
+/// A full ring-3 register context. `#[repr(C)]` fixes the byte offsets the trap asm hard-codes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TrapFrame {
+    regs: [u64; 15], // rax,rbx,rcx,rdx,rsi,rdi,rbp,r8..r15 (offsets 0..112)
+    rip: u64,        // 120
+    cs: u64,         // 128
+    rflags: u64,     // 136
+    rsp: u64,        // 144
+    ss: u64,         // 152
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<TrapFrame>() == 160);
+    assert!(core::mem::offset_of!(TrapFrame, rip) == 120);
+    assert!(core::mem::offset_of!(TrapFrame, cs) == 128);
+    assert!(core::mem::offset_of!(TrapFrame, rflags) == 136);
+    assert!(core::mem::offset_of!(TrapFrame, rsp) == 144);
+    assert!(core::mem::offset_of!(TrapFrame, ss) == 152);
+};
+
+/// RFLAGS bit 1 is reserved and must read 1. IF (bit 9) gates interrupt delivery in ring 3.
+const RFLAGS_COOP: u64 = 0x0000_0002; // IF clear — cooperative / one-shot tasks (no preemption)
+const RFLAGS_IF: u64 = 0x0000_0202; // IF set — preemptible tasks (the timer IRQ is delivered)
+
+impl TrapFrame {
+    const fn zeroed() -> Self {
+        TrapFrame {
+            regs: [0; 15],
+            rip: 0,
+            cs: 0,
+            rflags: 0,
+            rsp: 0,
+            ss: 0,
+        }
+    }
+    /// A fresh ring-3 task frame: entry RIP, user stack top, ring-3 selectors (RPL forced to 3).
+    fn new_user(entry: u64, sp: u64, rflags: u64) -> Self {
+        let sel = gdt::selectors();
+        let mut f = Self::zeroed();
+        f.rip = entry;
+        f.rsp = sp;
+        f.cs = (sel.user_code.0 | 3) as u64;
+        f.ss = (sel.user_data.0 | 3) as u64;
+        f.rflags = rflags;
+        f
+    }
+}
+
+/// Syscall numbers the ring-3 boundary understands. Anything else is denied (fail closed).
+const SYS_EMIT: u64 = 1;
+const SYS_YIELD: u64 = 2;
+const SYS_EXIT: u64 = 3;
+
+/// User virtual addresses — the 1..2 GiB region (`vm::USER_REGION_PDPT_INDEX`). BELOW 4 GiB because
+/// QEMU/OVMF enforce the ring-3 code segment's 4 GiB limit on the `iret` target; `build_space`
+/// privatizes this 1 GiB region per process so mappings here are genuinely isolated.
+const USER_CODE_VA: u64 = 0x4000_0000;
+const USER_STACK_VA: u64 = USER_CODE_VA + 0x1000;
+const USER_STACK_TOP: u64 = USER_STACK_VA + 0x1000;
+/// A per-process private data page for the cross-process isolation test.
+const VA_P: u64 = USER_CODE_VA + 0x3000;
+/// A supervisor-only (no USER bit) page a ring-3 read must fault on — the isolation proof.
+const VA_SUP: u64 = USER_CODE_VA + 0x5000;
+
+/// Countdown preloaded into the spin task's rcx: large enough that a working 100 Hz timer preempts
+/// before it drains, small enough that a BROKEN timer drains it (task self-exits) within the VM
+/// watchdog. Not correctness-critical — mirrors the aarch64 bound.
+const SPIN_COUNTDOWN: u64 = 0x2000_0000;
+
+/// Bring-up gate (advisor): while `true`, run only the core round-trip invariants (1–2) so a
+/// boot-or-die smoke test yields a legible pass before the full suite is enabled. Flip to `false`
+/// to run all ten.
+const BRINGUP_CORE_ONLY: bool = false;
+
+// ---------------------------------------------------------------------------
+// One-shot trial state (capability + isolation invariants) — reached by the Rust dispatchers.
+// ---------------------------------------------------------------------------
+
+struct Trial {
+    engine: CapEngine,
+    store: Store,
+    caps: Vec<CapToken>,
+    action: &'static str,
+    /// When set, a `#PF` at `expect_fault_va` is the *expected* isolation test, not a fatal bug.
+    armed: bool,
+    expect_fault_va: u64,
+    // outcomes, read back after the excursion returns
+    allowed: bool,
+    isolation_held: bool,
+    fault_va: u64,
+}
+
+static mut CURRENT: Option<Trial> = None;
+
+/// SAFETY: single-threaded; `CURRENT` is set immediately before an excursion and mutated only by
+/// the dispatcher that excursion drives. No concurrent access exists.
+#[inline]
+fn current() -> Option<&'static mut Trial> {
+    unsafe { (*addr_of_mut!(CURRENT)).as_mut() }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler state (multitasking invariants).
+// ---------------------------------------------------------------------------
+
+struct SchedState {
+    last_magic: u64,
+    exited: bool,
+    /// Set by the timer entry: the task was involuntarily preempted (not a yield/exit).
+    preempted: bool,
+}
+static mut SCHED: SchedState = SchedState {
+    last_magic: 0,
+    exited: false,
+    preempted: false,
+};
+
+#[derive(Clone, Copy)]
+struct Tcb {
+    frame: TrapFrame,
+    done: bool,
+}
+impl Tcb {
+    const fn new() -> Self {
+        Tcb {
+            frame: TrapFrame::zeroed(),
+            done: false,
+        }
+    }
+}
+const NTASK: usize = 2;
+static mut TCBS: [Tcb; NTASK] = [Tcb::new(); NTASK];
+
+// ---------------------------------------------------------------------------
+// Rust dispatchers, called from the assembly entries.
+// ---------------------------------------------------------------------------
+
+/// The capability-gated syscall AND the scheduler hooks, over one path.
+#[no_mangle]
+pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
+    match num {
+        SYS_EMIT => {
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(t.action, &Target::default(), &t.caps) {
+                Decision::Allow => {
+                    t.store.record_event(t.action, "ring3-process");
+                    t.allowed = true;
+                    0
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
+        }
+        SYS_YIELD => {
+            sched_report(arg, false);
+            0
+        }
+        SYS_EXIT => {
+            sched_report(arg, true);
+            0
+        }
+        _ => u64::MAX, // unknown syscall — fail closed
+    }
+}
+
+/// Timer IRQ dispatch. Acknowledge the PIC and mark the running task preempted so the scheduler
+/// round-robins to the next one. The PIT runs free (periodic mode 3), so no re-arm is needed.
+#[no_mangle]
+pub extern "sysv64" fn x86_irq() {
+    crate::pic::eoi(idt::TIMER_VECTOR);
+    // SAFETY: single-threaded; only the running task's IRQ writes this, read by the scheduler.
+    unsafe { (*addr_of_mut!(SCHED)).preempted = true };
+}
+
+/// `#PF` dispatch. An armed isolation trial treats a fault at the expected VA as the proof and
+/// resumes (the task is abandoned); any UNEXPECTED fault stays fatal so bugs cannot hide here.
+#[no_mangle]
+pub extern "sysv64" fn x86_page_fault(fault_va: u64) {
+    match current() {
+        Some(t) if t.armed && fault_va == t.expect_fault_va => {
+            t.isolation_held = true;
+            t.fault_va = fault_va;
+            t.armed = false;
+        }
+        _ => {
+            kprintln!("[usermode] UNEXPECTED ring-3 #PF at {:#x}", fault_va);
+            usermode_fatal(104);
+        }
+    }
+}
+
+/// Fatal user-mode error — reached from the ring-0 guard and unexpected faults. Never returns.
+#[no_mangle]
+pub extern "sysv64" fn usermode_fatal(code: u32) -> ! {
+    crate::exit::exit(code as i32)
+}
+
+/// Record what the running task reported this slice.
+fn sched_report(magic: u64, exited: bool) {
+    // SAFETY: single-threaded; only the running task's trap writes this, read by the scheduler.
+    unsafe {
+        let s = &mut *addr_of_mut!(SCHED);
+        s.last_magic = magic;
+        s.exited = exited;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers.
+// ---------------------------------------------------------------------------
+
+/// A `&[u8]` view of an assembler-emitted stub between its `_start`/`_end` extern labels. Taking
+/// the address of an `extern static` is `unsafe`, so the whole range read lives in one `unsafe`.
+macro_rules! stub_bytes {
+    ($start:ident, $end:ident) => {{
+        // SAFETY: `$start`/`$end` bound a contiguous byte range in the kernel `.text`.
+        unsafe {
+            let s = addr_of!($start);
+            let e = addr_of!($end);
+            core::slice::from_raw_parts(s, (e as usize) - (s as usize))
+        }
+    }};
+}
+
+fn install_entries() {
+    // SAFETY: valid raw interrupt entry points; called single-core with IF=0.
+    unsafe {
+        idt::install_usermode(
+            addr_of!(isr_syscall_entry) as u64,
+            addr_of!(isr_timer_entry) as u64,
+            addr_of!(isr_pf_entry) as u64,
+        );
+    }
+}
+
+fn set_trial(t: Trial) {
+    // SAFETY: single-threaded; install the trial the dispatcher reads for this excursion.
+    unsafe { *addr_of_mut!(CURRENT) = Some(t) };
+}
+fn take_trial() -> Trial {
+    // SAFETY: excursion complete; no other access to CURRENT exists.
+    unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("trial present")
+}
+
+/// Reclaim a mapped leaf page in `root`. (The page-table trees themselves are an intentional,
+/// bounded, one-time boot-test leak — the pool has tens of thousands of frames; this runs once.)
+fn free_leaf(root: u64, va: u64, f: Option<frames::Frame>) {
+    if let Some(f) = f {
+        vm::unmap_user(root, va);
+        frames::free(f);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Excursions.
+// ---------------------------------------------------------------------------
+
+/// Run one ring-3 syscall excursion in a fresh address space. `grant` decides whether the process
+/// holds the `event.emit` capability. Returns `(authorized, event_count_after)`.
+fn run_syscall(grant: bool) -> (bool, usize) {
+    let root_main = vm::active_root();
+    let root = match vm::build_space() {
+        Some(r) => r,
+        None => return (false, usize::MAX),
+    };
+    let code =
+        vm::map_stub_frame(root, USER_CODE_VA, stub_bytes!(stub_syscall_start, stub_syscall_end));
+    let stack = vm::map_user(root, USER_STACK_VA, true);
+    if code.is_none() || stack.is_none() {
+        free_leaf(root, USER_STACK_VA, stack);
+        free_leaf(root, USER_CODE_VA, code);
+        return (false, usize::MAX);
+    }
+
+    let mut engine = CapEngine::new(0xA5A5, 1000);
+    let mut caps = Vec::new();
+    if grant {
+        caps.push(engine.mint("ring3-process", "event.emit", Scope::All, Constraints::none()));
+    }
+    set_trial(Trial {
+        engine,
+        store: Store::new(),
+        caps,
+        action: "event.emit",
+        armed: false,
+        expect_fault_va: 0,
+        allowed: false,
+        isolation_held: false,
+        fault_va: 0,
+    });
+
+    let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    f.regs[RAX] = SYS_EMIT;
+    f.regs[RDI] = 0;
+    // SAFETY: `root` maps the running kernel; switch into it, run the ring-3 excursion until it
+    // traps, restore the scheduler's space. The frame lives on this stack (kernel, shared slot 0).
+    unsafe {
+        vm::switch_to(root);
+        resume_frame(&mut f as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+
+    free_leaf(root, USER_STACK_VA, stack);
+    free_leaf(root, USER_CODE_VA, code);
+    let t = take_trial();
+    (t.allowed, t.store.event_count())
+}
+
+/// Prove hardware isolation: a ring-3 read of a supervisor-only page faults and is contained (not
+/// fatal). Returns `(isolation_held, fault_va)`.
+fn run_isolation() -> (bool, u64) {
+    let root_main = vm::active_root();
+    let root = match vm::build_space() {
+        Some(r) => r,
+        None => return (false, 0),
+    };
+    let code = vm::map_stub_frame(root, USER_CODE_VA, stub_bytes!(stub_read_start, stub_read_end));
+    let stack = vm::map_user(root, USER_STACK_VA, true);
+    let sup = vm::map_supervisor(root, VA_SUP);
+    if code.is_none() || stack.is_none() || sup.is_none() {
+        free_leaf(root, VA_SUP, sup);
+        free_leaf(root, USER_STACK_VA, stack);
+        free_leaf(root, USER_CODE_VA, code);
+        return (false, 0);
+    }
+
+    set_trial(Trial {
+        engine: CapEngine::new(0xA5A5, 1000),
+        store: Store::new(),
+        caps: Vec::new(),
+        action: "event.emit",
+        armed: true,
+        expect_fault_va: VA_SUP,
+        allowed: false,
+        isolation_held: false,
+        fault_va: 0,
+    });
+
+    let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    f.regs[RDI] = VA_SUP; // the supervisor page the ring-3 stub tries to read
+    // SAFETY: see `run_syscall`.
+    unsafe {
+        vm::switch_to(root);
+        resume_frame(&mut f as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+
+    free_leaf(root, VA_SUP, sup);
+    free_leaf(root, USER_STACK_VA, stack);
+    free_leaf(root, USER_CODE_VA, code);
+    let t = take_trial();
+    (t.isolation_held, t.fault_va)
+}
+
+/// Run one ring-3 process in a dedicated address space (`switch_to(root)` around the excursion,
+/// restore `root_main` after). `armed`/`expect` mark whether a fault is the expected proof. Returns
+/// the taken `Trial`.
+fn run_in_space(
+    root: u64,
+    root_main: u64,
+    rdi: u64,
+    rax: u64,
+    engine: CapEngine,
+    caps: Vec<CapToken>,
+    armed: bool,
+    expect: u64,
+) -> Trial {
+    set_trial(Trial {
+        engine,
+        store: Store::new(),
+        caps,
+        action: "event.emit",
+        armed,
+        expect_fault_va: expect,
+        allowed: false,
+        isolation_held: false,
+        fault_va: 0,
+    });
+    let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    f.regs[RAX] = rax;
+    f.regs[RDI] = rdi;
+    // SAFETY: `root` maps the running kernel; restored to `root_main` immediately after.
+    unsafe {
+        vm::switch_to(root);
+        resume_frame(&mut f as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    take_trial()
+}
+
+/// Prove **per-process address-space isolation**: two ring-3 processes in separate PML4 spaces,
+/// where a page private to A is unreachable from B — even at the *same* virtual address. Returns
+/// `(a_reached_own_page, b_isolated, b_fault_va)`.
+fn run_cross_process_isolation() -> (bool, bool, u64) {
+    let root_main = vm::active_root();
+    let (root_a, root_b) = match (vm::build_space(), vm::build_space()) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return (false, false, 0),
+    };
+    let stub_rs = stub_bytes!(stub_read_syscall_start, stub_read_syscall_end);
+    // A: stub + stack + the private data page VA_P.
+    let a_code = vm::map_stub_frame(root_a, USER_CODE_VA, stub_rs);
+    let a_stack = vm::map_user(root_a, USER_STACK_VA, true);
+    let a_data = vm::map_user(root_a, VA_P, true);
+    // B: stub + stack only — VA_P deliberately left unmapped.
+    let b_code = vm::map_stub_frame(root_b, USER_CODE_VA, stub_rs);
+    let b_stack = vm::map_user(root_b, USER_STACK_VA, true);
+    if a_code.is_none()
+        || a_stack.is_none()
+        || a_data.is_none()
+        || b_code.is_none()
+        || b_stack.is_none()
+    {
+        free_leaf(root_a, VA_P, a_data);
+        free_leaf(root_a, USER_STACK_VA, a_stack);
+        free_leaf(root_a, USER_CODE_VA, a_code);
+        free_leaf(root_b, USER_STACK_VA, b_stack);
+        free_leaf(root_b, USER_CODE_VA, b_code);
+        return (false, false, 0);
+    }
+
+    // A reads its own VA_P (mapped) then makes an authorized syscall -> allowed proves both.
+    let mut a_engine = CapEngine::new(0xA5A5, 1000);
+    let a_caps =
+        alloc::vec![a_engine.mint("process-a", "event.emit", Scope::All, Constraints::none())];
+    let a = run_in_space(root_a, root_main, VA_P, SYS_EMIT, a_engine, a_caps, false, 0);
+    // B reads the SAME VA_P (unmapped in its space) -> armed fault at VA_P, contained.
+    let b = run_in_space(
+        root_b,
+        root_main,
+        VA_P,
+        SYS_EMIT,
+        CapEngine::new(0xA5A5, 1000),
+        Vec::new(),
+        true,
+        VA_P,
+    );
+
+    free_leaf(root_a, VA_P, a_data);
+    free_leaf(root_a, USER_STACK_VA, a_stack);
+    free_leaf(root_a, USER_CODE_VA, a_code);
+    free_leaf(root_b, USER_STACK_VA, b_stack);
+    free_leaf(root_b, USER_CODE_VA, b_code);
+    (a.allowed, b.isolation_held, b.fault_va)
+}
+
+/// Free each scheduled task's mapped leaf pages in its own space. (Table trees leak by design.)
+fn cleanup_tasks(
+    roots: &[u64; NTASK],
+    code: &mut [Option<frames::Frame>; NTASK],
+    stack: &mut [Option<frames::Frame>; NTASK],
+) {
+    for i in 0..NTASK {
+        free_leaf(roots[i], USER_STACK_VA, stack[i].take());
+        free_leaf(roots[i], USER_CODE_VA, code[i].take());
+    }
+}
+
+/// Set up NTASK tasks, each in its own space, all sharing USER_CODE_VA (a different space is the
+/// only thing routing that VA to the right task's stub). Returns roots, or `None` on exhaustion.
+fn setup_tasks(
+    code: &mut [Option<frames::Frame>; NTASK],
+    stack: &mut [Option<frames::Frame>; NTASK],
+    stub_bytes: &[u8],
+) -> Option<[u64; NTASK]> {
+    let mut roots = [0u64; NTASK];
+    for i in 0..NTASK {
+        roots[i] = vm::build_space()?;
+        code[i] = vm::map_stub_frame(roots[i], USER_CODE_VA, stub_bytes);
+        stack[i] = vm::map_user(roots[i], USER_STACK_VA, true);
+        if code[i].is_none() || stack[i].is_none() {
+            cleanup_tasks(&roots, code, stack);
+            return None;
+        }
+    }
+    Some(roots)
+}
+
+/// Run the round-robin scheduler over two cooperative ring-3 tasks, EACH IN ITS OWN SPACE. Returns
+/// `(round_robin_and_both_exited, every_slice_presented_its_own_magic, spaces_distinct)`.
+fn run_scheduler() -> (bool, bool, bool) {
+    let root_main = vm::active_root();
+    let magics: [u64; NTASK] = [0xA1A1, 0xB2B2];
+    let mut code: [Option<frames::Frame>; NTASK] = [None, None];
+    let mut stack: [Option<frames::Frame>; NTASK] = [None, None];
+    let roots = match setup_tasks(&mut code, &mut stack, stub_bytes!(stub_coop_start, stub_coop_end))
+    {
+        Some(r) => r,
+        None => return (false, false, false),
+    };
+    // SAFETY: single-threaded; init the TCBs before any resume. Each frame is primed with its
+    // task's magic in rbx (frame-primed, never written by the stub).
+    unsafe {
+        let tcbs = &mut *addr_of_mut!(TCBS);
+        for i in 0..NTASK {
+            let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+            f.regs[RBX] = magics[i];
+            tcbs[i] = Tcb { frame: f, done: false };
+        }
+    }
+
+    let mut order: Vec<(usize, u64)> = Vec::new();
+    let mut cur = 0usize;
+    loop {
+        let mut pick = None;
+        for k in 0..NTASK {
+            let s = (cur + k) % NTASK;
+            // SAFETY: single-threaded read of run state.
+            if !unsafe { (*addr_of!(TCBS))[s].done } {
+                pick = Some(s);
+                break;
+            }
+        }
+        let slot = match pick {
+            Some(s) => s,
+            None => break,
+        };
+        sched_report(0, false); // reset for this slice
+                                // SAFETY: roots[slot] maps the kernel; switch into the task's space, resume until it
+                                // yields/exits, restore the scheduler's space. The TCB frame is kernel data (shared).
+        unsafe {
+            vm::switch_to(roots[slot]);
+            resume_frame(&mut (*addr_of_mut!(TCBS))[slot].frame as *mut TrapFrame);
+            vm::switch_to(root_main);
+        }
+        let (mag, exited) = unsafe {
+            let s = &*addr_of!(SCHED);
+            (s.last_magic, s.exited)
+        };
+        order.push((slot, mag));
+        if exited {
+            // SAFETY: single-threaded write of run state.
+            unsafe { (*addr_of_mut!(TCBS))[slot].done = true };
+        }
+        cur = (slot + 1) % NTASK;
+        if order.len() > 4 * NTASK {
+            break; // safety bound — a correct run is exactly 2*NTASK*2 (8) slices
+        }
+    }
+
+    cleanup_tasks(&roots, &mut code, &mut stack);
+
+    // Expected: 4 slices per task (3 yields + 1 exit), strictly alternating A,B,A,B,A,B,A,B.
+    let expected_slots = [0usize, 1, 0, 1, 0, 1, 0, 1];
+    let order_ok = order.len() == 8
+        && order
+            .iter()
+            .zip(expected_slots.iter())
+            .all(|((slot, _), exp)| slot == exp);
+    let both_done = unsafe {
+        let t = &*addr_of!(TCBS);
+        t[0].done && t[1].done
+    };
+    // Every slice must report the magic of the task that ran it — proof the full register file
+    // (rbx magic) rode through each context switch. And because both tasks share ONE code VA in
+    // DIFFERENT spaces, a correct magic each slice ALSO proves the per-slice CR3 switch happened.
+    let magic_ok = order.len() == 8 && order.iter().all(|(slot, mag)| *mag == magics[*slot]);
+    let spaces_distinct = roots[0] != roots[1] && roots[0] != root_main && roots[1] != root_main;
+    (order_ok && both_done, magic_ok, spaces_distinct)
+}
+
+/// Prove **timer-driven (involuntary) preemption**: two ring-3 tasks that never yield (tight
+/// increment loops, IF set) are preempted by the PIT's IRQ0 and round-robined. Returns
+/// `(both_tasks_preempted_fairly, each_task_progressed_across_preemptions)`.
+fn run_preemptive() -> (bool, bool) {
+    let root_main = vm::active_root();
+    let mut code: [Option<frames::Frame>; NTASK] = [None, None];
+    let mut stack: [Option<frames::Frame>; NTASK] = [None, None];
+    let roots = match setup_tasks(&mut code, &mut stack, stub_bytes!(stub_spin_start, stub_spin_end))
+    {
+        Some(r) => r,
+        None => return (false, false),
+    };
+    // Preemptible frames: IF set (RFLAGS 0x202), rbx = progress (0), rcx = bounded fallback.
+    // SAFETY: single-threaded; init the TCBs before any resume.
+    unsafe {
+        let tcbs = &mut *addr_of_mut!(TCBS);
+        for i in 0..NTASK {
+            let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_IF);
+            f.regs[RBX] = 0;
+            f.regs[RCX] = SPIN_COUNTDOWN;
+            tcbs[i] = Tcb { frame: f, done: false };
+        }
+    }
+
+    const SLICES: usize = 6;
+    let mut counts = [0usize; NTASK];
+    let mut last_progress = [0u64; NTASK];
+    let mut seen = [false; NTASK];
+    let mut progress_ok = true;
+    let mut clean = true; // no task self-exited (i.e. the timer actually fired every slice)
+    let mut cur = 0usize;
+    for _ in 0..SLICES {
+        let slot = cur % NTASK;
+        // SAFETY: single-threaded reset of the slice report.
+        unsafe {
+            let s = &mut *addr_of_mut!(SCHED);
+            s.preempted = false;
+            s.exited = false;
+        }
+        // SAFETY: roots[slot] maps the kernel; run the task until the timer preempts it.
+        unsafe {
+            vm::switch_to(roots[slot]);
+            resume_frame(&mut (*addr_of_mut!(TCBS))[slot].frame as *mut TrapFrame);
+            vm::switch_to(root_main);
+        }
+        let (was_preempt, was_exit, progress) = unsafe {
+            let s = &*addr_of!(SCHED);
+            (s.preempted, s.exited, (*addr_of!(TCBS))[slot].frame.regs[RBX])
+        };
+        if was_exit || !was_preempt {
+            clean = false; // timer never fired (countdown drained) or an unexpected return
+            break;
+        }
+        if seen[slot] && progress <= last_progress[slot] {
+            progress_ok = false; // counter did not advance across the involuntary switch
+        }
+        seen[slot] = true;
+        last_progress[slot] = progress;
+        counts[slot] += 1;
+        cur = (cur + 1) % NTASK;
+    }
+
+    cleanup_tasks(&roots, &mut code, &mut stack);
+
+    let fair = clean && counts.iter().all(|&c| c > 0);
+    (fair, progress_ok && clean)
+}
+
+/// Prove the ring-3 boundary + multitasking invariants live. `Ok(n)` all passed; `Err((idx,name))`.
+pub fn selftest() -> Result<u32, (u32, &'static str)> {
+    // Mask interrupts for the whole suite, THEN repoint the vectors (advisor: a tick landing
+    // between repoint and mask would hit the context-switch entry with a stale CURRENT_FRAME).
+    x86_64::instructions::interrupts::disable();
+    install_entries();
+
+    // On the ring0->ring3 iret the CPU revalidates DS/ES/FS/GS against the new CPL. FS/GS still hold
+    // OVMF's stale 0x30 selector (which now indexes our TSS descriptor's upper half); null the data
+    // segments up front — in 64-bit mode their bases are ignored, so kernel data access is unaffected.
+    // SAFETY: single-core; long mode ignores DS/ES/FS/GS bases.
+    unsafe {
+        core::arch::asm!(
+            "xor ax, ax",
+            "mov ds, ax",
+            "mov es, ax",
+            "mov fs, ax",
+            "mov gs, ax",
+            out("ax") _,
+            options(nostack, preserves_flags)
+        );
+    }
+
+    // Precondition (advisor): a freshly-built space must leave the user region UNMAPPED, so the
+    // isolation proofs are real rather than silently sharing OVMF's identity map. `build_space`
+    // privatizes the user PDPT slot, so this holds even though OVMF identity-maps 1..2 GiB. Fail loud.
+    match vm::build_space() {
+        Some(probe) if vm::translate_in(probe, USER_CODE_VA).is_none() => {} // private — good
+        _ => {
+            kprintln!("[usermode] FATAL: built space does not privatize the user region");
+            usermode_fatal(110);
+        }
+    }
+
+    let mut n: u32 = 0;
+    macro_rules! check {
+        ($cond:expr, $name:expr) => {{
+            n += 1;
+            if !($cond) {
+                kprintln!("  [FAIL {:>2}] {}", n, $name);
+                return Err((n, $name));
+            }
+            kprintln!("  [pass {:>2}] {}", n, $name);
+        }};
+    }
+
+    // 1 — a ring-3 process with NO capability cannot cross the boundary: syscall denied, no effect.
+    let (allowed, events) = run_syscall(false);
+    check!(
+        !allowed && events == 0,
+        "ring3: uncapable process — syscall denied at the boundary, zero effect"
+    );
+
+    // 2 — a capability-granted ring-3 process performs EXACTLY the authorized effect (one event).
+    let (allowed, events) = run_syscall(true);
+    check!(
+        allowed && events == 1,
+        "ring3: capable process — syscall authorized via the same CapEngine, one event recorded"
+    );
+
+    if BRINGUP_CORE_ONLY {
+        return Ok(n);
+    }
+
+    // 3 — hardware isolation: a ring-3 read of a supervisor-only page faults and is contained.
+    let (held, fault_va) = run_isolation();
+    check!(
+        held && fault_va == VA_SUP,
+        "ring3: read of a supervisor-only page faults — address-space isolation holds"
+    );
+
+    // 4 & 5 — per-process address spaces: a page private to process A is reachable by A but NOT by
+    // process B at the SAME virtual address (each process has its own PML4 space).
+    let (a_reached, b_isolated, b_fault_va) = run_cross_process_isolation();
+    check!(
+        a_reached,
+        "ring3: process A reaches a page in its own address space (mapped VA resolves)"
+    );
+    check!(
+        b_isolated && b_fault_va == VA_P,
+        "ring3: process B cannot reach A's page at the same VA — per-process isolation holds"
+    );
+
+    // 6, 7 & 8 — cooperative multitasking with per-task address spaces: two ring-3 tasks in
+    // SEPARATE PML4 spaces context-switch via yield under a round-robin scheduler, each resuming
+    // with full register state, and the two tasks occupy genuinely distinct address spaces.
+    let (order_ok, magic_ok, spaces_distinct) = run_scheduler();
+    check!(
+        order_ok,
+        "ring3: round-robin scheduler runs two tasks (each in its own space) A,B,A,B,... to completion"
+    );
+    check!(
+        magic_ok,
+        "ring3: each task resumes with its own magic at the shared VA — full context + per-slice CR3 switch"
+    );
+    check!(
+        spaces_distinct,
+        "ring3: the two scheduled tasks occupy distinct PML4 address spaces"
+    );
+
+    // 9 & 10 — timer-driven (involuntary) preemption: two non-yielding ring-3 tasks are preempted
+    // by the PIT IRQ0 and round-robined; each resumes with its progress counter intact.
+    let (preempt_fair, preempt_progress) = run_preemptive();
+    check!(
+        preempt_fair,
+        "ring3: PIT IRQ0 preempts two non-yielding tasks — scheduler round-robins both"
+    );
+    check!(
+        preempt_progress,
+        "ring3: each task's register counter advances across timer preemptions — state preserved"
+    );
+
+    Ok(n)
+}
