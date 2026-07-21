@@ -16,9 +16,17 @@ SIZE_MB="${SIZE_MB:-64}"
 mkdir -p "$BUILD"
 
 echo "==> [1/5] build kernel .efi (x86_64-unknown-uefi)"
-( cd "$HERE" && cargo +nightly build )
-EFI="$HERE/target/x86_64-unknown-uefi/debug/aletheia-kernel-x86_64.efi"
+# Embed the RELEASE artifact by default. Override with EFI=/path or PROFILE=debug|release.
+# If the artifact already exists we DO NOT recompile — the image is built from the exact
+# .efi that was already produced (keeps an existing release build as-is).
+PROFILE="${PROFILE:-release}"
+EFI="${EFI:-$HERE/target/x86_64-unknown-uefi/$PROFILE/aletheia-kernel-x86_64.efi}"
+if [ ! -f "$EFI" ]; then
+  BUILD_FLAGS=""; [ "$PROFILE" = "release" ] && BUILD_FLAGS="--release"
+  ( cd "$HERE" && cargo build $BUILD_FLAGS )
+fi
 [ -f "$EFI" ] || { echo "missing $EFI"; exit 1; }
+echo "    using .efi: $EFI"
 
 echo "==> [2/5] create ${SIZE_MB}MiB GPT disk with a FAT32 partition"
 rm -f "$IMG"
