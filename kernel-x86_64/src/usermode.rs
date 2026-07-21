@@ -339,6 +339,10 @@ impl TrapFrame {
 const SYS_EMIT: u64 = 1;
 const SYS_YIELD: u64 = 2;
 const SYS_EXIT: u64 = 3;
+/// Capability-secure kernel IPC (gap register Issue 2): send/receive a message body through the
+/// kernel endpoint, each authorized by the same `CapEngine` (`ipc.send` / `ipc.recv`).
+const SYS_SEND: u64 = 4;
+const SYS_RECV: u64 = 5;
 
 /// User virtual addresses — the 1..2 GiB region (`vm::USER_REGION_PDPT_INDEX`). BELOW 4 GiB because
 /// QEMU/OVMF enforce the ring-3 code segment's 4 GiB limit on the `iret` target; `build_space`
@@ -387,6 +391,13 @@ static mut CURRENT: Option<Trial> = None;
 fn current() -> Option<&'static mut Trial> {
     unsafe { (*addr_of_mut!(CURRENT)).as_mut() }
 }
+
+/// Kernel IPC endpoint (single-slot mailbox). A `SYS_SEND` deposits a body; a `SYS_RECV` drains it.
+/// Sender and receiver run in SEPARATE PML4 spaces, so the body travels only through this kernel
+/// object — never shared user memory.
+static mut ENDPOINT: Option<u64> = None;
+/// The body the most recent authorized `SYS_RECV` drained.
+static mut IPC_RECEIVED: u64 = 0;
 
 // ---------------------------------------------------------------------------
 // Scheduler state (multitasking invariants).
@@ -452,6 +463,47 @@ pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
         SYS_EXIT => {
             sched_report(arg, true);
             0
+        }
+        SYS_SEND => {
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(t.action, &Target::default(), &t.caps) {
+                Decision::Allow => {
+                    // SAFETY: single-threaded; only the running task's trap writes the endpoint.
+                    unsafe { *addr_of_mut!(ENDPOINT) = Some(arg) };
+                    t.allowed = true;
+                    0
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
+        }
+        SYS_RECV => {
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(t.action, &Target::default(), &t.caps) {
+                Decision::Allow => {
+                    t.allowed = true;
+                    // SAFETY: single-threaded; only the running task's trap touches the endpoint.
+                    match unsafe { (*addr_of_mut!(ENDPOINT)).take() } {
+                        Some(body) => {
+                            unsafe { *addr_of_mut!(IPC_RECEIVED) = body };
+                            body
+                        }
+                        None => u64::MAX, // authorized, but the endpoint was empty
+                    }
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
         }
         _ => u64::MAX, // unknown syscall — fail closed
     }
@@ -736,6 +788,107 @@ fn run_cross_process_isolation() -> (bool, bool, u64) {
     free_leaf(root_b, USER_STACK_VA, b_stack);
     free_leaf(root_b, USER_CODE_VA, b_code);
     (a.allowed, b.isolation_held, b.fault_va)
+}
+
+// ---------------------------------------------------------------------------
+// Capability-secure kernel IPC (gap register Issue 2). Two ring-3 processes in SEPARATE PML4 spaces
+// exchange a message through a kernel endpoint — authorized by the same `CapEngine`, kernel-mediated,
+// never shared user memory. x86-64 twin of the aarch64 IPC suite.
+// ---------------------------------------------------------------------------
+
+/// Run one endpoint excursion in space `root`: a ring-3 process with (optionally) an `action`
+/// capability issues syscall `rax` with arg `rdi` and traps once. Returns whether it was authorized.
+/// Precondition: `root` already maps the syscall stub + stack at the user VAs.
+fn run_endpoint_excursion(
+    root: u64,
+    root_main: u64,
+    action: &'static str,
+    grant: bool,
+    rax: u64,
+    rdi: u64,
+) -> bool {
+    let mut engine = CapEngine::new(0xA5A5, 1000);
+    let mut caps = Vec::new();
+    if grant {
+        caps.push(engine.mint("ipc-process", action, Scope::All, Constraints::none()));
+    }
+    set_trial(Trial {
+        engine,
+        store: Store::new(),
+        caps,
+        action,
+        armed: false,
+        expect_fault_va: 0,
+        allowed: false,
+        isolation_held: false,
+        fault_va: 0,
+    });
+    let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    f.regs[RAX] = rax;
+    f.regs[RDI] = rdi;
+    // SAFETY: `root` maps the running kernel; switch in, run the ring-3 excursion, restore.
+    unsafe {
+        vm::switch_to(root);
+        resume_frame(&mut f as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    take_trial().allowed
+}
+
+/// Prove **capability-secure kernel IPC**: a message sent by one ring-3 process is delivered to
+/// another in a DIFFERENT address space, through the kernel endpoint, only when both hold the
+/// authorizing capability. Returns `(delivered_across_spaces, uncapable_send_denied,
+/// uncapable_recv_denied)`.
+fn run_ipc() -> (bool, bool, bool) {
+    let root_main = vm::active_root();
+    let (root_a, root_b) = match (vm::build_space(), vm::build_space()) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return (false, false, false),
+    };
+    let stub = stub_bytes!(stub_syscall_start, stub_syscall_end);
+    let a_code = vm::map_stub_frame(root_a, USER_CODE_VA, stub);
+    let a_stack = vm::map_user(root_a, USER_STACK_VA, true);
+    let b_code = vm::map_stub_frame(root_b, USER_CODE_VA, stub);
+    let b_stack = vm::map_user(root_b, USER_STACK_VA, true);
+    if a_code.is_none() || a_stack.is_none() || b_code.is_none() || b_stack.is_none() {
+        free_leaf(root_a, USER_STACK_VA, a_stack);
+        free_leaf(root_a, USER_CODE_VA, a_code);
+        free_leaf(root_b, USER_STACK_VA, b_stack);
+        free_leaf(root_b, USER_CODE_VA, b_code);
+        return (false, false, false);
+    }
+
+    let body: u64 = 0xC0FF_EE42;
+
+    // 1 — capable sender deposits, capable receiver drains; body survives the kernel trip.
+    // SAFETY: single-threaded reset of the endpoint before the exchange.
+    unsafe {
+        *addr_of_mut!(ENDPOINT) = None;
+        *addr_of_mut!(IPC_RECEIVED) = 0;
+    }
+    let send_ok = run_endpoint_excursion(root_a, root_main, "ipc.send", true, SYS_SEND, body);
+    let recv_ok = run_endpoint_excursion(root_b, root_main, "ipc.recv", true, SYS_RECV, 0);
+    let received = unsafe { *addr_of!(IPC_RECEIVED) };
+    let spaces_distinct = root_a != root_b && root_a != root_main && root_b != root_main;
+    let delivered = send_ok && recv_ok && received == body && spaces_distinct;
+
+    // 2 — no ipc.send cap => cannot post (fail-closed, slot untouched).
+    // SAFETY: single-threaded reset.
+    unsafe { *addr_of_mut!(ENDPOINT) = None };
+    let bad_send = run_endpoint_excursion(root_a, root_main, "ipc.send", false, SYS_SEND, body);
+    let send_denied = !bad_send && unsafe { (*addr_of!(ENDPOINT)).is_none() };
+
+    // 3 — no ipc.recv cap => cannot drain a queued message (fail-closed, slot intact).
+    // SAFETY: single-threaded seed of a queued message.
+    unsafe { *addr_of_mut!(ENDPOINT) = Some(body) };
+    let bad_recv = run_endpoint_excursion(root_b, root_main, "ipc.recv", false, SYS_RECV, 0);
+    let recv_denied = !bad_recv && unsafe { (*addr_of!(ENDPOINT)).is_some() };
+
+    free_leaf(root_a, USER_STACK_VA, a_stack);
+    free_leaf(root_a, USER_CODE_VA, a_code);
+    free_leaf(root_b, USER_STACK_VA, b_stack);
+    free_leaf(root_b, USER_CODE_VA, b_code);
+    (delivered, send_denied, recv_denied)
 }
 
 /// Free each scheduled task's mapped leaf pages in its own space. (Table trees leak by design.)
@@ -1031,6 +1184,23 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         preempt_progress,
         "ring3: each task's register counter advances across timer preemptions — state preserved"
+    );
+
+    // 11, 12 & 13 — capability-secure kernel IPC (gap register Issue 2): a message crosses from one
+    // ring-3 process to another in a DIFFERENT PML4 space only through the kernel endpoint, gated by
+    // the same CapEngine; an uncapable sender/receiver is denied fail-closed.
+    let (delivered, send_denied, recv_denied) = run_ipc();
+    check!(
+        delivered,
+        "ring3: capability-secure IPC — message delivered kernel-mediated across distinct address spaces"
+    );
+    check!(
+        send_denied,
+        "ring3: IPC send without the ipc.send capability is denied — endpoint untouched (fail-closed)"
+    );
+    check!(
+        recv_denied,
+        "ring3: IPC recv without the ipc.recv capability is denied — queued message intact (fail-closed)"
     );
 
     Ok(n)
