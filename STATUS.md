@@ -253,9 +253,11 @@ contract-honest: written outside-in and boot-verified, not blind hardware code).
 
 - **Boot model**: `x86_64-unknown-uefi` PE at `\EFI\BOOT\BOOTX64.EFI` on a GPT **EFI System
   Partition**; own COM1 serial + GOP framebuffer console; own `#[global_allocator]` (8 MiB static
-  bump heap) + `#[panic_handler]` that stay valid after ExitBootServices; firmware identity paging
-  kept (no page tables yet). UEFI is the hardware/platform integration layer (ADR-019); the OS above
-  it is entirely Aletheia-owned — no Linux/macOS/POSIX, no third-party OS framework.
+  bump heap) + `#[panic_handler]` that stay valid after ExitBootServices. Post-exit the kernel
+  **owns** the firmware page-table hierarchy: a physical frame allocator seeded from the UEFI
+  memory map (`frames.rs`) + map/unmap over the live PML4 (`vm.rs`) — see the P5 note below. UEFI
+  is the hardware/platform integration layer (ADR-019); the OS above it is entirely Aletheia-owned
+  — no Linux/macOS/POSIX, no third-party OS framework.
 - **Artifacts** (from `kernel-x86_64/scripts/build-image.sh`, macOS host, no mtools/xorriso/grub —
   only rust + hdiutil/diskutil + python3 + qemu-img): `build/aletheia-x86_64.img` (raw GPT/ESP) +
   `build/aletheia-x86_64.vmdk` (VMware) + `aletheia-x86_64.vmx`.
@@ -424,6 +426,8 @@ bash scripts/smoke-test.sh                         # boot the image in QEMU+OVMF
 #   • QEMU:       qemu-system-x86_64 -bios <OVMF_CODE.fd> -drive format=raw,file=build/aletheia-x86_64.img -serial stdio
 #   • VMware:     attach build/aletheia-x86_64.vmdk to a UEFI VM
 #   • VirtualBox: attach build/aletheia-x86_64.img (see scripts/build-vbox.sh)
-# NOTE: the x86-64 image boots the OS + re-proves the 11 spine invariants; the frame-allocator/MMU
-# bricks are aarch64-only this wave (their x86-64 backend is the documented P5 follow-on).
+# NOTE: the x86-64 image now proves 7 memory (frame allocator from the UEFI map) + 6 virtual-memory
+# (map/unmap over the live UEFI PML4 hierarchy) + 11 spine invariants. x86-64 can't do aarch64's
+# "MMU off->on" flip (long mode requires paging), so its vm suite proves the honest subset: walk +
+# edit the live hierarchy. smoke-test.sh gates all three marker families + exit 33.
 ```
