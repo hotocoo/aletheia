@@ -62,8 +62,8 @@ Plus `security.rs`: expired-capability denial, scope confinement, agent-cannot-s
 
 - **P2** (partially delivered — see "Delivered (P2 start)" below) WASM/WASI capability-secure
   component runtime + SDK + multi-agent composition. The runtime + app-as-capability model + fuel
-  bounding + a content return-buffer (read→transform→write) are delivered and tested; SDK,
-  multi-agent composition, and the gating fuzz/stress/chaos campaigns remain.
+  bounding + a content return-buffer (read→transform→write) + multi-agent composition (spawn) + the
+  **Rust component SDK** are delivered and tested; the gating stress/chaos campaigns remain.
 - **P3** Native-architecture experience layer (workspaces, dynamic interfaces, semantic search).
 - **P4** Real microkernel (Rust) on metal: capability enforcement, secure IPC, memory/address spaces,
   interrupts; System Core rehosted on it. VM-tested.
@@ -114,8 +114,36 @@ refused at the component boundary (criterion 9 preserved); a component reads→t
 data end to end; a committed effect survives a later fuel-kill (a trap cannot corrupt state); a
 component spawns a child that runs under a delegated capability; and a spawned child cannot exceed its
 parent's authority. The untrusted host-ABI boundary is **fuzzed** (PRD §38.4): the fail-closed default
-and host robustness hold for randomized memory arguments no one enumerated. Deferred (follow-on P2
-iterations): the component SDK, richer parent→child data-flow wiring, and the gating stress/chaos campaigns.
+and host robustness hold for randomized memory arguments no one enumerated. The **component SDK** is now
+delivered (Rust authoring layer over the host ABI — see its section below). Deferred (follow-on P2
+iterations): richer parent→child data-flow wiring, and the gating stress/chaos campaigns.
+
+## Delivered (2026-07-21 — P2 component SDK: author components in Rust)
+
+The layer that lets a developer **write an Aletheia component in Rust** instead of hand-assembling
+WASM/WAT against the raw host ABI. A small `no_std` crate (`component-sdk/`, `aletheia-component-sdk`)
+wraps the four capability-gated host calls behind safe, typed functions — and nothing else, because
+there is nothing else to reach (no WASI, no ambient authority; ADR-014).
+
+- **API**: `write_output(&[u8])`, `emit_event(&str)`, `read_entity(&str, &mut [u8]) -> len`,
+  `spawn_child(app, action)` — each returns `Result<_, HostError>` where `HostError` maps the host's
+  ABI sentinels (`-1` Denied / `-2` NeedsApproval / `-3` Bad). A `component_main!` macro exports the
+  guest's `run() -> i32` and provides the `no_std` `#[panic_handler]` (a panicking component traps and
+  leaves no effects — the host's per-call all-or-nothing + fuel boundary already guarantees this).
+- **Example**: `examples/hello-component/` — a real guest authored with the SDK (writes an Output
+  entity, emits an event), compiled to `wasm32-unknown-unknown`.
+- **Verified by the SAME bar as the runtime**: `aletheia/tests/sdk_component.rs` (4 tests, green) runs
+  the SDK-authored guest through the *unchanged* `SysCore` and asserts it is exactly capability-bounded
+  — no capability ⇒ it changes nothing (write denied, exits 1, zero effects); granted `entity.write` +
+  `event.emit` ⇒ it does exactly those, exits 0, and the stored entity holds precisely the bytes the
+  SDK wrote; granted only `entity.write` ⇒ it writes but its emit is denied (attenuation, exits 2).
+- **No new CI toolchain dependency**: the example is prebuilt to a committed fixture
+  (`aletheia/tests/fixtures/hello_component.wasm`, 306 B) by `scripts/build-example-component.sh`, so
+  the hosted `cargo test` gate stays green with no wasm target required; regenerate the fixture with
+  that script (needs `rustup target add wasm32-unknown-unknown`) whenever the SDK or example changes.
+  `clippy -D warnings` clean on host + wasm32.
+- **Deferred (follow-on)**: an `alloc`-backed convenience layer (owned buffers for `read_entity`),
+  richer parent→child data-flow, and typed entity/metadata helpers.
 
 ## Delivered (P4 start — VM-tested microkernel)
 

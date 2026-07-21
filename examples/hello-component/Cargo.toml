@@ -1,0 +1,17 @@
+[package]
+name = "hello-component"
+version = "0.1.0"
+edition = "2021"
+description = "Example Aletheia component authored with aletheia-component-sdk. Writes an Output entity and emits an event through the capability-gated host ABI; compiled to wasm32-unknown-unknown and run by SysCore."
+
+[lib]
+# A guest component is a cdylib: it exports `run() -> i32` and its linear `memory` for the host.
+crate-type = ["cdylib"]
+
+[dependencies]
+aletheia-component-sdk = { path = "../../component-sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
