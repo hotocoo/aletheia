@@ -36,11 +36,11 @@ mod vm;
 // provenance fields, IPC message fields) than this particular kernel exercises — the hosted crate
 // and the aarch64 `bench` module use the rest — so dead_code is allowed on the shared module to
 // keep `clippy -D warnings` clean without touching the shared source.
-#[path = "../../kernel/src/selftest.rs"]
-mod selftest;
-#[allow(dead_code)]
-#[path = "../../kernel/src/spine.rs"]
-mod spine;
+// Shared, arch-independent Aletheia spine + invariant suite — now a real `kernel-core` dependency
+// (defined once there, not `#[path]`-copied per target; gap-register Issue 1). The spine exposes
+// more surface than this particular kernel exercises, but as a library crate its `pub` items don't
+// trip `dead_code`, so no allow is needed here anymore.
+use kernel_core::{selftest, spine};
 
 /// Kernel entry, called from `_start` (boot.s) after stack + BSS setup.
 #[no_mangle]
@@ -97,7 +97,13 @@ pub extern "C" fn kmain() -> ! {
 
     kprintln!("");
     kprintln!("--- invariant selftests (M1 acceptance, re-proved in RISC-V kernel space) ---");
-    match selftest::run() {
+    match selftest::run(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
         Ok(n) => kprintln!("[selftest] ALL {} INVARIANTS HOLD", n),
         Err((idx, name)) => {
             kprintln!("[selftest] FAILED at invariant {}: {}", idx, name);

@@ -26,11 +26,14 @@ mod bench;
 mod frames;
 mod hal;
 mod heap;
-mod selftest;
 mod semihosting;
-mod spine;
 mod usermode;
 mod vm;
+
+// The capability-secure spine + the M1 invariant suite are arch-independent and live in
+// `kernel-core` — defined once, shared by all three targets (gap-register Issue 1). This kernel
+// provides only its own backend (`hal`) + console (`kprintln!`).
+use kernel_core::{selftest, spine};
 
 /// Kernel entry, called from `_start` (boot.s) after stack + BSS setup.
 #[no_mangle]
@@ -61,7 +64,13 @@ pub extern "C" fn kmain() -> ! {
 
     kprintln!("");
     kprintln!("--- invariant selftests (M1 acceptance, re-proved in kernel space) ---");
-    match selftest::run() {
+    match selftest::run(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
         Ok(n) => kprintln!("[selftest] ALL {} INVARIANTS HOLD", n),
         Err((idx, name)) => {
             kprintln!("[selftest] FAILED at invariant {}: {}", idx, name);
