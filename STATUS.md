@@ -165,8 +165,14 @@ Elevating the M1 reference from a scripted demo toward the real layered architec
   `aletheiad demo` = a client over the boundary. The M1 scenario is reproduced as conformance tests
   THAT TRANSIT THE API (+ a socket round-trip) — apps/tests no longer call Core internals.
 
-Deferred (next): the cargo-**workspace crate split** (SAD §4 — mechanical; module boundaries +
-dependency direction already match the target crate list).
+- **Aletheia HAL + first-class target matrix** (`kernel/src/hal.rs`, ADR-019) — the kernel is now
+  written against an Aletheia-owned `Hal` trait (timer/privilege/exit), not a specific CPU. **AMD64/
+  x86-64 and RISC-V are declared first-class targets**; aarch64 is the bootstrap/dev backend (VM-
+  tested, still 11/11 green through the HAL). The x86-64/RISC-V backends are `cfg`-gated contracts —
+  no untested bring-up code ships (ADR-010). The HAL imports no Linux/macOS/Darwin/POSIX.
+
+Deferred (next): x86-64 + RISC-V HAL backends (VM-tested bring-up, P4/P5); the cargo-**workspace crate
+split** (SAD §4 — mechanical; module boundaries + dependency direction already match the crate list).
 
 ## Run it
 

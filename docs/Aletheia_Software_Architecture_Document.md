@@ -53,10 +53,10 @@ SYSTEM CORE                 semantic store · capability engine · context · me
                             actor/task model · app/component model · scheduler(abstract) · HAL(abstract)
         │  (kernel contracts: capability enforcement, secure IPC, task isolation, memory)
 MICROKERNEL                 (P4 on metal; hosted realization in M1)
+        │  (Aletheia HAL contract — arch-independent; ADR-019)
+HARDWARE ABSTRACTION LAYER  Aletheia-owned; abstracts hardware ONLY (no Linux/macOS/Darwin/POSIX)
         │
-HARDWARE ABSTRACTION LAYER
-        │
-HARDWARE (CPU/GPU/NPU/devices)
+HARDWARE                    AMD64/x86-64 · RISC-V  (first-class targets) — aarch64 (bootstrap/dev)
 ```
 
 The seven primitives are realized in the System Core. The microkernel exists only to make capabilities unforgeable and to isolate tasks/devices/memory.

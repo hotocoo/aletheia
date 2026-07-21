@@ -23,6 +23,7 @@ global_asm!(include_str!("vectors.s"));
 mod uart;
 mod arch;
 mod bench;
+mod hal;
 mod heap;
 mod selftest;
 mod semihosting;
@@ -31,12 +32,14 @@ mod spine;
 /// Kernel entry, called from `_start` (boot.s) after stack + BSS setup.
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
+    use hal::{ActiveHal, Hal};
     kprintln!("========================================");
-    kprintln!(" Aletheia microkernel — bare-metal aarch64");
+    kprintln!(" Aletheia microkernel — HAL backend: {}", ActiveHal::arch_name());
     kprintln!("========================================");
+    kprintln!("[hal] first-class targets: AMD64/x86-64, RISC-V  (aarch64 = bootstrap/dev; ADR-019)");
     kprintln!("[boot] OK: stack ready, BSS clear");
-    kprintln!("[boot] exception level: EL{}", arch::current_el());
-    kprintln!("[boot] timer freq: {} Hz", arch::cntfrq());
+    kprintln!("[boot] privilege level: {}", ActiveHal::current_privilege());
+    kprintln!("[boot] timer freq: {} Hz", ActiveHal::timer_freq_hz());
     kprintln!("[boot] heap: {} B used after init", heap::used_bytes());
 
     kprintln!("");
