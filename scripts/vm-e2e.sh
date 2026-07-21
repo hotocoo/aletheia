@@ -31,8 +31,10 @@ echo "vm exit code: $CODE"
 
 fail=0
 [ "$CODE" -eq 0 ] || { echo "FAIL: expected exit 0, got $CODE"; fail=1; }
-echo "$OUT" | grep -q "ALL 11 INVARIANTS HOLD" || { echo "FAIL: invariants marker missing"; fail=1; }
-echo "$OUT" | grep -q "\[e2e\] PASS"            || { echo "FAIL: e2e PASS marker missing"; fail=1; }
+echo "$OUT" | grep -q "ALL 11 INVARIANTS HOLD"        || { echo "FAIL: spine invariants marker missing"; fail=1; }
+echo "$OUT" | grep -q "MEMORY INVARIANTS HOLD"        || { echo "FAIL: memory invariants marker missing"; fail=1; }
+echo "$OUT" | grep -q "VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory invariants marker missing"; fail=1; }
+echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then
   echo "VM-E2E: PASS"
