@@ -59,10 +59,14 @@ impl ModelRuntime for LlamaCppProvider {
                     intent.subject, intent.verb
                 )}
             ],
-            "temperature": 0.6,
+            // MiniCPM is a "thinking" model: a strict JSON grammar collides with its forced <think>
+            // phase and yields empty output. Validated fix (model card + live test) — run in no-think
+            // mode (enable_thinking=false, temp 0.7) WITH the GBNF grammar, which yields clean plan JSON.
+            "temperature": 0.7,
             "top_p": 0.95,
             "n_predict": 512,
             "cache_prompt": true,
+            "chat_template_kwargs": { "enable_thinking": false },
             "grammar": prompt::plan_grammar(),
             "stream": false
         })
