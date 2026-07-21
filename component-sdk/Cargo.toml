@@ -1,0 +1,13 @@
+[package]
+name = "aletheia-component-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Author capability-secure Aletheia WASM components in Rust. Safe, no_std wrappers over the Aletheia host ABI (read/write/emit/spawn) — no WASI, no ambient authority (ADR-014). Compile guests to wasm32-unknown-unknown."
+
+[lib]
+# rlib so example guests can depend on it; the guest itself is the cdylib that exports `run`/`memory`.
+crate-type = ["rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
