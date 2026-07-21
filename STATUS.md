@@ -72,7 +72,7 @@ Plus `security.rs`: expired-capability denial, scope confinement, agent-cannot-s
 - **P5** (partially delivered — see "Delivered (P5 start)" below) real memory management: a physical
   page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) are delivered and
   VM-tested on the aarch64 dev backend. Still deferred: higher-half + per-process address spaces,
-  EL0 user-mode, HAL on real devices, native on-GPU compositor, heterogeneous CPU/GPU/NPU scheduler,
+  HAL on real devices, native on-GPU compositor, heterogeneous CPU/GPU/NPU scheduler,
   secure boot, rollback/recovery.
 - **P6** Optional sandboxed Linux/POSIX compatibility environment (see Compatibility Appendix).
 
@@ -323,8 +323,9 @@ modules (`kernel/src/frames.rs`, `kernel/src/vm.rs`) are aarch64-crate-only; the
   live in QEMU. `scripts/vm-e2e.sh` now asserts the memory + virtual-memory markers alongside the 11
   spine invariants.
 - **Deferred (P5 follow-on)**: higher-half (TTBR1) kernel/user split, per-process address spaces,
-  EL0 user-mode + capability-gated syscall boundary, a frame-backed kernel heap (the static bump heap
-  stays load-bearing for now), and the x86-64/RISC-V MMU backends.
+  a frame-backed kernel heap (the static bump heap stays load-bearing for now), and the
+  x86-64/RISC-V MMU backends. (EL0 user-mode + the cap-gated syscall boundary is now delivered —
+  see its section below.)
 
 ## Delivered (2026-07-21 — P5: EL0 user-mode + capability-gated syscall boundary)
 
