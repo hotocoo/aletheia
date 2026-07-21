@@ -273,11 +273,12 @@ contract-honest: written outside-in and boot-verified, not blind hardware code).
 
 ## Delivered (2026-07-21 — x86-64 ring-3 user-mode + PIT-driven preemption)
 
-The x86-64 backend now proves the **same 10 user-mode invariants** the aarch64 EL0 suite does — the
-first executed ring-3 privilege boundary on the first-class AMD64 target. Code in
+The x86-64 backend now proves the **same 13 user-mode invariants** the aarch64 EL0 suite does
+(10 base ring-3 invariants + capability-secure IPC 11-13) — the first executed ring-3 privilege
+boundary on the first-class AMD64 target. Code in
 `kernel-x86_64/src/usermode.rs` (+ ring-3 GDT segments & TSS in `gdt.rs`, per-process address spaces
 in `vm.rs`, DPL=3 syscall/#PF/timer vectors in `idt.rs`). `scripts/smoke-test.sh` now also gates on
-`RING-3 BOUNDARY INVARIANTS HOLD`; QEMU exit 33 + `[e2e] PASS` still hold (10/10 green).
+`RING-3 BOUNDARY INVARIANTS HOLD`; QEMU exit 33 + `[e2e] PASS` still hold (13/13 green).
 
 - **Real ring 3 (CPL 3)**: `iretq` drops to unprivileged code in USER-only pages; the one door back
   is an `int 0x80` DPL=3 gate authorized by the SAME `CapEngine` the deterministic pipeline uses. A
@@ -443,7 +444,7 @@ an *unexpected* fault stays fatal (`exit 102`) so a real bug can never masquerad
   (`x20` countdown) so a timer that never fires makes the task self-exit → a clean failure, never a
   spin; and `-machine virt,gic-version=2` is pinned so a GICv3 can't silently swallow the MMIO CPU
   interface. The GIC/timer are torn down after the test so the benchmark is unperturbed.
-- **10 EL0-boundary invariants proved live in QEMU** (exit `80+i` on failure): (1) an EL0 process
+- **13 EL0-boundary invariants proved live in QEMU** (exit `80+i` on failure): (1) an EL0 process
   with **no capability** is denied at the boundary and leaves zero effect; (2) a **capability-granted**
   EL0 process is authorized via the same `CapEngine` and records exactly one event; (3) **hardware
   address-space isolation** — an EL0 read of kernel memory takes a permission Data Abort that is
@@ -454,8 +455,11 @@ an *unexpected* fault stays fatal (`exit 102`) so a real bug can never masquerad
   (full context + the per-slice address-space switch); (8) the two scheduled tasks occupy **distinct
   TTBR0 address spaces**; (9) the **generic-timer IRQ preempts** two non-yielding tasks and the
   scheduler round-robins both; (10) each task's **register counter advances across preemptions**
-  (state preserved under an involuntary switch). `cargo run` now boots and re-proves **11 spine +
-  7 memory + 13 virtual-memory + 10 user-mode** invariants + exit 0.
+  (state preserved under an involuntary switch); (11) **capability-secure IPC** — a message is
+  delivered kernel-mediated across distinct address spaces; (12) an IPC send **without** the
+  `ipc.send` capability is denied, endpoint untouched (fail-closed); (13) an IPC recv **without** the
+  `ipc.recv` capability is denied, the queued message intact (fail-closed). `cargo run` now boots and
+  re-proves **11 spine + 7 memory + 13 virtual-memory + 13 user-mode** invariants + exit 0.
 - **Deferred (P5 follow-on)**: higher-half (TTBR1) kernel/user split, a frame-backed kernel heap
   (the static bump heap stays load-bearing for now), SMP (secondary-hart bring-up), and the
   x86-64/RISC-V EL0/preemption backends.
@@ -470,8 +474,8 @@ cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 10 EL0 user-mode invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # same spine suite, for the RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 13 EL0 user-mode invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 7 memory + 13 Sv39 vm + 13 U-mode invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 
