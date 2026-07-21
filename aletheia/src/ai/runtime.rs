@@ -72,6 +72,51 @@ pub fn spawn_llama_server(cfg: &AiConfig, ctx: u32) -> std::io::Result<std::proc
         .spawn()
 }
 
+/// Provision the configured model into the local cache if missing, returning its path (ADR-017).
+/// Aletheia-OWNED lifecycle: this is how the model "comes with" Aletheia without a 1.1 GB blob in
+/// git (see `models/minicpm.toml`). Prefers `huggingface-cli`/`hf` (which verify LFS integrity),
+/// falling back to `curl` into a cache snapshot the resolver will find. Best-effort — the OS never
+/// requires it (deterministic fallback). NOT called by tests or the default demo; provisioning is
+/// explicit via `aletheiad model pull`.
+pub fn ensure_model(cfg: &AiConfig) -> Result<PathBuf, String> {
+    if let Some(p) = resolve_model_path(cfg) {
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    let file = super::config::DEFAULT_MODEL_FILE;
+    // Preferred: the HF CLI places the file in the standard cache and verifies its checksum.
+    for tool in ["huggingface-cli", "hf"] {
+        match std::process::Command::new(tool).arg("download").arg(&cfg.model_ref).arg(file).output() {
+            Ok(o) if o.status.success() => {
+                if let Some(p) = resolve_model_path(cfg) {
+                    return Ok(p);
+                }
+                let printed = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !printed.is_empty() && Path::new(&printed).exists() {
+                    return Ok(PathBuf::from(printed));
+                }
+            }
+            _ => {} // tool absent or failed → try the next option
+        }
+    }
+    // Fallback: curl the resolve URL into a manual snapshot dir the cache resolver will find.
+    let dest_dir = default_hf_hub().join(ref_to_cache_dirname(&cfg.model_ref)).join("snapshots").join("manual");
+    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join(file);
+    let url = format!("https://huggingface.co/{}/resolve/main/{}", cfg.model_ref, file);
+    let status = std::process::Command::new("curl")
+        .args(["-fL", "--retry", "3", "-o"])
+        .arg(&dest)
+        .arg(&url)
+        .status()
+        .map_err(|e| format!("curl unavailable: {e}"))?;
+    if status.success() && dest.exists() {
+        return Ok(dest);
+    }
+    Err(format!("could not provision model {}; run: huggingface-cli download {} {}", cfg.model_ref, cfg.model_ref, file))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

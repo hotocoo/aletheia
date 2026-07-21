@@ -51,7 +51,12 @@ pub mod config {
     //! machine-specific absolute path (ADR-017).
 
     /// Default local model for the hosted macOS phase. Model-agnostic: change via `MODEL_REF`.
+    /// These pin the first-party model declared in `models/minicpm.toml` (ADR-017); the weights are
+    /// provisioned on demand (`aletheiad model pull`), never committed to git.
     pub const DEFAULT_MODEL_REF: &str = "GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF";
+    pub const DEFAULT_MODEL_FILE: &str = "MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-Q8_0.gguf";
+    pub const DEFAULT_MODEL_SHA256: &str = "fc3ee1eddd305c155f63b6bd7bb189daa4d5f226ca325ab219bd7acd3b00ec77";
+    pub const DEFAULT_MODEL_CTX: u32 = 8192;
     pub const DEFAULT_ENDPOINT: &str = "http://localhost:8080";
 
     #[derive(Debug, Clone, PartialEq, Eq)]
