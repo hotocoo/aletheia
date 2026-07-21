@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "aletheia-kernel-riscv64"
 version = "0.1.0"
+dependencies = [
+ "kernel-core",
+]
+
+[[package]]
+name = "kernel-core"
+version = "0.1.0"

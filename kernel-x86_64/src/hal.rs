@@ -8,16 +8,8 @@
 
 use core::arch::asm;
 
-/// Arch-independent hardware primitives the kernel needs. Associated functions (no `self`) so the
-/// active backend is statically selected and zero-cost.
-pub trait Hal {
-    fn arch_name() -> &'static str;
-    fn timer_ticks() -> u64;
-    fn timer_freq_hz() -> u64;
-    fn ticks_to_ns(ticks: u64) -> u64;
-    fn current_privilege() -> u64;
-    fn exit(code: i32) -> !;
-}
+/// The active backend implements the shared `kernel_core::Hal` contract (defined once, not per crate).
+pub use kernel_core::Hal;
 
 pub struct Amd64Hal;
 
