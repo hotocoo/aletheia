@@ -29,6 +29,7 @@ mod heap;
 mod selftest;
 mod semihosting;
 mod spine;
+mod usermode;
 mod vm;
 
 /// Kernel entry, called from `_start` (boot.s) after stack + BSS setup.
@@ -90,11 +91,25 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // EL0 user-mode: drop to unprivileged EL0 and prove the capability-gated syscall boundary
+    // + hardware address-space isolation (aarch64 dev backend; requires the MMU, enabled above).
+    kprintln!("");
+    kprintln!(
+        "--- user-mode selftests (EL0 privilege boundary: cap-gated syscall + isolation) ---"
+    );
+    match usermode::selftest() {
+        Ok(n) => kprintln!("[usermode] ALL {} EL0-BOUNDARY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[usermode] FAILED at EL0 invariant {}: {}", idx, name);
+            semihosting::exit(80 + idx as i32);
+        }
+    }
+
     bench::run();
 
     kprintln!("");
     kprintln!(
-        "[e2e] PASS — boot + spine + {} invariants + memory-management + virtual-memory + benchmark complete",
+        "[e2e] PASS — boot + spine + {} invariants + memory-management + virtual-memory + user-mode + benchmark complete",
         11
     );
     semihosting::exit(0);

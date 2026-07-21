@@ -27,9 +27,9 @@ exc_vectors:
     .balign 0x80
     b   default_exception          // 0x380 SError
 
-    // ---- Lower EL, AArch64 ----
+    // ---- Lower EL, AArch64 (EL0 traps here) ----
     .balign 0x80
-    b   default_exception          // 0x400 Synchronous
+    b   el0_sync_entry             // 0x400 Synchronous  <-- EL0 svc / fault -> cap-gated boundary
     .balign 0x80
     b   default_exception          // 0x480 IRQ
     .balign 0x80
