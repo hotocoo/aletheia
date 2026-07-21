@@ -137,11 +137,36 @@ M1 invariants **in kernel space** — the first executed instance of the PRD's V
   benchmark program (cross-AS IPC vs a same-emulator Linux guest = next milestone), never a
   claim; and **not** bare-metal numbers.
 
+## Delivered (Alpha wave — 2026-07-21): policy engine, AI subsystem, Context Engine
+
+Elevating the M1 reference from a scripted demo toward the real layered architecture the SAD (§3/§4,
+§10) already commits to — the code now catches up to the docs.
+
+- **Policy & approval engine** (`policy.rs`, ADR-015) — a governance axis SEPARATE from capability
+  authority. Capabilities decide *authorized?*; policy decides *needs human approval?*. Both approval
+  triggers (destructive risk + approval-constrained capability) unified in one place. Durable
+  pending-approval lifecycle (request → list → grant/deny → execute) persisted via the immutable
+  event log and replayed on open; **approval confers no authority** (caps re-evaluated on execution).
+- **AI subsystem** (`ai/`, ADR-017) — AI as a first-class Aletheia-owned subsystem behind a
+  model-agnostic `ModelProvider` (`config`/`provider`/`context`/`prompt`/`runtime`/`llama`). Primary
+  hosted model = `GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF` (Q8_0) resolved from the
+  HF cache by configurable reference (weights never in git); deterministic interpreter is fallback +
+  test oracle. **Live-validated** against the running model: no-think mode + GBNF grammar yields
+  correct plan JSON; a strict grammar alone collides with the model's `<think>` phase.
+- **Context Engine** (`ai/context.rs`, ADR-018) — native capability-aware **Context Fabric (NOT RAG)**.
+  Structured-first layered retrieval around the World Model (direct → structured → relationships →
+  memory); authorization enforced BEFORE any entity enters context; budgeted for the small model;
+  semantic/vector + document knowledge are OPTIONAL seams (no embedding server / vector DB required).
+
+Deferred (next): the capability-gated **Service API / IPC boundary** + long-running Core Alpha daemon
+(apps/tests as clients over a boundary instead of internal calls), and the cargo-**workspace crate
+split** (SAD §4, mechanical).
+
 ## Run it
 
 ```bash
 cd aletheia
-cargo test        # 38 passed — M1 acceptance + property + security + P2 component invariants
+cargo test        # 53 passed — M1 acceptance + property + security + P2 component + policy + AI units
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
