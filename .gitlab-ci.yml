@@ -27,3 +27,9 @@ vm-e2e-riscv:
     - rustup toolchain install nightly --profile minimal
     - rustup component add rust-src --toolchain nightly
     - ./scripts/vm-e2e-riscv.sh
+
+traceability:
+  stage: test
+  image: rust:latest
+  script:
+    - ./scripts/check-traceability.sh

@@ -45,3 +45,11 @@ jobs:
           rustup component add rust-src --toolchain nightly
       - name: Boot riscv64 kernel in VM and assert 11/11 invariants + exit 0
         run: ./scripts/vm-e2e-riscv.sh
+
+  traceability:
+    name: Requirement traceability (delivered ⇒ evidence)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert every delivered/partial requirement maps to existing evidence
+        run: ./scripts/check-traceability.sh
