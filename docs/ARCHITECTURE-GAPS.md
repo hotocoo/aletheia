@@ -53,6 +53,15 @@ Raised by: GPT-5.5 (OpenAI)
 > / address-space / scheduler / IPC-endpoint / memory / interrupt abstractions so the per-target
 > `usermode.rs`/`vm.rs`/`frames.rs` implement shared `kernel-core` interfaces rather than parallel
 > bespoke code, and the fuller cargo-workspace split.
+>
+> Progress note #2 (2026-07-22): the **scheduler + task abstraction** is now extracted into
+> `kernel-core/src/sched.rs` — `TaskId`, a `TaskState` lifecycle, a `TaskContext` backend seam
+> (save/restore stays arch-specific), and a `RoundRobin` scheduler (FIFO fairness + block/unblock/
+> finish). This lifts the scheduling POLICY the three targets' `usermode.rs` each hand-roll into one
+> arch-independent place, proved on the host (`kernel-core/tests/sched.rs`, 6 tests). STILL OPEN:
+> wiring each target's asm context switch to drive this scheduler (the asm is unchanged and still
+> VM-gated), extracting the address-space / memory / interrupt abstractions, and the cargo-workspace
+> split.
 
 Problem
 Core kernel abstractions risk becoming distributed across architecture-specific implementations. This creates the possibility that AArch64, x86-64, and RISC-V evolve into partially independent kernels rather than hardware backends implementing one coherent Aletheia kernel model.
@@ -115,6 +124,15 @@ Raised by: GPT-5.5 (OpenAI)
 > shared spine, all three targets gain it at once. STILL OPEN: asynchronous notifications,
 > timeout/cancellation, zero-copy shared-memory channels, priority inheritance, IPC trace/replay, and
 > wiring `send_transfer` into the per-target cross-address-space usermode IPC path.
+>
+> Progress note #3 (2026-07-22): **asynchronous notifications, deadline/timeout-aware receive,
+> cancellation, and IPC tracing + deterministic replay** are now delivered in the shared
+> `kernel-core::ipc` module (consolidated from `spine`; re-exported so all three targets + the
+> selftest suite are unaffected), each authorized by the same `CapEngine` and proved fail-closed
+> (`kernel-core/tests/ipc.rs`, 9 tests). Design + phasing recorded in ADR-020. STILL OPEN:
+> zero-copy shared-memory channels (needs a frame grant-table), priority inheritance (needs the
+> extracted scheduler wired into the IPC blocking path), and wiring `send_transfer` into each
+> target's cross-AS usermode fast-path.
 Problem
 Aletheia's microkernel architecture requires IPC to be a first-class kernel primitive. Higher-level services, components, applications, AI agents, and device services must communicate through explicit capability-authorized boundaries rather than ad hoc hosted APIs or Unix-socket-style abstractions.
 Goal
@@ -458,6 +476,15 @@ Proposed Issue 11 — Expand Testing from Invariant Validation to System Behavio
 Priority: High
 Category: Testing / Security / Reliability
 Raised by: GPT-5.5 (OpenAI)
+
+> Progress note (2026-07-22): the **security** category's core threats now have a permanent
+> regression suite — `kernel-core/tests/security_behavior.rs` (9 hosted tests): confused-deputy (no
+> ambient authority), capability laundering (revoked/expired parent, transfer amplification), TOCTOU /
+> stale-capability (immediate revocation, no cached authorization window), and cross-principal leakage
+> (scope confinement + action-wildcard non-over-match). STILL OPEN: the concurrency / reliability /
+> AI-security categories (interrupt storms, nested faults, power-loss/disk-corruption, prompt
+> injection, model-output fuzzing) and failure-injection harnesses for storage/services/drivers.
+
 Problem
 Aletheia already has a strong invariant, property, chaos, and VM-gate testing direction. The next stage needs broader system-behavior coverage, especially around concurrency, recovery, storage, device failure, and AI-specific security threats.
 Required Test Categories
@@ -500,6 +527,18 @@ Proposed Issue 12 — Establish Machine-Checkable Architecture Traceability
 Priority: Medium
 Category: Architecture / Documentation / Engineering Process
 Raised by: GPT-5.5 (OpenAI)
+
+> Progress note (2026-07-22): **delivered.** `docs/TRACEABILITY.md` is a machine-readable matrix of
+> 45 requirements, each mapping stable ReqID → ADR → implementation → test → VM gate → status.
+> `scripts/check-traceability.sh` (pure bash, no new CI dep) fails the build if any requirement marked
+> delivered/partial lacks Implementation+Test evidence that exists in the tree, or carries an unknown
+> status; deferred work is explicitly distinguished and never counted as delivered. Wired as the
+> `traceability` CI job on GitHub + GitLab, and negative-tested (delivered-without-evidence,
+> missing-file, unknown-status all fail with a precise message). This satisfies the acceptance
+> criteria "CI can detect requirements marked delivered without evidence" and "deferred work is
+> explicitly distinguished from implemented work." FOLLOW-ON: auto-generate the STATUS summary counts
+> from the matrix so the two can never drift.
+
 Problem
 The architecture and status documentation is substantially ahead of the implementation. This creates a risk that a requirement is described as delivered while only a partial implementation exists.
 Target Traceability
