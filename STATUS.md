@@ -569,13 +569,16 @@ hosted tests, nothing drove it) to `delivered` (a target uses it, VM-gated) — 
   argued: `scripts/vm-e2e.sh` re-passes EL0 invariants 6 (round-robin to completion), 7 (each task
   resumes with its own register-magic at the shared VA), 8 (distinct TTBR0 spaces), and 9 (timer
   preemption round-robins) with the shared scheduler in the loop; exit 0, all 11+7+13+13 invariants.
-- **RISC-V now also drives it** (`kernel-riscv64/src/usermode.rs::run_scheduler`, same swap,
-  VM-gated by `scripts/vm-e2e-riscv.sh` — U-mode invariants 6/8 re-pass with the shared scheduler in
-  the loop, exit 0). So **two of three** first-class targets now drive the one `kernel_core::sched`
-  policy; the aarch64 + RISC-V asm context switch is the only per-target part.
-- **Follow-on (documented):** wiring x86-64 `usermode.rs` to drive the same `RoundRobin` (its ring-3
-  asm is unchanged and still VM-gated with its bespoke rotation), and driving the
-  `PriorityScheduler`/`GrantTable` from a target (the path to REQ-IPC-008/009 `delivered`).
+- **ALL THREE first-class targets now drive the one shared scheduler** — RISC-V
+  (`kernel-riscv64/src/usermode.rs`, VM-gated by `scripts/vm-e2e-riscv.sh`, U-mode invariants 6/8) and
+  x86-64 (`kernel-x86_64/src/usermode.rs`, VM-gated by `kernel-x86_64/scripts/smoke-test.sh`, ring-3
+  invariant 6, exit 33) drive the identical `kernel_core::sched::RoundRobin` via the same swap. Each
+  target performs ONLY its arch context switch behind the `TaskContext` seam — the "one coherent
+  kernel, three backends" thesis (gap Issue 1 / GAPS2 Issue 2) is now real for the scheduler policy.
+- **Follow-on (documented):** driving the `PriorityScheduler`/`GrantTable` from a target (the path to
+  REQ-IPC-008/009 `delivered`, GAPS2 Issues 3/5), and a formal cross-target conformance suite
+  (GAPS2 Issue 2). (Pre-existing, non-CI-gated clippy lints in the x86-64 kernel — `gdt.rs` descriptor
+  dead-code, `run_in_space` arg count — are untouched by this brick; a separate cleanup.)
 
 ## Delivered — kernel-core policy, PARTIAL (2026-07-22 — REQ-IPC-009: priority inheritance + priority-aware scheduling)
 

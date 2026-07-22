@@ -34,6 +34,10 @@ use crate::spine::{CapEngine, CapToken, Constraints, Decision, Scope, Store, Tar
 use crate::{frames, gdt, idt, vm};
 use alloc::vec::Vec;
 use core::ptr::{addr_of, addr_of_mut};
+// REQ-KERN-005: the x86-64 target DRIVES the shared arch-independent scheduling policy from
+// kernel-core rather than hand-rolling its own rotation — kernel-core decides which task runs next;
+// this module performs only the context-switch MECHANISM (resume_frame + CR3 address-space switch).
+use kernel_core::sched::{RoundRobin, TaskId};
 
 core::arch::global_asm!(
     r#"
@@ -609,8 +613,11 @@ fn run_syscall(grant: bool) -> (bool, usize) {
         Some(r) => r,
         None => return (false, usize::MAX),
     };
-    let code =
-        vm::map_stub_frame(root, USER_CODE_VA, stub_bytes!(stub_syscall_start, stub_syscall_end));
+    let code = vm::map_stub_frame(
+        root,
+        USER_CODE_VA,
+        stub_bytes!(stub_syscall_start, stub_syscall_end),
+    );
     let stack = vm::map_user(root, USER_STACK_VA, true);
     if code.is_none() || stack.is_none() {
         free_leaf(root, USER_STACK_VA, stack);
@@ -621,7 +628,12 @@ fn run_syscall(grant: bool) -> (bool, usize) {
     let mut engine = CapEngine::new(0xA5A5, 1000);
     let mut caps = Vec::new();
     if grant {
-        caps.push(engine.mint("ring3-process", "event.emit", Scope::All, Constraints::none()));
+        caps.push(engine.mint(
+            "ring3-process",
+            "event.emit",
+            Scope::All,
+            Constraints::none(),
+        ));
     }
     set_trial(Trial {
         engine,
@@ -660,7 +672,11 @@ fn run_isolation() -> (bool, u64) {
         Some(r) => r,
         None => return (false, 0),
     };
-    let code = vm::map_stub_frame(root, USER_CODE_VA, stub_bytes!(stub_read_start, stub_read_end));
+    let code = vm::map_stub_frame(
+        root,
+        USER_CODE_VA,
+        stub_bytes!(stub_read_start, stub_read_end),
+    );
     let stack = vm::map_user(root, USER_STACK_VA, true);
     let sup = vm::map_supervisor(root, VA_SUP);
     if code.is_none() || stack.is_none() || sup.is_none() {
@@ -684,7 +700,7 @@ fn run_isolation() -> (bool, u64) {
 
     let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
     f.regs[RDI] = VA_SUP; // the supervisor page the ring-3 stub tries to read
-    // SAFETY: see `run_syscall`.
+                          // SAFETY: see `run_syscall`.
     unsafe {
         vm::switch_to(root);
         resume_frame(&mut f as *mut TrapFrame);
@@ -769,7 +785,9 @@ fn run_cross_process_isolation() -> (bool, bool, u64) {
     let mut a_engine = CapEngine::new(0xA5A5, 1000);
     let a_caps =
         alloc::vec![a_engine.mint("process-a", "event.emit", Scope::All, Constraints::none())];
-    let a = run_in_space(root_a, root_main, VA_P, SYS_EMIT, a_engine, a_caps, false, 0);
+    let a = run_in_space(
+        root_a, root_main, VA_P, SYS_EMIT, a_engine, a_caps, false, 0,
+    );
     // B reads the SAME VA_P (unmapped in its space) -> armed fault at VA_P, contained.
     let b = run_in_space(
         root_b,
@@ -930,8 +948,11 @@ fn run_scheduler() -> (bool, bool, bool) {
     let magics: [u64; NTASK] = [0xA1A1, 0xB2B2];
     let mut code: [Option<frames::Frame>; NTASK] = [None, None];
     let mut stack: [Option<frames::Frame>; NTASK] = [None, None];
-    let roots = match setup_tasks(&mut code, &mut stack, stub_bytes!(stub_coop_start, stub_coop_end))
-    {
+    let roots = match setup_tasks(
+        &mut code,
+        &mut stack,
+        stub_bytes!(stub_coop_start, stub_coop_end),
+    ) {
         Some(r) => r,
         None => return (false, false, false),
     };
@@ -942,26 +963,25 @@ fn run_scheduler() -> (bool, bool, bool) {
         for i in 0..NTASK {
             let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
             f.regs[RBX] = magics[i];
-            tcbs[i] = Tcb { frame: f, done: false };
+            tcbs[i] = Tcb {
+                frame: f,
+                done: false,
+            };
         }
     }
 
+    // Scheduling POLICY driven by the shared kernel_core::sched::RoundRobin (REQ-KERN-005): the
+    // x86-64 target drives the SAME scheduler proved on the host and used by the aarch64 + RISC-V
+    // backends, performing only the context-switch MECHANISM (resume_frame + CR3 switch) behind the
+    // TaskContext seam. `schedule_next` picks; a yielded task rotates to the tail; an exited task is
+    // `finish`ed. Reproduces the same A,B,A,B,A,B,A,B order (asserted below).
+    let mut policy = RoundRobin::new();
+    for i in 0..NTASK {
+        policy.spawn(TaskId(i as u64));
+    }
     let mut order: Vec<(usize, u64)> = Vec::new();
-    let mut cur = 0usize;
-    loop {
-        let mut pick = None;
-        for k in 0..NTASK {
-            let s = (cur + k) % NTASK;
-            // SAFETY: single-threaded read of run state.
-            if !unsafe { (*addr_of!(TCBS))[s].done } {
-                pick = Some(s);
-                break;
-            }
-        }
-        let slot = match pick {
-            Some(s) => s,
-            None => break,
-        };
+    while let Some(TaskId(id)) = policy.schedule_next() {
+        let slot = id as usize;
         sched_report(0, false); // reset for this slice
                                 // SAFETY: roots[slot] maps the kernel; switch into the task's space, resume until it
                                 // yields/exits, restore the scheduler's space. The TCB frame is kernel data (shared).
@@ -978,8 +998,8 @@ fn run_scheduler() -> (bool, bool, bool) {
         if exited {
             // SAFETY: single-threaded write of run state.
             unsafe { (*addr_of_mut!(TCBS))[slot].done = true };
+            policy.finish(TaskId(id));
         }
-        cur = (slot + 1) % NTASK;
         if order.len() > 4 * NTASK {
             break; // safety bound — a correct run is exactly 2*NTASK*2 (8) slices
         }
@@ -1013,8 +1033,11 @@ fn run_preemptive() -> (bool, bool) {
     let root_main = vm::active_root();
     let mut code: [Option<frames::Frame>; NTASK] = [None, None];
     let mut stack: [Option<frames::Frame>; NTASK] = [None, None];
-    let roots = match setup_tasks(&mut code, &mut stack, stub_bytes!(stub_spin_start, stub_spin_end))
-    {
+    let roots = match setup_tasks(
+        &mut code,
+        &mut stack,
+        stub_bytes!(stub_spin_start, stub_spin_end),
+    ) {
         Some(r) => r,
         None => return (false, false),
     };
@@ -1026,7 +1049,10 @@ fn run_preemptive() -> (bool, bool) {
             let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_IF);
             f.regs[RBX] = 0;
             f.regs[RCX] = SPIN_COUNTDOWN;
-            tcbs[i] = Tcb { frame: f, done: false };
+            tcbs[i] = Tcb {
+                frame: f,
+                done: false,
+            };
         }
     }
 
@@ -1053,7 +1079,11 @@ fn run_preemptive() -> (bool, bool) {
         }
         let (was_preempt, was_exit, progress) = unsafe {
             let s = &*addr_of!(SCHED);
-            (s.preempted, s.exited, (*addr_of!(TCBS))[slot].frame.regs[RBX])
+            (
+                s.preempted,
+                s.exited,
+                (*addr_of!(TCBS))[slot].frame.regs[RBX],
+            )
         };
         if was_exit || !was_preempt {
             clean = false; // timer never fired (countdown drained) or an unexpected return
