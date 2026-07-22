@@ -28,6 +28,7 @@ mod hal;
 mod heap;
 mod semihosting;
 mod usermode;
+mod virtio;
 mod vm;
 
 // The capability-secure spine + the M1 invariant suite are arch-independent and live in
@@ -111,6 +112,21 @@ pub extern "C" fn kmain() -> ! {
         Err((idx, name)) => {
             kprintln!("[usermode] FAILED at EL0 invariant {}: {}", idx, name);
             semihosting::exit(80 + idx as i32);
+        }
+    }
+
+    // virtio-blk: the first REAL hardware driver (REQ-DRV-001, ADR-023). Skips green when no disk is
+    // attached (bare `cargo run`); the VM gate attaches one and asserts the invariant marker below.
+    kprintln!("");
+    kprintln!(
+        "--- virtio-blk selftests (real driver: discovery + virtqueue I/O + journal over storage) ---"
+    );
+    match virtio::selftest() {
+        Ok(0) => {} // no device attached — graceful skip, already logged
+        Ok(n) => kprintln!("[virtio] ALL {} VIRTIO-BLK INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[virtio] FAILED at virtio invariant {}: {}", idx, name);
+            semihosting::exit(120 + idx as i32);
         }
     }
 
