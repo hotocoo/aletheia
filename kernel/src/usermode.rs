@@ -34,7 +34,7 @@ use core::ptr::{addr_of, addr_of_mut};
 // REQ-KERN-005: the aarch64 target DRIVES the shared arch-independent scheduling policy from
 // kernel-core rather than hand-rolling its own rotation. kernel-core decides which task runs next;
 // this module performs only the context-switch MECHANISM (resume_frame + address-space switch).
-use kernel_core::sched::{RoundRobin, TaskId};
+use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's `vm.rs` performs the real page mapping into each address space.
 use kernel_core::grant::{GrantTable, ShareMode};
@@ -271,6 +271,14 @@ fn current() -> Option<&'static mut Trial> {
 static mut ENDPOINT: Option<u64> = None;
 /// The body the most recent authorized `SYS_RECV` drained from the endpoint.
 static mut IPC_RECEIVED: u64 = 0;
+/// When true (only during `run_blocking_ipc`), an authorized `SYS_RECV` on an EMPTY endpoint records
+/// that the caller must BLOCK (via `IPC_RECV_BLOCKED`) instead of returning fail-value immediately —
+/// the scheduler then deschedules it until a `SYS_SEND` wakes it. Default false ⇒ every other test
+/// keeps the original non-blocking mailbox semantics untouched.
+static mut IPC_BLOCK_MODE: bool = false;
+/// Set by the `SYS_RECV` handler when it blocked the caller on an empty endpoint (read by the
+/// blocking-IPC scheduler after the excursion returns, to move the task to the Blocked state).
+static mut IPC_RECV_BLOCKED: bool = false;
 
 // ---------------------------------------------------------------------------
 // Scheduler state (multitasking invariants).
@@ -373,7 +381,15 @@ pub extern "C" fn el0_trap(num: u64, arg: u64) -> u64 {
                             unsafe { *addr_of_mut!(IPC_RECEIVED) = body };
                             body
                         }
-                        None => u64::MAX, // authorized, but the endpoint was empty
+                        None => {
+                            // Empty endpoint. In blocking mode, signal the scheduler to deschedule
+                            // this caller until a SYS_SEND wakes it; otherwise keep the original
+                            // non-blocking semantics (return fail-value).
+                            if unsafe { IPC_BLOCK_MODE } {
+                                unsafe { *addr_of_mut!(IPC_RECV_BLOCKED) = true };
+                            }
+                            u64::MAX
+                        }
                     }
                 }
                 _ => {
@@ -607,6 +623,12 @@ const STUB_READ_X0: [u32; 2] = [0xF940_0001, 0x1400_0000];
 /// If the read faults the `svc` is never reached — a successful syscall is positive proof the
 /// read landed (used for the cross-process A case).
 const STUB_READ_THEN_SYSCALL: [u32; 3] = [0xF940_0001, 0xD400_0001, 0x1400_0000];
+/// EL0 receiver stub for blocking IPC: issue the primed syscall (x8 = SYS_RECV), then EXIT carrying
+/// whatever landed in x0 as the exit arg — so the kernel-delivered received body is reported back
+/// through `sched_report`. `svc #0 ; movz x8,#3 (SYS_EXIT) ; svc #0 ; b .`. On an empty endpoint the
+/// first `svc` blocks; when the sender wakes it the kernel writes the body into x0 and resumes here
+/// at the `movz`, so the EXIT reports the received body.
+const STUB_RECV_THEN_EXIT: [u32; 4] = [0xD400_0001, 0xD280_0068, 0xD400_0001, 0x1400_0000];
 
 /// Run one EL0 syscall excursion. `grant` decides whether the process holds the `event.emit`
 /// capability. Returns `(authorized, event_count_after)`.
@@ -1166,6 +1188,136 @@ fn run_preemptive() -> (bool, bool) {
     (fair, progress_ok && clean)
 }
 
+/// Prove **real blocking IPC** (gap register Issue 2 / the vehicle for REQ-IPC-009): a receiver that
+/// `recv`s an EMPTY endpoint genuinely BLOCKS (is descheduled via `kernel_core::sched`), a sender's
+/// `send` WAKES it and the kernel delivers the body across address spaces, and the woken receiver
+/// RESUMES — continuing past its `svc` with the body in `x0` and exiting while reporting it. Unlike
+/// the non-blocking mailbox (`run_ipc`), this exercises block → wake → deliver → resume with the
+/// scheduler in the loop. Two EL0 tasks in separate TTBR0 spaces. Returns
+/// `(recv_blocked, send_woke_and_delivered, receiver_resumed_with_body)`.
+fn run_blocking_ipc() -> (bool, bool, bool) {
+    let root_main = vm::active_root();
+    let (root_r, root_s) = match (vm::build_identity(), vm::build_identity()) {
+        (Some(r), Some(s)) => (r, s),
+        _ => return (false, false, false),
+    };
+    // Receiver runs the recv→exit stub; sender runs the one-shot syscall stub (send then park).
+    let r_code = map_user_code(root_r, USER_CODE_VA, &STUB_RECV_THEN_EXIT);
+    let r_stack = map_user_stack(root_r, USER_STACK_VA);
+    let s_code = map_user_code(root_s, USER_CODE_VA, &STUB_SYSCALL);
+    let s_stack = map_user_stack(root_s, USER_STACK_VA);
+    if r_code.is_none() || r_stack.is_none() || s_code.is_none() || s_stack.is_none() {
+        for (root, va, f) in [
+            (root_r, USER_STACK_VA, r_stack),
+            (root_r, USER_CODE_VA, r_code),
+            (root_s, USER_STACK_VA, s_stack),
+            (root_s, USER_CODE_VA, s_code),
+        ] {
+            if let Some(f) = f {
+                drop_user_page(root, va, f);
+            }
+        }
+        return (false, false, false);
+    }
+
+    const BODY: u64 = 0xB10C_CAFE;
+    // One shared trial holds the endpoint capability the handler authorizes both send and recv
+    // against (cap-gating itself is proved in run_ipc; here we prove BLOCKING). Blocking mode on.
+    let mut engine = CapEngine::new(0xB10C, 1000);
+    let caps = alloc::vec![engine.mint("ipc", "ipc.msg", Scope::All, Constraints::none())];
+    // SAFETY: single-threaded; install the shared trial + endpoint/flag state before any excursion.
+    unsafe {
+        *addr_of_mut!(ENDPOINT) = None;
+        *addr_of_mut!(IPC_RECEIVED) = 0;
+        *addr_of_mut!(IPC_RECV_BLOCKED) = false;
+        *addr_of_mut!(IPC_BLOCK_MODE) = true;
+        *addr_of_mut!(CURRENT) = Some(Trial {
+            engine,
+            store: Store::new(),
+            caps,
+            action: "ipc.msg",
+            armed: false,
+            allowed: false,
+            isolation_held: false,
+            fault_va: 0,
+        });
+    }
+    let mut recv_tcb = Tcb {
+        frame: TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, 0, SYS_RECV),
+        done: false,
+    };
+    let mut send_tcb = Tcb {
+        frame: TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, BODY, SYS_SEND),
+        done: false,
+    };
+    let mut sched = RoundRobin::new();
+    sched.spawn(TaskId(0)); // receiver
+    sched.spawn(TaskId(1)); // sender
+
+    // Step 1 — run the receiver: its recv on the empty endpoint must BLOCK (descheduled).
+    // SAFETY: root_r replicates the kernel identity map; switch in, resume, switch back.
+    unsafe {
+        vm::switch_address_space(root_r);
+        resume_frame(&mut recv_tcb.frame as *mut TrapFrame);
+        vm::switch_address_space(root_main);
+    }
+    let recv_blocked = unsafe { *addr_of!(IPC_RECV_BLOCKED) };
+    if recv_blocked {
+        sched.block(TaskId(0));
+    }
+
+    // Step 2 — run the sender: its send deposits the body; because a receiver is blocked-waiting,
+    // the kernel WAKES it (unblock), delivers the body into the receiver's x0, and drains the slot.
+    // SAFETY: root_s replicates the kernel identity map; switch in, resume, switch back.
+    unsafe {
+        vm::switch_address_space(root_s);
+        resume_frame(&mut send_tcb.frame as *mut TrapFrame);
+        vm::switch_address_space(root_main);
+    }
+    let sent = unsafe { (*addr_of!(ENDPOINT)).is_some() };
+    let send_woke_and_delivered = if sent && recv_blocked {
+        // SAFETY: single-threaded; drain the slot and deliver to the woken receiver.
+        let body = unsafe { (*addr_of_mut!(ENDPOINT)).take() }.unwrap_or(0);
+        unsafe { *addr_of_mut!(IPC_RECEIVED) = body };
+        recv_tcb.frame.regs[0] = body; // deliver the body into the woken receiver's x0
+        sched.unblock(TaskId(0));
+        body == BODY && sched.state(TaskId(0)) == Some(TaskState::Ready)
+    } else {
+        false
+    };
+
+    // Step 3 — resume the woken receiver: it continues past its recv `svc` with x0 = body, then
+    // EXITs reporting x0 as the arg — so a reported magic == BODY proves it received across spaces.
+    sched_report(0, false);
+    // SAFETY: root_r replicates the kernel identity map; resume the now-Ready receiver.
+    unsafe {
+        vm::switch_address_space(root_r);
+        resume_frame(&mut recv_tcb.frame as *mut TrapFrame);
+        vm::switch_address_space(root_main);
+    }
+    let (reported, exited) = unsafe {
+        let s = &*addr_of!(SCHED);
+        (s.last_magic, s.exited)
+    };
+    let receiver_resumed_with_body = exited && reported == BODY;
+
+    // Restore non-blocking mode + clear the trial; reclaim the leaf pages.
+    unsafe {
+        *addr_of_mut!(IPC_BLOCK_MODE) = false;
+        (*addr_of_mut!(CURRENT)).take();
+    }
+    drop_user_page(root_r, USER_STACK_VA, r_stack.expect("mapped"));
+    drop_user_page(root_r, USER_CODE_VA, r_code.expect("mapped"));
+    drop_user_page(root_s, USER_STACK_VA, s_stack.expect("mapped"));
+    drop_user_page(root_s, USER_CODE_VA, s_code.expect("mapped"));
+
+    (
+        recv_blocked,
+        send_woke_and_delivered,
+        receiver_resumed_with_body,
+    )
+}
+
 /// Shared VA for the grant-table test — an unused slot in the same `0x5000_xxxx` hole as the other
 /// user pages (above QEMU RAM, so it is NOT identity-mapped: a real per-process translation).
 const SHARED_VA: usize = 0x5000_5000;
@@ -1360,6 +1512,24 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         revoke_unmaps,
         "el0: a successful grant revoke gates the unmap of the grantee's page; the grantor keeps access"
+    );
+
+    // 17, 18 & 19 — real BLOCKING IPC (gap register Issue 2; the vehicle for REQ-IPC-009): a receiver
+    // that recv's an empty endpoint BLOCKS (descheduled via kernel_core::sched), a sender's send WAKES
+    // it and delivers the body across address spaces, and the woken receiver RESUMES past its svc with
+    // the body in x0 and exits reporting it.
+    let (recv_blocked, send_woke, receiver_resumed) = run_blocking_ipc();
+    check!(
+        recv_blocked,
+        "el0: recv on an empty endpoint BLOCKS the receiver — it is descheduled (kernel_core::sched)"
+    );
+    check!(
+        send_woke,
+        "el0: a send WAKES the blocked receiver (unblock ⇒ Ready) and delivers the body across spaces"
+    );
+    check!(
+        receiver_resumed,
+        "el0: the woken receiver RESUMES past its svc with the body in x0 and exits reporting it"
     );
 
     Ok(n)
