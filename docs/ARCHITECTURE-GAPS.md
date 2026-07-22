@@ -69,11 +69,13 @@ Raised by: GPT-5.5 (OpenAI)
 > (`resume_frame` + TTBR0 switch) behind the `TaskContext` seam. VM-gated: `scripts/vm-e2e.sh` re-passes
 > EL0 invariants 6–9 (round-robin to completion, per-slice register-magic, distinct spaces, timer
 > preemption) with the shared scheduler in the loop (exit 0). This converts REQ-KERN-005
-> `partial → delivered`. **RISC-V now also drives it** (`kernel-riscv64/src/usermode.rs`, VM-gated by
-> `scripts/vm-e2e-riscv.sh`) — two of three targets on the one shared scheduler. STILL OPEN: wiring
-> x86-64 `usermode.rs` to drive it too, driving the `PriorityScheduler`/`GrantTable` from a target (the
-> REQ-IPC-008/009 path), the remaining address-space / memory / interrupt abstractions, and the
-> cargo-workspace split.
+> `partial → delivered`. **ALL THREE targets now drive it** — RISC-V (`kernel-riscv64/src/usermode.rs`,
+> `scripts/vm-e2e-riscv.sh`) and x86-64 (`kernel-x86_64/src/usermode.rs`,
+> `kernel-x86_64/scripts/smoke-test.sh`, exit 33) drive the identical `kernel_core::sched::RoundRobin`
+> via the same swap; each performs only its arch context switch behind the `TaskContext` seam. STILL
+> OPEN: driving the `PriorityScheduler`/`GrantTable` from a target (the REQ-IPC-008/009 path), the
+> remaining address-space / memory / interrupt abstractions, the cargo-workspace split, and a formal
+> cross-target conformance suite (GAPS2 Issue 2).
 
 Problem
 Core kernel abstractions risk becoming distributed across architecture-specific implementations. This creates the possibility that AArch64, x86-64, and RISC-V evolve into partially independent kernels rather than hardware backends implementing one coherent Aletheia kernel model.
