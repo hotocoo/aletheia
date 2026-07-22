@@ -523,3 +523,7 @@ pub use crate::grant::{GrantError, GrantTable, ShareMode};
 // so the `spine::*` surface carries the priority-scheduler alongside the round-robin one; the policy
 // is arch-independent, the context switch stays each target's `TaskContext` seam.
 pub use crate::priosched::{Endpoint, Priority, PriorityScheduler, SchedError};
+
+// Crash-consistent journaled block store (REQ-STOR-002, ADR-024) — arch-independent WAL over the
+// `BlockDevice` seam a real driver later implements; re-exported on the `spine::*` surface.
+pub use crate::storage::{BlockDevice, Journal, MemBlockDevice, StorageError, BLOCK_SIZE};

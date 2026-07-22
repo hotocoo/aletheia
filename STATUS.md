@@ -554,6 +554,32 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-STOR-002: crash-consistent journaled block store)
+
+Second P7 brick (persistent storage, ADR-024). A general-purpose OS needs storage that survives power
+loss without corruption. `kernel-core/src/storage.rs` delivers the arch-independent middle of that
+stack: a **write-ahead journal** over an abstract `BlockDevice` seam (a real virtio-blk driver,
+REQ-DRV-001, will implement the same trait). `alloc`-only — the journal core is kernel-portable.
+
+- **Atomic commit protocol:** write the redo data to the journal area → flush → write a **checksummed
+  commit record** → flush (*the atomic pivot*) → apply to home blocks → flush.
+- **Recovery is binary:** if the commit record's magic is absent or its checksum (over header **and**
+  journal payload) fails, the transaction is uncommitted and nothing is applied; otherwise the journal
+  is replayed idempotently. So for **every** crash point recovery yields the pre- or the fully-applied
+  state — never torn.
+- **Proved (`kernel-core/tests/storage.rs`, 5 tests):** the load-bearing **crash-at-every-prefix
+  sweep** (capture a 2-block txn's ordered writes; for every prefix K, materialize the device with
+  only the first K writes, recover, assert both home blocks are pre OR fully post — never torn); a
+  torn commit record → rolled back; a torn journal payload → rolled back (checksum load-bearing,
+  corruption surfaced not swallowed); full-commit replay is idempotent; a blank device recovers to
+  nothing (fail closed). `kernel-core` hosted suite **63 passed**; aarch64 VM gate still green (the
+  new module compiles no_std); `clippy -D warnings` clean.
+
+**Honesty (advisor):** NEW requirement **REQ-STOR-002** delivered. The umbrella **REQ-STOR-001**
+(full stack: real driver, filesystem/object store, encryption-at-rest layer, semantic-store-on-
+persistent) stays `partial` — the journal is its crash-consistent middle; the ends are follow-ons
+(REQ-DRV-001 driver next). Traceability green (49 reqs — 41 delivered / 3 partial / 5 deferred).
+
 ## Delivered (2026-07-22 — REQ-BOOT-002: asymmetric component provenance, ed25519 + key hierarchy)
 
 First P7 brick (secure-boot Phase 2, ADR-025). Phase 1's `TrustStore` was **symmetric** HMAC — the

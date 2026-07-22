@@ -24,7 +24,17 @@ children are durable. Crash consistency by construction — an interrupted write
 committed root intact (no torn state). Integrity = the address IS the checksum; corruption is
 detectable on read (hash mismatch).
 
-**Phase 2 — durability + recovery.** Journaling/CoW commit; snapshots (a root is a snapshot); rollback
+**Phase 2 — durability + recovery.**
+
+*Delivered (REQ-STOR-002, 2026-07-22, `kernel-core/src/storage.rs`).* A crash-consistent **write-ahead
+journal** over an abstract `BlockDevice` seam (the `alloc`-only, kernel-portable middle of the stack; a
+real virtio-blk driver, REQ-DRV-001/ADR-023, implements the same trait). Commit = journal-write →
+flush → checksummed commit-record → flush (the atomic pivot) → apply → flush; recovery replays iff the
+commit record verifies, else rolls back. Proved by a **crash-at-every-prefix sweep** (for every crash
+point, recovery yields pre- or fully-applied state, never torn) plus torn-commit-record and
+torn-journal-payload rejection (`kernel-core/tests/storage.rs`, 5 tests). Follow-ons below stay open.
+
+Journaling/CoW commit; snapshots (a root is a snapshot); rollback
 to any prior root; anti-downgrade tie-in with ADR-025. Encryption-key lifecycle bound to secure key
 storage (TPM/enclave where available). Recovery tooling: mount last-known-good root; a fsck-equivalent
 that verifies reachable objects' hashes.
