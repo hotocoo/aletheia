@@ -23,10 +23,13 @@
 >   (REQ-BOOT-002 delivered): ed25519, public-key-only verifier (cannot forge) + root→signing-key
 >   hierarchy (`aletheia/src/provenance.rs`). STILL hardware-bound (REQ-BOOT-001): firmware→kernel
 >   measured chain, TPM/secure-enclave root of trust, anti-rollback (needs persistent secure storage).
-> - **#7 Persistent storage substrate — ⏳ partial.** Crash-consistent journaled block store delivered
->   (REQ-STOR-002, `kernel-core/src/storage.rs`): WAL over a `BlockDevice` seam, proved by a
->   crash-at-every-prefix sweep + torn-record/torn-journal rejection. STILL open (REQ-STOR-001): a real
->   storage driver (virtio-blk, #5), encryption-at-rest layer, and the semantic store on persistence.
+> - **#7 Persistent storage substrate — ⏳ partial, advanced.** Crash-consistent journaled block store
+>   delivered (REQ-STOR-002, `kernel-core/src/storage.rs`): WAL over a `BlockDevice` seam, proved by a
+>   crash-at-every-prefix sweep + torn-record/torn-journal rejection. The **real storage driver now
+>   exists**: a virtio-blk driver over modern virtio-mmio (REQ-DRV-003, `kernel/src/virtio.rs`)
+>   implements that `BlockDevice` trait and is VM-gated (`scripts/vm-e2e.sh`) — the journal's
+>   commit+recover is proved over real emulated storage, not just the in-memory device. STILL open
+>   (REQ-STOR-001): the encryption-at-rest layer over the device and the semantic store on persistence.
 > - **#8 Fault supervision as a kernel primitive — ⏳ deferred** (REQ-REL-001 / ADR-026).
 > - **#9 Capability concurrency spec before SMP — ⏳ open** (precedes #4).
 > - **#10 Hardware-diversity ladder — ⏳ deferred** (QEMU is the current top rung; real boards later).

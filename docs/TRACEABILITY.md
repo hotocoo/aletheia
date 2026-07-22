@@ -80,7 +80,8 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-SEC-001 | Adversarial security-behaviour regressions | ADR-003 | kernel-core/src/spine.rs | kernel-core/tests/security_behavior.rs | - | delivered |
 | REQ-DRV-001 | Device / driver architecture (discovery, real driver, hotplug, DMA/IOMMU, restart) | ADR-023 | kernel-core/src/device.rs | kernel-core/tests/device.rs | - | partial |
 | REQ-DRV-002 | Capability-authorized device access (hosted, over the BlockDevice seam) | ADR-023 | kernel-core/src/device.rs | kernel-core/tests/device.rs | - | delivered |
-| REQ-STOR-001 | Persistent storage stack (driver → FS/object store → encryption → semantic store) | ADR-024 | kernel-core/src/storage.rs | kernel-core/tests/storage.rs | - | partial |
+| REQ-DRV-003 | virtio-blk driver over virtio-mmio (modern/v2): discovery + split-virtqueue + BlockDevice, VM-gated | ADR-023 | kernel/src/virtio.rs | kernel/src/virtio.rs | scripts/vm-e2e.sh | delivered |
+| REQ-STOR-001 | Persistent storage stack (driver → FS/object store → encryption → semantic store) | ADR-024 | kernel-core/src/storage.rs; kernel/src/virtio.rs | kernel-core/tests/storage.rs; kernel/src/virtio.rs | scripts/vm-e2e.sh | partial |
 | REQ-STOR-002 | Crash-consistent journaled block store (WAL over a BlockDevice seam, hosted) | ADR-024 | kernel-core/src/storage.rs | kernel-core/tests/storage.rs | - | delivered |
 | REQ-BOOT-001 | Secure boot + chain of trust (firmware→bootloader→kernel measured chain, hardware root) | ADR-025 | aletheia/src/provenance.rs; aletheia/src/crypto.rs | aletheia/tests/component_signing.rs | - | partial |
 | REQ-BOOT-002 | Asymmetric component provenance (ed25519, public-key-only verifier, root→signing key hierarchy) | ADR-025 | aletheia/src/provenance.rs; aletheia/src/crypto.rs | aletheia/src/provenance.rs | - | delivered |

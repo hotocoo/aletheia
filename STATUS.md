@@ -554,6 +554,45 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-DRV-003: virtio-blk driver — the FIRST real hardware driver, VM-gated)
+
+The named next slice of ADR-023, executed. Until now the `kernel_core::storage::BlockDevice` seam was
+only ever backed by an in-memory `MemBlockDevice`; this brick implements it over a **genuine emulated
+block device** — a **virtio-blk** driver over **modern (v2) virtio-mmio** on the aarch64 QEMU `virt`
+dev backend (`kernel/src/virtio.rs`) — so the write-ahead journal (REQ-STOR-002) now runs over real
+emulated storage. This closes gap-register Issue 5's "no concrete driver" hole. Contract-honest
+(ADR-010): written outside-in, boot-verified; a wrong ring layout faults/hangs into the 60s VM
+watchdog, never a silent pass.
+
+- **Discovery + modern handshake.** Scans the 32 virtio-mmio slots for magic (`0x74726976`) +
+  `DeviceID==2`; init = reset → `ACKNOWLEDGE|DRIVER` → feature negotiation (accept **only**
+  `VIRTIO_F_VERSION_1` + `VIRTIO_BLK_F_FLUSH` when offered) → `FEATURES_OK` read-back → queue-0 setup
+  → `DRIVER_OK`. **Fails closed** on a legacy (v1) transport — no silent wrong-mode driver.
+- **Split virtqueue + request protocol.** A 3-descriptor chain (header / data / status) with `dsb`
+  barriers around `QueueNotify` and the used-ring poll (the classic virtqueue ordering trap), a
+  bounded poll (anti-hang), and descriptors carrying **physical** addresses (VA==PA under the identity
+  map). `read_block`/`write_block`/`flush` each issue one request. The 4 KiB `BlockDevice` block maps
+  to **8** 512-byte virtio sectors (sector = idx × 8).
+- **No ambient authority (REQ-DRV-002 over the real device).** The driver holds only the frames it
+  allocated; wrapped in `DeviceGuard`, every block op is authorized by the SAME `CapEngine` — proved
+  live: no capability ⇒ no bytes move; a write capability's bytes land and read back.
+- **5 VM-gated invariants** (`scripts/vm-e2e.sh`, exit 0, `ALL 5 VIRTIO-BLK INVARIANTS HOLD`):
+  (1) device discovered + initialized; (2) capacity read matches the attached 1 MiB image (256 × 4 KiB
+  blocks); (3) write→read-back virtqueue round-trip returns the written bytes; (4) `Journal` commit +
+  a FRESH `recover` reproduce state from the device bytes alone (crash-consistency over real storage —
+  the ADR-023 payoff); (5) capability-gated I/O via `DeviceGuard`. **Graceful skip** under bare
+  `cargo run` (`[virtio] no device (skipped)`) so the disk-less runner stays green; the gate attaches
+  the disk and forces modern mmio (`-global virtio-mmio.force-legacy=false` — QEMU defaults the mmio
+  transport to legacy v1). `clippy` clean.
+- **Two gotchas (documented in-code):** (1) QEMU's `virtio-blk-device` on `virt` presents **legacy
+  (v1)** virtio-mmio unless `virtio-mmio.force-legacy=false`; the driver's version check caught this
+  as a fail-closed init error before any I/O. (2) descriptor addresses are physical DMA targets — the
+  identity map makes VA==PA, so frame-allocated ring/buffer addresses are handed to the device raw.
+- **Deferred (umbrella REQ-DRV-001):** hotplug, DMA/IOMMU confinement, driver-crash isolation +
+  supervisor restart (ADR-023 Phase 3), and the RISC-V/x86-64 virtio backends (the aarch64 driver is
+  the reference — the same cross-target spread pattern as blocking-IPC/priority-inheritance).
+  Traceability green: **52 requirements — 44 delivered / 4 partial / 4 deferred**.
+
 ## Delivered (2026-07-22 — REQ-DRV-002: capability-authorized device access)
 
 Fourth P7 brick — the capability model extended to hardware (no ambient device authority).
