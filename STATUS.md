@@ -570,8 +570,10 @@ over the **real** `MemBlockDevice` — deny/allow decides actual bytes, not a re
 **Honesty (advisor):** NEW req **REQ-DRV-002** delivered; the umbrella **REQ-DRV-001** (device
 discovery, a real hardware driver, hotplug, DMA/IOMMU, restart) stays `partial` — the concrete
 **virtio-blk driver, which will implement this very `BlockDevice` trait**, is the named next slice,
-deferred (ADR-023, hardware-bound, ADR-010). Traceability green (51 reqs — 43 delivered / 4 partial /
-4 deferred).
+deferred (ADR-023, hardware-bound, ADR-010). A precise **virtio-blk implementation plan** (virtio-mmio
+discovery → feature negotiation → split-virtqueue setup → request protocol → `BlockDevice` impl → QEMU
+wiring → VM-gated invariants) is now written into ADR-023 so a fresh-context session executes it in one
+focused pass. Traceability green (51 reqs — 43 delivered / 4 partial / 4 deferred).
 
 ## Delivered (2026-07-22 — REQ-CONF-001: cross-architecture semantic conformance gate, GAPS2 #2)
 
