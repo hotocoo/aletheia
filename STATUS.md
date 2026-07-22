@@ -554,6 +554,25 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-CONF-001: cross-architecture semantic conformance gate, GAPS2 #2)
+
+Third P7 brick — the consolidation the audit called the #1 systemic risk: *silent behavioral
+divergence* between the three CPU backends. `scripts/conformance.sh` boots all three targets and
+asserts each proves the **same core semantic contract** — 10 arch-neutral named behaviors
+(capability-secure cross-AS IPC, the grant-table's cap-gate/zero-copy/revoke, blocking IPC's
+block/wake/resume, and priority inheritance's inversion-avoidance/service/receive).
+
+- **Spec'd on named behaviors, not invariant counts** (advisor): the contract substrings deliberately
+  omit the privilege term (el0/u-mode/ring3), the address-space term (TTBR0/satp/PML4), and the trap
+  term (svc/ecall/int 0x80), so a genuine behavior matches on every arch. Per-arch invariants
+  (x86-64's 46 total vs aarch64/RISC-V's 53 — long mode can't do the MMU-off→on flip) are **extensions**
+  reported informationally, never failures. x86-64 is SKIPPED (never silently passed) where the host
+  lacks the image toolchain.
+- **Result:** all three targets PASS all 10 core behaviors — the "one coherent kernel, three backends"
+  thesis is now machine-checked, not asserted. Traceability green (50 reqs — 42 delivered / 3 partial
+  / 5 deferred). Follow-on: wire as a CI job alongside `e2e-all`; extend the contract as new
+  cross-target behaviors land.
+
 ## Delivered (2026-07-22 — REQ-STOR-002: crash-consistent journaled block store)
 
 Second P7 brick (persistent storage, ADR-024). A general-purpose OS needs storage that survives power
