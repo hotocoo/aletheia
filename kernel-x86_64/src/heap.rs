@@ -52,7 +52,9 @@ unsafe impl GlobalAlloc for Bump {
 }
 
 #[global_allocator]
-static ALLOCATOR: Bump = Bump { next: AtomicUsize::new(0) };
+static ALLOCATOR: Bump = Bump {
+    next: AtomicUsize::new(0),
+};
 
 pub fn used_bytes() -> usize {
     // SAFETY: reads a static; no exclusive borrow of HEAP_AREA is ever taken.

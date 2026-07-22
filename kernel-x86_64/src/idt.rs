@@ -25,7 +25,8 @@ pub fn init() {
         let idt = IDT.get_mut();
         idt.breakpoint.set_handler_fn(breakpoint);
         idt.invalid_opcode.set_handler_fn(invalid_opcode);
-        idt.general_protection_fault.set_handler_fn(general_protection);
+        idt.general_protection_fault
+            .set_handler_fn(general_protection);
         idt.page_fault.set_handler_fn(page_fault);
         idt.double_fault.set_handler_fn(double_fault);
         idt[TIMER_VECTOR].set_handler_fn(timer);
@@ -38,22 +39,36 @@ extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn invalid_opcode(frame: InterruptStackFrame) {
-    kprintln!("[cpu] #UD (invalid opcode) at {:#x}", frame.instruction_pointer.as_u64());
+    kprintln!(
+        "[cpu] #UD (invalid opcode) at {:#x}",
+        frame.instruction_pointer.as_u64()
+    );
     crate::exit::exit(105);
 }
 
 extern "x86-interrupt" fn general_protection(frame: InterruptStackFrame, err: u64) {
-    kprintln!("[cpu] #GP err={:#x} at {:#x}", err, frame.instruction_pointer.as_u64());
+    kprintln!(
+        "[cpu] #GP err={:#x} at {:#x}",
+        err,
+        frame.instruction_pointer.as_u64()
+    );
     crate::exit::exit(103);
 }
 
 extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, err: PageFaultErrorCode) {
-    kprintln!("[cpu] #PF {:?} at {:#x}", err, frame.instruction_pointer.as_u64());
+    kprintln!(
+        "[cpu] #PF {:?} at {:#x}",
+        err,
+        frame.instruction_pointer.as_u64()
+    );
     crate::exit::exit(104);
 }
 
 extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, _err: u64) -> ! {
-    kprintln!("[cpu] #DF (double fault) at {:#x}", frame.instruction_pointer.as_u64());
+    kprintln!(
+        "[cpu] #DF (double fault) at {:#x}",
+        frame.instruction_pointer.as_u64()
+    );
     crate::exit::exit(102)
 }
 

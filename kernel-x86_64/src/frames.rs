@@ -21,7 +21,9 @@
 //! fail-closed on exhaustion. Identical strategy to the aarch64 backend.
 use core::cell::UnsafeCell;
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
-use x86_64::structures::paging::{FrameAllocator as X86FrameAllocator, PhysFrame as X86PhysFrame, Size4KiB};
+use x86_64::structures::paging::{
+    FrameAllocator as X86FrameAllocator, PhysFrame as X86PhysFrame, Size4KiB,
+};
 use x86_64::PhysAddr;
 
 /// 4 KiB frame — the x86-64 base page size.
@@ -62,7 +64,13 @@ struct FrameAllocator {
 
 impl FrameAllocator {
     const fn empty() -> Self {
-        FrameAllocator { head: 0, free: 0, total: 0, base: 0, end: 0 }
+        FrameAllocator {
+            head: 0,
+            free: 0,
+            total: 0,
+            base: 0,
+            end: 0,
+        }
     }
 
     /// Populate the free-list from every aligned frame in `[base, end)` (rounded inward).
@@ -257,7 +265,10 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // 1 — the pool manages real RAM from the UEFI map.
     let total = total_count();
     let free0 = free_count();
-    check!(total > 0 && free0 == total, "frames: pool seeded from UEFI conventional RAM");
+    check!(
+        total > 0 && free0 == total,
+        "frames: pool seeded from UEFI conventional RAM"
+    );
 
     // 2 — alloc yields distinct, aligned, in-range frames.
     let (a, b) = match (alloc(), alloc()) {
@@ -289,8 +300,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // 4 — freeing returns capacity; a misaligned free is rejected without corrupting the pool.
     free(a);
     free(b);
-    check!(free_count() == free0, "frames: free returns capacity to the pool");
-    check!(!free(Frame(a.addr() + 1)), "frames: misaligned free rejected (fail-closed)");
+    check!(
+        free_count() == free0,
+        "frames: free returns capacity to the pool"
+    );
+    check!(
+        !free(Frame(a.addr() + 1)),
+        "frames: misaligned free rejected (fail-closed)"
+    );
 
     // 5 — exhaustion is fail-closed, and freeing revives allocation (deterministic scratch pool).
     {
@@ -303,9 +320,15 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         for slot in held.iter_mut().take(cap) {
             *slot = scratch.alloc().expect("scratch frame within capacity");
         }
-        check!(scratch.alloc().is_none(), "frames: exhausted pool denies allocation (fail-closed)");
+        check!(
+            scratch.alloc().is_none(),
+            "frames: exhausted pool denies allocation (fail-closed)"
+        );
         scratch.free(held[0]);
-        check!(scratch.alloc().is_some(), "frames: freeing an exhausted pool revives allocation");
+        check!(
+            scratch.alloc().is_some(),
+            "frames: freeing an exhausted pool revives allocation"
+        );
     }
 
     Ok(n)

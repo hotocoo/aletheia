@@ -29,8 +29,22 @@ impl FrameBuffer {
     /// # Safety
     /// `base` must be the linear framebuffer from GOP for a 32-bpp mode with `stride` pixels per
     /// scanline and at least `height` scanlines; the region must be exclusively ours (post-exit).
-    pub unsafe fn new(base: *mut u8, width: usize, height: usize, stride: usize, bgr: bool) -> Self {
-        let mut fb = FrameBuffer { base, width, height, stride, _bgr: bgr, cx: 0, cy: 0 };
+    pub unsafe fn new(
+        base: *mut u8,
+        width: usize,
+        height: usize,
+        stride: usize,
+        bgr: bool,
+    ) -> Self {
+        let mut fb = FrameBuffer {
+            base,
+            width,
+            height,
+            stride,
+            _bgr: bgr,
+            cx: 0,
+            cy: 0,
+        };
         fb.clear();
         fb
     }
