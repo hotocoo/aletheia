@@ -16,11 +16,16 @@ Establish a measured, signed chain of trust; each stage verifies the next before
 Firmware → Verified Bootloader → Verified Kernel → Verified Services → Verified Apps → Verified Models
 ```
 
-**Phase 1 — signing + verification format.** Define the signature envelope (a detached signature over
-a content hash — reusing the store's hashing, ADR-005) and a key hierarchy (root → stage keys). The
-kernel verifies each service/component signature before launch; a component is already a
-content-addressed entity (ADR-014), so signature verification slots in at `install`/`run`. This layer
-is **hosted-testable now**: sign a component fixture, tamper one byte, assert launch is refused.
+**Phase 1 — signing + verification format (delivered, hosted).** A detached signature over a
+component's content hash (reusing the store's hashing, ADR-005). A component is already a
+content-addressed entity (ADR-014), so verification slots in at the launch boundary. Under an opt-in
+secure policy (`SysCore::set_require_signed_components`, default off): `install_signed_component`
+refuses an untrusted/tampered signature at install; `run_installed` verifies the stored signature over
+the content hash and refuses an unsigned/invalid component fail-closed; and the ad-hoc raw-WASM
+`run_component` path — which carries no provenance — is refused entirely under secure policy, so there
+is no bypass. Proved hosted (`aletheia/tests/component_signing.rs`): sign a fixture → launches; tamper
+/untrusted/unsigned/ad-hoc → refused. Implemented with symmetric HMAC-SHA256 (`crypto::hmac_sha256`,
+built on the existing `sha2`); the asymmetric key hierarchy (root → stage keys) is Phase 2 below.
 
 **Phase 2 — platform root of trust.** UEFI Secure Boot (x86-64) / measured boot into a TPM PCR
 (where present) / RISC-V equivalent, behind the `Hal`. Measured boot records each stage's hash; remote
