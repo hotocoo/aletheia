@@ -720,6 +720,7 @@ fn run_isolation() -> (bool, u64) {
 /// Run one ring-3 process in a dedicated address space (`switch_to(root)` around the excursion,
 /// restore `root_main` after). `armed`/`expect` mark whether a fault is the expected proof. Returns
 /// the taken `Trial`.
+#[allow(clippy::too_many_arguments)] // an isolated ring-3 excursion legitimately needs all of these
 fn run_in_space(
     root: u64,
     root_main: u64,
@@ -1048,11 +1049,11 @@ fn run_preemptive() -> (bool, bool) {
     // SAFETY: single-threaded; init the TCBs before any resume.
     unsafe {
         let tcbs = &mut *addr_of_mut!(TCBS);
-        for i in 0..NTASK {
+        for tcb in tcbs.iter_mut() {
             let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_IF);
             f.regs[RBX] = 0;
             f.regs[RCX] = SPIN_COUNTDOWN;
-            tcbs[i] = Tcb {
+            *tcb = Tcb {
                 frame: f,
                 done: false,
             };
