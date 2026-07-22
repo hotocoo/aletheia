@@ -505,6 +505,46 @@ spine itself was textually included.
   the per-target `usermode.rs`/`vm.rs`/`frames.rs` implement shared interfaces rather than parallel
   bespoke code; and the fuller cargo-workspace split.
 
+## Delivered (2026-07-22 — P6 substrate: IPC tail, scheduler abstraction, security suite, traceability gate)
+
+Four contract-honest bricks advancing the gap register's top-priority P6 items, plus the phased
+architecture text for the hardware-bound issues. Every code brick is TDD'd, hosted-proved, and
+clippy-clean; the aarch64 VM gate stays green (exit 0, all invariant markers). `kernel-core` hosted
+suite grows **17 → 41** (6 suites).
+
+- **IPC substrate tail** (gap Issue 2, ADR-020) — the IPC layer is consolidated into one
+  arch-independent `kernel-core::ipc` module (re-exported from `spine` so all three targets and the
+  selftest suite are unaffected) and extended with the primitives a real microkernel IPC needs beyond
+  synchronous send + bounded queues + attenuated capability transfer: **asynchronous notifications**
+  (coalescing seL4-style badge, capability-gated signal), **deadline/timeout-aware receive** (a
+  message past its deadline is dropped, never delivered late — fail-closed), **cancellation** of an
+  undelivered message by id, and **tracing + deterministic replay** (`replay()` reconstructs the exact
+  delivered sequence from the trace alone). 9 new hosted tests.
+- **Adversarial security-behaviour suite** (gap Issue 11) — permanent regressions that attack the
+  capability engine as an adversary would: **confused deputy** (no ambient authority — `evaluate`
+  consults only offered tokens), **capability laundering** (cannot mint fresh authority from a
+  revoked/expired parent, nor launder a broader scope through a transfer), **TOCTOU / stale
+  capability** (revocation is immediate — no cached authorization window), and **cross-principal
+  leakage** (scope confinement + action-wildcard does not over-match a neighbouring namespace).
+  9 hosted tests; all green (the engine holds).
+- **Machine-checkable traceability gate** (gap Issue 12) — `docs/TRACEABILITY.md` is a machine-readable
+  matrix of **45 requirements** (34 delivered, 2 partial, 9 deferred), each mapping
+  ReqID → ADR → implementation → test → VM gate → status. `scripts/check-traceability.sh` (pure bash,
+  no new CI dep) FAILS the build if any delivered/partial requirement lacks Implementation+Test
+  evidence that exists in the tree, or carries an unknown status; deferred work is explicitly
+  distinguished and never counted as delivered. Wired as the `traceability` job in both GitHub Actions
+  and GitLab CI; negative-tested against three bad fixtures.
+- **Arch-independent scheduler + task abstraction** (gap Issue 1, first extraction beyond the shared
+  spine) — `kernel-core::sched`: `TaskId`, a `TaskState` lifecycle, a `TaskContext` backend seam
+  (save/restore stays arch-specific), and a `RoundRobin` scheduler (FIFO fairness + block/unblock/
+  finish transitions), lifting the scheduling **policy** the three targets' `usermode.rs` each
+  hand-roll into one place, proved on the host (6 tests). Wiring each target's asm context switch to
+  drive it is the documented follow-on (its asm is unchanged and still VM-gated).
+- **Phased-plan ADRs 020–026** — contract-honest architecture text for the hardware-bound issues
+  (SMP, AI execution substrate, device/driver model, persistent storage, secure boot, fault recovery)
+  so no deferred requirement implies code that does not exist; each names its hosted-testable first
+  slice where one exists.
+
 ## Run it
 
 ```bash
@@ -514,7 +554,8 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 17 passed — the shared spine's invariants (incl. IPC capability transfer + bounded queues) proved on the HOST, arch-independent, no QEMU
+(cd ../kernel-core && cargo test)  # 41 passed — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
 ./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 13 EL0 user-mode invariants + exit 0
