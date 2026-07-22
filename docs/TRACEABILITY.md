@@ -18,6 +18,14 @@ whose Req ID begins with `REQ-` and enforces:
 - **`deferred`** — evidence columns are `-` (nothing is built yet); the row documents the ADR /
   phased plan only. A deferred row is never counted as delivered.
 - Every row's Status must be one of `delivered` / `partial` / `deferred`.
+- **Target-specific rows** (GAPS2 Issue #1). Requirements whose implementation is per-CPU — kernel
+  boot (`REQ-KERN-001/002/003`), memory (`REQ-MEM-{AARCH64,X86,RISCV}-001`), and user-mode
+  (`REQ-USER-{AARCH64,X86,RISCV}-001`) — are split into one row **per target**, each naming that
+  target's own implementation and its own VM gate (`scripts/vm-e2e.sh` for aarch64,
+  `kernel-x86_64/scripts/smoke-test.sh` for x86-64, `scripts/vm-e2e-riscv.sh` for RISC-V). This closes
+  the hole where a generic row listed several impls but omitted a target's gate, so a target-specific
+  regression could compile and escape the requirement gate. A regression in one target's user-mode now
+  fails that target's named gate, not a sibling's.
 
 Running a VM gate itself (booting QEMU) remains the existing `vm-e2e*` / `smoke-test` CI jobs; this
 check verifies the **mapping** is real and that no delivered claim is evidence-free.
@@ -60,11 +68,12 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-KERN-003 | RISC-V microkernel + spine invariants | ADR-019 | kernel-riscv64/src/main.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e-riscv.sh | delivered |
 | REQ-KERN-004 | Shared kernel-core spine + selftest (Issue 1 slice) | ADR-019 | kernel-core/src/spine.rs; kernel-core/src/selftest.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-KERN-005 | Shared kernel-core task/scheduler policy (Issue 1 rest) | ADR-019 | kernel-core/src/sched.rs; kernel/src/usermode.rs | kernel-core/tests/sched.rs | scripts/vm-e2e.sh | delivered |
-| REQ-MEM-001 | Physical page-frame allocator | ADR-019 | kernel/src/frames.rs; kernel-riscv64/src/frames.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh; scripts/vm-e2e-riscv.sh | delivered |
-| REQ-MEM-002 | MMU virtual memory (identity + dynamic map/unmap) | ADR-019 | kernel/src/vm.rs; kernel-riscv64/src/vm.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh; scripts/vm-e2e-riscv.sh | delivered |
-| REQ-USER-001 | User-mode + capability-gated syscall boundary | ADR-019 | kernel/src/usermode.rs; kernel-x86_64/src/usermode.rs; kernel-riscv64/src/usermode.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh; scripts/vm-e2e-riscv.sh | delivered |
-| REQ-USER-002 | Per-process (isolated) address spaces | ADR-019 | kernel/src/usermode.rs; kernel-x86_64/src/usermode.rs; kernel-riscv64/src/usermode.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh; scripts/vm-e2e-riscv.sh | delivered |
-| REQ-USER-003 | Preemptive multitasking (timer IRQ) | ADR-019 | kernel/src/usermode.rs; kernel-x86_64/src/usermode.rs; kernel-riscv64/src/usermode.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh; scripts/vm-e2e-riscv.sh | delivered |
+| REQ-MEM-AARCH64-001 | Physical frame allocator + MMU virtual memory (aarch64) | ADR-019 | kernel/src/frames.rs; kernel/src/vm.rs | kernel/src/vm.rs | scripts/vm-e2e.sh | delivered |
+| REQ-MEM-X86-001 | Physical frame allocator (UEFI map) + MMU map/unmap over live PML4 (x86-64) | ADR-019 | kernel-x86_64/src/frames.rs; kernel-x86_64/src/vm.rs | kernel-x86_64/src/vm.rs | kernel-x86_64/scripts/smoke-test.sh | delivered |
+| REQ-MEM-RISCV-001 | Physical frame allocator + Sv39 MMU virtual memory (RISC-V) | ADR-019 | kernel-riscv64/src/frames.rs; kernel-riscv64/src/vm.rs | kernel-riscv64/src/vm.rs | scripts/vm-e2e-riscv.sh | delivered |
+| REQ-USER-AARCH64-001 | EL0 user-mode: cap-gated syscall + per-process address space + preemptive multitasking (aarch64) | ADR-019 | kernel/src/usermode.rs | kernel/src/usermode.rs | scripts/vm-e2e.sh | delivered |
+| REQ-USER-X86-001 | ring-3 user-mode: cap-gated syscall + per-process PML4 + PIT preemption (x86-64) | ADR-019 | kernel-x86_64/src/usermode.rs | kernel-x86_64/src/usermode.rs | kernel-x86_64/scripts/smoke-test.sh | delivered |
+| REQ-USER-RISCV-001 | U-mode: cap-gated ecall + per-process satp + S-timer preemption (RISC-V) | ADR-019 | kernel-riscv64/src/usermode.rs | kernel-riscv64/src/usermode.rs | scripts/vm-e2e-riscv.sh | delivered |
 | REQ-SMP-001 | SMP / multicore scheduling | ADR-021 | - | - | - | deferred |
 | REQ-SEC-001 | Adversarial security-behaviour regressions | ADR-003 | kernel-core/src/spine.rs | kernel-core/tests/security_behavior.rs | - | delivered |
 | REQ-DRV-001 | Device / driver architecture | ADR-023 | - | - | - | deferred |
