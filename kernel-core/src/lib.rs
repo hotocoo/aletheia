@@ -28,6 +28,7 @@ pub mod grant;
 pub mod ipc;
 pub mod priosched;
 pub mod sched;
+pub mod storage;
 pub mod selftest;
 pub mod spine;
 
