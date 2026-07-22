@@ -554,6 +554,25 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-KERN-005: aarch64 target DRIVES the shared kernel-core scheduler, VM-gated)
+
+The "wire, don't pile" brick: instead of adding a fourth unwired kernel-core policy module, this wave
+makes a real target *drive* the shared scheduler, converting REQ-KERN-005 from `partial` (policy +
+hosted tests, nothing drove it) to `delivered` (a target uses it, VM-gated) — the honest delivered bar.
+
+- The aarch64 dev backend's cooperative multitasking (`kernel/src/usermode.rs::run_scheduler`) no
+  longer hand-rolls its `(cur+k)%NTASK` rotation. It now drives `kernel_core::sched::RoundRobin`:
+  `schedule_next` decides which EL0 task runs next, a yielded task is rotated to the tail, an exited
+  task is `finish`ed and leaves the rotation. The target performs ONLY the context-switch *mechanism*
+  (`resume_frame` + TTBR0 address-space switch) behind the `TaskContext` seam.
+- Reproduces the exact `A,B,A,B,A,B,A,B` sequence the bespoke loop did — **VM-proved live**, not just
+  argued: `scripts/vm-e2e.sh` re-passes EL0 invariants 6 (round-robin to completion), 7 (each task
+  resumes with its own register-magic at the shared VA), 8 (distinct TTBR0 spaces), and 9 (timer
+  preemption round-robins) with the shared scheduler in the loop; exit 0, all 11+7+13+13 invariants.
+- **Follow-on (documented):** wiring x86-64 and RISC-V `usermode.rs` to drive the same `RoundRobin`
+  (their asm is unchanged and still VM-gated with their bespoke rotation), and driving the
+  `PriorityScheduler`/`GrantTable` from a target (the path to REQ-IPC-008/009 `delivered`).
+
 ## Delivered — kernel-core policy, PARTIAL (2026-07-22 — REQ-IPC-009: priority inheritance + priority-aware scheduling)
 
 **Status honesty (traceability `partial`):** this is the arch-independent *policy* + hosted proof; it

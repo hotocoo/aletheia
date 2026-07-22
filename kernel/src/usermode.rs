@@ -31,6 +31,10 @@ use crate::{frames, vm};
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
 use core::ptr::{addr_of, addr_of_mut};
+// REQ-KERN-005: the aarch64 target DRIVES the shared arch-independent scheduling policy from
+// kernel-core rather than hand-rolling its own rotation. kernel-core decides which task runs next;
+// this module performs only the context-switch MECHANISM (resume_frame + address-space switch).
+use kernel_core::sched::{RoundRobin, TaskId};
 
 global_asm!(
     r#"
@@ -983,31 +987,28 @@ fn run_scheduler() -> (bool, bool, bool) {
     // the distinct roots are what make them separate address spaces.
     unsafe {
         let tcbs = &mut *addr_of_mut!(TCBS);
-        for i in 0..NTASK {
-            tcbs[i] = Tcb {
+        for tcb in tcbs.iter_mut() {
+            *tcb = Tcb {
                 frame: TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, 0, 0),
                 done: false,
             };
         }
     }
 
-    // Round-robin: after a task yields/exits, start the search at the next slot.
+    // Scheduling POLICY driven by the shared arch-independent kernel_core::sched::RoundRobin
+    // (REQ-KERN-005): the target no longer hand-rolls the rotation — it drives the SAME scheduler
+    // proved on the host and performs only the context-switch MECHANISM (resume_frame +
+    // address-space switch) behind the TaskContext seam. `schedule_next` decides which task runs; a
+    // yielded task stays Running and is rotated to the tail on the next call; an exited task is
+    // `finish`ed and leaves the rotation. This reproduces the exact A,B,A,B,A,B,A,B sequence the
+    // bespoke loop did (proved by the assertions below), now from one source of truth.
+    let mut policy = RoundRobin::new();
+    for i in 0..NTASK {
+        policy.spawn(TaskId(i as u64));
+    }
     let mut order: Vec<(usize, u64)> = Vec::new();
-    let mut cur = 0usize;
-    loop {
-        let mut pick = None;
-        for k in 0..NTASK {
-            let s = (cur + k) % NTASK;
-            // SAFETY: single-threaded read of run state.
-            if !unsafe { (*addr_of!(TCBS))[s].done } {
-                pick = Some(s);
-                break;
-            }
-        }
-        let slot = match pick {
-            Some(s) => s,
-            None => break,
-        };
+    while let Some(TaskId(id)) = policy.schedule_next() {
+        let slot = id as usize;
         sched_report(0, false); // reset for this slice
                                 // SAFETY: roots[slot] identity-maps the kernel; switch into the task's space, resume it
                                 // until it yields/exits, then restore the scheduler's space. The frame lives in the static
@@ -1025,8 +1026,8 @@ fn run_scheduler() -> (bool, bool, bool) {
         if exited {
             // SAFETY: single-threaded write of run state.
             unsafe { (*addr_of_mut!(TCBS))[slot].done = true };
+            policy.finish(TaskId(id)); // leaves the rotation; schedule_next ends when none remain
         }
-        cur = (slot + 1) % NTASK;
         if order.len() > 4 * NTASK {
             break; // safety bound — a correct run is exactly 2*NTASK*... (8) slices
         }
@@ -1099,11 +1100,11 @@ fn run_preemptive() -> (bool, bool) {
     // SAFETY: single-threaded; init the TCBs before any resume.
     unsafe {
         let tcbs = &mut *addr_of_mut!(TCBS);
-        for i in 0..NTASK {
+        for tcb in tcbs.iter_mut() {
             let mut f = TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, 0, 0);
             f.spsr = SPSR_EL0T_IRQ;
             f.regs[20] = SPIN_COUNTDOWN;
-            tcbs[i] = Tcb {
+            *tcb = Tcb {
                 frame: f,
                 done: false,
             };
