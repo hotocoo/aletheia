@@ -1232,14 +1232,16 @@ fn run_shared_memory() -> (bool, bool, bool) {
         && vm::translate(root_a, SHARED_VA) == Some(pa)
         && vm::translate(root_b, SHARED_VA) == Some(pa);
 
-    // (revoke_unmaps) Revoking the grant tears down the grantee's mapping (the per-target seam:
-    // revocation ⇒ unmap) while the grantor keeps its own access.
+    // (revoke_unmaps) Revocation PATH: the kernel consults the grant-table's revoke authority and,
+    // ONLY on success, tears down the grantee's mapping — so the unmap is a *consequence* of a
+    // successful revoke, not an unconditional harness action. The grantor keeps its own access.
     let grant_id = granted.unwrap_or(0);
-    let revoked = gt.revoke(grant_id);
-    vm::unmap_page(root_b, SHARED_VA);
-    let revoke_unmaps = revoked
-        && vm::translate(root_b, SHARED_VA).is_none()
-        && vm::translate(root_a, SHARED_VA) == Some(pa);
+    let revoke_unmaps = if gt.revoke(grant_id) {
+        vm::unmap_page(root_b, SHARED_VA);
+        vm::translate(root_b, SHARED_VA).is_none() && vm::translate(root_a, SHARED_VA) == Some(pa)
+    } else {
+        false
+    };
 
     // Cleanup: unmap the grantor and reclaim the shared frame (the two identity roots are left, as
     // the other multitasking tests do — one-shot boot excursions on a 41k-frame pool).
@@ -1357,7 +1359,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     );
     check!(
         revoke_unmaps,
-        "el0: revoking the grant unmaps the grantee's page while the grantor keeps access"
+        "el0: a successful grant revoke gates the unmap of the grantee's page; the grantor keeps access"
     );
 
     Ok(n)
