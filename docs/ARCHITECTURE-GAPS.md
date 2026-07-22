@@ -311,6 +311,16 @@ Proposed Issue 7 — Build Secure Boot and the Complete Chain of Trust
 Priority: Critical
 Category: Security / Boot
 Raised by: GPT-5.5 (OpenAI)
+
+> Progress note (2026-07-22): the **component-signature** slice is delivered on the hosted System Core
+> (ADR-025 Phase 1) — `aletheia/src/provenance.rs` (a trust anchor + HMAC-SHA256 sign/verify over a
+> component's content hash, built on the existing `sha2`, no new dep) wired into `SysCore`: under an
+> opt-in secure policy (default off) `run_installed` refuses an unsigned/invalid component fail-closed
+> and `install_signed_component` refuses an untrusted signature at install. Verified by
+> `aletheia/tests/component_signing.rs` (5 tests) + crypto/provenance unit tests. STILL OPEN (Phase
+> 2–3, hardware-bound): asymmetric keys + a root→stage key hierarchy, UEFI Secure Boot / measured boot
+> into a TPM, anti-downgrade/rollback protection, and model-provenance verification.
+
 Problem
 Runtime capability security must be complemented by boot-time integrity. The system needs a verifiable chain from firmware through the kernel, system services, applications, and AI models.
 Target Chain
