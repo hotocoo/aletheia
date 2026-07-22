@@ -62,6 +62,16 @@ Raised by: GPT-5.5 (OpenAI)
 > wiring each target's asm context switch to drive this scheduler (the asm is unchanged and still
 > VM-gated), extracting the address-space / memory / interrupt abstractions, and the cargo-workspace
 > split.
+>
+> Progress note #3 (2026-07-22): the **aarch64 dev backend now DRIVES** `kernel_core::sched::RoundRobin`
+> in `kernel/src/usermode.rs::run_scheduler` instead of its hand-rolled `(cur+k)%NTASK` rotation —
+> `schedule_next`/`finish` decide the order, the target performs only the context-switch mechanism
+> (`resume_frame` + TTBR0 switch) behind the `TaskContext` seam. VM-gated: `scripts/vm-e2e.sh` re-passes
+> EL0 invariants 6–9 (round-robin to completion, per-slice register-magic, distinct spaces, timer
+> preemption) with the shared scheduler in the loop (exit 0). This converts REQ-KERN-005
+> `partial → delivered`. STILL OPEN: wiring x86-64 and RISC-V `usermode.rs` to drive the same
+> scheduler, driving the `PriorityScheduler`/`GrantTable` from a target (the REQ-IPC-008/009 path), the
+> remaining address-space / memory / interrupt abstractions, and the cargo-workspace split.
 
 Problem
 Core kernel abstractions risk becoming distributed across architecture-specific implementations. This creates the possibility that AArch64, x86-64, and RISC-V evolve into partially independent kernels rather than hardware backends implementing one coherent Aletheia kernel model.
