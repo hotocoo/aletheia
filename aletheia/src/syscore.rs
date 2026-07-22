@@ -37,6 +37,12 @@ pub struct SysCore {
     tasks: HashMap<Id, TaskState>,
     cancelled: HashSet<Id>,
     root_minted: bool,
+    /// Trust anchor for component signatures (ADR-025 Phase 1). Empty by default.
+    trust: crate::provenance::TrustStore,
+    /// When true, `run_installed` refuses any component whose stored signature is missing or does not
+    /// verify against the trust anchor ("cannot execute under secure policy"). Default false, so the
+    /// existing unsigned install/run flow is unchanged until an operator opts in.
+    require_signed_components: bool,
 }
 
 impl SysCore {
@@ -61,6 +67,8 @@ impl SysCore {
             tasks: HashMap::new(),
             cancelled: HashSet::new(),
             root_minted,
+            trust: crate::provenance::TrustStore::new(),
+            require_signed_components: false,
         };
         core.rebuild_approvals();
         Ok(core)
@@ -363,8 +371,72 @@ impl SysCore {
             return Err(AlethError::validation("entity is not an application"));
         }
         let hash = app.content_ref.clone().ok_or_else(|| AlethError::validation("application has no code"))?;
+        // Secure-launch provenance gate (ADR-025 Phase 1, gap Issue 7): under secure policy the app's
+        // stored signature must verify over its content hash against the trust anchor. Missing or
+        // invalid => refuse the launch (fail closed) and record the rejection. Default policy (off)
+        // leaves the existing unsigned launch path unchanged.
+        if self.require_signed_components {
+            let sig = app.metadata.get("signature").and_then(|v| v.as_str());
+            let verified = sig.map(|s| self.trust.verify(&hash, s)).unwrap_or(false);
+            if !verified {
+                let reason = if sig.is_none() { "unsigned" } else { "invalid signature" };
+                self.emit("ComponentSignatureRejected", &new_id(), subject, json!({"app": app.id, "reason": reason}));
+                return Err(AlethError::authorization("component signature not verified under secure policy"));
+            }
+        }
         let wasm = self.store.get_blob(&hash).cloned().ok_or_else(|| AlethError::not_found("application code missing"))?;
         self.run_component(launch_caps, grant_caps, subject, &wasm, fuel)
+    }
+
+    /// Trust a component-signing key: the trust anchor for secure-launch provenance (ADR-025 Phase 1).
+    pub fn trust_component_key(&mut self, key: [u8; 32]) {
+        self.trust.trust(key);
+    }
+
+    /// Enable/disable secure-launch policy. When on, `run_installed` refuses a component whose stored
+    /// signature is missing or does not verify against the trust anchor (gap Issue 7 / ADR-025 P1).
+    pub fn set_require_signed_components(&mut self, require: bool) {
+        self.require_signed_components = require;
+    }
+
+    /// Sign a component's content hash with the trust anchor's active key so a caller can install it
+    /// signed. `None` if no key is trusted (you cannot mint provenance without an anchor).
+    pub fn sign_component(&self, content_hash_hex: &str) -> Option<String> {
+        self.trust.sign(content_hash_hex)
+    }
+
+    /// Install a component WITH a provenance signature (ADR-025 Phase 1). The signature must verify
+    /// over the code's content hash against the trust anchor, or the install is refused — an untrusted
+    /// or tampered artifact never enters the store as a trusted application. Requires `component.install`
+    /// like the unsigned path; the verified signature is recorded in the entity metadata so a later
+    /// `run_installed` under secure policy can re-verify it.
+    pub fn install_signed_component(&mut self, offered: &[String], subject: &str, name: &str, wasm: &[u8], signature: &str) -> Result<Entity> {
+        let target = Target { id: None, etype: Some(EntityType::Application) };
+        if !matches!(self.caps.evaluate("component.install", &target, offered), Decision::Allow) {
+            self.emit("CapabilityDenied", &new_id(), subject, json!({"action": "component.install"}));
+            return Err(AlethError::authorization("not permitted to install components"));
+        }
+        let hash = crate::crypto::sha256_hex(wasm);
+        if !self.trust.verify(&hash, signature) {
+            self.emit("ComponentSignatureRejected", &new_id(), subject, json!({"name": name, "reason": "untrusted or invalid signature at install"}));
+            return Err(AlethError::authorization("component signature is not trusted"));
+        }
+        let stored_hash = self.store.put_blob(wasm)?;
+        let e = Entity {
+            id: new_id(),
+            etype: EntityType::Application,
+            content_ref: Some(stored_hash),
+            version: 1,
+            version_chain: new_id(),
+            metadata: json!({"name": name, "kind": "wasm-component", "bytes": wasm.len(), "signature": signature}),
+            provenance: Provenance::of(subject),
+            created_at: now(),
+            updated_at: now(),
+            deleted: false,
+        };
+        self.store.put_entity(&e)?;
+        self.emit("ComponentInstalled", &new_id(), subject, json!({"app": e.id, "name": name, "bytes": wasm.len(), "signed": true}));
+        Ok(e)
     }
 
     // --- task lifecycle ---

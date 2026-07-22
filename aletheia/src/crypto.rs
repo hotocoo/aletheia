@@ -16,6 +16,53 @@ pub fn random_token() -> String { hex(&rand::random::<[u8; 16]>()) }
 
 pub fn random_key() -> [u8; 32] { rand::random::<[u8; 32]>() }
 
+/// HMAC-SHA256 (RFC 2104), built on the already-present `sha2` — no extra dependency. Used for
+/// symmetric component-signature provenance (ADR-025 Phase 1); asymmetric keys + a key hierarchy are
+/// the production/hardware phases.
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_digest);
+    let mut res = [0u8; 32];
+    res.copy_from_slice(&outer.finalize());
+    res
+}
+
+pub fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    hex(&hmac_sha256(key, msg))
+}
+
+/// Constant-time equality for two equal-length strings — no early exit, so a signature comparison
+/// does not leak the match prefix via timing.
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
 /// Authenticated encryption. Sealed layout: 12-byte nonce || ciphertext+tag.
 pub struct Cipher {
     inner: ChaCha20Poly1305,
@@ -41,5 +88,25 @@ impl Cipher {
         self.inner
             .decrypt(Nonce::from_slice(nonce), ct)
             .map_err(|_| AlethError::persistence("aead open failed"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_sha256_matches_rfc4231_test_case_1() {
+        // RFC 4231 §4.2: key = 20 bytes of 0x0b, data = "Hi There".
+        let key = [0x0bu8; 20];
+        let got = hmac_sha256_hex(&key, b"Hi There");
+        assert_eq!(got, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+    }
+
+    #[test]
+    fn ct_eq_distinguishes_and_rejects_length_mismatch() {
+        assert!(ct_eq("abcd", "abcd"));
+        assert!(!ct_eq("abcd", "abce"));
+        assert!(!ct_eq("abcd", "abcde"));
     }
 }

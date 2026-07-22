@@ -14,6 +14,7 @@ pub mod intelligence;
 pub mod intent_action;
 pub mod memory;
 pub mod policy;
+pub mod provenance;
 pub mod service;
 pub mod storage;
 pub mod syscore;

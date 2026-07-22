@@ -540,6 +540,15 @@ suite grows **17 → 41** (6 suites).
   finish transitions), lifting the scheduling **policy** the three targets' `usermode.rs` each
   hand-roll into one place, proved on the host (6 tests). Wiring each target's asm context switch to
   drive it is the documented follow-on (its asm is unchanged and still VM-gated).
+- **Component signature verification** (gap Issue 7 / ADR-025 Phase 1, secure boot's hosted first
+  slice) — a component is a content-addressed `Application` entity; its provenance is a detached
+  HMAC-SHA256 signature over its content hash under a trusted key (`aletheia/src/provenance.rs`,
+  `crypto::hmac_sha256` built on the existing `sha2`, RFC-4231-validated, no new dependency). Under an
+  opt-in secure policy (`set_require_signed_components`, default OFF for back-compat), `run_installed`
+  refuses a component whose stored signature is missing or does not verify (fail closed), and
+  `install_signed_component` refuses an untrusted/tampered signature at install. 5 hosted tests +
+  crypto/provenance unit tests; the aletheia hosted suite grows to **77 passed** with zero regressions.
+  Asymmetric keys, a key hierarchy, measured boot, and rollback protection remain ADR-025 Phase 2–3.
 - **Phased-plan ADRs 020–026** — contract-honest architecture text for the hardware-bound issues
   (SMP, AI execution substrate, device/driver model, persistent storage, secure boot, fault recovery)
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
