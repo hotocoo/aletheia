@@ -123,6 +123,42 @@ pub enum Decision {
     RequireApproval,
 }
 
+/// Evidence that [`CapEngine::authorize`] found a live, matching capability for a request, naming
+/// **which** token satisfied it — information [`CapEngine::evaluate`] discards (it reports only the
+/// verdict). An `Authorization` is NOT authority on its own and NOT a lasting grant: under
+/// concurrency it is valid only for the duration of the engine-lock hold in which it was produced.
+/// Bind the check and its effect with [`CapEngine::with_authorization`] so no revocation can
+/// linearize between them — see ADR-027 (capability concurrency model, Option A).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Authorization {
+    cap: CapToken,
+}
+
+impl Authorization {
+    /// The capability that authorized the request.
+    pub fn capability(&self) -> CapToken {
+        self.cap
+    }
+}
+
+/// Result of [`CapEngine::authorize`] — the same three outcomes as [`Decision`], but the `Allow`
+/// arm carries the [`Authorization`] naming the matching token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthOutcome {
+    Allow(Authorization),
+    RequireApproval,
+    Deny(String),
+}
+
+/// Outcome of testing ONE offered token against a request. Private — the single source of truth for
+/// the matching logic shared by [`CapEngine::evaluate`] and [`CapEngine::authorize`], so the two can
+/// never drift apart.
+enum TokenMatch {
+    Allow,
+    NeedsApproval,
+    NoMatch,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Target {
     pub id: Option<u64>,
@@ -233,38 +269,98 @@ impl CapEngine {
         }
     }
 
+    /// Test ONE offered token against a request. The single matching rule used by both `evaluate`
+    /// and `authorize` (so the fast verdict path and the token-naming path can never diverge).
+    /// Fail-closed: a revoked, forged/unknown, non-covering, or expired token is `NoMatch`.
+    fn test_token(&self, token: CapToken, action: &str, target: &Target) -> TokenMatch {
+        if self.revoked.contains(&token.0) {
+            return TokenMatch::NoMatch;
+        }
+        let cap = match self.registry.get(&token.0) {
+            Some(c) => c,
+            None => return TokenMatch::NoMatch, // forged / unknown handle — not authority
+        };
+        if !action_covers(&cap.action, action) {
+            return TokenMatch::NoMatch;
+        }
+        if !scope_covers(&cap.scope, target) {
+            return TokenMatch::NoMatch;
+        }
+        if let Some(exp) = cap.constraints.expires_at {
+            if self.now > exp {
+                return TokenMatch::NoMatch;
+            }
+        }
+        if cap.constraints.approval_required {
+            return TokenMatch::NeedsApproval;
+        }
+        TokenMatch::Allow
+    }
+
     /// The core authorization decision. Fail closed: no matching live capability => Deny.
     pub fn evaluate(&self, action: &str, target: &Target, offered: &[CapToken]) -> Decision {
         let mut needs_approval = false;
-        for token in offered {
-            if self.revoked.contains(&token.0) {
-                continue;
+        for &token in offered {
+            match self.test_token(token, action, target) {
+                TokenMatch::Allow => return Decision::Allow,
+                TokenMatch::NeedsApproval => needs_approval = true,
+                TokenMatch::NoMatch => {}
             }
-            let cap = match self.registry.get(&token.0) {
-                Some(c) => c,
-                None => continue, // forged / unknown handle — not authority
-            };
-            if !action_covers(&cap.action, action) {
-                continue;
-            }
-            if !scope_covers(&cap.scope, target) {
-                continue;
-            }
-            if let Some(exp) = cap.constraints.expires_at {
-                if self.now > exp {
-                    continue;
-                }
-            }
-            if cap.constraints.approval_required {
-                needs_approval = true;
-                continue;
-            }
-            return Decision::Allow;
         }
         if needs_approval {
             Decision::RequireApproval
         } else {
             Decision::Deny("no capability".to_string())
+        }
+    }
+
+    /// Like [`evaluate`](Self::evaluate), but the `Allow` arm reports **which** token authorized the
+    /// request as an [`Authorization`]. Read-only (`&self`). Fail-closed identically. The returned
+    /// `Authorization` is a point-in-time result: under concurrency it is valid only while the
+    /// engine lock is still held. Prefer [`with_authorization`](Self::with_authorization) to bind the
+    /// check and its effect into one critical section (ADR-027).
+    pub fn authorize(&self, action: &str, target: &Target, offered: &[CapToken]) -> AuthOutcome {
+        let mut needs_approval = false;
+        for &token in offered {
+            match self.test_token(token, action, target) {
+                TokenMatch::Allow => return AuthOutcome::Allow(Authorization { cap: token }),
+                TokenMatch::NeedsApproval => needs_approval = true,
+                TokenMatch::NoMatch => {}
+            }
+        }
+        if needs_approval {
+            AuthOutcome::RequireApproval
+        } else {
+            AuthOutcome::Deny("no capability".to_string())
+        }
+    }
+
+    /// Atomic authorize-and-commit — the concurrency-safe way to act on a capability (ADR-027,
+    /// Option A: one critical section). Evaluates `action`/`target` against `offered`; **iff** the
+    /// verdict is `Allow`, runs `commit` and returns `Ok(T)`; otherwise runs nothing and returns
+    /// `Err(Decision)` (fail-closed).
+    ///
+    /// The check and the effect execute inside this single `&self` call, so under the engine's lock
+    /// (revocation requires `&mut self` — the write side) **no revoke can linearize between the
+    /// authorization and the effect**. That closes the time-of-check/time-of-use window GAPS2 #9
+    /// flags for SMP: a `check(); drop_lock(); …; act();` sequence can act on a stale `Allow`, but
+    /// this primitive makes that gap structurally unrepresentable.
+    ///
+    /// `commit` receives `&self` (the still-live engine) alongside the [`Authorization`], so an
+    /// effect may perform additional capability reads or a post-condition *verify* within the same
+    /// authorized critical section (mirroring the pipeline's authorize→execute→verify step) — but it
+    /// cannot revoke or otherwise mutate the engine (no `&mut`).
+    pub fn with_authorization<T>(
+        &self,
+        action: &str,
+        target: &Target,
+        offered: &[CapToken],
+        commit: impl FnOnce(&Self, &Authorization) -> T,
+    ) -> Result<T, Decision> {
+        match self.authorize(action, target, offered) {
+            AuthOutcome::Allow(auth) => Ok(commit(self, &auth)),
+            AuthOutcome::RequireApproval => Err(Decision::RequireApproval),
+            AuthOutcome::Deny(msg) => Err(Decision::Deny(msg)),
         }
     }
 

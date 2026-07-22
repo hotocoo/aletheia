@@ -39,6 +39,7 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-CAP-003 | Delegation attenuation (never amplifies) | ADR-003 | kernel-core/src/spine.rs | kernel-core/tests/invariants.rs; kernel-core/tests/security_behavior.rs | scripts/vm-e2e.sh | delivered |
 | REQ-CAP-004 | Cascading revocation | ADR-003 | kernel-core/src/spine.rs | kernel-core/tests/invariants.rs; kernel-core/tests/security_behavior.rs | scripts/vm-e2e.sh | delivered |
 | REQ-CAP-005 | Policy/approval separation for destructive actions | ADR-015 | kernel-core/src/spine.rs; aletheia/src/policy.rs | kernel-core/tests/invariants.rs | - | delivered |
+| REQ-CAP-006 | Capability concurrency semantics: atomic authorize+execute (no stale-authorization TOCTOU, no authority resurrection) — spec + hosted-proved primitive; SMP wiring deferred under REQ-SMP-001 | ADR-027 | kernel-core/src/spine.rs | kernel-core/tests/cap_concurrency.rs | - | delivered |
 | REQ-PIPE-001 | Intent→Action pipeline: validate→authorize→execute→verify→record | ADR-002 | kernel-core/src/spine.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-PIPE-002 | Malformed model output cannot execute | ADR-006 | kernel-core/src/spine.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-STORE-001 | Content-addressed, versioned semantic store | ADR-005 | kernel-core/src/spine.rs; aletheia/src/storage.rs | kernel-core/tests/invariants.rs | - | delivered |
