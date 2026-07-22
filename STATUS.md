@@ -554,7 +554,13 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
-## Delivered (2026-07-22 — REQ-IPC-009: priority inheritance + priority-aware scheduling)
+## Delivered — kernel-core policy, PARTIAL (2026-07-22 — REQ-IPC-009: priority inheritance + priority-aware scheduling)
+
+**Status honesty (traceability `partial`):** this is the arch-independent *policy* + hosted proof; it
+is the same shape as REQ-KERN-005 — no target drives it and no VM gate exercises it yet, so it is
+`partial`, not `delivered`, until wired into a target's `usermode.rs` and VM-gated (the accumulated
+kernel-core policy — KERN-005 scheduler, IPC-008 grant-table, IPC-009 priority scheduler — is wired in
+one target-integration brick next).
 
 The second remaining IPC scope item, closing the IPC substrate's kernel-core policy work (gap Issue 2
 / ADR-020). The round-robin scheduler is fair but priority-blind, so it is prey to **unbounded
@@ -578,11 +584,16 @@ real microkernel does, as arch-independent policy inherited by all three targets
 - **Proved on the host** — `kernel-core/tests/priosched.rs` (9 tests): base-with-no-donors, cap-gated
   fail-closed, acquire/busy/wait semantics, single + transitive inheritance, inversion avoidance,
   release-withdraws-and-hands-off, and non-holder-release fail-closed. `kernel-core` hosted suite now
-  **58 passed** (8 suites); `clippy -D warnings` clean; `check-traceability.sh` green (36 delivered / 3
-  partial / 6 deferred). The IPC scope's only remaining deferred item is wiring `send_transfer` into
-  each target's cross-address-space `usermode.rs` fast-path (per-target integration, not new policy).
+  **58 passed** (8 suites); `clippy -D warnings` clean; `check-traceability.sh` green (34 delivered / 5
+  partial / 6 deferred — IPC-008/009 are `partial`: kernel-core policy proved, per-target wiring +
+  VM gate pending). The IPC scope's remaining items are the per-target wiring of this policy and
+  wiring `send_transfer` into each target's cross-address-space `usermode.rs` fast-path.
 
-## Delivered (2026-07-22 — REQ-IPC-008: zero-copy shared-memory grant-table)
+## Delivered — kernel-core policy, PARTIAL (2026-07-22 — REQ-IPC-008: zero-copy shared-memory grant-table)
+
+**Status honesty (traceability `partial`):** arch-independent *policy* + hosted proof, not yet driven
+by any target or VM gate — `partial` like REQ-KERN-005 until wired into a target's `vm.rs` mapping and
+VM-gated.
 
 The bulk-data companion to the message-copy `Channel`, closing the first of the two remaining IPC
 scope items (gap Issue 2 / ADR-020). The synchronous fast-path copies a message body into the
@@ -607,10 +618,9 @@ one physical frame region between endpoints under explicit authority; this wave 
   which `kernel-core::sched` owns the scheduling policy while each target owns the context switch.
 - **Proved on the host** — `kernel-core/tests/grant.rs` (8 tests): cap-gated, zero-copy read-sees-write,
   read-only-cannot-write, attenuate-but-never-amplify, no-share-without-access, bounded, and
-  revocation-unmaps-and-releases. `kernel-core` hosted suite now **49 passed** (7 suites); `clippy -D
-  warnings` clean; `check-traceability.sh` green (35 delivered / 3 partial / 7 deferred). The IPC scope
-  now leaves only **priority inheritance** (REQ-IPC-009, blocked on wiring the extracted scheduler into
-  the IPC blocking path) still deferred.
+  revocation-unmaps-and-releases. `kernel-core` hosted suite **49 passed** at this brick (7 suites);
+  `clippy -D warnings` clean. Traceability status `partial` (kernel-core policy proved; per-target
+  `vm.rs` mapping + VM gate pending).
 
 ## Run it
 
