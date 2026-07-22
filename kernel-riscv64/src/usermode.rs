@@ -992,13 +992,16 @@ fn run_shared_memory() -> (bool, bool, bool) {
         && vm::translate(root_a, SHARED_VA) == Some(pa)
         && vm::translate(root_b, SHARED_VA) == Some(pa);
 
-    // (revoke_unmaps) Revoking unmaps the grantee's page; the grantor keeps access.
+    // (revoke_unmaps) Revocation PATH: consult the grant-table's revoke authority, and ONLY on
+    // success tear down the grantee's mapping — the unmap is a consequence of a successful revoke,
+    // not unconditional. The grantor keeps its own access.
     let grant_id = granted.unwrap_or(0);
-    let revoked = gt.revoke(grant_id);
-    vm::unmap_page(root_b, SHARED_VA);
-    let revoke_unmaps = revoked
-        && vm::translate(root_b, SHARED_VA).is_none()
-        && vm::translate(root_a, SHARED_VA) == Some(pa);
+    let revoke_unmaps = if gt.revoke(grant_id) {
+        vm::unmap_page(root_b, SHARED_VA);
+        vm::translate(root_b, SHARED_VA).is_none() && vm::translate(root_a, SHARED_VA) == Some(pa)
+    } else {
+        false
+    };
 
     vm::unmap_page(root_a, SHARED_VA);
     frames::free(shf);
@@ -1104,7 +1107,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     );
     check!(
         revoke_unmaps,
-        "u-mode: revoking the grant unmaps the grantee's page while the grantor keeps access"
+        "u-mode: a successful grant revoke gates the unmap of the grantee's page; the grantor keeps access"
     );
 
     Ok(n)
