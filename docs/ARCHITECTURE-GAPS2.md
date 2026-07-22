@@ -5,9 +5,11 @@
 > - **#1 Target-specific traceability — ✅ ADDRESSED.** `REQ-USER-*` and `REQ-MEM-*` split into
 >   per-target rows, each naming its own VM gate (`vm-e2e.sh` / `smoke-test.sh` / `vm-e2e-riscv.sh`);
 >   a target-specific regression can no longer escape the gate. See TRACEABILITY "How it is checked".
-> - **#2 Cross-target conformance suite — 🔜 NEXT (their top pick).** The shared `kernel-core` spine +
->   `selftest::run` already run identically on all three VM gates; formalizing an explicit
->   conformance contract (capability/ipc/process/memory/scheduler/faults) is the next brick.
+> - **#2 Cross-target conformance suite — ✅ ADDRESSED.** `scripts/conformance.sh` (REQ-CONF-001) boots
+>   all three targets and asserts each proves the SAME 10 core semantic behaviors (cross-AS IPC,
+>   grant-table cap-gate/zero-copy/revoke, blocking IPC, priority inheritance). Spec'd on named
+>   behaviors with per-arch invariants declared as EXTENSIONS (x86-64 46 vs aarch64/RISC-V 53 total —
+>   honest MMU-off→on difference), NOT count equality. All three PASS. Follow-on: CI job; grow contract.
 > - **#3 IPC transfer through the real per-target user-mode path — ⏳ open** (kernel-core policy done;
 >   cross-AS `send_transfer` wiring per target is the remaining integration).
 > - **#4 SMP / concurrency cliff — ⏳ open** (REQ-SMP-001; blocked on #9 concurrency spec first).

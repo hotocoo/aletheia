@@ -69,6 +69,7 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-KERN-003 | RISC-V microkernel + spine invariants | ADR-019 | kernel-riscv64/src/main.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e-riscv.sh | delivered |
 | REQ-KERN-004 | Shared kernel-core spine + selftest (Issue 1 slice) | ADR-019 | kernel-core/src/spine.rs; kernel-core/src/selftest.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-KERN-005 | Shared kernel-core task/scheduler policy (Issue 1 rest) | ADR-019 | kernel-core/src/sched.rs; kernel/src/usermode.rs | kernel-core/tests/sched.rs | scripts/vm-e2e.sh | delivered |
+| REQ-CONF-001 | Cross-architecture semantic conformance gate (GAPS2 #2) | ADR-019 | scripts/conformance.sh | scripts/conformance.sh | scripts/conformance.sh | delivered |
 | REQ-MEM-AARCH64-001 | Physical frame allocator + MMU virtual memory (aarch64) | ADR-019 | kernel/src/frames.rs; kernel/src/vm.rs | kernel/src/vm.rs | scripts/vm-e2e.sh | delivered |
 | REQ-MEM-X86-001 | Physical frame allocator (UEFI map) + MMU map/unmap over live PML4 (x86-64) | ADR-019 | kernel-x86_64/src/frames.rs; kernel-x86_64/src/vm.rs | kernel-x86_64/src/vm.rs | kernel-x86_64/scripts/smoke-test.sh | delivered |
 | REQ-MEM-RISCV-001 | Physical frame allocator + Sv39 MMU virtual memory (RISC-V) | ADR-019 | kernel-riscv64/src/frames.rs; kernel-riscv64/src/vm.rs | kernel-riscv64/src/vm.rs | scripts/vm-e2e-riscv.sh | delivered |
