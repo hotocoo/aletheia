@@ -554,6 +554,27 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — GAPS2 Issue #1: target-specific traceability, no gate can be escaped)
+
+A second architecture audit (`docs/ARCHITECTURE-GAPS2.md`) flagged that the traceability matrix proved
+*evidence files exist* but not that the *correct target* executes them: the generic `REQ-USER-*` /
+`REQ-MEM-*` rows listed several implementations yet omitted `kernel-x86_64/scripts/smoke-test.sh` from
+their VM-Gate column, so an x86-64-specific user-mode or memory regression could compile and **escape
+the requirement gate**. Fixed by splitting those into **one row per target**, each naming that target's
+own implementation and its own VM gate:
+
+- `REQ-USER-AARCH64-001` / `REQ-USER-X86-001` / `REQ-USER-RISCV-001` (EL0 / ring-3 / U-mode, each →
+  `vm-e2e.sh` / `smoke-test.sh` / `vm-e2e-riscv.sh`).
+- `REQ-MEM-AARCH64-001` / `REQ-MEM-X86-001` / `REQ-MEM-RISCV-001` (frame allocator + MMU per target →
+  the same three gates). (Kernel-boot rows `REQ-KERN-001/002/003` were already per-target.)
+
+A regression in one target's user-mode now fails **that target's** named gate, not a sibling's.
+`check-traceability.sh` green: **46 requirements — 36 delivered / 4 partial / 6 deferred** (the
+authoritative counts; dated sections below are point-in-time snapshots). Remaining GAPS2 items tracked:
+cross-target conformance suite (#2), IPC-transfer through the real per-target user-mode path (#3),
+SMP + capability concurrency spec (#4/#9), end-to-end VM-tested priority inheritance (#5), real
+secure-boot chain (#6), persistent storage (#7), fault supervision (#8).
+
 ## Delivered (2026-07-22 — REQ-KERN-005: aarch64 target DRIVES the shared kernel-core scheduler, VM-gated)
 
 The "wire, don't pile" brick: instead of adding a fourth unwired kernel-core policy module, this wave
