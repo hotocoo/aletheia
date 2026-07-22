@@ -554,6 +554,30 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-IPC-009 → delivered: priority inheritance proved end-to-end on aarch64)
+
+The payoff of the blocking-IPC vehicle: REQ-IPC-009 priority inheritance is now proved **end-to-end
+through the real blocking-IPC path** (not a hosted re-run of coherent-by-construction policy — the bar
+the advisor + GAPS2 #5 set). New EL0 invariants **20-22** in `kernel/src/usermode.rs::run_priority_ipc`,
+VM-gated by `scripts/vm-e2e.sh` (now **ALL 22 EL0-BOUNDARY INVARIANTS HOLD**, exit 0):
+
+- **20 — inversion avoided at the real dispatch point:** a HIGH-priority EL0 receiver blocks on the
+  endpoint a LOW-priority task services; the blocked HIGH `wait`s on that endpoint (held by LOW) so
+  `kernel_core::priosched::PriorityScheduler` boosts LOW's effective priority to HIGH — and
+  `schedule_next` dispatches the boosted LOW **ahead of a Ready MEDIUM** task. A priority-blind
+  scheduler would have run MEDIUM and starved HIGH indirectly.
+- **21 — the boosted LOW services:** the dispatched LOW runs and sends, waking the blocked HIGH.
+- **22 — HIGH receives:** HIGH resumes as the highest-priority task and receives the body across the
+  two distinct address spaces.
+
+MEDIUM is a scheduler-only Ready competitor (the proof is the dispatch *decision* under real
+contention, not MEDIUM's execution). `clippy -D warnings` clean; `check-traceability.sh` green:
+**47 requirements — 39 delivered / 2 partial / 6 deferred**. The **entire IPC substrate scope
+(gap Issue 2) is now delivered** — synchronous, transfer+attenuation, bounded queues, async
+notifications, timeout, cancellation, trace/replay, zero-copy shared memory (all-target real MMU),
+blocking IPC, and priority inheritance. Follow-on: spread blocking-IPC + priority inheritance to
+x86-64/RISC-V (the aarch64 proof is the reference); GAPS2 #5 closed on the dev backend.
+
 ## Delivered (2026-07-22 — REQ-IPC-010: real blocking IPC on aarch64, the vehicle for priority inheritance)
 
 The chosen next feature (advisor: "the cheap-conversion phase is over; pick a feature"). Until now the

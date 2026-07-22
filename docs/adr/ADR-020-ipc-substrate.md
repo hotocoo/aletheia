@@ -59,6 +59,15 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
   recursion via a visited set, not a hang). Arch-independent policy; the context switch stays each
   target's `TaskContext` seam. Proved on the host in `kernel-core/tests/priosched.rs` (9 tests).
 
+- **Priority inheritance / donation** (REQ-IPC-009, **delivered** 2026-07-22). kernel-core policy in
+  `kernel-core/src/priosched.rs`; proved end-to-end through the REAL blocking-IPC path in
+  `kernel/src/usermode.rs::run_priority_ipc` (EL0 invariants 20-22, VM-gated by `scripts/vm-e2e.sh`):
+  a HIGH EL0 receiver blocks on the endpoint a LOW task services, donates its priority so the boosted
+  LOW is dispatched ahead of a Ready MEDIUM (inversion avoided at the real dispatch point), LOW
+  services, and HIGH wakes. Depends on **blocking IPC** (REQ-IPC-010, `run_blocking_ipc`), the
+  substrate that lets an EL0 task genuinely block on an endpoint. aarch64 dev backend; x86-64/RISC-V
+  spread is the follow-on.
+
 **Deferred (design here; no blind code — ADR-010):**
 - **Cross-address-space wiring.** `send_transfer` is proved in the shared spine; wiring it into each
   target's cross-AS `usermode.rs` fast-path (aarch64/x86-64/RISC-V invariants 11–13 already deliver
