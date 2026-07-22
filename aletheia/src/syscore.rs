@@ -260,11 +260,35 @@ impl SysCore {
         Ok(e)
     }
 
-    /// Launch an untrusted component. Two distinct authority layers (application-as-capability):
-    /// `launch_caps` must satisfy `component.run` (the right to run any component at all), while the
-    /// component executes with EXACTLY `grant_caps` as its authority — nothing is inherited from the
-    /// launcher, so a component with an empty grant can do nothing (INV-011, no ambient authority).
+    /// Launch an untrusted component from RAW WASM (ad-hoc, no installed provenance). Two distinct
+    /// authority layers (application-as-capability): `launch_caps` must satisfy `component.run`, while
+    /// the component executes with EXACTLY `grant_caps` (nothing inherited from the launcher, INV-011).
+    ///
+    /// Secure-launch policy (ADR-025 Phase 1): because ad-hoc raw WASM carries no signature, this path
+    /// is refused fail-closed when `require_signed_components` is on — only signed, installed components
+    /// (`install_signed_component` + `run_installed`) may launch under secure policy. With the policy
+    /// off (default), ad-hoc runs behave exactly as before.
     pub fn run_component(
+        &mut self,
+        launch_caps: &[String],
+        grant_caps: &[String],
+        subject: &str,
+        wasm: &[u8],
+        fuel: u64,
+    ) -> Result<crate::component::ComponentOutcome> {
+        if self.require_signed_components {
+            self.emit("ComponentSignatureRejected", &new_id(), subject, json!({"reason": "ad-hoc run refused under secure policy; install a signed component"}));
+            return Err(AlethError::authorization("ad-hoc component execution refused under secure policy"));
+        }
+        self.launch_component(launch_caps, grant_caps, subject, wasm, fuel)
+    }
+
+    /// The authorized launch path shared by `run_component` (ad-hoc) and `run_installed` (verified):
+    /// `launch_caps` must satisfy `component.run`; the component then executes with EXACTLY
+    /// `grant_caps`. Secure-launch provenance is settled by the CALLER (`run_installed` verifies the
+    /// stored signature; `run_component` refuses ad-hoc runs under secure policy), so this internal
+    /// path performs only the capability check + composition.
+    fn launch_component(
         &mut self,
         launch_caps: &[String],
         grant_caps: &[String],
@@ -385,7 +409,9 @@ impl SysCore {
             }
         }
         let wasm = self.store.get_blob(&hash).cloned().ok_or_else(|| AlethError::not_found("application code missing"))?;
-        self.run_component(launch_caps, grant_caps, subject, &wasm, fuel)
+        // Provenance is already settled above; launch via the internal path (not the public ad-hoc
+        // `run_component`, which would refuse under secure policy).
+        self.launch_component(launch_caps, grant_caps, subject, &wasm, fuel)
     }
 
     /// Trust a component-signing key: the trust anchor for secure-launch provenance (ADR-025 Phase 1).

@@ -109,6 +109,21 @@ fn signature_is_bound_to_the_content() {
     assert!(result.is_err(), "a signature over other content does not authorize this component");
 }
 
+/// Under secure policy, an AD-HOC raw-WASM `run_component` (no installed provenance) is refused
+/// fail-closed — closing the bypass where unsigned code could launch without going through the
+/// signed installed path.
+#[test]
+fn adhoc_run_component_refused_under_secure_policy() {
+    let (mut core, owner) = open();
+    core.trust_component_key(TRUSTED_KEY);
+    core.set_require_signed_components(true);
+    let run_cap = grant(&mut core, &owner, "component:hello", "component.run");
+
+    let result = core.run_component(&[run_cap], &[], "component:hello", HELLO_WASM, 1_000_000);
+    assert!(result.is_err(), "ad-hoc raw-WASM execution has no provenance and is refused under secure policy");
+    assert_eq!(count_events(&core, "ComponentRan"), 0, "the component never ran");
+}
+
 /// With the policy OFF (default), the existing unsigned install/run flow is unchanged (back-compat).
 #[test]
 fn default_policy_runs_unsigned_component() {
