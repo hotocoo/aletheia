@@ -24,6 +24,7 @@
 
 extern crate alloc;
 
+pub mod grant;
 pub mod ipc;
 pub mod sched;
 pub mod selftest;

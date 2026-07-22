@@ -513,3 +513,8 @@ pub fn run_pipeline(
 // ---------------------------------------------------------------------------
 
 pub use crate::ipc::{CapGrant, Channel, IpcOp, Message, Notification, RecvOutcome, TraceEvent};
+
+// Zero-copy shared-memory grant-table (REQ-IPC-008, ADR-020) — the bulk-data companion to the
+// message-copy `Channel`. Re-exported here so the `spine::*` surface carries it alongside the IPC
+// types; the authority/lifecycle layer is arch-independent, the page mapping stays a per-target seam.
+pub use crate::grant::{GrantError, GrantTable, ShareMode};
