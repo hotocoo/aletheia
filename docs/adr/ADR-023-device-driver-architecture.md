@@ -36,7 +36,24 @@ class in gap-register Issue 11).
 **Phase 3 — isolation + recovery.** Drivers run isolated (a driver crash cannot corrupt the kernel or
 other drivers); the supervisor (ADR-026) restarts a failed driver; hotplug + power management.
 
-## Virtio-blk driver — implementation plan (the named next slice; REQ-DRV-001, VM-gated)
+## Virtio-blk driver — ✅ DELIVERED (REQ-DRV-003, 2026-07-22, `kernel/src/virtio.rs`, VM-gated)
+
+The concrete first real driver is now **built and VM-gated** on the aarch64 dev backend
+(`scripts/vm-e2e.sh`): virtio-blk over **modern (v2)** virtio-mmio on QEMU `virt`, implementing the
+delivered `kernel_core::storage::BlockDevice` trait so the journaled store (REQ-STOR-002) runs over
+real emulated storage. **5 invariants** hold live (exit 0): device discovery, capacity read matches
+the attached 1 MiB image (256 × 4 KiB blocks), a write→read-back virtqueue round-trip, `Journal`
+commit + a fresh `recover` reproducing state from the device bytes alone (crash-consistency over real
+storage), and capability-gated I/O through `DeviceGuard` (REQ-DRV-002 over the real device). Two
+gotchas hit + fixed: QEMU's `virtio-blk-device` on `virt` defaults the mmio transport to **legacy
+(v1)** — forced modern with `-global virtio-mmio.force-legacy=false`; and the 4 KiB `BlockDevice`
+block maps to **8** 512-byte virtio sectors (sector = idx × 8). The driver fails closed on a legacy
+transport and skips green (`[virtio] no device (skipped)`) under bare `cargo run` (no disk). The plan
+that produced it is preserved below. **Still deferred under the umbrella REQ-DRV-001:** hotplug,
+DMA/IOMMU confinement, driver-crash isolation + supervisor restart (Phase 3), and the RISC-V/x86-64
+virtio backends.
+
+### Original plan (executed)
 
 The concrete first real driver: a **virtio-blk** device over **virtio-mmio** on QEMU `virt`
 (aarch64/RISC-V), implementing the delivered `kernel_core::storage::BlockDevice` trait so the journaled
