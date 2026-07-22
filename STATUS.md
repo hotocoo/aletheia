@@ -554,6 +554,42 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-CAP-006: capability concurrency semantics, the SMP prerequisite)
+
+The gate the audit itself put **before** SMP (GAPS2 #9 "the capability model needs a formal
+concurrency specification before SMP"; #9 precedes #4). Until now the capability engine's safety
+rested on an implicit single-core assumption: Rust's borrow checker serializes a `&self` `evaluate`
+against a `&mut self` `revoke`. SMP breaks that — two cores behind one lock can interleave the
+pipeline's *authorize* and *execute* steps, so an effect acts on a capability revoked in the gap
+(a classic time-of-check/time-of-use bug). ADR-027 specifies the guarantee and `kernel-core` now
+implements + proves it, contract-honest.
+
+- **Specified (ADR-027):** authorization and the effect it authorizes commit inside **one critical
+  section**; an effect executes only if its capability is live at that point; revocation is immediate
+  and permanent (no cached authorization, no authority resurrection). **Option A** (single lock —
+  re-check inside the critical section, no epochs) is chosen and built; **Option B** (generation/epoch
+  tokens for a future lock-free authorize) is documented but deliberately NOT built (ADR-010 + YAGNI).
+- **Implemented (additive):** `CapEngine::with_authorization(action, target, offered, commit)` runs
+  the check and, iff `Allow`, the `commit` closure within one `&self` call — because `revoke` needs
+  `&mut self`, under the engine lock no revoke can linearize between check and effect, making the
+  TOCTOU gap **unrepresentable**. `CapEngine::authorize` is the read-only variant that also names
+  *which* token matched (an `Authorization`); `evaluate`/`revoke`/`mint`/`delegate` signatures are
+  **untouched** (both authorization paths route through one private `test_token` matcher, so they
+  cannot drift). The `now` clock is fixed at construction, so it is not shared-mutable under concurrency.
+- **Proved under REAL threads (`kernel-core/tests/cap_concurrency.rs`, 5 tests):** the naive
+  `check(); … ; act();` pattern is stale by construction; then an `RwLock`-guarded engine is hammered
+  by committer threads vs. a revoker (progress-gated so the Allow path is genuinely exercised
+  regardless of thread-wakeup order — a fixed spin races the scheduler) and asserts the disciplined
+  primitive **never** commits under a revoked capability and that **revocation is permanent** (a
+  committer that observes revoke-completed can never then see `Allow`). `kernel-core` hosted suite
+  **72 passed**; aarch64 VM gate still green (`[e2e] PASS`, exit 0); `clippy -D warnings` + `fmt` clean.
+
+**Honesty (advisor):** this proves the **mechanism** under host threads — it does **not** prove an
+SMP-safe kernel (none exists). Wiring `with_authorization` into each target's real trap/IPC path, plus
+the TLB-shootdown / atomic-ordering audit, is the SMP integration still **deferred** under
+**REQ-SMP-001** (gap #4, ADR-021); REQ-CAP-006 is the prerequisite spec that unblocks it. Traceability
+green (**53 reqs — 45 delivered / 4 partial / 4 deferred**).
+
 ## Delivered (2026-07-22 — REQ-DRV-003: virtio-blk driver — the FIRST real hardware driver, VM-gated)
 
 The named next slice of ADR-023, executed. Until now the `kernel_core::storage::BlockDevice` seam was

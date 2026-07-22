@@ -31,7 +31,14 @@
 >   commit+recover is proved over real emulated storage, not just the in-memory device. STILL open
 >   (REQ-STOR-001): the encryption-at-rest layer over the device and the semantic store on persistence.
 > - **#8 Fault supervision as a kernel primitive — ⏳ deferred** (REQ-REL-001 / ADR-026).
-> - **#9 Capability concurrency spec before SMP — ⏳ open** (precedes #4).
+> - **#9 Capability concurrency spec before SMP — ✅ ADDRESSED (spec + hosted-proved primitive).**
+>   REQ-CAP-006 / ADR-027: the authorize→execute atomicity guarantee is specified (Option A — one
+>   critical section; Option B epochs documented, not built) and implemented as
+>   `CapEngine::with_authorization` (+ `authorize`). Proved under real `std::thread` contention
+>   (`kernel-core/tests/cap_concurrency.rs`): the naive check-then-act is stale by construction, the
+>   disciplined primitive never commits under a revoked cap, and revocation is permanent. Proves the
+>   MECHANISM on host threads; wiring it into each target's real trap path (+ TLB-shootdown /
+>   atomic-ordering audit) is the SMP integration still deferred under #4.
 > - **#10 Hardware-diversity ladder — ⏳ deferred** (QEMU is the current top rung; real boards later).
 >
 > Recent progress feeding these: all three targets now DRIVE the shared `kernel_core::sched::RoundRobin`
