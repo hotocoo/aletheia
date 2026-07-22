@@ -571,9 +571,14 @@ proved live by `scripts/vm-e2e.sh` (now **ALL 16 EL0-BOUNDARY INVARIANTS HOLD**,
 - **16 — revocation unmaps:** revoking the grant tears down the grantee's page mapping while the
   grantor keeps its own access (the per-target "revoke ⇒ unmap" seam).
 
-`check-traceability.sh` green; `clippy -D warnings` clean on the aarch64 kernel. **Follow-on:** the same
-real-path conversion on x86-64 (`vm.rs` over PML4) and RISC-V (Sv39), and — GAPS2 #3 — wiring EL0 code
-itself (not just the kernel-verified mapping) to read/write the shared page across the boundary.
+`check-traceability.sh` green; `clippy -D warnings` clean on the aarch64 kernel.
+
+**All three targets now prove it** (cross-target, GAPS2 #2): the identical `run_shared_memory` invariants
+14-16 pass on aarch64 (TTBR0, `scripts/vm-e2e.sh`), RISC-V (Sv39 satp, `scripts/vm-e2e-riscv.sh`, "ALL
+16 USER-MODE BOUNDARY INVARIANTS HOLD"), and x86-64 (PML4, `kernel-x86_64/scripts/smoke-test.sh`, "ALL
+16 RING-3 BOUNDARY INVARIANTS HOLD", exit 33) — one arch-independent `GrantTable` authority layer, three
+real per-target MMU backends. **Follow-on (GAPS2 #3):** wiring EL0/ring-3/U-mode code itself (not just
+the kernel-verified mapping) to read/write the shared page across the boundary.
 
 ## Delivered (2026-07-22 — GAPS2 Issue #1: target-specific traceability, no gate can be escaped)
 
