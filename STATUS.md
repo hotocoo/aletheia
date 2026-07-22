@@ -554,6 +554,30 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — blocking IPC + priority inheritance on ALL THREE targets; x86 exit-race fixed)
+
+Closing the divergence the aarch64-only blocking IPC opened (GAPS2 #2, advisor's steer): REQ-IPC-010
+blocking IPC and REQ-IPC-009 priority inheritance are now proved through the real user-mode path on
+**all three first-class targets** — aarch64 EL0 (TTBR0), RISC-V U-mode (satp), x86-64 ring-3 (PML4) —
+each **22 boundary invariants**, VM-gated:
+
+- RISC-V: `run_blocking_ipc` + `run_priority_ipc` in `kernel-riscv64/src/usermode.rs`, new
+  `_stub_recv_exit` asm stub, a0(`regs[10]`) delivery; `scripts/vm-e2e-riscv.sh` "ALL 22 … HOLD".
+- x86-64: same in `kernel-x86_64/src/usermode.rs`, new `stub_recv_exit` asm stub, rdi(`regs[RDI]`)
+  delivery; `kernel-x86_64/scripts/smoke-test.sh` "ALL 22 … HOLD", exit 33.
+- Per-target pieces (advisor: highest-asm-content spread): a two-syscall receiver stub in each ISA,
+  the `IPC_BLOCK_MODE` recv branch in each trap dispatcher, frame-register delivery per `TrapFrame`
+  layout, and the priosched wiring — composed from each target's existing syscall stubs.
+
+**Bug fixed (x86 exit-race):** the extra invariants exposed a latent race — `kmain` re-enabled
+interrupts after the ring-3 suite, so a PIT IRQ latched during the suite fired between "[e2e] PASS"
+and `exit(0)`; with no live scheduler left, `resume_return` jumped into the last excursion's stale
+`KERNEL_CTX` → triple fault → QEMU exit 255 (the "x86 exit-255 flake"). Fixed by keeping IF=0 through
+the halt/exit (as aarch64/RISC-V already do). x86 now exits 33 deterministically.
+
+`check-traceability.sh` green (47 reqs — 39 delivered / 2 partial / 6 deferred); REQ-IPC-009/010 rows
+name all three gates (GAPS2 #1). The IPC substrate (gap Issue 2) is delivered cross-target.
+
 ## Delivered (2026-07-22 — REQ-IPC-009 → delivered: priority inheritance proved end-to-end on aarch64)
 
 The payoff of the blocking-IPC vehicle: REQ-IPC-009 priority inheritance is now proved **end-to-end

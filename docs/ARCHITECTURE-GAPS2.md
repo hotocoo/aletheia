@@ -11,11 +11,12 @@
 > - **#3 IPC transfer through the real per-target user-mode path — ⏳ open** (kernel-core policy done;
 >   cross-AS `send_transfer` wiring per target is the remaining integration).
 > - **#4 SMP / concurrency cliff — ⏳ open** (REQ-SMP-001; blocked on #9 concurrency spec first).
-> - **#5 Priority inheritance end-to-end VM-tested — ✅ ADDRESSED (aarch64).** REQ-IPC-009 now proved
->   through the REAL blocking-IPC path: a HIGH EL0 receiver blocks on the endpoint a LOW task services,
->   donates its priority, and the boosted LOW is dispatched ahead of a Ready MEDIUM
->   (`kernel/src/usermode.rs::run_priority_ipc`, EL0 invariants 20-22, `scripts/vm-e2e.sh`). Built on
->   REQ-IPC-010 real blocking IPC. Follow-on: spread to x86-64/RISC-V.
+> - **#5 Priority inheritance end-to-end VM-tested — ✅ ADDRESSED (all three targets).** REQ-IPC-009
+>   proved through the REAL blocking-IPC path: a HIGH receiver blocks on the endpoint a LOW task
+>   services, donates its priority, and the boosted LOW is dispatched ahead of a Ready MEDIUM
+>   (`…/usermode.rs::run_priority_ipc`, invariants 20-22). Built on REQ-IPC-010 real blocking IPC.
+>   Proved on aarch64 (`scripts/vm-e2e.sh`), RISC-V (`scripts/vm-e2e-riscv.sh`), and x86-64
+>   (`kernel-x86_64/scripts/smoke-test.sh`) — directly reducing the #2 divergence risk.
 > - **#6 Real secure-boot chain — ⏳ partial** (component signatures = ADR-025 Phase 1; hardware root
 >   of trust / key lifecycle / rollback deferred).
 > - **#7 Persistent storage substrate — ⏳ deferred** (REQ-STOR-001 / ADR-024).

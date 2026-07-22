@@ -93,7 +93,10 @@ fn capture_framebuffer() -> Option<FbInfo> {
         PixelFormat::Bgr => true,
         PixelFormat::Rgb => false,
         other => {
-            kprintln!("[gop] pixel format {:?} has no linear framebuffer; serial-only", other);
+            kprintln!(
+                "[gop] pixel format {:?} has no linear framebuffer; serial-only",
+                other
+            );
             return None;
         }
     };
@@ -102,9 +105,20 @@ fn capture_framebuffer() -> Option<FbInfo> {
     let size = buffer.size();
     kprintln!(
         "[gop] {}x{} stride={} fmt={:?} base={:p} size={:#x}",
-        width, height, stride, format, base, size
+        width,
+        height,
+        stride,
+        format,
+        base,
+        size
     );
-    Some(FbInfo { base, width, height, stride, bgr })
+    Some(FbInfo {
+        base,
+        width,
+        height,
+        stride,
+        bgr,
+    })
 }
 
 fn summarize_memory(map: &MemoryMapOwned) -> (usize, u64) {
@@ -124,9 +138,14 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
 
     kprintln!("");
     kprintln!("========================================");
-    kprintln!(" Aletheia microkernel — HAL backend: {}", ActiveHal::arch_name());
+    kprintln!(
+        " Aletheia microkernel — HAL backend: {}",
+        ActiveHal::arch_name()
+    );
     kprintln!("========================================");
-    kprintln!("[hal] first-class targets: AMD64/x86-64, RISC-V  (aarch64 = bootstrap/dev; ADR-019)");
+    kprintln!(
+        "[hal] first-class targets: AMD64/x86-64, RISC-V  (aarch64 = bootstrap/dev; ADR-019)"
+    );
 
     gdt::init();
     kprintln!("[boot] GDT loaded (flat 64-bit code/data); segment registers reloaded");
@@ -143,8 +162,14 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         entries,
         conventional / (1024 * 1024)
     );
-    kprintln!("[boot] heap: 8 MiB static region; {} B used after init", heap::used_bytes());
-    kprintln!("[boot] privilege: CPL {} (ring 0 = kernel)", ActiveHal::current_privilege());
+    kprintln!(
+        "[boot] heap: 8 MiB static region; {} B used after init",
+        heap::used_bytes()
+    );
+    kprintln!(
+        "[boot] privilege: CPL {} (ring 0 = kernel)",
+        ActiveHal::current_privilege()
+    );
 
     x86_64::instructions::interrupts::enable();
     kprintln!("[boot] interrupts enabled (sti); waiting for timer IRQs...");
@@ -152,7 +177,10 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     while pit::ticks() < target {
         x86_64::instructions::hlt();
     }
-    kprintln!("[timer] OK: {} ticks via IRQ0 — interrupts + timer are LIVE", pit::ticks());
+    kprintln!(
+        "[timer] OK: {} ticks via IRQ0 — interrupts + timer are LIVE",
+        pit::ticks()
+    );
     kprintln!("[hal] rdtsc monotonic sample: {}", ActiveHal::timer_ticks());
 
     // --- physical memory management (P5): take ownership of the RAM the firmware handed us ---
@@ -208,7 +236,10 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     match usermode::selftest() {
         Ok(n) => {
             kprintln!("[usermode] ALL {} RING-3 BOUNDARY INVARIANTS HOLD", n);
-            x86_64::instructions::interrupts::enable();
+            // Keep IF=0 through the halt/exit (as aarch64/RISC-V do). Re-enabling here would let a
+            // PIT IRQ latched during the ring-3 suite fire between "[e2e] PASS" and exit(0) and, with
+            // no live scheduler left, resume_return would jump into the last excursion's now-stale
+            // KERNEL_CTX — a triple fault surfacing as QEMU exit 255. Nothing below needs interrupts.
         }
         Err((idx, name)) => {
             kprintln!("[usermode] FAILED at ring-3 invariant {}: {}", idx, name);
