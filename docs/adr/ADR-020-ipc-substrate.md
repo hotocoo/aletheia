@@ -39,12 +39,18 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
   endpoint's address space stays each target's `vm.rs` seam (map/unmap already delivered) — the same
   split by which `kernel-core::sched` owns the scheduling policy and each target owns the context
   switch. Proved on the host in `kernel-core/tests/grant.rs` (8 tests, no QEMU).
+- **Priority inheritance / donation** (REQ-IPC-009, delivered 2026-07-22, `kernel-core/src/priosched.rs`).
+  A `PriorityScheduler` tracks task base priorities and an endpoint ownership + wait graph. When a task
+  `wait`s on an endpoint held by another, the holder's **effective** priority rises to that of the
+  waiter (and, transitively, of anything blocked behind the waiter across a chain of held endpoints),
+  so `schedule_next` runs the boosted holder ahead of an unrelated medium-priority task — bounding
+  priority inversion to the holder's critical section. Acquiring/waiting on an endpoint is gated by the
+  SAME `CapEngine` (fail-closed); donation is derived on read, so `release` (which hands the endpoint to
+  its highest-priority waiter) withdraws it automatically. Cycle-safe (a deadlock breaks the donation
+  recursion via a visited set, not a hang). Arch-independent policy; the context switch stays each
+  target's `TaskContext` seam. Proved on the host in `kernel-core/tests/priosched.rs` (9 tests).
 
 **Deferred (design here; no blind code — ADR-010):**
-- **Priority inheritance / donation.** When a high-priority task blocks on an endpoint held by a
-  lower-priority task, the holder temporarily inherits the waiter's priority to avoid priority
-  inversion. Requires the scheduler (`kernel-core::sched`) in the IPC blocking path — landed after the
-  per-target `usermode.rs` is wired to the shared scheduler (see REQ-KERN-005).
 - **Cross-address-space wiring.** `send_transfer` is proved in the shared spine; wiring it into each
   target's cross-AS `usermode.rs` fast-path (aarch64/x86-64/RISC-V invariants 11–13 already deliver
   the basic kernel-mediated endpoint) is the remaining per-target integration.
@@ -53,7 +59,9 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
 
 - Higher-level services can be built on real capability-authorized IPC, not ad-hoc hosted APIs.
 - The fail-closed discipline is re-proved at each new boundary (notifications, timeout, transfer).
-- Zero-copy shared memory is now delivered as the arch-independent `GrantTable` (REQ-IPC-008); the
-  per-target page-mapping of a grant rides each target's existing `vm.rs`. Priority inheritance
-  (REQ-IPC-009) stays deferred until the extracted scheduler is wired into the IPC blocking path;
-  its status in `docs/TRACEABILITY.md` remains honest until then.
+- Zero-copy shared memory (REQ-IPC-008, `GrantTable`) and priority inheritance (REQ-IPC-009,
+  `PriorityScheduler`) are now both delivered as arch-independent policy in `kernel-core`; the
+  per-target page-mapping of a grant and the per-target context switch remain the respective `vm.rs`
+  and `TaskContext` seams. The IPC scope's only remaining deferred item is cross-address-space wiring
+  of `send_transfer` into each target's `usermode.rs` fast-path (a per-target integration, not new
+  kernel-core policy); `docs/TRACEABILITY.md` stays honest about it.

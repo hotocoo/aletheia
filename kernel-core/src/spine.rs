@@ -518,3 +518,8 @@ pub use crate::ipc::{CapGrant, Channel, IpcOp, Message, Notification, RecvOutcom
 // message-copy `Channel`. Re-exported here so the `spine::*` surface carries it alongside the IPC
 // types; the authority/lifecycle layer is arch-independent, the page mapping stays a per-target seam.
 pub use crate::grant::{GrantError, GrantTable, ShareMode};
+
+// Priority-inheritance blocking IPC + priority-aware scheduling (REQ-IPC-009, ADR-020). Re-exported
+// so the `spine::*` surface carries the priority-scheduler alongside the round-robin one; the policy
+// is arch-independent, the context switch stays each target's `TaskContext` seam.
+pub use crate::priosched::{Endpoint, Priority, PriorityScheduler, SchedError};
