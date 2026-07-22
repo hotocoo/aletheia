@@ -37,10 +37,12 @@ use core::ptr::{addr_of, addr_of_mut};
 // REQ-KERN-005: the x86-64 target DRIVES the shared arch-independent scheduling policy from
 // kernel-core rather than hand-rolling its own rotation — kernel-core decides which task runs next;
 // this module performs only the context-switch MECHANISM (resume_frame + CR3 address-space switch).
-use kernel_core::sched::{RoundRobin, TaskId};
+use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's PML4 `vm.rs` performs the real page mapping into each space.
 use kernel_core::grant::{GrantTable, ShareMode};
+// REQ-IPC-009/010: shared priority-inheritance scheduler for the blocking-IPC dispatch decision.
+use kernel_core::priosched::{Endpoint, Priority, PriorityScheduler};
 
 core::arch::global_asm!(
     r#"
@@ -248,6 +250,19 @@ stub_spin_start:
 15: jmp     15b
 .global stub_spin_end
 stub_spin_end:
+
+// Blocking-IPC receiver: recv (blocks on empty; the kernel delivers the body into rdi on wake), then
+// EXIT carrying rdi as the arg — so the received body is reported back through sched_report. `mov eax`
+// does not touch rdi, so the delivered body survives to the exit syscall.
+.global stub_recv_exit_start
+stub_recv_exit_start:
+    mov     eax, 5                   // SYS_RECV
+    int     0x80
+    mov     eax, 3                   // SYS_EXIT (rdi unchanged = delivered body)
+    int     0x80
+16: jmp     16b
+.global stub_recv_exit_end
+stub_recv_exit_end:
 "#
 );
 
@@ -272,6 +287,8 @@ extern "sysv64" {
     static stub_coop_end: u8;
     static stub_spin_start: u8;
     static stub_spin_end: u8;
+    static stub_recv_exit_start: u8;
+    static stub_recv_exit_end: u8;
 }
 
 /// The running task's frame, published by `resume_frame` and saved into by every entry. One
@@ -405,6 +422,11 @@ fn current() -> Option<&'static mut Trial> {
 static mut ENDPOINT: Option<u64> = None;
 /// The body the most recent authorized `SYS_RECV` drained.
 static mut IPC_RECEIVED: u64 = 0;
+// Blocking IPC (REQ-IPC-010): when set (only during run_blocking_ipc/run_priority_ipc), an authorized
+// SYS_RECV on an empty endpoint records that the caller must BLOCK instead of returning fail-value;
+// the scheduler deschedules it until a SYS_SEND wakes it. Default off ⇒ run_ipc semantics untouched.
+static mut IPC_BLOCK_MODE: bool = false;
+static mut IPC_RECV_BLOCKED: bool = false;
 
 // ---------------------------------------------------------------------------
 // Scheduler state (multitasking invariants).
@@ -503,7 +525,14 @@ pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
                             unsafe { *addr_of_mut!(IPC_RECEIVED) = body };
                             body
                         }
-                        None => u64::MAX, // authorized, but the endpoint was empty
+                        None => {
+                            // Empty. In blocking mode, signal the scheduler to deschedule this
+                            // caller until a SYS_SEND wakes it; else non-blocking fail-value.
+                            if unsafe { IPC_BLOCK_MODE } {
+                                unsafe { *addr_of_mut!(IPC_RECV_BLOCKED) = true };
+                            }
+                            u64::MAX
+                        }
                     }
                 }
                 _ => {
@@ -1108,6 +1137,260 @@ fn run_preemptive() -> (bool, bool) {
     (fair, progress_ok && clean)
 }
 
+/// Real blocking IPC on x86-64 (REQ-IPC-010) — the aarch64/RISC-V twin: a receiver that `recv`s an
+/// EMPTY endpoint BLOCKS (descheduled via `kernel_core::sched`), a sender's `send` WAKES it and the
+/// kernel delivers the body across PML4 spaces (into the receiver's saved `rdi`), and the woken
+/// receiver RESUMES past its `int 0x80` and exits reporting the body. Returns
+/// `(recv_blocked, send_woke_and_delivered, receiver_resumed_with_body)`.
+fn run_blocking_ipc() -> (bool, bool, bool) {
+    let root_main = vm::active_root();
+    let (root_r, root_s) = match (vm::build_space(), vm::build_space()) {
+        (Some(r), Some(s)) => (r, s),
+        _ => return (false, false, false),
+    };
+    let r_code = vm::map_stub_frame(
+        root_r,
+        USER_CODE_VA,
+        stub_bytes!(stub_recv_exit_start, stub_recv_exit_end),
+    );
+    let r_stack = vm::map_user(root_r, USER_STACK_VA, true);
+    let s_code = vm::map_stub_frame(
+        root_s,
+        USER_CODE_VA,
+        stub_bytes!(stub_syscall_start, stub_syscall_end),
+    );
+    let s_stack = vm::map_user(root_s, USER_STACK_VA, true);
+    if r_code.is_none() || r_stack.is_none() || s_code.is_none() || s_stack.is_none() {
+        free_leaf(root_r, USER_STACK_VA, r_stack);
+        free_leaf(root_r, USER_CODE_VA, r_code);
+        free_leaf(root_s, USER_STACK_VA, s_stack);
+        free_leaf(root_s, USER_CODE_VA, s_code);
+        return (false, false, false);
+    }
+
+    const BODY: u64 = 0xB10C_CAFE;
+    let mut engine = CapEngine::new(0xB10C, 1000);
+    let caps = alloc::vec![engine.mint("ipc", "ipc.msg", Scope::All, Constraints::none())];
+    // SAFETY: single-threaded; reset endpoint/flag state before any excursion.
+    unsafe {
+        *addr_of_mut!(ENDPOINT) = None;
+        *addr_of_mut!(IPC_RECEIVED) = 0;
+        *addr_of_mut!(IPC_RECV_BLOCKED) = false;
+        *addr_of_mut!(IPC_BLOCK_MODE) = true;
+    }
+    set_trial(Trial {
+        engine,
+        store: Store::new(),
+        caps,
+        action: "ipc.msg",
+        armed: false,
+        expect_fault_va: 0,
+        allowed: false,
+        isolation_held: false,
+        fault_va: 0,
+    });
+    let mut recv_frame = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    recv_frame.regs[RAX] = SYS_RECV;
+    recv_frame.regs[RDI] = 0;
+    let mut send_frame = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    send_frame.regs[RAX] = SYS_SEND;
+    send_frame.regs[RDI] = BODY;
+    let mut sched = RoundRobin::new();
+    sched.spawn(TaskId(0)); // receiver
+    sched.spawn(TaskId(1)); // sender
+
+    // Step 1 — receiver recv's the empty endpoint and must BLOCK.
+    // SAFETY: root_r maps the running kernel.
+    unsafe {
+        vm::switch_to(root_r);
+        resume_frame(&mut recv_frame as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    let recv_blocked = unsafe { *addr_of!(IPC_RECV_BLOCKED) };
+    if recv_blocked {
+        sched.block(TaskId(0));
+    }
+
+    // Step 2 — sender sends; the kernel WAKES the blocked receiver, delivers the body into its rdi.
+    // SAFETY: root_s maps the running kernel.
+    unsafe {
+        vm::switch_to(root_s);
+        resume_frame(&mut send_frame as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    let sent = unsafe { (*addr_of!(ENDPOINT)).is_some() };
+    let send_woke_and_delivered = if sent && recv_blocked {
+        let body = unsafe { (*addr_of_mut!(ENDPOINT)).take() }.unwrap_or(0);
+        unsafe { *addr_of_mut!(IPC_RECEIVED) = body };
+        recv_frame.regs[RDI] = body; // deliver into the woken receiver's rdi (its exit arg)
+        sched.unblock(TaskId(0));
+        body == BODY && sched.state(TaskId(0)) == Some(TaskState::Ready)
+    } else {
+        false
+    };
+
+    // Step 3 — resume the woken receiver: continues past its recv int 0x80 with rdi = body, then
+    // EXITs reporting rdi — a reported magic == BODY proves it received across spaces.
+    sched_report(0, false);
+    // SAFETY: root_r maps the running kernel.
+    unsafe {
+        vm::switch_to(root_r);
+        resume_frame(&mut recv_frame as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    let (reported, exited) = unsafe {
+        let s = &*addr_of!(SCHED);
+        (s.last_magic, s.exited)
+    };
+    let receiver_resumed_with_body = exited && reported == BODY;
+
+    unsafe { *addr_of_mut!(IPC_BLOCK_MODE) = false };
+    take_trial();
+    free_leaf(root_r, USER_STACK_VA, r_stack);
+    free_leaf(root_r, USER_CODE_VA, r_code);
+    free_leaf(root_s, USER_STACK_VA, s_stack);
+    free_leaf(root_s, USER_CODE_VA, s_code);
+    (
+        recv_blocked,
+        send_woke_and_delivered,
+        receiver_resumed_with_body,
+    )
+}
+
+/// Priority inheritance end-to-end on x86-64 (REQ-IPC-009) through the real blocking-IPC path — the
+/// aarch64/RISC-V twin: a HIGH ring-3 receiver blocks on the endpoint a LOW task services; the blocked
+/// HIGH donates its priority (`PriorityScheduler`) so the boosted LOW is dispatched ahead of a Ready
+/// MEDIUM (inversion avoided), LOW services, and HIGH wakes. MEDIUM is a scheduler-only competitor.
+/// Returns `(inversion_avoided, low_serviced, high_received)`.
+fn run_priority_ipc() -> (bool, bool, bool) {
+    let root_main = vm::active_root();
+    let (root_h, root_l) = match (vm::build_space(), vm::build_space()) {
+        (Some(h), Some(l)) => (h, l),
+        _ => return (false, false, false),
+    };
+    let h_code = vm::map_stub_frame(
+        root_h,
+        USER_CODE_VA,
+        stub_bytes!(stub_recv_exit_start, stub_recv_exit_end),
+    );
+    let h_stack = vm::map_user(root_h, USER_STACK_VA, true);
+    let l_code = vm::map_stub_frame(
+        root_l,
+        USER_CODE_VA,
+        stub_bytes!(stub_syscall_start, stub_syscall_end),
+    );
+    let l_stack = vm::map_user(root_l, USER_STACK_VA, true);
+    if h_code.is_none() || h_stack.is_none() || l_code.is_none() || l_stack.is_none() {
+        free_leaf(root_h, USER_STACK_VA, h_stack);
+        free_leaf(root_h, USER_CODE_VA, h_code);
+        free_leaf(root_l, USER_STACK_VA, l_stack);
+        free_leaf(root_l, USER_CODE_VA, l_code);
+        return (false, false, false);
+    }
+
+    const BODY: u64 = 0x9A9A_5C5C;
+    const LOW: TaskId = TaskId(0);
+    const MED: TaskId = TaskId(1);
+    const HIGH: TaskId = TaskId(2);
+    const EP: Endpoint = Endpoint(1);
+
+    let mut engine = CapEngine::new(0x9A9A, 1000);
+    let caps = alloc::vec![engine.mint("ipc", "ipc.msg", Scope::All, Constraints::none())];
+    // SAFETY: single-threaded; reset endpoint/flag state.
+    unsafe {
+        *addr_of_mut!(ENDPOINT) = None;
+        *addr_of_mut!(IPC_RECEIVED) = 0;
+        *addr_of_mut!(IPC_RECV_BLOCKED) = false;
+        *addr_of_mut!(IPC_BLOCK_MODE) = true;
+    }
+    set_trial(Trial {
+        engine,
+        store: Store::new(),
+        caps,
+        action: "ipc.msg",
+        armed: false,
+        expect_fault_va: 0,
+        allowed: false,
+        isolation_held: false,
+        fault_va: 0,
+    });
+    let mut peng = CapEngine::new(0x00EE, 1000);
+    let acq = peng.mint("sched", "ep.acquire", Scope::All, Constraints::none());
+    let mut ps = PriorityScheduler::new("ep.acquire");
+    ps.admit(LOW, Priority(1));
+    ps.admit(MED, Priority(5));
+    ps.admit(HIGH, Priority(10));
+    let _ = ps.acquire(&peng, EP, LOW, &[acq]);
+
+    let mut high_frame = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    high_frame.regs[RAX] = SYS_RECV;
+    high_frame.regs[RDI] = 0;
+    let mut low_frame = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    low_frame.regs[RAX] = SYS_SEND;
+    low_frame.regs[RDI] = BODY;
+
+    // Step 1 — HIGH runs first and BLOCKS; it then WAITS on the endpoint LOW holds, donating to LOW.
+    // SAFETY: root_h maps the running kernel.
+    unsafe {
+        vm::switch_to(root_h);
+        resume_frame(&mut high_frame as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    let high_blocked = unsafe { *addr_of!(IPC_RECV_BLOCKED) };
+    if high_blocked {
+        let _ = ps.wait(&peng, EP, HIGH, &[acq]);
+    }
+
+    // The inheritance decision: boosted LOW dispatched ahead of the Ready MEDIUM.
+    let boosted = ps.effective_priority(LOW) == Priority(10);
+    let picked = ps.schedule_next();
+    let inversion_avoided = high_blocked && boosted && picked == Some(LOW);
+
+    // Step 2 — run the dispatched LOW: it services the endpoint (sends), waking HIGH.
+    let low_serviced = if picked == Some(LOW) {
+        // SAFETY: root_l maps the running kernel.
+        unsafe {
+            vm::switch_to(root_l);
+            resume_frame(&mut low_frame as *mut TrapFrame);
+            vm::switch_to(root_main);
+        }
+        let sent = unsafe { (*addr_of!(ENDPOINT)).is_some() };
+        if sent && high_blocked {
+            let body = unsafe { (*addr_of_mut!(ENDPOINT)).take() }.unwrap_or(0);
+            unsafe { *addr_of_mut!(IPC_RECEIVED) = body };
+            high_frame.regs[RDI] = body; // deliver into the woken HIGH receiver's rdi
+            let _ = ps.release(EP, LOW);
+            body == BODY
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Step 3 — HIGH resumes as highest-priority and receives the body across spaces.
+    sched_report(0, false);
+    // SAFETY: root_h maps the running kernel.
+    unsafe {
+        vm::switch_to(root_h);
+        resume_frame(&mut high_frame as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    let (reported, exited) = unsafe {
+        let s = &*addr_of!(SCHED);
+        (s.last_magic, s.exited)
+    };
+    let high_received = exited && reported == BODY;
+
+    unsafe { *addr_of_mut!(IPC_BLOCK_MODE) = false };
+    take_trial();
+    free_leaf(root_h, USER_STACK_VA, h_stack);
+    free_leaf(root_h, USER_CODE_VA, h_code);
+    free_leaf(root_l, USER_STACK_VA, l_stack);
+    free_leaf(root_l, USER_CODE_VA, l_code);
+    (inversion_avoided, low_serviced, high_received)
+}
+
 /// Shared VA for the grant-table test — an unused page in the user 1 GiB PDPT slot (below 4 GiB, as
 /// the ring-3 code segment's `iret` limit requires), distinct from the code/stack/private VAs.
 const SHARED_VA: u64 = USER_CODE_VA + 0x5000;
@@ -1332,6 +1615,38 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         revoke_unmaps,
         "ring3: a successful grant revoke gates the unmap of the grantee's page; the grantor keeps access"
+    );
+
+    // 17, 18 & 19 — real BLOCKING IPC (REQ-IPC-010): recv on empty BLOCKS, send WAKES + delivers
+    // across PML4 spaces, the woken receiver RESUMES past its int 0x80 with the body in rdi + reports.
+    let (recv_blocked, send_woke, receiver_resumed) = run_blocking_ipc();
+    check!(
+        recv_blocked,
+        "ring3: recv on an empty endpoint BLOCKS the receiver — it is descheduled (kernel_core::sched)"
+    );
+    check!(
+        send_woke,
+        "ring3: a send WAKES the blocked receiver (unblock ⇒ Ready) and delivers the body across spaces"
+    );
+    check!(
+        receiver_resumed,
+        "ring3: the woken receiver RESUMES past its int 0x80 with the body in rdi and exits reporting it"
+    );
+
+    // 20, 21 & 22 — priority inheritance end-to-end (REQ-IPC-009): a blocked HIGH donates to the LOW
+    // endpoint holder, so the boosted LOW is dispatched over a Ready MEDIUM; LOW services, HIGH wakes.
+    let (inversion_avoided, low_serviced, high_received) = run_priority_ipc();
+    check!(
+        inversion_avoided,
+        "ring3: blocked HIGH donates to the LOW endpoint holder — scheduler dispatches boosted LOW over Ready MEDIUM"
+    );
+    check!(
+        low_serviced,
+        "ring3: the boosted LOW runs and services the endpoint (sends), waking HIGH"
+    );
+    check!(
+        high_received,
+        "ring3: HIGH resumes as highest-priority and receives the body across address spaces"
     );
 
     Ok(n)
