@@ -24,6 +24,7 @@
 
 extern crate alloc;
 
+pub mod ipc;
 pub mod selftest;
 pub mod spine;
 
