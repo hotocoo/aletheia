@@ -27,7 +27,8 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
 - **Cancellation** — an undelivered message can be cancelled by its channel-assigned id.
 - **Tracing + deterministic replay** — every op is logged; `replay()` reconstructs the exact delivery
   sequence from the trace alone (auditable + reproducible).
-- **Zero-copy shared-memory channels** (REQ-IPC-008, delivered 2026-07-22, `kernel-core/src/grant.rs`).
+- **Zero-copy shared-memory channels** (REQ-IPC-008, kernel-core policy delivered 2026-07-22,
+  `kernel-core/src/grant.rs`; traceability `partial` — per-target `vm.rs` page-mapping + VM gate pending).
   A `GrantTable` shares one physical frame region between endpoints under an explicit `memory.share`
   capability: establishing a share is gated by the SAME `CapEngine` (no capability ⇒ no grant,
   fail-closed); a grant can only **attenuate** the grantor's access (a read-only holder can never mint
@@ -39,7 +40,8 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
   endpoint's address space stays each target's `vm.rs` seam (map/unmap already delivered) — the same
   split by which `kernel-core::sched` owns the scheduling policy and each target owns the context
   switch. Proved on the host in `kernel-core/tests/grant.rs` (8 tests, no QEMU).
-- **Priority inheritance / donation** (REQ-IPC-009, delivered 2026-07-22, `kernel-core/src/priosched.rs`).
+- **Priority inheritance / donation** (REQ-IPC-009, kernel-core policy delivered 2026-07-22,
+  `kernel-core/src/priosched.rs`; traceability `partial` — per-target `usermode.rs` wiring + VM gate pending).
   A `PriorityScheduler` tracks task base priorities and an endpoint ownership + wait graph. When a task
   `wait`s on an endpoint held by another, the holder's **effective** priority rises to that of the
   waiter (and, transitively, of anything blocked behind the waiter across a chain of held endpoints),
@@ -60,8 +62,9 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
 - Higher-level services can be built on real capability-authorized IPC, not ad-hoc hosted APIs.
 - The fail-closed discipline is re-proved at each new boundary (notifications, timeout, transfer).
 - Zero-copy shared memory (REQ-IPC-008, `GrantTable`) and priority inheritance (REQ-IPC-009,
-  `PriorityScheduler`) are now both delivered as arch-independent policy in `kernel-core`; the
-  per-target page-mapping of a grant and the per-target context switch remain the respective `vm.rs`
-  and `TaskContext` seams. The IPC scope's only remaining deferred item is cross-address-space wiring
-  of `send_transfer` into each target's `usermode.rs` fast-path (a per-target integration, not new
-  kernel-core policy); `docs/TRACEABILITY.md` stays honest about it.
+  `PriorityScheduler`) are now implemented as arch-independent policy in `kernel-core` with green
+  hosted proofs, but — like REQ-KERN-005 — no target drives them and no VM gate exercises them yet, so
+  `docs/TRACEABILITY.md` marks both **`partial`**, not delivered, until they are wired into a target
+  (grant → `vm.rs` mapping; priority scheduler → `usermode.rs`) and VM-gated. The remaining IPC
+  integration work is therefore: per-target wiring of this policy, plus cross-address-space
+  `send_transfer` in each target's `usermode.rs` fast-path.
