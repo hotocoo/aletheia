@@ -554,6 +554,34 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-IPC-009: priority inheritance + priority-aware scheduling)
+
+The second remaining IPC scope item, closing the IPC substrate's kernel-core policy work (gap Issue 2
+/ ADR-020). The round-robin scheduler is fair but priority-blind, so it is prey to **unbounded
+priority inversion**: a high task H blocks on an endpoint a low task L holds while an unrelated medium
+task M preempts L forever. `kernel-core/src/priosched.rs` (`PriorityScheduler`) breaks this the way a
+real microkernel does, as arch-independent policy inherited by all three targets:
+
+- **Priority donation** — when a task `wait`s on an endpoint held by another, the holder's *effective*
+  priority rises to the waiter's, and **transitively** to anything blocked behind it across a chain of
+  held endpoints. Effective priority is derived on read (a visited set makes a deadlock cycle
+  terminate rather than hang), so `release` withdraws donation automatically.
+- **Inversion avoided** — `schedule_next` runs the highest-effective-priority Ready task (FIFO
+  tiebreak), so a boosted low holder outranks an unrelated medium task and finishes its critical
+  section; the inversion is bounded to that section.
+- **Capability-gated** — acquiring or waiting on a kernel endpoint is authorized by the SAME
+  `CapEngine` (no ambient endpoint access); every refusal is fail-closed.
+- **Hand-off on release** — releasing an endpoint hands it to its highest-priority waiter, which is
+  unblocked and becomes the new holder.
+- **Per-target seam (ADR-010):** the scheduling *policy* is here; the actual register save/restore +
+  address-space switch stays each target's `TaskContext` seam (same split as `kernel-core::sched`).
+- **Proved on the host** — `kernel-core/tests/priosched.rs` (9 tests): base-with-no-donors, cap-gated
+  fail-closed, acquire/busy/wait semantics, single + transitive inheritance, inversion avoidance,
+  release-withdraws-and-hands-off, and non-holder-release fail-closed. `kernel-core` hosted suite now
+  **58 passed** (8 suites); `clippy -D warnings` clean; `check-traceability.sh` green (36 delivered / 3
+  partial / 6 deferred). The IPC scope's only remaining deferred item is wiring `send_transfer` into
+  each target's cross-address-space `usermode.rs` fast-path (per-target integration, not new policy).
+
 ## Delivered (2026-07-22 — REQ-IPC-008: zero-copy shared-memory grant-table)
 
 The bulk-data companion to the message-copy `Channel`, closing the first of the two remaining IPC

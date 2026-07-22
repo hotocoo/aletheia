@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod grant;
 pub mod ipc;
+pub mod priosched;
 pub mod sched;
 pub mod selftest;
 pub mod spine;
