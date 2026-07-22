@@ -554,6 +554,31 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-BOOT-002: asymmetric component provenance, ed25519 + key hierarchy)
+
+First P7 brick (secure-boot Phase 2, ADR-025). Phase 1's `TrustStore` was **symmetric** HMAC — the
+verifier held the secret and could therefore forge. This wave adds **asymmetric** provenance in
+`aletheia/src/provenance.rs` (ed25519, pure-Rust dalek; ADR-004-consistent, no C toolchain):
+
+- **`SigningIdentity`** holds the PRIVATE key and signs a component's content hash; **`AsymTrustStore`**
+  holds trusted **public keys ONLY** — so possession of the verifier's trust anchor confers **no
+  ability to sign**. A compromised verifier still cannot forge (the property Phase 1 lacked).
+- **Root→signing-key hierarchy:** a trusted root ENDORSES a component-signing key (`endorse`), which
+  signs components; `verify_chain` accepts a component only if a trusted root endorsed its signer AND
+  the signer signed the component — signing authority can be delegated/rotated without trusting every
+  signer directly.
+- **Fail-closed:** empty store verifies nothing; malformed keys/signatures are verification failures
+  (never mistaken for valid); tamper (different hash), unendorsed signer, and untrusted-root
+  endorsement are all rejected.
+- **Proved:** 3 new hosted tests (`provenance.rs`, fixed-seed keypairs for determinism) + the 3
+  legacy HMAC tests unchanged; aletheia suite **81 passed**; `clippy -D warnings` clean.
+
+**Honesty (advisor):** this is a NEW requirement **REQ-BOOT-002**, marked delivered. The full
+**REQ-BOOT-001 "secure boot + chain of trust"** stays `partial`: a firmware→bootloader→kernel measured
+chain with a hardware root of trust (TPM/secure enclave) and anti-rollback (a monotonic counter needs
+persistent secure storage) are hardware-bound (ADR-025 Phase 3) — designed, not claimed. Traceability
+green (48 reqs — 40 delivered / 2 partial / 6 deferred).
+
 ## Delivered (2026-07-22 — blocking IPC + priority inheritance on ALL THREE targets; x86 exit-race fixed)
 
 Closing the divergence the aarch64-only blocking IPC opened (GAPS2 #2, advisor's steer): REQ-IPC-010

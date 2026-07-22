@@ -79,7 +79,8 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-SEC-001 | Adversarial security-behaviour regressions | ADR-003 | kernel-core/src/spine.rs | kernel-core/tests/security_behavior.rs | - | delivered |
 | REQ-DRV-001 | Device / driver architecture | ADR-023 | - | - | - | deferred |
 | REQ-STOR-001 | Persistent storage / filesystem / recovery | ADR-024 | - | - | - | deferred |
-| REQ-BOOT-001 | Secure boot + chain of trust (component signature verification) | ADR-025 | aletheia/src/provenance.rs; aletheia/src/crypto.rs | aletheia/tests/component_signing.rs | - | partial |
+| REQ-BOOT-001 | Secure boot + chain of trust (firmware→bootloader→kernel measured chain, hardware root) | ADR-025 | aletheia/src/provenance.rs; aletheia/src/crypto.rs | aletheia/tests/component_signing.rs | - | partial |
+| REQ-BOOT-002 | Asymmetric component provenance (ed25519, public-key-only verifier, root→signing key hierarchy) | ADR-025 | aletheia/src/provenance.rs; aletheia/src/crypto.rs | aletheia/src/provenance.rs | - | delivered |
 | REQ-REL-001 | Fault recovery / supervision | ADR-026 | - | - | - | deferred |
 
 > Deferred rows carry an ADR (the phased plan) but no code — by design (ADR-010: no blind hardware
