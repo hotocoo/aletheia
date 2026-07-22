@@ -554,6 +554,30 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-IPC-010: real blocking IPC on aarch64, the vehicle for priority inheritance)
+
+The chosen next feature (advisor: "the cheap-conversion phase is over; pick a feature"). Until now the
+kernel IPC endpoint was a non-blocking single-slot mailbox (`recv` on empty returned a fail-value).
+This wave adds **real blocking IPC** on the aarch64 dev backend — the substrate REQ-IPC-009 priority
+inheritance needs to be VM-proved end-to-end. New EL0 invariants **17-19** in
+`kernel/src/usermode.rs::run_blocking_ipc`, proved live by `scripts/vm-e2e.sh` (now **ALL 19
+EL0-BOUNDARY INVARIANTS HOLD**, exit 0):
+
+- **17 — recv blocks:** a receiver that `recv`s an EMPTY endpoint is genuinely descheduled — the
+  handler signals the block, and the scheduler moves it to `Blocked` (`kernel_core::sched` block()).
+- **18 — send wakes + delivers:** the sender's `send` deposits the body; because a receiver is
+  blocked-waiting, the kernel wakes it (`unblock` ⇒ `Ready`) and delivers the body across the two
+  distinct TTBR0 address spaces (into the receiver's saved `x0`).
+- **19 — receiver resumes:** the woken receiver resumes *past its `svc`* with the body in `x0` and
+  exits reporting it — proving the block→wake→deliver→resume round trip, not just a mailbox drain.
+
+Guarded so every other test is untouched: blocking is behind an `IPC_BLOCK_MODE` flag (default off),
+so `run_ipc`'s non-blocking mailbox semantics are unchanged. `clippy -D warnings` clean;
+`check-traceability.sh` green. **This is the vehicle, not the priority proof:** REQ-IPC-009 stays
+`partial` until a follow-on drives this blocking endpoint under `PriorityScheduler` with a 3rd
+medium-priority task, showing the boosted holder runs ahead of it (priority inversion avoided) — the
+genuine end-to-end priority-inheritance VM proof (GAPS2 #5).
+
 ## Delivered (2026-07-22 — REQ-IPC-008 → delivered: grant-table through the REAL aarch64 MMU path)
 
 Converting the zero-copy shared-memory grant-table from hosted-only (`partial`) to VM-gated
