@@ -38,6 +38,9 @@ use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's `vm.rs` performs the real page mapping into each address space.
 use kernel_core::grant::{GrantTable, ShareMode};
+// REQ-IPC-009: the shared priority-inheritance scheduler drives the dispatch decision when a
+// high-priority EL0 task blocks on the endpoint a low-priority task must service.
+use kernel_core::priosched::{Endpoint, Priority, PriorityScheduler};
 
 global_asm!(
     r#"
@@ -1318,6 +1321,151 @@ fn run_blocking_ipc() -> (bool, bool, bool) {
     )
 }
 
+/// Prove **priority inheritance end-to-end** (REQ-IPC-009 / GAPS2 #5) through the REAL blocking-IPC
+/// path — not a hosted re-run. A HIGH-priority EL0 receiver blocks on the endpoint a LOW-priority EL0
+/// task must service; with an unrelated MEDIUM task Ready, a priority-BLIND scheduler would run MEDIUM
+/// and starve HIGH indirectly (classic priority inversion). Driven by the shared
+/// [`PriorityScheduler`], the blocked HIGH waiter DONATES its priority to the LOW holder, so
+/// `schedule_next` dispatches the boosted LOW ahead of MEDIUM — LOW services the endpoint, HIGH wakes.
+/// MEDIUM is a scheduler-only Ready competitor (the proof is the DISPATCH decision, not its
+/// execution). Returns `(inversion_avoided, low_serviced, high_received)`.
+fn run_priority_ipc() -> (bool, bool, bool) {
+    let root_main = vm::active_root();
+    let (root_h, root_l) = match (vm::build_identity(), vm::build_identity()) {
+        (Some(h), Some(l)) => (h, l),
+        _ => return (false, false, false),
+    };
+    let h_code = map_user_code(root_h, USER_CODE_VA, &STUB_RECV_THEN_EXIT);
+    let h_stack = map_user_stack(root_h, USER_STACK_VA);
+    let l_code = map_user_code(root_l, USER_CODE_VA, &STUB_SYSCALL);
+    let l_stack = map_user_stack(root_l, USER_STACK_VA);
+    if h_code.is_none() || h_stack.is_none() || l_code.is_none() || l_stack.is_none() {
+        for (root, va, f) in [
+            (root_h, USER_STACK_VA, h_stack),
+            (root_h, USER_CODE_VA, h_code),
+            (root_l, USER_STACK_VA, l_stack),
+            (root_l, USER_CODE_VA, l_code),
+        ] {
+            if let Some(f) = f {
+                drop_user_page(root, va, f);
+            }
+        }
+        return (false, false, false);
+    }
+
+    const BODY: u64 = 0x9A9A_5C5C;
+    const LOW: TaskId = TaskId(0);
+    const MED: TaskId = TaskId(1);
+    const HIGH: TaskId = TaskId(2);
+    const EP: Endpoint = Endpoint(1);
+
+    // Shared IPC trial (endpoint capability) + blocking mode, exactly as run_blocking_ipc.
+    let mut engine = CapEngine::new(0x9A9A, 1000);
+    let caps = alloc::vec![engine.mint("ipc", "ipc.msg", Scope::All, Constraints::none())];
+    // SAFETY: single-threaded; install the trial + reset endpoint/flag state before any excursion.
+    unsafe {
+        *addr_of_mut!(ENDPOINT) = None;
+        *addr_of_mut!(IPC_RECEIVED) = 0;
+        *addr_of_mut!(IPC_RECV_BLOCKED) = false;
+        *addr_of_mut!(IPC_BLOCK_MODE) = true;
+        *addr_of_mut!(CURRENT) = Some(Trial {
+            engine,
+            store: Store::new(),
+            caps,
+            action: "ipc.msg",
+            armed: false,
+            allowed: false,
+            isolation_held: false,
+            fault_va: 0,
+        });
+    }
+
+    // The priority scheduler: LOW services, MED is an unrelated Ready competitor, HIGH receives.
+    // A separate capability engine authorizes endpoint acquisition (cap-gated, like real IPC).
+    let mut peng = CapEngine::new(0x00EE, 1000);
+    let acq = peng.mint("sched", "ep.acquire", Scope::All, Constraints::none());
+    let mut ps = PriorityScheduler::new("ep.acquire");
+    ps.admit(LOW, Priority(1));
+    ps.admit(MED, Priority(5));
+    ps.admit(HIGH, Priority(10));
+    let _ = ps.acquire(&peng, EP, LOW, &[acq]); // LOW holds the endpoint it will service
+
+    let mut high_tcb = Tcb {
+        frame: TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, 0, SYS_RECV),
+        done: false,
+    };
+    let mut low_tcb = Tcb {
+        frame: TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, BODY, SYS_SEND),
+        done: false,
+    };
+
+    // Step 1 — HIGH runs first (highest base) and BLOCKS on the empty endpoint; it then WAITS on the
+    // endpoint LOW holds, donating its priority to LOW.
+    // SAFETY: root_h replicates the kernel identity map.
+    unsafe {
+        vm::switch_address_space(root_h);
+        resume_frame(&mut high_tcb.frame as *mut TrapFrame);
+        vm::switch_address_space(root_main);
+    }
+    let high_blocked = unsafe { *addr_of!(IPC_RECV_BLOCKED) };
+    if high_blocked {
+        let _ = ps.wait(&peng, EP, HIGH, &[acq]);
+    }
+
+    // The inheritance decision: LOW is boosted to HIGH's priority, so `schedule_next` dispatches LOW
+    // ahead of the Ready MEDIUM — the priority inversion is avoided at the real dispatch point.
+    let boosted = ps.effective_priority(LOW) == Priority(10);
+    let picked = ps.schedule_next();
+    let inversion_avoided = high_blocked && boosted && picked == Some(LOW);
+
+    // Step 2 — run the dispatched LOW: it services the endpoint (sends BODY), which wakes HIGH.
+    let low_serviced = if picked == Some(LOW) {
+        // SAFETY: root_l replicates the kernel identity map.
+        unsafe {
+            vm::switch_address_space(root_l);
+            resume_frame(&mut low_tcb.frame as *mut TrapFrame);
+            vm::switch_address_space(root_main);
+        }
+        let sent = unsafe { (*addr_of!(ENDPOINT)).is_some() };
+        if sent && high_blocked {
+            let body = unsafe { (*addr_of_mut!(ENDPOINT)).take() }.unwrap_or(0);
+            unsafe { *addr_of_mut!(IPC_RECEIVED) = body };
+            high_tcb.frame.regs[0] = body; // deliver into the woken HIGH receiver's x0
+            let _ = ps.release(EP, LOW); // hands the endpoint to HIGH (the waiter), unblocking it
+            body == BODY
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Step 3 — HIGH resumes (now the highest Ready task) and receives the body across spaces.
+    sched_report(0, false);
+    // SAFETY: root_h replicates the kernel identity map.
+    unsafe {
+        vm::switch_address_space(root_h);
+        resume_frame(&mut high_tcb.frame as *mut TrapFrame);
+        vm::switch_address_space(root_main);
+    }
+    let (reported, exited) = unsafe {
+        let s = &*addr_of!(SCHED);
+        (s.last_magic, s.exited)
+    };
+    let high_received = exited && reported == BODY;
+
+    unsafe {
+        *addr_of_mut!(IPC_BLOCK_MODE) = false;
+        (*addr_of_mut!(CURRENT)).take();
+    }
+    drop_user_page(root_h, USER_STACK_VA, h_stack.expect("mapped"));
+    drop_user_page(root_h, USER_CODE_VA, h_code.expect("mapped"));
+    drop_user_page(root_l, USER_STACK_VA, l_stack.expect("mapped"));
+    drop_user_page(root_l, USER_CODE_VA, l_code.expect("mapped"));
+
+    (inversion_avoided, low_serviced, high_received)
+}
+
 /// Shared VA for the grant-table test — an unused slot in the same `0x5000_xxxx` hole as the other
 /// user pages (above QEMU RAM, so it is NOT identity-mapped: a real per-process translation).
 const SHARED_VA: usize = 0x5000_5000;
@@ -1530,6 +1678,24 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         receiver_resumed,
         "el0: the woken receiver RESUMES past its svc with the body in x0 and exits reporting it"
+    );
+
+    // 20, 21 & 22 — priority inheritance end-to-end (REQ-IPC-009 / GAPS2 #5) over the real blocking-IPC
+    // path: a HIGH receiver blocks on the endpoint a LOW task services; the blocked HIGH donates its
+    // priority so the boosted LOW is dispatched ahead of a Ready MEDIUM (inversion avoided), LOW
+    // services, and HIGH wakes with the body.
+    let (inversion_avoided, low_serviced, high_received) = run_priority_ipc();
+    check!(
+        inversion_avoided,
+        "el0: blocked HIGH donates to the LOW endpoint holder — scheduler dispatches boosted LOW over Ready MEDIUM"
+    );
+    check!(
+        low_serviced,
+        "el0: the boosted LOW runs and services the endpoint (sends), waking HIGH"
+    );
+    check!(
+        high_received,
+        "el0: HIGH resumes as highest-priority and receives the body across address spaces"
     );
 
     Ok(n)

@@ -11,8 +11,11 @@
 > - **#3 IPC transfer through the real per-target user-mode path — ⏳ open** (kernel-core policy done;
 >   cross-AS `send_transfer` wiring per target is the remaining integration).
 > - **#4 SMP / concurrency cliff — ⏳ open** (REQ-SMP-001; blocked on #9 concurrency spec first).
-> - **#5 Priority inheritance end-to-end VM-tested — ⏳ partial.** Policy delivered + hosted-proved
->   (`PriorityScheduler`); a real high-prio-blocked-on-endpoint VM scenario is pending (REQ-IPC-009).
+> - **#5 Priority inheritance end-to-end VM-tested — ✅ ADDRESSED (aarch64).** REQ-IPC-009 now proved
+>   through the REAL blocking-IPC path: a HIGH EL0 receiver blocks on the endpoint a LOW task services,
+>   donates its priority, and the boosted LOW is dispatched ahead of a Ready MEDIUM
+>   (`kernel/src/usermode.rs::run_priority_ipc`, EL0 invariants 20-22, `scripts/vm-e2e.sh`). Built on
+>   REQ-IPC-010 real blocking IPC. Follow-on: spread to x86-64/RISC-V.
 > - **#6 Real secure-boot chain — ⏳ partial** (component signatures = ADR-025 Phase 1; hardware root
 >   of trust / key lifecycle / rollback deferred).
 > - **#7 Persistent storage substrate — ⏳ deferred** (REQ-STOR-001 / ADR-024).
