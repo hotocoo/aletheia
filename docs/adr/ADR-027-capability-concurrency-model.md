@@ -70,8 +70,12 @@ that SMP Phase 2 (ADR-021) will start from. Revisit if per-CPU lock-free authori
   pattern is stale by construction, then hammers `with_authorization` under real `std::thread`
   contention (an `RwLock`-guarded engine, committer threads vs. a revoker) and asserts the effect
   **never** commits under a revoked capability and revocation is **permanent** (no resurrection).
-- **Additive.** `evaluate`/`revoke`/`mint`/`delegate` signatures are untouched, so `selftest`, the
-  hosted invariant suite, and all three VM gates are unaffected.
+- **Additive.** `evaluate`/`revoke`/`mint`/`delegate` signatures are untouched, so `selftest` and the
+  hosted invariant suite are unaffected. All three target crates recompile against the changed shared
+  spine; the aarch64 (`scripts/vm-e2e.sh`) and RISC-V (`scripts/vm-e2e-riscv.sh`) VM gates were re-run
+  green (exit 0). The x86-64 image gate (`kernel-x86_64/scripts/smoke-test.sh`) is compile-verified —
+  its boot needs the image toolchain and was not re-run this session (consistent with `conformance.sh`
+  SKIPPING x86-64 on hosts lacking that toolchain).
 - **Honesty boundary.** This proves the *mechanism* under host threads. It does **not** prove an
   SMP-safe kernel — none exists yet. Wiring `with_authorization` into each target's real trap/IPC
   path, plus the TLB-shootdown / atomic-ordering audit, is the SMP integration deferred under ADR-021
