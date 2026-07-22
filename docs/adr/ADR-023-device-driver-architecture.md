@@ -36,6 +36,44 @@ class in gap-register Issue 11).
 **Phase 3 — isolation + recovery.** Drivers run isolated (a driver crash cannot corrupt the kernel or
 other drivers); the supervisor (ADR-026) restarts a failed driver; hotplug + power management.
 
+## Virtio-blk driver — implementation plan (the named next slice; REQ-DRV-001, VM-gated)
+
+The concrete first real driver: a **virtio-blk** device over **virtio-mmio** on QEMU `virt`
+(aarch64/RISC-V), implementing the delivered `kernel_core::storage::BlockDevice` trait so the journaled
+store (REQ-STOR-002) runs over real emulated hardware. This is a fresh-context brick (intricate MMIO +
+ring code); the plan below is exact so it can be executed and VM-gated in one focused pass.
+
+**Environment wiring.** Add to the aarch64 runner (`kernel/.cargo/config.toml`) and `scripts/vm-e2e.sh`
+(and the RISC-V equivalents): generate a small raw backing image (e.g. `truncate -s 1M`), seed sector 0
+with a known pattern, and attach `-drive if=none,format=raw,file=<img>,id=blk0 -device
+virtio-blk-device,drive=blk0`. On `virt`, virtio-mmio transports sit at `0x0a00_0000 + i*0x200` (32
+slots) inside the Device-mapped peripheral GiB — already mapped by `vm::build_identity`. The probe must
+be graceful: under bare `cargo run` (no disk) it logs `[virtio] no device (skipped)` and boots green;
+the VM gate attaches the disk and asserts discovery + I/O.
+
+**Driver protocol (modern/v2 split virtqueue).**
+1. *Discovery:* scan the 32 mmio slots for `MagicValue==0x7472_6976` ("virt") and `DeviceID==2` (block).
+2. *Init handshake:* write status `ACKNOWLEDGE|DRIVER`; read `DeviceFeatures` (accept the minimal set,
+   clear `VIRTIO_F_*` we don't implement), write `DriverFeatures`, set `FEATURES_OK`, read it back.
+3. *Queue 0 setup:* allocate frame-backed, aligned descriptor table (16 B × N) + avail ring + used
+   ring; program `QueueSel=0`, `QueueNum`, and the `QueueDesc/Avail/Used` low/high registers; set
+   `QueueReady=1`. Read capacity from config space (`sectors = read64(config+0)`).
+4. *Request:* a 3-descriptor chain — header (RO: `type` READ=0/WRITE=1, reserved, `sector`), a
+   `BLOCK_SIZE` data buffer (device-writable for READ / driver-readable for WRITE), and a 1-byte status
+   (device-writable). Post the head index to the avail ring, `QueueNotify=0`, poll the used ring for
+   completion, check `status==0` (OK). `flush` uses a `VIRTIO_BLK_T_FLUSH` request.
+5. *BlockDevice impl:* `read_block`/`write_block` issue one request each; `num_blocks` from capacity.
+
+**Capability gating (reuses REQ-DRV-002).** The driver's device object is wrapped in a `DeviceGuard`
+so every block op is authorized by the `CapEngine` — the driver holds only its `device.blk` capability,
+no ambient authority.
+
+**VM-gated invariants (planned):** device discovered; capacity read matches the attached image; write
+sector then read-back returns the written bytes across a real virtqueue round-trip; and — end to end —
+`Journal::commit` runs a transaction over the virtio-blk `BlockDevice` and a subsequent `recover`
+reproduces it (crash-consistency over real emulated storage). Contract-honest (ADR-010): a wrong ring
+layout faults/hangs into the VM watchdog, never a silent pass.
+
 ## Consequences
 
 - Drivers require no ambient authority beyond their assigned capabilities — a compromised driver is
