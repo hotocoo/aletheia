@@ -554,6 +554,27 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-IPC-008 → delivered: grant-table through the REAL aarch64 MMU path)
+
+Converting the zero-copy shared-memory grant-table from hosted-only (`partial`) to VM-gated
+(`delivered`) by driving it through the real per-target path — the honesty currency this project runs
+on (GAPS2 #3: "the real path is what matters"), the same move that made REQ-KERN-005 real. The shared
+`GrantTable` is the arch-independent authority/lifecycle layer; the aarch64 `vm.rs` performs the actual
+mapping (the documented seam). New EL0 invariants **14-16** in `kernel/src/usermode.rs::run_shared_memory`,
+proved live by `scripts/vm-e2e.sh` (now **ALL 16 EL0-BOUNDARY INVARIANTS HOLD**, exit 0):
+
+- **14 — capability-gated (fail-closed):** without a `memory.share` capability the grant is refused and
+  nothing is mapped; with it, the share is authorized through the SAME `CapEngine` the pipeline uses.
+- **15 — zero-copy across address spaces:** the grant maps ONE physical frame into TWO distinct
+  process TTBR0 roots, and both resolve the shared VA to the SAME physical frame — one page present in
+  two separate address spaces is exactly zero-copy shared memory (no copy through any queue).
+- **16 — revocation unmaps:** revoking the grant tears down the grantee's page mapping while the
+  grantor keeps its own access (the per-target "revoke ⇒ unmap" seam).
+
+`check-traceability.sh` green; `clippy -D warnings` clean on the aarch64 kernel. **Follow-on:** the same
+real-path conversion on x86-64 (`vm.rs` over PML4) and RISC-V (Sv39), and — GAPS2 #3 — wiring EL0 code
+itself (not just the kernel-verified mapping) to read/write the shared page across the boundary.
+
 ## Delivered (2026-07-22 — GAPS2 Issue #1: target-specific traceability, no gate can be escaped)
 
 A second architecture audit (`docs/ARCHITECTURE-GAPS2.md`) flagged that the traceability matrix proved
