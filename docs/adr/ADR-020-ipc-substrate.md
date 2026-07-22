@@ -27,8 +27,12 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
 - **Cancellation** — an undelivered message can be cancelled by its channel-assigned id.
 - **Tracing + deterministic replay** — every op is logged; `replay()` reconstructs the exact delivery
   sequence from the trace alone (auditable + reproducible).
-- **Zero-copy shared-memory channels** (REQ-IPC-008, kernel-core policy delivered 2026-07-22,
-  `kernel-core/src/grant.rs`; traceability `partial` — per-target `vm.rs` page-mapping + VM gate pending).
+- **Zero-copy shared-memory channels** (REQ-IPC-008, **delivered** 2026-07-22). kernel-core policy in
+  `kernel-core/src/grant.rs`; driven through the REAL aarch64 MMU path in `kernel/src/usermode.rs`
+  (EL0 invariants 14-16, VM-gated by `scripts/vm-e2e.sh`): a `memory.share` grant maps one physical
+  frame into two distinct TTBR0 address spaces (both resolve to the same frame — zero-copy across AS),
+  establishing it is capability-gated fail-closed, and revocation unmaps the grantee's page. x86-64
+  (PML4) and RISC-V (Sv39) real-path wiring is a follow-on.
   A `GrantTable` shares one physical frame region between endpoints under an explicit `memory.share`
   capability: establishing a share is gated by the SAME `CapEngine` (no capability ⇒ no grant,
   fail-closed); a grant can only **attenuate** the grantor's access (a read-only holder can never mint

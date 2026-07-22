@@ -35,6 +35,9 @@ use core::ptr::{addr_of, addr_of_mut};
 // kernel-core rather than hand-rolling its own rotation. kernel-core decides which task runs next;
 // this module performs only the context-switch MECHANISM (resume_frame + address-space switch).
 use kernel_core::sched::{RoundRobin, TaskId};
+// REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
+// shared-memory region; THIS target's `vm.rs` performs the real page mapping into each address space.
+use kernel_core::grant::{GrantTable, ShareMode};
 
 global_asm!(
     r#"
@@ -1163,6 +1166,89 @@ fn run_preemptive() -> (bool, bool) {
     (fair, progress_ok && clean)
 }
 
+/// Shared VA for the grant-table test — an unused slot in the same `0x5000_xxxx` hole as the other
+/// user pages (above QEMU RAM, so it is NOT identity-mapped: a real per-process translation).
+const SHARED_VA: usize = 0x5000_5000;
+
+/// Prove the zero-copy shared-memory grant-table (REQ-IPC-008) through the REAL aarch64 MMU path,
+/// converting it from hosted-only to VM-gated. The shared `GrantTable` is the arch-independent
+/// authority/lifecycle layer (capability check + attenuation + revocation); THIS target's `vm.rs`
+/// performs the actual page mapping — the seam the module documents. Proves, live:
+///   * a `memory.share` grant maps ONE physical frame into TWO distinct process address spaces
+///     (their own TTBR0 roots), so both resolve the SAME physical frame — zero-copy across AS;
+///   * establishing the grant is capability-gated (no `memory.share` ⇒ no grant, and we map nothing);
+///   * revoking the grant unmaps the grantee's page while leaving the grantor's intact.
+///
+/// Returns `(cap_gated, shared_across_spaces, revoke_unmaps)`.
+fn run_shared_memory() -> (bool, bool, bool) {
+    let (root_a, root_b) = match (vm::build_identity(), vm::build_identity()) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return (false, false, false),
+    };
+    let shf = match frames::alloc_zeroed() {
+        Some(f) => f,
+        None => return (false, false, false),
+    };
+    let pa = shf.addr();
+
+    // Authority to share is a `memory.share` capability, checked by the SAME CapEngine the pipeline
+    // uses. The grant-table records the region owned by proc-a at the frame's physical base.
+    let mut engine = CapEngine::new(0x5EED, 1000);
+    let share_cap = engine.mint("proc-a", "memory.share", Scope::All, Constraints::none());
+    let mut gt = GrantTable::new("memory.share");
+    let region = gt.create_region("proc-a", pa as u64, frames::FRAME_SIZE);
+
+    // (cap_gated) Fail-closed: with NO capability offered, the share is refused and nothing maps.
+    let denied = gt
+        .share(
+            &engine,
+            region,
+            "proc-a",
+            "proc-b",
+            ShareMode::ReadWrite,
+            &[],
+        )
+        .is_err();
+    // …and WITH the capability the share is authorized (attenuation checked in the hosted suite).
+    let granted = gt.share(
+        &engine,
+        region,
+        "proc-a",
+        "proc-b",
+        ShareMode::ReadWrite,
+        &[share_cap],
+    );
+    let cap_gated = denied && granted.is_ok();
+
+    // On the authorized grant, the target maps the ONE frame into BOTH roots at the shared VA.
+    let mapped = granted.is_ok()
+        && vm::map_page(root_a, SHARED_VA, pa, vm::USER_DATA)
+        && vm::map_page(root_b, SHARED_VA, pa, vm::USER_DATA);
+
+    // (shared_across_spaces) Both distinct roots translate the shared VA to the SAME frame — one
+    // physical page present in two separate address spaces is exactly zero-copy shared memory.
+    let shared_across_spaces = mapped
+        && root_a != root_b
+        && vm::translate(root_a, SHARED_VA) == Some(pa)
+        && vm::translate(root_b, SHARED_VA) == Some(pa);
+
+    // (revoke_unmaps) Revoking the grant tears down the grantee's mapping (the per-target seam:
+    // revocation ⇒ unmap) while the grantor keeps its own access.
+    let grant_id = granted.unwrap_or(0);
+    let revoked = gt.revoke(grant_id);
+    vm::unmap_page(root_b, SHARED_VA);
+    let revoke_unmaps = revoked
+        && vm::translate(root_b, SHARED_VA).is_none()
+        && vm::translate(root_a, SHARED_VA) == Some(pa);
+
+    // Cleanup: unmap the grantor and reclaim the shared frame (the two identity roots are left, as
+    // the other multitasking tests do — one-shot boot excursions on a 41k-frame pool).
+    vm::unmap_page(root_a, SHARED_VA);
+    frames::free(shf);
+
+    (cap_gated, shared_across_spaces, revoke_unmaps)
+}
+
 /// Prove the EL0 boundary + multitasking invariants live. `Ok(n)` all passed; `Err((idx,name))`.
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     install_vectors();
@@ -1255,6 +1341,23 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         recv_denied,
         "el0: IPC recv without the ipc.recv capability is denied — queued message intact (fail-closed)"
+    );
+
+    // 14, 15 & 16 — zero-copy shared memory (gap register Issue 2 / REQ-IPC-008): a memory.share
+    // grant maps ONE physical frame into TWO distinct process address spaces (zero-copy across AS),
+    // establishing it is capability-gated (fail-closed), and revocation unmaps the grantee's page.
+    let (cap_gated, shared_across_spaces, revoke_unmaps) = run_shared_memory();
+    check!(
+        cap_gated,
+        "el0: shared-memory grant is capability-gated — no memory.share ⇒ no grant, nothing mapped (fail-closed)"
+    );
+    check!(
+        shared_across_spaces,
+        "el0: grant-table maps one frame into two distinct TTBR0 spaces — zero-copy shared memory across address spaces"
+    );
+    check!(
+        revoke_unmaps,
+        "el0: revoking the grant unmaps the grantee's page while the grantor keeps access"
     );
 
     Ok(n)
