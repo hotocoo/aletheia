@@ -27,6 +27,10 @@ use crate::{arch, frames, sbi, vm};
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
 use core::ptr::{addr_of, addr_of_mut};
+// REQ-KERN-005: the RISC-V target DRIVES the shared arch-independent scheduling policy from
+// kernel-core rather than hand-rolling its own rotation — kernel-core decides which task runs next;
+// this module performs only the context-switch MECHANISM (run_one_shot + satp address-space switch).
+use kernel_core::sched::{RoundRobin, TaskId};
 
 // --- Syscall ABI (fail-closed): number in a7, arg in a0, result in a0 -----------------------
 const SYS_EMIT: u64 = 1;
@@ -350,10 +354,10 @@ struct Trial {
     store: Store,
     caps: Vec<CapToken>,
     action: &'static str,
-    armed: bool,          // true => a U-mode fault is EXPECTED (isolation test), not fatal
-    allowed: bool,        // outcome: was the syscall authorized
+    armed: bool,   // true => a U-mode fault is EXPECTED (isolation test), not fatal
+    allowed: bool, // outcome: was the syscall authorized
     isolation_held: bool, // outcome: did the armed fault actually occur
-    fault_va: usize,      // outcome: stval of the armed fault
+    fault_va: usize, // outcome: stval of the armed fault
 }
 static mut CURRENT: Option<Trial> = None;
 
@@ -751,21 +755,21 @@ fn run_scheduler() -> (bool, bool, bool) {
         make_frame(USER_CODE_VA, USER_STACK_TOP, 0, magics[0], 0),
         make_frame(USER_CODE_VA, USER_STACK_TOP, 0, magics[1], 0),
     ];
-    let mut done = [false; NTASK];
+    // Scheduling POLICY driven by the shared kernel_core::sched::RoundRobin (REQ-KERN-005): the
+    // RISC-V target drives the SAME scheduler proved on the host and used by the aarch64 backend,
+    // performing only the context-switch MECHANISM (run_one_shot + satp switch) behind the
+    // TaskContext seam. `schedule_next` picks the task; a yielded task is rotated to the tail; an
+    // exited task is `finish`ed. Reproduces the same A,B,A,B,A,B,A,B order (asserted below).
+    let mut policy = RoundRobin::new();
+    for i in 0..NTASK {
+        policy.spawn(TaskId(i as u64));
+    }
     let mut order: Vec<usize> = Vec::new();
     let mut magic_ok = true;
-    let mut cur = 0usize;
     let mut guard = 0usize;
 
-    loop {
-        if done[0] && done[1] {
-            break;
-        }
-        if done[cur] {
-            cur = 1 - cur;
-            continue;
-        }
-        let i = cur;
+    while let Some(TaskId(id)) = policy.schedule_next() {
+        let i = id as usize;
         // Cooperative tasks report through SCHED, not CURRENT.
         unsafe {
             *addr_of_mut!(CURRENT) = None;
@@ -788,9 +792,8 @@ fn run_scheduler() -> (bool, bool, bool) {
             magic_ok = false;
         }
         if exited {
-            done[i] = true;
+            policy.finish(TaskId(id));
         }
-        cur = 1 - cur;
         guard += 1;
         if guard > 4 * NTASK {
             break; // safety bound: never spin on a scheduler bug
