@@ -148,9 +148,18 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     frames::free(frame);
 
     check!(map_ok, "vm: map fresh frame at a new high virtual address");
-    check!(resolves, "vm: mapped VA resolves to the frame (translation follows the new entry)");
-    check!(write_through, "vm: write via VA lands in the mapped physical frame");
-    check!(unmapped, "vm: unmap removes the page; VA no longer resolves");
+    check!(
+        resolves,
+        "vm: mapped VA resolves to the frame (translation follows the new entry)"
+    );
+    check!(
+        write_through,
+        "vm: write via VA lands in the mapped physical frame"
+    );
+    check!(
+        unmapped,
+        "vm: unmap removes the page; VA no longer resolves"
+    );
 
     Ok(n)
 }
@@ -225,7 +234,11 @@ pub fn build_space() -> Option<u64> {
 pub fn translate_in(root: u64, va: u64) -> Option<u64> {
     use x86_64::structures::paging::mapper::Translate;
     // SAFETY: `root` is a valid identity-accessible PML4; single-core.
-    unsafe { mapper_for(root).translate_addr(VirtAddr::new(va)).map(|p| p.as_u64()) }
+    unsafe {
+        mapper_for(root)
+            .translate_addr(VirtAddr::new(va))
+            .map(|p| p.as_u64())
+    }
 }
 
 /// Map `va -> pa` in `root` as a ring-3 (user-accessible) page; `writable` sets RW vs read/execute.
