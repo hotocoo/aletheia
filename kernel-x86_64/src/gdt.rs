@@ -21,6 +21,7 @@ use x86_64::VirtAddr;
 /// nest (each fully unwinds back to the scheduler before the next `iretq`).
 const KSTACK_SIZE: usize = 16 * 1024;
 #[repr(align(16))]
+#[allow(dead_code)] // storage newtype: the bytes ARE the ring-0 stack, used via addr_of!(KSTACK)
 struct KStack([u8; KSTACK_SIZE]);
 static mut KSTACK: KStack = KStack([0; KSTACK_SIZE]);
 
@@ -30,6 +31,8 @@ static GDT: Racy<GlobalDescriptorTable> = Racy::new(GlobalDescriptorTable::new()
 /// The selectors this GDT installed, cached for the user-mode entry/exit path (which builds ring-3
 /// interrupt frames referencing the user code/data selectors).
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // all selectors cached for completeness/debug; only user_code/user_data are read
+                    // on the ring-3 frame-build path (kernel_code/kernel_data/tss loaded once in init)
 pub struct Selectors {
     pub kernel_code: SegmentSelector,
     pub kernel_data: SegmentSelector,
