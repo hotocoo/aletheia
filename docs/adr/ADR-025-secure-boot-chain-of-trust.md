@@ -25,7 +25,18 @@ the content hash and refuses an unsigned/invalid component fail-closed; and the 
 `run_component` path — which carries no provenance — is refused entirely under secure policy, so there
 is no bypass. Proved hosted (`aletheia/tests/component_signing.rs`): sign a fixture → launches; tamper
 /untrusted/unsigned/ad-hoc → refused. Implemented with symmetric HMAC-SHA256 (`crypto::hmac_sha256`,
-built on the existing `sha2`); the asymmetric key hierarchy (root → stage keys) is Phase 2 below.
+built on the existing `sha2`).
+
+**Asymmetric provenance (REQ-BOOT-002, delivered 2026-07-22, `aletheia/src/provenance.rs`).** The
+symmetric HMAC store lets the verifier forge (it holds the secret). The asymmetric path fixes that:
+`SigningIdentity` holds the PRIVATE key and signs; `AsymTrustStore` holds trusted **public keys only**
+(no private material), so a compromised verifier cannot forge. Includes the **root→signing-key
+hierarchy** — a trusted root endorses a component-signing key (`endorse`), and `verify_chain` accepts a
+component only if a trusted root endorsed its signer AND the signer signed the component (delegation +
+rotation without trusting every signer). Ed25519 (pure-Rust dalek; ADR-004). Fail-closed on empty
+store / malformed key / malformed signature / tamper / unendorsed signer / untrusted-root endorsement.
+Hosted-proved (3 tests, fixed-seed keypairs). This is the signing FORMAT + trust hierarchy; the
+platform root of trust and anti-rollback below remain hardware-bound (REQ-BOOT-001).
 
 **Phase 2 — platform root of trust.** UEFI Secure Boot (x86-64) / measured boot into a TPM PCR
 (where present) / RISC-V equivalent, behind the `Hal`. Measured boot records each stage's hash; remote

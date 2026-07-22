@@ -17,6 +17,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
+# Asymmetric component provenance (ADR-025 Phase 2 / REQ-BOOT-002). Pure-Rust (dalek), no C toolchain
+# — consistent with the sha2/chacha20poly1305 precedent (ADR-004). Default features are pure-Rust;
+# the SIMD backend is opt-in and stays off. Verifier holds PUBLIC keys only (cannot forge).
+ed25519-dalek = "2"
 rand = "0.8"
 ulid = { version = "1", features = ["serde"] }
 wasmi = "1.1.0"

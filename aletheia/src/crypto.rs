@@ -12,6 +12,19 @@ pub fn hex(bytes: &[u8]) -> String {
 
 pub fn sha256_hex(bytes: &[u8]) -> String { hex(&Sha256::digest(bytes)) }
 
+/// Decode a hex string to bytes. `None` on odd length or a non-hex digit — callers treat a decode
+/// failure as a verification failure (fail closed), so malformed input can never be mistaken for a
+/// valid signature.
+pub fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
 pub fn random_token() -> String { hex(&rand::random::<[u8; 16]>()) }
 
 pub fn random_key() -> [u8; 32] { rand::random::<[u8; 32]>() }

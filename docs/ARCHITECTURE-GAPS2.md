@@ -17,8 +17,10 @@
 >   (`…/usermode.rs::run_priority_ipc`, invariants 20-22). Built on REQ-IPC-010 real blocking IPC.
 >   Proved on aarch64 (`scripts/vm-e2e.sh`), RISC-V (`scripts/vm-e2e-riscv.sh`), and x86-64
 >   (`kernel-x86_64/scripts/smoke-test.sh`) — directly reducing the #2 divergence risk.
-> - **#6 Real secure-boot chain — ⏳ partial** (component signatures = ADR-025 Phase 1; hardware root
->   of trust / key lifecycle / rollback deferred).
+> - **#6 Real secure-boot chain — ⏳ partial, advanced.** Component signatures now **asymmetric**
+>   (REQ-BOOT-002 delivered): ed25519, public-key-only verifier (cannot forge) + root→signing-key
+>   hierarchy (`aletheia/src/provenance.rs`). STILL hardware-bound (REQ-BOOT-001): firmware→kernel
+>   measured chain, TPM/secure-enclave root of trust, anti-rollback (needs persistent secure storage).
 > - **#7 Persistent storage substrate — ⏳ deferred** (REQ-STOR-001 / ADR-024).
 > - **#8 Fault supervision as a kernel primitive — ⏳ deferred** (REQ-REL-001 / ADR-026).
 > - **#9 Capability concurrency spec before SMP — ⏳ open** (precedes #4).
