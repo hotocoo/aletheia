@@ -16,6 +16,13 @@ Drivers are **user-space services** reached through capability IPC, not privileg
 Application → Capability IPC (ADR-020) → Device Service → Driver → Hardware
 ```
 
+*Delivered (REQ-DRV-002, 2026-07-22, `kernel-core/src/device.rs`).* The capability-authorization core:
+`DeviceGuard` wraps any `BlockDevice` and gates every read/write/flush on the same `CapEngine` — no
+ambient device authority. Proved over the real `MemBlockDevice` (`kernel-core/tests/device.rs`): no
+capability ⇒ no I/O; a read-only capability reads but cannot write (attenuation); a write capability's
+bytes land. Hardware discovery + the concrete virtio-blk driver (implementing this same `BlockDevice`
+trait) remain the deferred slices below.
+
 **Phase 1 — discovery + device capabilities.** A device manager enumerates hardware via ACPI
 (x86-64) / device-tree (aarch64, RISC-V), abstracted behind the `Hal`. Each device becomes an entity
 with a capability; a driver is granted a `device.<class>` capability scoped to exactly its device

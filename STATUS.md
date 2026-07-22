@@ -554,6 +554,25 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-DRV-002: capability-authorized device access)
+
+Fourth P7 brick — the capability model extended to hardware (no ambient device authority).
+`kernel-core/src/device.rs` `DeviceGuard` wraps any `BlockDevice` and gates every read/write/flush on
+the SAME `CapEngine`, so device I/O is authorized exactly like an entity write or an IPC send. Proved
+over the **real** `MemBlockDevice` — deny/allow decides actual bytes, not a registry boolean:
+
+- **No capability ⇒ no I/O** (`tests/device.rs`): read/write/flush all `Denied`, nothing moves.
+- **Read-only capability reads but cannot write** (attenuation): a `dev.blk.read` holder reads the
+  real block yet a write is `Denied` and the device is confirmed unchanged.
+- **Write capability's bytes actually land** and read back; a `dev.blk.*` wildcard authorizes both.
+
+`kernel-core` **67 passed**; aarch64 VM gate green (compiles no_std); `clippy -D warnings` clean.
+**Honesty (advisor):** NEW req **REQ-DRV-002** delivered; the umbrella **REQ-DRV-001** (device
+discovery, a real hardware driver, hotplug, DMA/IOMMU, restart) stays `partial` — the concrete
+**virtio-blk driver, which will implement this very `BlockDevice` trait**, is the named next slice,
+deferred (ADR-023, hardware-bound, ADR-010). Traceability green (51 reqs — 43 delivered / 3 partial /
+5 deferred).
+
 ## Delivered (2026-07-22 — REQ-CONF-001: cross-architecture semantic conformance gate, GAPS2 #2)
 
 Third P7 brick — the consolidation the audit called the #1 systemic risk: *silent behavioral

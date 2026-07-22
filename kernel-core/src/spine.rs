@@ -527,3 +527,7 @@ pub use crate::priosched::{Endpoint, Priority, PriorityScheduler, SchedError};
 // Crash-consistent journaled block store (REQ-STOR-002, ADR-024) — arch-independent WAL over the
 // `BlockDevice` seam a real driver later implements; re-exported on the `spine::*` surface.
 pub use crate::storage::{BlockDevice, Journal, MemBlockDevice, StorageError, BLOCK_SIZE};
+
+// Capability-authorized device access (REQ-DRV-002, ADR-023) — no ambient device authority; gates
+// I/O to a `BlockDevice` on the same `CapEngine`.
+pub use crate::device::{DeviceError, DeviceGuard};

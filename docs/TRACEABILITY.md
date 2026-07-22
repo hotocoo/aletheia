@@ -78,7 +78,8 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-USER-RISCV-001 | U-mode: cap-gated ecall + per-process satp + S-timer preemption (RISC-V) | ADR-019 | kernel-riscv64/src/usermode.rs | kernel-riscv64/src/usermode.rs | scripts/vm-e2e-riscv.sh | delivered |
 | REQ-SMP-001 | SMP / multicore scheduling | ADR-021 | - | - | - | deferred |
 | REQ-SEC-001 | Adversarial security-behaviour regressions | ADR-003 | kernel-core/src/spine.rs | kernel-core/tests/security_behavior.rs | - | delivered |
-| REQ-DRV-001 | Device / driver architecture | ADR-023 | - | - | - | deferred |
+| REQ-DRV-001 | Device / driver architecture (discovery, real driver, hotplug, DMA/IOMMU, restart) | ADR-023 | kernel-core/src/device.rs | kernel-core/tests/device.rs | - | partial |
+| REQ-DRV-002 | Capability-authorized device access (hosted, over the BlockDevice seam) | ADR-023 | kernel-core/src/device.rs | kernel-core/tests/device.rs | - | delivered |
 | REQ-STOR-001 | Persistent storage stack (driver → FS/object store → encryption → semantic store) | ADR-024 | kernel-core/src/storage.rs | kernel-core/tests/storage.rs | - | partial |
 | REQ-STOR-002 | Crash-consistent journaled block store (WAL over a BlockDevice seam, hosted) | ADR-024 | kernel-core/src/storage.rs | kernel-core/tests/storage.rs | - | delivered |
 | REQ-BOOT-001 | Secure boot + chain of trust (firmware→bootloader→kernel measured chain, hardware root) | ADR-025 | aletheia/src/provenance.rs; aletheia/src/crypto.rs | aletheia/tests/component_signing.rs | - | partial |
