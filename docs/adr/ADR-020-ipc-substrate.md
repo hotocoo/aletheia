@@ -27,13 +27,20 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
 - **Cancellation** — an undelivered message can be cancelled by its channel-assigned id.
 - **Tracing + deterministic replay** — every op is logged; `replay()` reconstructs the exact delivery
   sequence from the trace alone (auditable + reproducible).
+- **Zero-copy shared-memory channels** (REQ-IPC-008, delivered 2026-07-22, `kernel-core/src/grant.rs`).
+  A `GrantTable` shares one physical frame region between endpoints under an explicit `memory.share`
+  capability: establishing a share is gated by the SAME `CapEngine` (no capability ⇒ no grant,
+  fail-closed); a grant can only **attenuate** the grantor's access (a read-only holder can never mint
+  a read-write grant); the region's bytes live exactly once so a read-write holder's write is observed
+  by every reader with no copy through any queue (the zero-copy property, made observable via
+  `region_refcount`); every access is bounded to `[0, len)`; and revocation drops the endpoint's
+  mapping fail-closed and releases its share of the backing. This is the **arch-independent**
+  authority/lifecycle layer; turning a granted region into a real page-table mapping in each
+  endpoint's address space stays each target's `vm.rs` seam (map/unmap already delivered) — the same
+  split by which `kernel-core::sched` owns the scheduling policy and each target owns the context
+  switch. Proved on the host in `kernel-core/tests/grant.rs` (8 tests, no QEMU).
 
 **Deferred (design here; no blind code — ADR-010):**
-- **Zero-copy shared-memory channels.** A grant-table maps a physical frame region into both
-  endpoints' address spaces under an explicit `memory.share` capability; the sender transfers a
-  read/read-write grant, the receiver maps it, and revocation unmaps. Requires the per-target MMU
-  (delivered) + a frame grant-table (new) — brought up behind the same `CapEngine` authorization, one
-  target at a time, VM-gated.
 - **Priority inheritance / donation.** When a high-priority task blocks on an endpoint held by a
   lower-priority task, the holder temporarily inherits the waiter's priority to avoid priority
   inversion. Requires the scheduler (`kernel-core::sched`) in the IPC blocking path — landed after the
@@ -46,5 +53,7 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
 
 - Higher-level services can be built on real capability-authorized IPC, not ad-hoc hosted APIs.
 - The fail-closed discipline is re-proved at each new boundary (notifications, timeout, transfer).
-- Zero-copy and priority inheritance are unblocked once the frame grant-table and scheduler-wiring
-  land; both are honestly marked deferred in `docs/TRACEABILITY.md` (REQ-IPC-008/009) until then.
+- Zero-copy shared memory is now delivered as the arch-independent `GrantTable` (REQ-IPC-008); the
+  per-target page-mapping of a grant rides each target's existing `vm.rs`. Priority inheritance
+  (REQ-IPC-009) stays deferred until the extracted scheduler is wired into the IPC blocking path;
+  its status in `docs/TRACEABILITY.md` remains honest until then.

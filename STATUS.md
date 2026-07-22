@@ -554,6 +554,36 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-22 — REQ-IPC-008: zero-copy shared-memory grant-table)
+
+The bulk-data companion to the message-copy `Channel`, closing the first of the two remaining IPC
+scope items (gap Issue 2 / ADR-020). The synchronous fast-path copies a message body into the
+receiver's inbox — correct for control messages, wrong for a page of data. A real microkernel shares
+one physical frame region between endpoints under explicit authority; this wave delivers the
+**arch-independent authority + lifecycle layer** of that mechanism in `kernel-core/src/grant.rs`
+(`GrantTable`), inherited by all three targets from one source.
+
+- **Capability-gated establishment** — a share requires `memory.share` authority checked through the
+  SAME `CapEngine` the pipeline uses; no capability ⇒ no grant (fail-closed).
+- **Attenuation, never amplification** — a grant can only narrow the grantor's own access; a read-only
+  holder can never mint a read-write grant (the memory analogue of `CapEngine::delegate`).
+- **Zero-copy backing** — the region's bytes live exactly once (`Rc<RefCell<[u8]>>`); a read-write
+  holder's write is observed by every reader with no copy through any queue, made observable by
+  `region_refcount` (rises per live grant, falls on revoke).
+- **Bounded access** — every read/write is confined to `[0, len)` (the model of the MMU refusing an
+  access past the shared frame); an `offset+len` overflow is refused, never wraps.
+- **Revocation unmaps** — revoking a grant drops that endpoint's handle fail-closed (later access
+  denied) and releases its share of the backing.
+- **Per-target seam (ADR-010):** turning a granted region into a real page-table mapping in each
+  endpoint's address space is each target's `vm.rs` (map/unmap already delivered) — the same split by
+  which `kernel-core::sched` owns the scheduling policy while each target owns the context switch.
+- **Proved on the host** — `kernel-core/tests/grant.rs` (8 tests): cap-gated, zero-copy read-sees-write,
+  read-only-cannot-write, attenuate-but-never-amplify, no-share-without-access, bounded, and
+  revocation-unmaps-and-releases. `kernel-core` hosted suite now **49 passed** (7 suites); `clippy -D
+  warnings` clean; `check-traceability.sh` green (35 delivered / 3 partial / 7 deferred). The IPC scope
+  now leaves only **priority inheritance** (REQ-IPC-009, blocked on wiring the extracted scheduler into
+  the IPC blocking path) still deferred.
+
 ## Run it
 
 ```bash
