@@ -31,8 +31,11 @@ the SAME `CapEngine` the deterministic pipeline uses. The substrate provides:
   `kernel-core/src/grant.rs`; driven through the REAL aarch64 MMU path in `kernel/src/usermode.rs`
   (EL0 invariants 14-16, VM-gated by `scripts/vm-e2e.sh`): a `memory.share` grant maps one physical
   frame into two distinct TTBR0 address spaces (both resolve to the same frame — zero-copy across AS),
-  establishing it is capability-gated fail-closed, and revocation unmaps the grantee's page. x86-64
-  (PML4) and RISC-V (Sv39) real-path wiring is a follow-on.
+  establishing it is capability-gated fail-closed, and revocation unmaps the grantee's page. The same
+  `run_shared_memory` invariants (14-16) are now proved on **all three targets** — aarch64 (TTBR0),
+  RISC-V (Sv39 satp, `vm-e2e-riscv.sh`), and x86-64 (PML4, `smoke-test.sh`) — one arch-independent
+  `GrantTable` authority layer over three real MMU backends. Follow-on: EL0/ring-3/U-mode code itself
+  accessing the shared page across the boundary (GAPS2 #3).
   A `GrantTable` shares one physical frame region between endpoints under an explicit `memory.share`
   capability: establishing a share is gated by the SAME `CapEngine` (no capability ⇒ no grant,
   fail-closed); a grant can only **attenuate** the grantor's access (a read-only holder can never mint

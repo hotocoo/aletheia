@@ -50,7 +50,7 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-IPC-005 | Deadline / timeout-aware receive | ADR-020 | kernel-core/src/ipc.rs | kernel-core/tests/ipc.rs | - | delivered |
 | REQ-IPC-006 | Message cancellation | ADR-020 | kernel-core/src/ipc.rs | kernel-core/tests/ipc.rs | - | delivered |
 | REQ-IPC-007 | IPC tracing + deterministic replay | ADR-020 | kernel-core/src/ipc.rs | kernel-core/tests/ipc.rs | - | delivered |
-| REQ-IPC-008 | Zero-copy shared-memory channels | ADR-020 | kernel-core/src/grant.rs; kernel/src/usermode.rs | kernel-core/tests/grant.rs; kernel/src/usermode.rs | scripts/vm-e2e.sh | delivered |
+| REQ-IPC-008 | Zero-copy shared-memory channels (policy + all-target real MMU path) | ADR-020 | kernel-core/src/grant.rs; kernel/src/usermode.rs; kernel-x86_64/src/usermode.rs; kernel-riscv64/src/usermode.rs | kernel-core/tests/grant.rs | scripts/vm-e2e.sh; kernel-x86_64/scripts/smoke-test.sh; scripts/vm-e2e-riscv.sh | delivered |
 | REQ-IPC-009 | Priority inheritance / donation | ADR-020 | kernel-core/src/priosched.rs | kernel-core/tests/priosched.rs | - | partial |
 | REQ-COMP-001 | WASM components, no ambient authority | ADR-014 | aletheia/src/component.rs | aletheia/tests/component.rs | - | delivered |
 | REQ-COMP-002 | Fuel-bounded component execution | ADR-014 | aletheia/src/component.rs | aletheia/tests/component.rs | - | delivered |

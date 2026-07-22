@@ -7,13 +7,15 @@
 //! pipeline uses. Contract-honest (ADR-010): written outside-in, boot-verified; an *unexpected*
 //! trap stays fatal (`exit 102`) so a real bug can never masquerade as a pass.
 //!
-//! WHAT IT PROVES (13 invariants, identical in spirit to the other two targets):
+//! WHAT IT PROVES (16 invariants, identical in spirit to the other two targets):
 //!   1-2  cap-gated `ecall` syscall — no capability ⇒ denied, zero effect; granted ⇒ one event.
 //!   3    hardware isolation — a U-mode load of a supervisor-only (no-`U`) page faults, contained.
 //!   4-5  per-process address spaces — A reaches its own page; B cannot reach A's VA (own `satp`).
 //!   6-8  cooperative round-robin scheduler — two tasks in distinct spaces run A,B,A,B… to exit.
 //!   9-10 timer preemption — the S-mode timer IRQ preempts two non-yielding tasks; state survives.
 //!   11-13 capability-secure IPC — kernel-mediated message across spaces; send/recv fail-closed.
+//!   14-16 zero-copy shared memory — a memory.share grant maps one frame into two satp spaces
+//!         (REQ-IPC-008); cap-gated fail-closed; revocation unmaps the grantee (see run_shared_memory).
 //!
 //! RISC-V SPECIFICS vs aarch64: `sscratch` holds the *current task's frame pointer* while it runs
 //! (the trap entry swaps it into `sp` in one `csrrw`); `x0` is hardwired zero so there is no
@@ -31,6 +33,9 @@ use core::ptr::{addr_of, addr_of_mut};
 // kernel-core rather than hand-rolling its own rotation — kernel-core decides which task runs next;
 // this module performs only the context-switch MECHANISM (run_one_shot + satp address-space switch).
 use kernel_core::sched::{RoundRobin, TaskId};
+// REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
+// shared-memory region; THIS target's Sv39 `vm.rs` performs the real page mapping into each space.
+use kernel_core::grant::{GrantTable, ShareMode};
 
 // --- Syscall ABI (fail-closed): number in a7, arg in a0, result in a0 -----------------------
 const SYS_EMIT: u64 = 1;
@@ -926,8 +931,83 @@ fn run_ipc() -> (bool, bool, bool) {
     (delivered, send_denied, recv_denied)
 }
 
+/// Shared VA for the grant-table test — an unused slot in the same `0x5000_xxxx` hole as the other
+/// user pages (below RAM at 0x8000_0000, so NOT identity-mapped: a real per-process translation).
+const SHARED_VA: usize = 0x5000_5000;
+
+/// Prove the zero-copy shared-memory grant-table (REQ-IPC-008) through the REAL RISC-V Sv39 MMU path,
+/// exactly as the aarch64 backend does — the shared `GrantTable` is the arch-independent
+/// authority/lifecycle layer; THIS target's `vm.rs` performs the actual page mapping. Proves, live:
+///   * a `memory.share` grant maps ONE physical frame into TWO distinct process address spaces
+///     (their own `satp` roots), so both resolve the SAME physical frame — zero-copy across AS;
+///   * establishing the grant is capability-gated (no `memory.share` ⇒ no grant, nothing mapped);
+///   * revoking the grant unmaps the grantee's page while leaving the grantor's intact.
+///
+/// Returns `(cap_gated, shared_across_spaces, revoke_unmaps)`.
+fn run_shared_memory() -> (bool, bool, bool) {
+    let (root_a, root_b) = match (vm::build_identity(), vm::build_identity()) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return (false, false, false),
+    };
+    let shf = match frames::alloc_zeroed() {
+        Some(f) => f,
+        None => return (false, false, false),
+    };
+    let pa = shf.addr();
+
+    let mut engine = CapEngine::new(0x5EED, 1000);
+    let share_cap = engine.mint("proc-a", "memory.share", Scope::All, Constraints::none());
+    let mut gt = GrantTable::new("memory.share");
+    let region = gt.create_region("proc-a", pa as u64, frames::FRAME_SIZE);
+
+    // (cap_gated) Fail-closed without the capability; authorized with it.
+    let denied = gt
+        .share(
+            &engine,
+            region,
+            "proc-a",
+            "proc-b",
+            ShareMode::ReadWrite,
+            &[],
+        )
+        .is_err();
+    let granted = gt.share(
+        &engine,
+        region,
+        "proc-a",
+        "proc-b",
+        ShareMode::ReadWrite,
+        &[share_cap],
+    );
+    let cap_gated = denied && granted.is_ok();
+
+    // Map the ONE frame into BOTH roots at the shared VA.
+    let mapped = granted.is_ok()
+        && vm::map_page(root_a, SHARED_VA, pa, vm::USER_DATA)
+        && vm::map_page(root_b, SHARED_VA, pa, vm::USER_DATA);
+
+    // (shared_across_spaces) Both distinct roots translate the shared VA to the SAME frame.
+    let shared_across_spaces = mapped
+        && root_a != root_b
+        && vm::translate(root_a, SHARED_VA) == Some(pa)
+        && vm::translate(root_b, SHARED_VA) == Some(pa);
+
+    // (revoke_unmaps) Revoking unmaps the grantee's page; the grantor keeps access.
+    let grant_id = granted.unwrap_or(0);
+    let revoked = gt.revoke(grant_id);
+    vm::unmap_page(root_b, SHARED_VA);
+    let revoke_unmaps = revoked
+        && vm::translate(root_b, SHARED_VA).is_none()
+        && vm::translate(root_a, SHARED_VA) == Some(pa);
+
+    vm::unmap_page(root_a, SHARED_VA);
+    frames::free(shf);
+
+    (cap_gated, shared_across_spaces, revoke_unmaps)
+}
+
 // -------------------------------------------------------------------------------------------
-// Selftest — 13 U-mode boundary invariants, riscv64-only. `Ok(n)` all passed; `Err((idx,name))`
+// Selftest — 16 U-mode boundary invariants, riscv64-only. `Ok(n)` all passed; `Err((idx,name))`
 // = failure (the caller exits the VM with 80+idx). An unexpected/unarmed trap is fatal (exit 102).
 // -------------------------------------------------------------------------------------------
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
@@ -1008,6 +1088,23 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         recv_denied,
         "u-mode: IPC recv without the ipc.recv capability is denied — queued message intact (fail-closed)"
+    );
+
+    // 14, 15 & 16 — zero-copy shared memory (gap register Issue 2 / REQ-IPC-008): a memory.share
+    // grant maps ONE physical frame into TWO distinct satp address spaces (zero-copy across AS),
+    // establishing it is capability-gated (fail-closed), and revocation unmaps the grantee's page.
+    let (cap_gated, shared_across_spaces, revoke_unmaps) = run_shared_memory();
+    check!(
+        cap_gated,
+        "u-mode: shared-memory grant is capability-gated — no memory.share ⇒ no grant, nothing mapped (fail-closed)"
+    );
+    check!(
+        shared_across_spaces,
+        "u-mode: grant-table maps one frame into two distinct satp spaces — zero-copy shared memory across address spaces"
+    );
+    check!(
+        revoke_unmaps,
+        "u-mode: revoking the grant unmaps the grantee's page while the grantor keeps access"
     );
 
     Ok(n)
