@@ -25,13 +25,12 @@
 //! * Liveness waits are PROGRESS-GATED with a wall-clock deadline — never a fixed spin count
 //!   (a fixed spin races thread wake-up and flakes; proven in kernel-core's cap_concurrency).
 use core::arch::asm;
-use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::hal::{ActiveHal, Hal};
 use crate::vm;
 use kernel_core::spine::{CapEngine, CapToken, Constraints, Scope, Target};
+use kernel_core::sync::SpinLock;
 
 // --- PSCI (Power State Coordination Interface), HVC conduit on QEMU 'virt' -----------------
 /// PSCI 0.2 `CPU_ON`, SMC64 calling convention (function id per ARM DEN0022).
@@ -107,61 +106,9 @@ const POST_ATTEMPTS: usize = 64;
 static IPI_SEEN: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static IPI_BAD: AtomicUsize = AtomicUsize::new(0);
 
-// --- SpinLock — the kernel's first real cross-core mutual exclusion -------------------------
-/// Test-and-set spinlock. Acquire on lock / Release on unlock orders the protected data; this is
-/// the engine lock ADR-027's `with_authorization` contract assumes ("under the engine's lock no
-/// revoke can linearize between the authorization and the effect").
-pub struct SpinLock<T> {
-    locked: AtomicBool,
-    cell: UnsafeCell<T>,
-}
-
-// SAFETY: the lock serializes all access to `cell`; T only needs Send to cross cores.
-unsafe impl<T: Send> Sync for SpinLock<T> {}
-
-impl<T> SpinLock<T> {
-    pub const fn new(value: T) -> Self {
-        SpinLock {
-            locked: AtomicBool::new(false),
-            cell: UnsafeCell::new(value),
-        }
-    }
-
-    pub fn lock(&self) -> SpinGuard<'_, T> {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-        }
-        SpinGuard { lock: self }
-    }
-}
-
-pub struct SpinGuard<'a, T> {
-    lock: &'a SpinLock<T>,
-}
-
-impl<T> Deref for SpinGuard<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        // SAFETY: guard existence proves exclusive ownership of the cell.
-        unsafe { &*self.lock.cell.get() }
-    }
-}
-impl<T> DerefMut for SpinGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: guard existence proves exclusive ownership of the cell.
-        unsafe { &mut *self.lock.cell.get() }
-    }
-}
-impl<T> Drop for SpinGuard<'_, T> {
-    fn drop(&mut self) {
-        self.lock.locked.store(false, Ordering::Release);
-    }
-}
-
+// --- Capability engine behind the SHARED kernel-core SpinLock (Issue 1: defined once) --------
+// The engine lock is what makes ADR-027's `with_authorization` contract real across cores ("under
+// the engine's lock no revoke can linearize between the authorization and the effect").
 struct CapState {
     engine: CapEngine,
     cap: CapToken,

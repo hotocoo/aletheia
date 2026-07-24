@@ -26,6 +26,7 @@ mod frames;
 mod hal;
 mod heap;
 mod sbi;
+mod smp;
 mod trap;
 mod usermode;
 mod vm;
@@ -143,6 +144,22 @@ pub extern "C" fn kmain() -> ! {
         Err((idx, name)) => {
             kprintln!("[usermode] FAILED at user-mode invariant {}: {}", idx, name);
             ActiveHal::exit(80 + idx as i32);
+        }
+    }
+
+    // SMP: start the other harts via SBI HSM and prove the cross-hart substrate (REQ-SMP-002,
+    // ADR-021). Skips green on a single-hart machine; the VM gate boots `-smp 4` and asserts the
+    // invariant marker below.
+    kprintln!("");
+    kprintln!(
+        "--- SMP selftests (secondary hart bring-up + cross-hart atomics/caps/IPI, real harts) ---"
+    );
+    match smp::selftest() {
+        Ok(0) => {} // single-hart machine — graceful skip, already logged
+        Ok(n) => kprintln!("[smp] ALL {} SMP INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[smp] FAILED at SMP invariant {}: {}", idx, name);
+            ActiveHal::exit(140 + idx as i32);
         }
     }
 

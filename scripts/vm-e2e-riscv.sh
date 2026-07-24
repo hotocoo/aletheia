@@ -20,9 +20,9 @@ cd "$KDIR" || { echo "FAIL: no kernel-riscv64 dir"; exit 3; }
 echo "==> building riscv64 kernel"
 cargo build || { echo "FAIL: build"; exit 3; }
 
-echo "==> booting in QEMU riscv64 'virt' + OpenSBI (60s watchdog)"
-OUT="$(perl -e 'alarm 60; exec @ARGV or die' \
-  qemu-system-riscv64 -machine virt -cpu rv64 -smp 1 -m 128M -nographic \
+echo "==> booting in QEMU riscv64 'virt' + OpenSBI (120s watchdog, -smp 4 for the SMP suite)"
+OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
+  qemu-system-riscv64 -machine virt -cpu rv64 -smp 4 -m 128M -nographic \
   -bios default -kernel "$ELF")"
 CODE=$?
 
@@ -38,6 +38,7 @@ echo "$OUT" | grep -q "ALL 11 INVARIANTS HOLD"        || { echo "FAIL: invariant
 echo "$OUT" | grep -q "ALL 7 MEMORY INVARIANTS HOLD"  || { echo "FAIL: memory-management marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 13 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 22 USER-MODE BOUNDARY INVARIANTS HOLD" || { echo "FAIL: user-mode marker missing"; fail=1; }
+echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then

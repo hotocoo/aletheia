@@ -18,9 +18,12 @@
 >   primitive (`with_authorization`) is now proved on REAL concurrent cores — commits flow, a
 >   cross-core revoke linearizes inside the engine `SpinLock`, ZERO commits after it, every retry
 >   fails closed. Plus: exact cross-core atomics (CAS bump allocator fixed), release/acquire
->   mailbox, GICv2 SGI IPI end-to-end. STILL open under REQ-SMP-001: per-CPU run-queues /
->   work-stealing scheduler, TLB shootdown, lock-hierarchy + atomic-ordering audit, x86-64
->   (INIT-SIPI-SIPI) + RISC-V (SBI HSM) bring-up parity.
+>   mailbox, GICv2 SGI IPI end-to-end. **RISC-V parity delivered same day**: SBI HSM `hart_start`
+>   (+ boot-hart-lottery-safe claim in `_start`), per-hart `tp`, Sv39 over shared tables, SBI IPI
+>   via polled `sip.SSIP` — same 13 invariants, `scripts/vm-e2e-riscv.sh` at `-smp 4`; the
+>   SpinLock now lives ONCE in `kernel-core/src/sync.rs` (host-proved, both targets). STILL open
+>   under REQ-SMP-001: per-CPU run-queues / work-stealing scheduler, TLB shootdown,
+>   lock-hierarchy + atomic-ordering audit, x86-64 (INIT-SIPI-SIPI) bring-up parity.
 > - **#5 Priority inheritance end-to-end VM-tested — ✅ ADDRESSED (all three targets).** REQ-IPC-009
 >   proved through the REAL blocking-IPC path: a HIGH receiver blocks on the endpoint a LOW task
 >   services, donates its priority, and the boosted LOW is dispatched ahead of a Ready MEDIUM
