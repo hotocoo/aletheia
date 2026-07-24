@@ -13,10 +13,12 @@
 //! SCOPE (contract-honest, ADR-010/ADR-019): aarch64 dev backend on QEMU `virt` with PSCI (HVC
 //! conduit). This is CPU bring-up + the concurrency substrate + the ADR-021 Phase 2 scheduling
 //! policy on real cores (per-CPU run queues + work stealing via `kernel_core::smpsched`,
-//! REQ-SMP-003) — preemptive cross-core task *migration*, TLB shootdown, and the lock-ordering
-//! audit remain the named next slices under REQ-SMP-001, which stays partial. With `-smp 1` (or a
-//! PSCI without more CPUs) the suite skips green, exactly like the virtio driver with no disk;
-//! the VM gate boots `-smp 4` and asserts the full marker.
+//! REQ-SMP-003) + cross-core TLB shootdown (Phase 6: the `kernel_core::shootdown` all-acknowledged
+//! barrier + the aarch64 broadcast `tlbi …is`, REQ-SMP-004 / ADR-021 Phase 3). Preemptive
+//! cross-core task *migration*, CPU affinity, and the lock-hierarchy / atomic-ordering audit remain
+//! the named next slices under REQ-SMP-001, which stays partial. With `-smp 1` (or a PSCI without
+//! more CPUs) the suite skips green, exactly like the virtio driver with no disk; the VM gate boots
+//! `-smp 4` and asserts the full marker.
 //!
 //! CONCURRENCY RULES (load-bearing):
 //! * Secondaries NEVER print — the PL011 writer is not serialized; core 0 narrates everything.
@@ -31,8 +33,10 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 
 use alloc::boxed::Box;
 
+use crate::frames;
 use crate::hal::{ActiveHal, Hal};
 use crate::vm;
+use kernel_core::shootdown::{Invalidation, TlbShootdown};
 use kernel_core::smpsched::SmpSched;
 use kernel_core::spine::{CapEngine, CapToken, Constraints, Scope, Target};
 use kernel_core::sync::SpinLock;
@@ -83,7 +87,7 @@ static SEEN_TPIDR: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; 
 static PARKED: AtomicUsize = AtomicUsize::new(0);
 
 /// Phase gate — core 0 advances it; secondaries wait on it.
-/// 1=counter 2=mailbox 3=caps 4=ipi 5=sched 6=park.
+/// 1=counter 2=mailbox 3=caps 4=ipi 5=sched 6=shootdown 7=park.
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static DONE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static DONE_MAILBOX: AtomicUsize = AtomicUsize::new(0);
@@ -145,6 +149,39 @@ fn sched_worker_turn(cpu: usize) {
     } else {
         core::hint::spin_loop();
     }
+}
+
+// Phase 6 — cross-core TLB shootdown on REAL cores (REQ-SMP-004, ADR-021 Phase 3). Core 0 maps a
+// fresh VA to frame A in the SHARED kernel root; every secondary reads it (priming its TLB with the
+// A→translation); core 0 remaps the VA to frame B and shoots down — the aarch64 broadcast `tlbi
+// …is` is the real cross-core mechanism, and the `kernel_core::shootdown` barrier proves every
+// secondary acknowledged its own invalidation BEFORE core 0 treats the remap as globally effective.
+// Each secondary then re-reads and must observe B. HONESTY (ADR-021 Phase 3): this proves the
+// mechanism + barrier ran on real cores, NOT that QEMU TCG exhibits a stale entry (its softmmu TLB
+// is a performance cache, not a faithful retention model) — the discriminating stale-vs-fresh proof
+// is the deterministic host-thread test in kernel-core/tests/shootdown.rs.
+/// A spare VA in an unused L1 slot (2 GiB; RAM identity map is L1 idx 1 = 1..1.125 GiB, peripherals
+/// idx 0) — safe to map/remap in the shared root without disturbing the running kernel.
+const SHOOTDOWN_VA: usize = 0x8000_0000;
+/// The address space (ASID) the shootdown targets — a synthetic id for this VA-space test.
+const SHOOTDOWN_ASID: u64 = 1;
+/// Frame-A / frame-B tenant magics (distinct), written through the RAM identity map.
+const MAGIC_A: u64 = 0xA1E7_0000_1111_0001;
+const MAGIC_B: u64 = 0xB0B0_0000_2222_0002;
+/// The `&'static TlbShootdown` (leaked by core 0), published as an address for the secondaries.
+static SHOOTDOWN_PTR: AtomicUsize = AtomicUsize::new(0);
+/// Value each secondary read through SHOOTDOWN_VA at priming (must be MAGIC_A) and after the
+/// shootdown (must be MAGIC_B). Init u64::MAX = "not read yet".
+static SEEN_MAP_A: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static SEEN_MAP_B: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static PRIMED: AtomicUsize = AtomicUsize::new(0);
+static DONE_SHOOTDOWN: AtomicUsize = AtomicUsize::new(0);
+
+/// The shootdown coordinator core 0 published. Callers must be past the PHASE=6 gate.
+fn shootdown_ref() -> &'static TlbShootdown {
+    // SAFETY: SHOOTDOWN_PTR is a Box::leak'd TlbShootdown published with Release before PHASE
+    // reaches 6; readers gate on PHASE (SeqCst) first, so the pointer is non-null and immortal.
+    unsafe { &*(SHOOTDOWN_PTR.load(Ordering::Acquire) as *const TlbShootdown) }
 }
 
 // --- Capability engine behind the SHARED kernel-core SpinLock (Issue 1: defined once) --------
@@ -342,6 +379,37 @@ pub extern "C" fn ksecondary(_ctx: u64) -> ! {
         sched_worker_turn(cpu);
     }
     DONE_SCHED.fetch_add(1, Ordering::SeqCst);
+
+    // Phase 6 — TLB shootdown. Prime this core's TLB by reading the mapped VA, service the
+    // initiator's shootdown (drop our cached translation, then acknowledge), and re-read to
+    // observe the remapped frame.
+    while PHASE.load(Ordering::SeqCst) < 6 {
+        core::hint::spin_loop();
+    }
+    // Prime: populate this core's TLB with the A→ translation and record what we saw.
+    // SAFETY: SHOOTDOWN_VA is mapped to frame A in the shared root before PHASE reaches 6.
+    let primed_val = unsafe { core::ptr::read_volatile(SHOOTDOWN_VA as *const u64) };
+    SEEN_MAP_A[cpu].store(primed_val, Ordering::SeqCst);
+    PRIMED.fetch_add(1, Ordering::SeqCst);
+    // Service shootdowns until the initiator has invalidated our mapping (>=1 acknowledged). The
+    // service callback runs the core-LOCAL invalidation, so the ack means real work happened.
+    let sd = shootdown_ref();
+    let sd_deadline = deadline_after(10);
+    while sd.acked(cpu) == 0 {
+        sd.service(cpu, |_inv| {
+            // SAFETY: local TLB invalidation of the shootdown VA at EL1 is always sound.
+            unsafe { vm::tlbi_va_local(SHOOTDOWN_VA) };
+        });
+        if now_ticks() > sd_deadline {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    // Re-read: post-shootdown, this core must now observe the remapped frame (B).
+    // SAFETY: the VA is remapped (not unmapped) by the initiator before it posts the shootdown.
+    let reread_val = unsafe { core::ptr::read_volatile(SHOOTDOWN_VA as *const u64) };
+    SEEN_MAP_B[cpu].store(reread_val, Ordering::SeqCst);
+    DONE_SHOOTDOWN.fetch_add(1, Ordering::SeqCst);
 
     PARKED.fetch_add(1, Ordering::SeqCst);
     loop {
@@ -559,8 +627,63 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "smp: work stealing drains an unbalanced queue across cores (smpsched live on real CPUs)"
     );
 
-    // 13 — the machine is still coherent: every secondary parked, nothing regressed.
+    // 16..18 — cross-core TLB shootdown (REQ-SMP-004, ADR-021 Phase 3). Map SHOOTDOWN_VA -> frame A
+    // in the SHARED kernel root; each secondary primes its TLB by reading it; remap -> frame B and
+    // shoot down (aarch64 broadcast tlbi + the kernel-core all-acknowledged barrier); each secondary
+    // re-reads and must observe B. Honesty scope: proves the mechanism + barrier on real cores, not
+    // that QEMU exhibits a stale entry (that discriminating proof is the host-thread test).
+    let shootdown: &'static TlbShootdown = Box::leak(Box::new(TlbShootdown::new(ncpus)));
+    SHOOTDOWN_PTR.store(shootdown as *const TlbShootdown as usize, Ordering::Release);
+    let frame_a = frames::alloc().expect("shootdown frame A");
+    let frame_b = frames::alloc().expect("shootdown frame B");
+    // SAFETY: both are fresh RAM frames (identity-mapped); write the tenant magics directly.
+    unsafe {
+        core::ptr::write_volatile(frame_a.addr() as *mut u64, MAGIC_A);
+        core::ptr::write_volatile(frame_b.addr() as *mut u64, MAGIC_B);
+    }
+    let root = vm::active_root();
+    let mapped_a = vm::map_page(root, SHOOTDOWN_VA, frame_a.addr(), vm::NORMAL_PAGE);
+    // SAFETY: publish the fresh A-mapping to every core in the inner-shareable domain before priming.
+    unsafe { vm::tlbi_va_broadcast(SHOOTDOWN_VA) };
     PHASE.store(6, Ordering::SeqCst);
+    check!(
+        mapped_a
+            && wait_until(deadline_after(10), || PRIMED.load(Ordering::SeqCst)
+                == secondaries)
+            && (1..=secondaries).all(|c| SEEN_MAP_A[c].load(Ordering::SeqCst) == MAGIC_A),
+        "smp: every secondary primed a shared-address-space mapping (observed frame A)"
+    );
+
+    // Remap the SAME VA to frame B, then shoot it down across every secondary. The broadcast tlbi
+    // is aarch64's real cross-core invalidation; the barrier proves each core acknowledged BEFORE
+    // core 0 treats the remap as globally effective (the load-bearing ordering, ADR-027-style).
+    let mapped_b = vm::map_page(root, SHOOTDOWN_VA, frame_b.addr(), vm::NORMAL_PAGE);
+    // SAFETY: broadcast the B-remap invalidation to the inner-shareable domain.
+    unsafe { vm::tlbi_va_broadcast(SHOOTDOWN_VA) };
+    let mut tgt = [0usize; MAX_CPUS];
+    for (i, slot) in tgt.iter_mut().enumerate().take(secondaries) {
+        *slot = i + 1;
+    }
+    let barrier_deadline = deadline_after(10);
+    let barrier_ok = shootdown.request(
+        &tgt[..secondaries],
+        Invalidation::page(SHOOTDOWN_ASID, SHOOTDOWN_VA as u64),
+        || now_ticks() <= barrier_deadline,
+    );
+    check!(
+        mapped_b
+            && barrier_ok
+            && wait_until(deadline_after(10), || DONE_SHOOTDOWN.load(Ordering::SeqCst)
+                == secondaries),
+        "smp: TLB shootdown barrier acknowledged by every secondary (all-acknowledged completion)"
+    );
+    check!(
+        (1..=secondaries).all(|c| SEEN_MAP_B[c].load(Ordering::SeqCst) == MAGIC_B),
+        "smp: every secondary observes the remapped frame B after the shootdown (coherent)"
+    );
+
+    // 19 — the machine is still coherent: every secondary parked, nothing regressed.
+    PHASE.store(7, Ordering::SeqCst);
     check!(
         wait_until(deadline_after(5), || PARKED.load(Ordering::SeqCst)
             == secondaries)

@@ -54,7 +54,7 @@ const NORMAL_BLOCK: u64 = DESC_BLOCK | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF |
 /// Attributes for a Device-memory 2 MiB block (MMIO — never executable).
 const DEVICE_BLOCK: u64 = DESC_BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | UXN | PXN;
 /// Attributes for a Normal-memory 4 KiB page (dynamic mappings).
-const NORMAL_PAGE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF | UXN;
+pub const NORMAL_PAGE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF | UXN;
 /// EL0-executable user code page: EL0 RW+X (AP_RW_EL0, UXN clear), EL1 execute-never (PXN).
 pub const USER_CODE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL0 | SH_INNER | AF | PXN;
 /// EL0 data/stack page: EL0 RW, never executable at either level.
@@ -212,6 +212,49 @@ unsafe fn tlbi_va(va: usize) {
         "dsb ishst",
         "tlbi vae1, {page}",
         "dsb ish",
+        "isb",
+        page = in(reg) page,
+        options(nostack),
+    );
+}
+
+/// Broadcast TLB invalidation of one VA to EVERY core in the inner-shareable domain (SMP TLB
+/// shootdown, REQ-SMP-004): `tlbi vaae1is` (all-ASID, inner-shareable) + `dsb ish` for completion +
+/// `isb`. On aarch64 the `…is` variant is the REAL cross-core mechanism — the hardware propagates
+/// the invalidation to all cores and `dsb ish` waits for it to complete everywhere — so an
+/// initiator that calls this has already invalidated the stale entry on every core. The
+/// `kernel_core::shootdown` barrier layered on top proves the per-core completion is acknowledged
+/// before the initiator reclaims (uniform with x86-64/RISC-V, whose invalidation is core-local).
+///
+/// SAFETY: `tlbi`/`dsb`/`isb` at EL1 are always sound; over-invalidating (VA not mapped) is
+/// harmless. The caller must have already published the page-table edit this invalidates.
+#[inline]
+pub unsafe fn tlbi_va_broadcast(va: usize) {
+    let page = (va >> 12) as u64;
+    asm!(
+        "dsb ishst",
+        "tlbi vaae1is, {page}",
+        "dsb ish",
+        "isb",
+        page = in(reg) page,
+        options(nostack),
+    );
+}
+
+/// Core-LOCAL TLB invalidation of one VA (`tlbi vaae1` — no `is`, this core only) + local barriers.
+/// This is the per-core half of a software shootdown: the remote core, on servicing a shootdown
+/// request, drops its own cached translation. Uniform with the x86-64 `invlpg` and RISC-V
+/// `sfence.vma` per-core paths; on aarch64 it is belt-and-suspenders behind the initiator's
+/// broadcast, and it is what the `service` callback runs so the acknowledgement means real work.
+///
+/// SAFETY: `tlbi`/`dsb`/`isb` at EL1 are always sound; over-invalidating is harmless.
+#[inline]
+pub unsafe fn tlbi_va_local(va: usize) {
+    let page = (va >> 12) as u64;
+    asm!(
+        "dsb nshst",
+        "tlbi vaae1, {page}",
+        "dsb nsh",
         "isb",
         page = in(reg) page,
         options(nostack),
