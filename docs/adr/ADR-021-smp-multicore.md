@@ -79,15 +79,18 @@ path is **alloc-free** past construction (kernel CPUs spin on it; bump allocator
   exactly-once dispatch under 4-thread contention with an all-on-one-queue seed (none lost, none
   duplicated), local-first, steal liveness + victim attribution, most-loaded victim preference,
   least-loaded placement balance.
-- **VM-gated on real cores** (`kernel/src/smp.rs` phase 5, suite now 16 invariants at `-smp 4`):
-  every task seeded on CPU 1's queue alone, so core 0 + CPUs 2..3 progress ONLY by stealing;
-  invariants: scheduling completes on every core, every task dispatched EXACTLY once, stealing
-  drains the unbalanced queue (core 0 performs one uncontended steal before opening the phase, so
-  the steal invariant is structural, never a race).
+- **VM-gated on real cores on ALL THREE targets** (`kernel/src/smp.rs`, `kernel-riscv64/src/smp.rs`,
+  `kernel-x86_64/src/smp.rs` — each suite now 16 invariants at `-smp 4`): every task seeded on ONE
+  secondary's queue alone (lowest started hartid on RISC-V — the boot-hart lottery makes ids
+  arbitrary, so its scheduler is sized MAX_CPUS and indexed by hartid), so the boot CPU and the
+  other secondaries progress ONLY by stealing; invariants: scheduling completes on every core,
+  every task dispatched EXACTLY once, stealing drains the unbalanced queue (the boot CPU performs
+  one uncontended steal before opening the phase, so the steal invariant is structural, never a
+  race).
 - **Honesty:** this is the *policy* on real cores dispatching kernel work items. Preemptive
   cross-core *task migration* (a stolen EL0 task resuming on the thief CPU via the `TaskContext`
-  seam), RISC-V/x86-64 suite parity, TLB shootdown, and the lock-hierarchy/atomic-ordering audit
-  remain open under REQ-SMP-001 (partial).
+  seam), TLB shootdown, and the lock-hierarchy/atomic-ordering audit remain open under
+  REQ-SMP-001 (partial).
 
 ## Consequences
 

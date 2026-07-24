@@ -576,14 +576,19 @@ allocators never reclaim).
   task is dispatched EXACTLY once across cores, and stealing drains the unbalanced queue. The
   steal invariant is structural, not a race: core 0 performs one uncontended steal before opening
   the phase to the other cores.
+- **RISC-V + x86-64 parity (same day):** `kernel-riscv64/src/smp.rs` and `kernel-x86_64/src/smp.rs`
+  run the identical phase (same seed-on-one-secondary shape, same three invariants; the RISC-V
+  scheduler is sized MAX_CPUS and indexed by hartid because OpenSBI's boot-hart lottery makes ids
+  arbitrary — the seed queue is the lowest started secondary hart). ALL THREE targets now gate 16
+  SMP invariants at `-smp 4`.
 - **Honesty:** this is the scheduling *policy* proved on real cores dispatching kernel work items
   (what runs where). Preemptive cross-core *task migration* (a stolen EL0 task resuming on the
-  thief CPU through the `TaskContext` seam), RISC-V/x86-64 suite parity, TLB shootdown, and the
-  lock-hierarchy/atomic-ordering audit stay open under **REQ-SMP-001 (partial)**.
+  thief CPU through the `TaskContext` seam), TLB shootdown, and the lock-hierarchy/atomic-ordering
+  audit stay open under **REQ-SMP-001 (partial)**.
 
-Gates: aarch64 vm-e2e PASS (74 invariants incl. SMP 16) · riscv64 PASS (66) · x86-64 smoke PASS
-(59) · e2e-all 3/3 · conformance 3/3 · kernel-core hosted 79 · clippy `-D warnings` + fmt clean.
-Traceability: **55 reqs — 47 delivered / 5 partial / 3 deferred**.
+Gates: aarch64 vm-e2e PASS (74 invariants incl. SMP 16) · riscv64 PASS (69 incl. SMP 16) · x86-64
+smoke PASS (62 incl. SMP 16) · e2e-all 3/3 · conformance 3/3 · kernel-core hosted 79 · clippy
+`-D warnings` + fmt clean. Traceability: **55 reqs — 47 delivered / 5 partial / 3 deferred**.
 
 ## Delivered (2026-07-24 — REQ-SMP-002: SMP secondary bring-up + cross-core concurrency substrate, VM-gated at -smp 4)
 
