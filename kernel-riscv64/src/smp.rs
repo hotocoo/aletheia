@@ -10,9 +10,11 @@
 //!
 //! SCOPE (contract-honest): bring-up + concurrency substrate + the ADR-021 Phase 2 scheduling
 //! policy on real harts (per-hart run queues + work stealing via `kernel_core::smpsched`,
-//! REQ-SMP-003 parity); preemptive cross-hart task *migration*, TLB shootdown and the lock-order
-//! audit stay open under REQ-SMP-001. With `-smp 1` the suite skips green (like the aarch64
-//! twin); the VM gate boots `-smp 4` and asserts the full marker, so CI cannot silently skip.
+//! REQ-SMP-003 parity) + cross-hart TLB shootdown (Phase 6: the SBI RFENCE firmware fence + the
+//! `kernel_core::shootdown` all-acknowledged barrier, REQ-SMP-004 / ADR-021 Phase 3). Preemptive
+//! cross-hart task *migration*, CPU affinity and the lock-hierarchy / atomic-ordering audit stay
+//! open under REQ-SMP-001. With `-smp 1` the suite skips green (like the aarch64 twin); the VM
+//! gate boots `-smp 4` and asserts the full marker, so CI cannot silently skip.
 //!
 //! CONCURRENCY RULES (load-bearing, same as aarch64): secondaries NEVER print; every capability-
 //! engine access happens under the one SpinLock; liveness waits are progress-gated with wall-clock
@@ -23,9 +25,11 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 
 use alloc::boxed::Box;
 
+use crate::frames;
 use crate::hal::ActiveHal;
 use crate::sbi;
 use crate::vm;
+use kernel_core::shootdown::{Invalidation, TlbShootdown};
 use kernel_core::smpsched::SmpSched;
 use kernel_core::spine::{CapEngine, CapToken, Constraints, Scope, Target};
 use kernel_core::sync::SpinLock;
@@ -120,6 +124,32 @@ fn sched_worker_turn(hart: usize) {
     } else {
         core::hint::spin_loop();
     }
+}
+
+// Phase 6 — cross-hart TLB shootdown on REAL harts (REQ-SMP-004, ADR-021 Phase 3). The boot hart
+// maps a fresh VA to frame A in the SHARED kernel root; every secondary reads it (priming its TLB);
+// the boot hart remaps the VA to frame B and shoots down — the SBI RFENCE call is the idiomatic
+// firmware mechanism (OpenSBI fences the remote harts and blocks until done), and the
+// `kernel_core::shootdown` barrier proves each hart also ran its own `sfence.vma` and acknowledged
+// before the boot hart treats the remap as globally effective. Each secondary re-reads and must
+// observe B. Queues/arrays are indexed by hartid (boot-hart lottery). Honesty (ADR-021 Phase 3):
+// this proves the mechanism + barrier on real harts, not that QEMU exhibits a stale entry (the
+// discriminating proof is the deterministic host-thread test).
+const SHOOTDOWN_VA: usize = frames::RAM_END + 0x1_0000;
+const SHOOTDOWN_ASID: u64 = 1;
+const MAGIC_A: u64 = 0xA1E7_0000_1111_0001;
+const MAGIC_B: u64 = 0xB0B0_0000_2222_0002;
+static SHOOTDOWN_PTR: AtomicUsize = AtomicUsize::new(0);
+static SEEN_MAP_A: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static SEEN_MAP_B: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static PRIMED: AtomicUsize = AtomicUsize::new(0);
+static DONE_SHOOTDOWN: AtomicUsize = AtomicUsize::new(0);
+
+/// The shootdown coordinator the boot hart published. Callers must be past the PHASE=6 gate.
+fn shootdown_ref() -> &'static TlbShootdown {
+    // SAFETY: SHOOTDOWN_PTR is a Box::leak'd TlbShootdown published with Release before PHASE
+    // reaches 6; readers gate on PHASE (SeqCst) first, so the pointer is non-null and immortal.
+    unsafe { &*(SHOOTDOWN_PTR.load(Ordering::Acquire) as *const TlbShootdown) }
 }
 
 struct CapState {
@@ -268,6 +298,30 @@ pub extern "C" fn ksecondary(hartid: u64) -> ! {
         sched_worker_turn(hart);
     }
     DONE_SCHED.fetch_add(1, Ordering::SeqCst);
+
+    // Phase 6 — TLB shootdown. Prime this hart's TLB by reading the mapped VA, service the boot
+    // hart's shootdown (core-local `sfence.vma`, then acknowledge), and re-read to observe the
+    // remapped frame. The poll is phase-gated (boot hart advances to PHASE 7 once every hart has
+    // acknowledged) so it cannot hang.
+    while PHASE.load(Ordering::SeqCst) < 6 {
+        core::hint::spin_loop();
+    }
+    // SAFETY: SHOOTDOWN_VA is mapped to frame A in the shared root before PHASE reaches 6.
+    let primed_val = unsafe { core::ptr::read_volatile(SHOOTDOWN_VA as *const u64) };
+    SEEN_MAP_A[hart].store(primed_val, Ordering::SeqCst);
+    PRIMED.fetch_add(1, Ordering::SeqCst);
+    let sd = shootdown_ref();
+    while sd.acked(hart) == 0 && PHASE.load(Ordering::SeqCst) < 7 {
+        sd.service(hart, |_inv| {
+            // SAFETY: local S-mode TLB fence of the shootdown VA is always sound.
+            unsafe { vm::sfence_page(SHOOTDOWN_VA) };
+        });
+        core::hint::spin_loop();
+    }
+    // SAFETY: the VA is remapped (not unmapped) by the boot hart before it posts the shootdown.
+    let reread_val = unsafe { core::ptr::read_volatile(SHOOTDOWN_VA as *const u64) };
+    SEEN_MAP_B[hart].store(reread_val, Ordering::SeqCst);
+    DONE_SHOOTDOWN.fetch_add(1, Ordering::SeqCst);
 
     PARKED.fetch_add(1, Ordering::SeqCst);
     loop {
@@ -480,8 +534,70 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "smp: work stealing drains an unbalanced queue across harts (smpsched live on real harts)"
     );
 
-    // 13 — the machine is still coherent: every secondary parked, nothing regressed.
+    // 16..18 — cross-hart TLB shootdown (REQ-SMP-004, ADR-021 Phase 3). Map SHOOTDOWN_VA -> frame A
+    // in the shared kernel root; each secondary primes; remap -> frame B and shoot down (SBI RFENCE
+    // firmware fence + the kernel-core all-acknowledged barrier where each hart runs its own
+    // sfence.vma and acks); each secondary re-reads and must observe B.
+    let shootdown: &'static TlbShootdown = Box::leak(Box::new(TlbShootdown::new(MAX_CPUS)));
+    SHOOTDOWN_PTR.store(shootdown as *const TlbShootdown as usize, Ordering::Release);
+    let frame_a = frames::alloc().expect("shootdown frame A");
+    let frame_b = frames::alloc().expect("shootdown frame B");
+    // SAFETY: fresh RAM frames (identity-mapped RWX); write the tenant magics directly.
+    unsafe {
+        core::ptr::write_volatile(frame_a.addr() as *mut u64, MAGIC_A);
+        core::ptr::write_volatile(frame_b.addr() as *mut u64, MAGIC_B);
+    }
+    let root = vm::active_root();
+    let mapped_a = vm::map_page(root, SHOOTDOWN_VA, frame_a.addr(), vm::NORMAL_PAGE);
+    // SAFETY: publish the A-mapping locally before releasing the secondaries to prime.
+    unsafe { vm::sfence_page(SHOOTDOWN_VA) };
     PHASE.store(6, Ordering::SeqCst);
+    check!(
+        mapped_a
+            && wait_until(deadline_after(10), || PRIMED.load(Ordering::SeqCst)
+                == secondaries)
+            && (0..MAX_CPUS)
+                .filter(|h| started_mask & (1 << h) != 0)
+                .all(|h| SEEN_MAP_A[h].load(Ordering::SeqCst) == MAGIC_A),
+        "smp: every secondary primed a shared-address-space mapping (observed frame A)"
+    );
+
+    // Remap the SAME VA to frame B, then shoot it down: the SBI RFENCE firmware fence (idiomatic
+    // RISC-V mechanism; bits of started_mask ARE hartids) + the all-acknowledged barrier where each
+    // hart runs its own sfence.vma before the boot hart treats the remap as globally effective.
+    let mapped_b = vm::map_page(root, SHOOTDOWN_VA, frame_b.addr(), vm::NORMAL_PAGE);
+    let rfence_ok = sbi::remote_sfence_vma(started_mask, 0, SHOOTDOWN_VA, 4096) == 0;
+    let mut tgt = [0usize; MAX_CPUS];
+    let mut ntgt = 0usize;
+    for h in 0..MAX_CPUS {
+        if started_mask & (1 << h) != 0 {
+            tgt[ntgt] = h;
+            ntgt += 1;
+        }
+    }
+    let barrier_deadline = deadline_after(10);
+    let barrier_ok = shootdown.request(
+        &tgt[..ntgt],
+        Invalidation::page(SHOOTDOWN_ASID, SHOOTDOWN_VA as u64),
+        || now_ticks() <= barrier_deadline,
+    );
+    check!(
+        mapped_b
+            && rfence_ok
+            && barrier_ok
+            && wait_until(deadline_after(10), || DONE_SHOOTDOWN.load(Ordering::SeqCst)
+                == secondaries),
+        "smp: TLB shootdown barrier acknowledged by every secondary hart (all-acknowledged completion)"
+    );
+    check!(
+        (0..MAX_CPUS)
+            .filter(|h| started_mask & (1 << h) != 0)
+            .all(|h| SEEN_MAP_B[h].load(Ordering::SeqCst) == MAGIC_B),
+        "smp: every secondary hart observes the remapped frame B after the shootdown (coherent)"
+    );
+
+    // 19 — the machine is still coherent: every secondary parked, nothing regressed.
+    PHASE.store(7, Ordering::SeqCst);
     check!(
         wait_until(deadline_after(5), || PARKED.load(Ordering::SeqCst)
             == secondaries)

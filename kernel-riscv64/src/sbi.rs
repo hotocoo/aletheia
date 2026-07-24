@@ -69,6 +69,42 @@ pub fn send_ipi(hart_mask: usize, hart_mask_base: usize) -> isize {
     ecall(EXT_IPI, IPI_SEND, hart_mask, hart_mask_base, 0).0
 }
 
+// SBI RFENCE extension (EID "RFNC" = 0x5246_4E43). FID 1 `remote_sfence_vma(hart_mask,
+// hart_mask_base, start_addr, size)` makes the firmware issue an `sfence.vma` covering
+// [start, start+size) on every hart in the mask — the RISC-V cross-core TLB shootdown mechanism
+// (the aarch64 twin is a broadcast `tlbi …is`; x86 has none and IPIs each core to `invlpg`). SBI
+// blocks until the remote fences complete, so this is itself an all-harts-acknowledged barrier;
+// the kernel-core shootdown barrier layered on top proves the per-hart completion uniformly.
+const EXT_RFENCE: usize = 0x5246_4E43;
+const RFENCE_REMOTE_SFENCE_VMA: usize = 1;
+
+/// Firmware-issue `sfence.vma [start, start+size)` on the harts in `hart_mask` (bit i =
+/// `hart_mask_base + i`). Returns the SBI error code (0 = success). Needs a 4th argument (a3=size),
+/// which the shared 3-arg [`ecall`] helper does not carry, so the `ecall` is inlined here.
+pub fn remote_sfence_vma(
+    hart_mask: usize,
+    hart_mask_base: usize,
+    start: usize,
+    size: usize,
+) -> isize {
+    let err: isize;
+    // SAFETY: an `ecall` with a valid SBI RFENCE function id traps to OpenSBI (M-mode), which
+    // services it and returns; clobbers only the SBI argument/return registers per the SBI ABI.
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("a0") hart_mask as isize => err,
+            in("a1") hart_mask_base,
+            in("a2") start,
+            in("a3") size,
+            in("a6") RFENCE_REMOTE_SFENCE_VMA,
+            in("a7") EXT_RFENCE,
+            options(nostack),
+        );
+    }
+    err
+}
+
 /// Prove the S->M SBI boundary works: read and print the spec version + implementation id. Returns
 /// true if the firmware answered (error == 0), which it must for a conformant SBI.
 pub fn probe() -> bool {
