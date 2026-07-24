@@ -277,23 +277,30 @@ fn stolen_task_resumes_on_the_thief_through_the_taskcontext_seam() {
     const THIEF: usize = 0;
 
     // The task's saved context (CPU-independent): a real backend restores registers + address space
-    // in `resume`; the mock records WHICH CPU resumed it.
+    // in `resume`; the mock records WHICH CPU resumed it AND which task's context it carried, so the
+    // proof ties the resumed context to the actually-stolen task (not just "a resume happened").
     struct SavedContext {
         resumed_on: AtomicUsize,
+        resumed_task: AtomicUsize,
     }
     struct Resumer<'a> {
         cpu: usize,
+        task: u64,
         ctx: &'a SavedContext,
     }
     impl TaskContext for Resumer<'_> {
         fn resume(&mut self) {
             self.ctx.resumed_on.store(self.cpu, Ordering::SeqCst);
+            self.ctx
+                .resumed_task
+                .store(self.task as usize, Ordering::SeqCst);
         }
     }
 
     let sched = SmpSched::new(4);
     let ctx = SavedContext {
         resumed_on: AtomicUsize::new(usize::MAX),
+        resumed_task: AtomicUsize::new(usize::MAX),
     };
     sched.enqueue_on(ORIGIN, 42); // ANY affinity -> any idle CPU may migrate it
 
@@ -308,9 +315,11 @@ fn stolen_task_resumes_on_the_thief_through_the_taskcontext_seam() {
         "the dispatch attributes the migration to the origin CPU"
     );
 
-    // Resume the migrated task on the thief through the seam.
+    // Resume the ACTUAL stolen task on the thief through the seam — the resumer carries the dispatched
+    // task's identity, so the assertions below bind "what resumed" to "what was stolen".
     let mut resumer = Resumer {
         cpu: THIEF,
+        task: d.task,
         ctx: &ctx,
     };
     resumer.resume();
@@ -324,6 +333,11 @@ fn stolen_task_resumes_on_the_thief_through_the_taskcontext_seam() {
         ctx.resumed_on.load(Ordering::SeqCst),
         ORIGIN,
         "and NOT on its origin CPU -> the task genuinely migrated"
+    );
+    assert_eq!(
+        ctx.resumed_task.load(Ordering::SeqCst),
+        42,
+        "the context that resumed carried the stolen task's identity (not some unrelated value)"
     );
 }
 

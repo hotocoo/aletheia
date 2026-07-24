@@ -189,8 +189,6 @@ fn shootdown_ref() -> &'static TlbShootdown {
 // Task ids for the migration demo (kept clear of the 0..SCHED_TASKS work-item range).
 const AFFINE_TASK: u64 = 1_001;
 const MIG_TASK: u64 = 1_002;
-/// The "saved register" value the migrated task's context carries; the thief must restore it exactly.
-const MIG_MAGIC: u64 = 0xA110_C0DE_F00D_5EED;
 
 /// Minimal saved-execution-context stand-in for the migration proof. A real backend restores the
 /// task's full register file + address space in `resume` and `eret`s into it; this restores ONE saved
@@ -735,7 +733,8 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // Migration: a task seeded on CPU 1's queue is stolen by CPU 0 (its own queue empty) — the task
     // now lives on a CPU other than the one it was enqueued on.
     mig.enqueue_on(1, MIG_TASK);
-    let migrated = mig.next_for(0)
+    let d = mig.next_for(0);
+    let migrated = d
         == Some(Dispatch {
             task: MIG_TASK,
             stolen_from: Some(1),
@@ -744,12 +743,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         migrated,
         "smp: a task seeded on CPU 1 migrates to CPU 0 by stealing (cross-core task migration)"
     );
-    // Resume the migrated task on the thief through the TaskContext seam (a minimal GPR restore).
-    let mut ctx = GpCtx::new(MIG_MAGIC);
+    // Resume the ACTUAL stolen task on the thief through the TaskContext seam: the context carries the
+    // migrated task's identity (from the dispatch above), so restoring MIG_TASK here proves THIS task
+    // resumed — not just that some register move ran.
+    let mut ctx = GpCtx::new(d.map(|x| x.task).unwrap_or(0));
     ctx.resume();
     check!(
-        ctx.restored == MIG_MAGIC,
-        "smp: the migrated task resumes on the thief via the TaskContext seam (GPR restore ran here)"
+        ctx.restored == MIG_TASK,
+        "smp: the migrated task resumes on the thief via the TaskContext seam (its id restored here)"
     );
 
     // 22 — the machine is still coherent: every secondary parked, nothing regressed.

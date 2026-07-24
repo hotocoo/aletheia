@@ -604,10 +604,10 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // U-mode preemption suite) — this proves the migration MECHANISM + the resume seam.
     const AFFINE_TASK: u64 = 1_001;
     const MIG_TASK: u64 = 1_002;
-    const MIG_MAGIC: u64 = 0xA110_C0DE_F00D_5EED;
     // Minimal saved-context stand-in: a real backend restores the task's full register file + address
     // space and `sret`s into it; this restores ONE saved GPR through a register move, enough to prove
-    // the TaskContext seam ran on the thief hart.
+    // the TaskContext seam ran on the thief hart. The value it carries IS the stolen task's id, so the
+    // resume assertion binds "what resumed" to "what was migrated".
     struct GpCtx {
         saved: u64,
         restored: u64,
@@ -635,7 +635,8 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     );
     // Migration: a task seeded on CPU 1's queue is stolen by CPU 0 (its own queue empty).
     mig.enqueue_on(1, MIG_TASK);
-    let migrated = mig.next_for(0)
+    let d = mig.next_for(0);
+    let migrated = d
         == Some(Dispatch {
             task: MIG_TASK,
             stolen_from: Some(1),
@@ -644,15 +645,16 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         migrated,
         "smp: a task seeded on CPU 1 migrates to CPU 0 by stealing (cross-core task migration)"
     );
-    // Resume the migrated task on the thief through the TaskContext seam (a minimal GPR restore).
+    // Resume the ACTUAL stolen task on the thief through the TaskContext seam: the context carries the
+    // migrated task's identity, so restoring MIG_TASK here proves THIS task resumed (not just a move).
     let mut ctx = GpCtx {
-        saved: MIG_MAGIC,
+        saved: d.map(|x| x.task).unwrap_or(0),
         restored: 0,
     };
     ctx.resume();
     check!(
-        ctx.restored == MIG_MAGIC,
-        "smp: the migrated task resumes on the thief via the TaskContext seam (GPR restore ran here)"
+        ctx.restored == MIG_TASK,
+        "smp: the migrated task resumes on the thief via the TaskContext seam (its id restored here)"
     );
 
     // 22 — the machine is still coherent: every secondary parked, nothing regressed.
