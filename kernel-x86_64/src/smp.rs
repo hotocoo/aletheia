@@ -10,11 +10,13 @@
 //! atomic authorize+execute primitive under live cross-core revocation (behind the ONE shared
 //! `kernel_core::sync::SpinLock`), and a fixed-vector LAPIC IPI delivered + acknowledged end-to-end.
 //!
-//! SCOPE (contract-honest, ADR-010/ADR-019/ADR-021 Phase 1): bring-up + the concurrency substrate
-//! on QEMU q35 + OVMF. Cross-core *scheduling* (per-CPU run queues, load balancing, TLB shootdown)
-//! stays the named next slice under REQ-SMP-001. With `-smp 1` (MADT lists only the BSP) the suite
-//! skips green, exactly like virtio-with-no-disk; the smoke test boots `-smp 4` and asserts the
-//! full marker so a silent skip cannot pass CI.
+//! SCOPE (contract-honest, ADR-010/ADR-019/ADR-021): bring-up + the concurrency substrate + the
+//! ADR-021 Phase 2 scheduling policy on real cores (per-CPU run queues + work stealing via
+//! `kernel_core::smpsched`, REQ-SMP-003 parity) on QEMU q35 + OVMF. Preemptive cross-core task
+//! *migration*, TLB shootdown and the lock-order audit stay the named next slices under
+//! REQ-SMP-001. With `-smp 1` (MADT lists only the BSP) the suite skips green, exactly like
+//! virtio-with-no-disk; the smoke test boots `-smp 4` and asserts the full marker so a silent
+//! skip cannot pass CI.
 //!
 //! ORDERING (load-bearing): this suite runs BEFORE `usermode::selftest`. The ring-3 suite repoints
 //! IRQ0 at its own context-switching entry and must leave IF=0 afterwards (see kmain), so the PIT
@@ -29,7 +31,10 @@
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+use alloc::boxed::Box;
+
 use crate::pit;
+use kernel_core::smpsched::SmpSched;
 use kernel_core::spine::{CapEngine, CapToken, Constraints, Scope, Target};
 use kernel_core::sync::SpinLock;
 
@@ -329,7 +334,7 @@ static SEEN_GS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX
 /// APs that reached the final parking loop.
 static PARKED: AtomicUsize = AtomicUsize::new(0);
 
-/// Phase gate — the BSP advances it; APs wait on it. 1=counter 2=mailbox 3=caps 4=ipi 5=park.
+/// Phase gate — the BSP advances it; APs wait on it. 1=counter 2=mailbox 3=caps 4=ipi 5=sched 6=park.
 static PHASE: AtomicU32 = AtomicU32::new(0);
 static DONE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static DONE_MAILBOX: AtomicUsize = AtomicUsize::new(0);
@@ -357,6 +362,42 @@ const POST_ATTEMPTS: usize = 64;
 static IPI_SEEN: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 /// An AP that took an unexpected fault reports itself here instead of triple-faulting silently.
 static AP_FAULTS: AtomicUsize = AtomicUsize::new(0);
+
+// Phase 5 — per-CPU run queues + work stealing on REAL cores (ADR-021 Phase 2, REQ-SMP-003
+// parity with the aarch64/RISC-V suites). Every task is seeded on CPU 1's queue alone, so the
+// BSP and CPUs 2.. progress only by stealing through `kernel_core::smpsched` (the policy
+// host-proved in kernel-core/tests/smpsched.rs).
+const SCHED_TASKS: usize = 64;
+/// The `&'static SmpSched` (leaked by the BSP), published as an address for the APs.
+static SCHED_PTR: AtomicUsize = AtomicUsize::new(0);
+/// Per-task dispatch count — every slot must end at EXACTLY 1 (no loss, no duplication).
+static EXEC_SEEN: [AtomicU32; SCHED_TASKS] = [const { AtomicU32::new(0) }; SCHED_TASKS];
+static EXEC_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static STEALS: AtomicUsize = AtomicUsize::new(0);
+static DONE_SCHED: AtomicUsize = AtomicUsize::new(0);
+
+/// The scheduler the BSP published. Callers must be past the PHASE=5 gate (publication ordering).
+fn sched_ref() -> &'static SmpSched {
+    // SAFETY: SCHED_PTR is a Box::leak'd SmpSched published with Release before PHASE reaches 5;
+    // readers gate on PHASE (SeqCst) first, so the pointer is non-null and the pointee immortal.
+    unsafe { &*(SCHED_PTR.load(Ordering::Acquire) as *const SmpSched) }
+}
+
+/// One scheduling turn shared by every core: dispatch, tally, attribute steals.
+fn sched_worker_turn(cpu: usize) {
+    if let Some(d) = sched_ref().next_for(cpu) {
+        let t = d.task as usize;
+        if t < SCHED_TASKS {
+            EXEC_SEEN[t].fetch_add(1, Ordering::SeqCst);
+        }
+        if d.stolen_from.is_some() {
+            STEALS.fetch_add(1, Ordering::SeqCst);
+        }
+        EXEC_TOTAL.fetch_add(1, Ordering::SeqCst);
+    } else {
+        core::hint::spin_loop();
+    }
+}
 
 // --- Capability engine behind the SHARED kernel-core SpinLock (Issue 1: defined once) --------
 struct CapState {
@@ -511,6 +552,16 @@ pub extern "C" fn ap_entry() -> ! {
         core::hint::spin_loop(); // BSP-clocked: its deadline advances PHASE on a miss
     }
     x86_64::instructions::interrupts::disable();
+
+    // Phase 5 — per-CPU scheduling: pull work from this AP's own run queue, steal when it is
+    // empty, until the whole task set is dispatched (the executions themselves are the tallies).
+    while PHASE.load(Ordering::SeqCst) < 5 {
+        core::hint::spin_loop();
+    }
+    while EXEC_TOTAL.load(Ordering::SeqCst) < SCHED_TASKS {
+        sched_worker_turn(cpu);
+    }
+    DONE_SCHED.fetch_add(1, Ordering::SeqCst);
 
     PARKED.fetch_add(1, Ordering::SeqCst);
     park();
@@ -753,8 +804,43 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "smp: fixed-vector LAPIC IPI delivered + acknowledged on every AP"
     );
 
-    // 10 — the machine is still coherent: every AP parked, nothing regressed.
+    // 10..12 — ADR-021 Phase 2 on real cores: per-CPU run queues + work stealing. Every task is
+    // seeded on CPU 1's queue alone, so the BSP and CPUs 2.. can only progress by STEALING —
+    // the policy (`kernel_core::smpsched`, host-proved) now demonstrably schedules real silicon.
+    let ncpus = secondaries + 1;
+    let sched: &'static SmpSched = Box::leak(Box::new(SmpSched::new(ncpus)));
+    for t in 0..SCHED_TASKS {
+        sched.enqueue_on(1, t as u64);
+    }
+    SCHED_PTR.store(sched as *const SmpSched as usize, Ordering::Release);
+    // Deterministic first steal: no AP is scheduling yet and the BSP's own queue is empty, so
+    // this dispatch MUST come from CPU 1's queue — invariant 12 can never race to a flake.
+    sched_worker_turn(0);
     PHASE.store(5, Ordering::SeqCst);
+    let sched_deadline = deadline_after(10);
+    while EXEC_TOTAL.load(Ordering::SeqCst) < SCHED_TASKS && pit::ticks() <= sched_deadline {
+        sched_worker_turn(0); // the BSP works the queues too (it steals — its queue stays empty)
+    }
+    check!(
+        wait_until(deadline_after(10), || DONE_SCHED.load(Ordering::SeqCst)
+            == secondaries),
+        "smp: scheduling phase completes on every core"
+    );
+    let mut exactly_once = EXEC_TOTAL.load(Ordering::SeqCst) == SCHED_TASKS;
+    for seen in EXEC_SEEN.iter() {
+        exactly_once &= seen.load(Ordering::SeqCst) == 1;
+    }
+    check!(
+        exactly_once,
+        "smp: per-CPU queues dispatch every task EXACTLY once (none lost, none duplicated)"
+    );
+    check!(
+        STEALS.load(Ordering::SeqCst) > 0 && (0..ncpus).all(|c| sched.load(c) == 0),
+        "smp: work stealing drains an unbalanced queue across cores (smpsched live on real CPUs)"
+    );
+
+    // 13 — the machine is still coherent: every AP parked, nothing regressed.
+    PHASE.store(6, Ordering::SeqCst);
     check!(
         wait_until(deadline_after(5), || PARKED.load(Ordering::SeqCst)
             == secondaries)

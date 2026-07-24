@@ -8,9 +8,11 @@
 //! ADR-027 atomic authorize+execute primitive under live cross-hart revocation (behind the SHARED
 //! `kernel_core::sync::SpinLock`), and an SBI IPI (sip.SSIP) delivered end-to-end.
 //!
-//! SCOPE (contract-honest): bring-up + concurrency substrate; cross-hart *scheduling* stays open
-//! under REQ-SMP-001. With `-smp 1` the suite skips green (like the aarch64 twin); the VM gate
-//! boots `-smp 4` and asserts the full marker, so CI cannot silently skip.
+//! SCOPE (contract-honest): bring-up + concurrency substrate + the ADR-021 Phase 2 scheduling
+//! policy on real harts (per-hart run queues + work stealing via `kernel_core::smpsched`,
+//! REQ-SMP-003 parity); preemptive cross-hart task *migration*, TLB shootdown and the lock-order
+//! audit stay open under REQ-SMP-001. With `-smp 1` the suite skips green (like the aarch64
+//! twin); the VM gate boots `-smp 4` and asserts the full marker, so CI cannot silently skip.
 //!
 //! CONCURRENCY RULES (load-bearing, same as aarch64): secondaries NEVER print; every capability-
 //! engine access happens under the one SpinLock; liveness waits are progress-gated with wall-clock
@@ -19,9 +21,12 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+use alloc::boxed::Box;
+
 use crate::hal::ActiveHal;
 use crate::sbi;
 use crate::vm;
+use kernel_core::smpsched::SmpSched;
 use kernel_core::spine::{CapEngine, CapToken, Constraints, Scope, Target};
 use kernel_core::sync::SpinLock;
 use kernel_core::Hal;
@@ -79,6 +84,43 @@ const POST_ATTEMPTS: usize = 64;
 
 // Phase 4 — SBI IPI (sip.SSIP).
 static IPI_SEEN: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+
+// Phase 5 — per-hart run queues + work stealing on REAL harts (ADR-021 Phase 2, REQ-SMP-003
+// parity with the aarch64 suite). Queues are indexed by hartid (OpenSBI's boot-hart lottery means
+// ids are arbitrary), so the scheduler is sized MAX_CPUS and unstarted harts simply own empty
+// queues. Every task is seeded on ONE secondary's queue; everyone else progresses only by
+// stealing through `kernel_core::smpsched` (host-proved in kernel-core/tests/smpsched.rs).
+const SCHED_TASKS: usize = 64;
+/// The `&'static SmpSched` (leaked by the boot hart), published as an address.
+static SCHED_PTR: AtomicUsize = AtomicUsize::new(0);
+/// Per-task dispatch count — every slot must end at EXACTLY 1 (no loss, no duplication).
+static EXEC_SEEN: [AtomicU32; SCHED_TASKS] = [const { AtomicU32::new(0) }; SCHED_TASKS];
+static EXEC_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static STEALS: AtomicUsize = AtomicUsize::new(0);
+static DONE_SCHED: AtomicUsize = AtomicUsize::new(0);
+
+/// The scheduler the boot hart published. Callers must be past the PHASE=5 gate.
+fn sched_ref() -> &'static SmpSched {
+    // SAFETY: SCHED_PTR is a Box::leak'd SmpSched published with Release before PHASE reaches 5;
+    // readers gate on PHASE (SeqCst) first, so the pointer is non-null and the pointee immortal.
+    unsafe { &*(SCHED_PTR.load(Ordering::Acquire) as *const SmpSched) }
+}
+
+/// One scheduling turn shared by every hart: dispatch, tally, attribute steals.
+fn sched_worker_turn(hart: usize) {
+    if let Some(d) = sched_ref().next_for(hart) {
+        let t = d.task as usize;
+        if t < SCHED_TASKS {
+            EXEC_SEEN[t].fetch_add(1, Ordering::SeqCst);
+        }
+        if d.stolen_from.is_some() {
+            STEALS.fetch_add(1, Ordering::SeqCst);
+        }
+        EXEC_TOTAL.fetch_add(1, Ordering::SeqCst);
+    } else {
+        core::hint::spin_loop();
+    }
+}
 
 struct CapState {
     engine: CapEngine,
@@ -216,6 +258,16 @@ pub extern "C" fn ksecondary(hartid: u64) -> ! {
         }
         core::hint::spin_loop();
     }
+
+    // Phase 5 — per-hart scheduling: pull work from this hart's own run queue, steal when it is
+    // empty, until the whole task set is dispatched (the executions themselves are the tallies).
+    while PHASE.load(Ordering::SeqCst) < 5 {
+        core::hint::spin_loop();
+    }
+    while EXEC_TOTAL.load(Ordering::SeqCst) < SCHED_TASKS {
+        sched_worker_turn(hart);
+    }
+    DONE_SCHED.fetch_add(1, Ordering::SeqCst);
 
     PARKED.fetch_add(1, Ordering::SeqCst);
     loop {
@@ -393,8 +445,43 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "smp: SBI IPI (sip.SSIP) delivered + acknowledged on every secondary hart"
     );
 
-    // 10 — the machine is still coherent: every secondary parked, nothing regressed.
+    // 10..12 — ADR-021 Phase 2 on real harts: per-hart run queues + work stealing. Every task is
+    // seeded on the lowest started secondary's queue alone, so the boot hart and every other hart
+    // can only progress by STEALING (`kernel_core::smpsched`, host-proved, now on real silicon).
+    let seed_hart = started_mask.trailing_zeros() as usize;
+    let sched: &'static SmpSched = Box::leak(Box::new(SmpSched::new(MAX_CPUS)));
+    for t in 0..SCHED_TASKS {
+        sched.enqueue_on(seed_hart, t as u64);
+    }
+    SCHED_PTR.store(sched as *const SmpSched as usize, Ordering::Release);
+    // Deterministic first steal: no other hart is scheduling yet and the boot hart's own queue is
+    // empty, so this dispatch MUST come from seed_hart's queue — invariant 11 can never flake.
+    sched_worker_turn(boot_hart);
     PHASE.store(5, Ordering::SeqCst);
+    let sched_deadline = deadline_after(10);
+    while EXEC_TOTAL.load(Ordering::SeqCst) < SCHED_TASKS && now_ticks() <= sched_deadline {
+        sched_worker_turn(boot_hart); // the boot hart works the queues too (it can only steal)
+    }
+    check!(
+        wait_until(deadline_after(10), || DONE_SCHED.load(Ordering::SeqCst)
+            == secondaries),
+        "smp: scheduling phase completes on every hart"
+    );
+    let mut exactly_once = EXEC_TOTAL.load(Ordering::SeqCst) == SCHED_TASKS;
+    for seen in EXEC_SEEN.iter() {
+        exactly_once &= seen.load(Ordering::SeqCst) == 1;
+    }
+    check!(
+        exactly_once,
+        "smp: per-hart queues dispatch every task EXACTLY once (none lost, none duplicated)"
+    );
+    check!(
+        STEALS.load(Ordering::SeqCst) > 0 && (0..MAX_CPUS).all(|h| sched.load(h) == 0),
+        "smp: work stealing drains an unbalanced queue across harts (smpsched live on real harts)"
+    );
+
+    // 13 — the machine is still coherent: every secondary parked, nothing regressed.
+    PHASE.store(6, Ordering::SeqCst);
     check!(
         wait_until(deadline_after(5), || PARKED.load(Ordering::SeqCst)
             == secondaries)
