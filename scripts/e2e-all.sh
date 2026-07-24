@@ -8,7 +8,8 @@
 #   2. RISC-V/RV64GC (second first-class)  — scripts/vm-e2e-riscv.sh
 #        S-mode boot + SBI + rdtime + spine(11).
 #   3. AMD64/x86-64 (first-class)          — kernel-x86_64 build-image + smoke-test
-#        UEFI boot + arch init + PIT timer IRQ + spine(11), booted from the real disk image.
+#        UEFI boot + arch init + PIT timer IRQ + memory(7) + vm(6) + spine(11) + SMP(13, MADT +
+#        INIT-SIPI-SIPI at -smp 4) + ring-3(22), booted from the real disk image.
 #
 # aarch64 and RISC-V are pure QEMU and always run. The x86-64 leg builds a bootable GPT/ESP
 # disk image, which needs a macOS host with hdiutil/diskutil + OVMF firmware; when that host

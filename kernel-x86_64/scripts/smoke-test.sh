@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Automated boot smoke test: boot the Aletheia x86-64 disk image under QEMU + OVMF (UEFI) and
-# assert the kernel reached its end-to-end PASS. PASS criteria:
+# Automated boot smoke test: boot the Aletheia x86-64 disk image under QEMU + OVMF (UEFI) at
+# -smp 4 (the SMP suite must run, not skip) and assert the kernel reached its end-to-end PASS.
+# PASS criteria:
 #   - QEMU process exit code 33  (kernel isa-debug-exit encodes success 0 as value 0x10)
-#   - serial log contains "[e2e] PASS"
+#   - serial log contains "[e2e] PASS" + all four invariant-family markers (memory, vm, SMP, ring-3)
 # A 30s watchdog guards against a hang (triple fault / no exit). Exit 0 = PASS, 1 = FAIL.
 set -uo pipefail
 
@@ -22,7 +23,7 @@ LOG="$WORK/serial.log"
 cp "$VARSSRC" "$VARS"
 : > "$LOG"
 
-qemu-system-x86_64 -machine q35 -m 256 \
+qemu-system-x86_64 -machine q35 -m 256 -smp 4 \
   -drive if=pflash,format=raw,unit=0,file="$CODE",readonly=on \
   -drive if=pflash,format=raw,unit=1,file="$VARS" \
   -drive format=raw,file="$IMG" \
@@ -42,6 +43,7 @@ echo "QEMU exit code: $RC (expect 33)"
 if [ "$RC" -eq 33 ] \
    && grep -q 'MEMORY INVARIANTS HOLD' "$LOG" \
    && grep -q 'VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'SMP INVARIANTS HOLD' "$LOG" \
    && grep -q 'RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
   echo "SMOKE TEST: PASS"
