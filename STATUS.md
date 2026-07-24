@@ -554,6 +554,41 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-24 — REQ-SMP-002: SMP secondary bring-up + cross-core concurrency substrate, VM-gated at -smp 4)
+
+The SMP cliff (gap #4, ADR-021 Phase 1) is broken: Aletheia now **boots and runs on multiple real
+CPUs**. `kernel/src/smp.rs` (+ `boot.s::_secondary_start`) powers on every present secondary via the
+PSCI `CPU_ON` firmware call (HVC conduit), gives each a private 16 KiB stack and per-CPU identity
+(`TPIDR_EL1`), and enables its MMU over the SAME kernel page tables core 0 built — then proves the
+cross-core substrate with **13 VM-gated invariants** (`scripts/vm-e2e.sh` now boots `-smp 4` and
+asserts `ALL 13 SMP INVARIANTS HOLD`; with `-smp 1` the suite skips green like virtio-with-no-disk,
+and the pinned gate makes a silent skip impossible).
+
+- **Bring-up + identity (inv 1-3):** PSCI accepts CPU_ON for 3 secondaries; all come online with
+  translation on; each core's MPIDR affinity + TPIDR_EL1 are distinct (per-CPU data works).
+- **Cross-core memory model (inv 4-7):** 4 cores hammer one counter — the total is EXACT (real
+  atomicity, no lost increments); a release/acquire mailbox publishes a payload every core observes
+  and answers with a per-CPU transform. The kernel bump allocator moved from load-then-store to
+  **CAS** (`heap.rs`) — the first removed single-core assumption (two cores could previously be
+  handed the same bytes).
+- **ADR-027 on REAL cores (inv 8-11):** the `with_authorization` atomic authorize+execute primitive
+  — until now proved only under host threads — runs under the kernel's first **`SpinLock`** while 3
+  secondaries commit and core 0 revokes: commits flow pre-revoke (progress-gated, never a fixed
+  spin), the revoke linearizes inside the lock hold, **ZERO commits land after it**, and all 64
+  post-revoke attempts per core fail closed. GAPS2 #9's mechanism is now SMP-proved.
+- **IPI (inv 12):** a GICv2 **SGI** from core 0 is delivered to and acknowledged on every
+  secondary's banked CPU interface (polled IAR with PSTATE.I masked — the secondaries never touch
+  the core-0-owned vector table). Distributor state is restored after.
+- **Stability (inv 13):** all secondaries park in WFE; online mask + counters unchanged.
+- **Concurrency rules (load-bearing):** secondaries never print (PL011 unserialized); every engine
+  access sits under the one SpinLock; liveness waits are progress-gated with CNTPCT deadlines.
+
+Gates: aarch64 vm-e2e PASS (71 invariants incl. SMP 13) · riscv64 + x86-64 e2e PASS ·
+conformance 3/3 PASS · kernel-core hosted 72 · clippy/fmt clean. **Honesty:** this is ADR-021
+Phase 1 + the concurrency-substrate slice — per-CPU run queues/work stealing (Phase 2), TLB
+shootdown, the lock-hierarchy/atomic-ordering audit, and x86-64/RISC-V bring-up parity stay open
+under **REQ-SMP-001 (partial)**. Traceability: **54 reqs — 46 delivered / 5 partial / 3 deferred**.
+
 ## Delivered (2026-07-22 — REQ-CAP-006: capability concurrency semantics, the SMP prerequisite)
 
 The gate the audit itself put **before** SMP (GAPS2 #9 "the capability model needs a formal

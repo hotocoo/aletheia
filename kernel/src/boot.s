@@ -27,3 +27,14 @@ _start:
     // kmain never returns; if it does, fall through to park.
 3:  wfe
     b       3b
+
+// PSCI CPU_ON entry for a secondary core (REQ-SMP-002): firmware delivers us here with the MMU
+// off, IRQs masked, and x0 = the context argument — which core 0 sets to this core's private
+// stack top. BSS is already zeroed (core 0 did it before any CPU_ON).
+.global _secondary_start
+_secondary_start:
+    mov     sp, x0
+    bl      ksecondary
+    // ksecondary never returns; park defensively.
+4:  wfe
+    b       4b

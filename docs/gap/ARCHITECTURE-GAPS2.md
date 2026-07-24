@@ -12,7 +12,15 @@
 >   honest MMU-off→on difference), NOT count equality. All three PASS. Follow-on: CI job; grow contract.
 > - **#3 IPC transfer through the real per-target user-mode path — ⏳ open** (kernel-core policy done;
 >   cross-AS `send_transfer` wiring per target is the remaining integration).
-> - **#4 SMP / concurrency cliff — ⏳ open** (REQ-SMP-001; blocked on #9 concurrency spec first).
+> - **#4 SMP / concurrency cliff — ⏳ partial, advanced (Phase 1 delivered).** REQ-SMP-002: real
+>   secondary-CPU bring-up on aarch64 (PSCI `CPU_ON`, per-CPU stacks + `TPIDR_EL1`, MMU on over the
+>   shared kernel tables), VM-gated at `-smp 4` (`kernel/src/smp.rs`, 13 invariants). The #9
+>   primitive (`with_authorization`) is now proved on REAL concurrent cores — commits flow, a
+>   cross-core revoke linearizes inside the engine `SpinLock`, ZERO commits after it, every retry
+>   fails closed. Plus: exact cross-core atomics (CAS bump allocator fixed), release/acquire
+>   mailbox, GICv2 SGI IPI end-to-end. STILL open under REQ-SMP-001: per-CPU run-queues /
+>   work-stealing scheduler, TLB shootdown, lock-hierarchy + atomic-ordering audit, x86-64
+>   (INIT-SIPI-SIPI) + RISC-V (SBI HSM) bring-up parity.
 > - **#5 Priority inheritance end-to-end VM-tested — ✅ ADDRESSED (all three targets).** REQ-IPC-009
 >   proved through the REAL blocking-IPC path: a HIGH receiver blocks on the endpoint a LOW task
 >   services, donates its priority, and the boosted LOW is dispatched ahead of a Ready MEDIUM
