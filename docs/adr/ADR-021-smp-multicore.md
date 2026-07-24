@@ -45,10 +45,16 @@ shared scheduler/memory paths; CPU affinity; NUMA abstraction as a later refinem
   every core fails closed. This upgrades GAPS2 #9 from host-thread proof to real-SMP proof.
 - **IPI:** GICv2 SGI 0 from core 0 is claimed on each secondary's banked CPU interface (polled IAR,
   masked PSTATE — never re-enters the core-0-owned vector table) and EOI'd.
-- **Honesty line:** with `-smp 1` the suite skips green (like virtio with no disk); the VM gate pins
+- **RISC-V parity (same day):** `kernel-riscv64/src/smp.rs` + `boot.s::_secondary_start` replicate
+  the suite through SBI HSM `hart_start` (boot-hart lottery handled by an atomic first-comer claim
+  in `_start` — never assume hart 0), per-hart `tp` identity, Sv39 enable over the shared tables,
+  and the SBI IPI (`send_ipi` → polled `sip.SSIP`). Same 13 invariants, gated by
+  `scripts/vm-e2e-riscv.sh` at `-smp 4`. The `SpinLock` moved to `kernel-core/src/sync.rs`
+  (Issue 1: defined once, host-proved in `kernel-core/tests/sync.rs`, used by both targets).
+- **Honesty line:** with `-smp 1` the suite skips green (like virtio with no disk); the VM gates pin
   `-smp 4` so CI cannot silently skip. Phase 2 (per-CPU run queues, work stealing), TLB shootdown,
-  the lock-hierarchy/atomic-ordering audit, and x86-64/RISC-V bring-up parity remain open under
-  REQ-SMP-001 (partial).
+  the lock-hierarchy/atomic-ordering audit, and x86-64 bring-up parity (INIT-SIPI-SIPI needs a
+  real-mode trampoline below 1 MiB) remain open under REQ-SMP-001 (partial).
 
 ## Consequences
 

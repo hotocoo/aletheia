@@ -583,11 +583,21 @@ and the pinned gate makes a silent skip impossible).
 - **Concurrency rules (load-bearing):** secondaries never print (PL011 unserialized); every engine
   access sits under the one SpinLock; liveness waits are progress-gated with CNTPCT deadlines.
 
-Gates: aarch64 vm-e2e PASS (71 invariants incl. SMP 13) · riscv64 + x86-64 e2e PASS ·
-conformance 3/3 PASS · kernel-core hosted 72 · clippy/fmt clean. **Honesty:** this is ADR-021
-Phase 1 + the concurrency-substrate slice — per-CPU run queues/work stealing (Phase 2), TLB
-shootdown, the lock-hierarchy/atomic-ordering audit, and x86-64/RISC-V bring-up parity stay open
-under **REQ-SMP-001 (partial)**. Traceability: **54 reqs — 46 delivered / 5 partial / 3 deferred**.
+**RISC-V parity (same day):** `kernel-riscv64/src/smp.rs` + `boot.s::_secondary_start` replicate
+the full suite through **SBI HSM `hart_start`** — with a boot-hart-lottery-safe atomic first-comer
+claim in `_start` (OpenSBI may pick ANY hart as boot hart; `BOOT_HART` is recorded in `.data`
+before BSS zeroing) — per-hart `tp` identity, Sv39 enable over the shared tables, and the SBI
+**IPI** (`send_ipi` → polled `sip.SSIP`, SIE masked). Same 13 invariants, VM-gated by
+`scripts/vm-e2e-riscv.sh` at `-smp 4` (66 total riscv invariants). The `SpinLock` was extracted to
+**`kernel-core/src/sync.rs`** — defined ONCE (Issue 1), host-proved under real threads
+(`kernel-core/tests/sync.rs`: exclusion exactness + no torn publication), used by both targets.
+
+Gates: aarch64 vm-e2e PASS (71 invariants incl. SMP 13) · riscv64 vm-e2e PASS (66 incl. SMP 13) ·
+x86-64 e2e PASS · conformance 3/3 PASS · kernel-core hosted 74 · clippy/fmt clean. **Honesty:**
+this is ADR-021 Phase 1 + the concurrency-substrate slice — per-CPU run queues/work stealing
+(Phase 2), TLB shootdown, the lock-hierarchy/atomic-ordering audit, and x86-64 bring-up parity
+(INIT-SIPI-SIPI real-mode trampoline) stay open under **REQ-SMP-001 (partial)**. Traceability:
+**54 reqs — 46 delivered / 5 partial / 3 deferred**.
 
 ## Delivered (2026-07-22 — REQ-CAP-006: capability concurrency semantics, the SMP prerequisite)
 

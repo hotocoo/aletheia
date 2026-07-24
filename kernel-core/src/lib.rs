@@ -32,6 +32,7 @@ pub mod sched;
 pub mod selftest;
 pub mod spine;
 pub mod storage;
+pub mod sync;
 
 /// The arch-independent hardware primitives the Aletheia kernel needs from a target backend. Every
 /// target implements this for its own `…Hal` struct; the kernel is written against the trait, never

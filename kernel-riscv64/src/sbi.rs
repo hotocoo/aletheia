@@ -45,6 +45,30 @@ pub fn set_timer(abs: u64) {
     let _ = ecall(EXT_TIME, TIME_SET_TIMER, abs as usize, 0, 0);
 }
 
+// SBI HSM extension (EID "HSM" = 0x48534D) — hart lifecycle. FID 0 `hart_start(hartid,
+// start_addr, opaque)` powers on a STOPPED hart: it enters `start_addr` in S-mode with
+// satp=0 (MMU off), SIE masked, a0 = hartid, a1 = opaque (REQ-SMP-002 bring-up path).
+const EXT_HSM: usize = 0x48_534D;
+const HSM_HART_START: usize = 0;
+
+/// Start a stopped hart at `start_addr` (physical) with `opaque` handed to it in a1.
+/// Returns the SBI error code (0 = success; a nonexistent hart returns an error — the
+/// topology probe the SMP suite relies on).
+pub fn hart_start(hartid: usize, start_addr: usize, opaque: usize) -> isize {
+    ecall(EXT_HSM, HSM_HART_START, hartid, start_addr, opaque).0
+}
+
+// SBI IPI extension (EID "sPI" = 0x73_5049). FID 0 `send_ipi(hart_mask, hart_mask_base)`
+// raises the supervisor software interrupt (sip.SSIP) on every hart in the mask — the
+// RISC-V inter-processor-interrupt path (the aarch64 twin is a GICv2 SGI).
+const EXT_IPI: usize = 0x73_5049;
+const IPI_SEND: usize = 0;
+
+/// Raise SSIP on the harts in `hart_mask` (bit i = hart `hart_mask_base + i`).
+pub fn send_ipi(hart_mask: usize, hart_mask_base: usize) -> isize {
+    ecall(EXT_IPI, IPI_SEND, hart_mask, hart_mask_base, 0).0
+}
+
 /// Prove the S->M SBI boundary works: read and print the spec version + implementation id. Returns
 /// true if the firmware answered (error == 0), which it must for a conformant SBI.
 pub fn probe() -> bool {
