@@ -27,7 +27,11 @@ fn whole_suite_all_invariants_hold_on_host() {
     let mut reported: Vec<(u32, bool, &'static str)> = Vec::new();
     let result = selftest::run(|n, passed, name| reported.push((n, passed, name)));
 
-    assert_eq!(result, Ok(11), "all 11 shared spine invariants must hold on the host");
+    assert_eq!(
+        result,
+        Ok(11),
+        "all 11 shared spine invariants must hold on the host"
+    );
     assert_eq!(reported.len(), 11, "every check must report exactly once");
     assert!(
         reported.iter().all(|(_, passed, _)| *passed),
@@ -35,7 +39,11 @@ fn whole_suite_all_invariants_hold_on_host() {
     );
     // Indices are dense 1..=11 in order — the same numbering the VM gate maps to exit 10+idx.
     for (i, (n, _, _)) in reported.iter().enumerate() {
-        assert_eq!(*n as usize, i + 1, "check indices must be dense and in order");
+        assert_eq!(
+            *n as usize,
+            i + 1,
+            "check indices must be dense and in order"
+        );
     }
 }
 
@@ -82,7 +90,11 @@ fn invariant_authorized_pipeline_verifies_and_records_event() {
     );
     let r = run_pipeline(&e, &mut s, "user", &derive_plan(doc), &[cap]);
     assert!(r.ok && r.executed && r.verified);
-    assert_eq!(s.event_count(), 1, "an immutable event is recorded only after verified success");
+    assert_eq!(
+        s.event_count(),
+        1,
+        "an immutable event is recorded only after verified success"
+    );
 }
 
 #[test]
@@ -90,7 +102,10 @@ fn invariant_forged_token_is_not_authority() {
     let e = CapEngine::new(0xA5A5, 1000);
     let forged = CapToken::forge_for_test(0xDEAD_BEEF);
     let d = e.evaluate("entity.derive", &Target::default(), &[forged]);
-    assert!(matches!(d, Decision::Deny(_)), "a fabricated handle absent from the registry is denied");
+    assert!(
+        matches!(d, Decision::Deny(_)),
+        "a fabricated handle absent from the registry is denied"
+    );
 }
 
 #[test]
@@ -99,7 +114,13 @@ fn invariant_delegation_attenuates_but_never_amplifies() {
     let root = e.mint("user", "entity.*", Scope::All, Constraints::none());
     // equal-or-narrower is allowed
     assert!(e
-        .delegate(root, "agent", "entity.derive", Scope::Type(EntityType::Document), Constraints::none())
+        .delegate(
+            root,
+            "agent",
+            "entity.derive",
+            Scope::Type(EntityType::Document),
+            Constraints::none()
+        )
         .is_ok());
     // a narrow cap cannot be delegated into a broader action/scope
     let narrow = e.mint(
@@ -109,7 +130,13 @@ fn invariant_delegation_attenuates_but_never_amplifies() {
         Constraints::none(),
     );
     assert!(e
-        .delegate(narrow, "agent", "entity.delete", Scope::All, Constraints::none())
+        .delegate(
+            narrow,
+            "agent",
+            "entity.delete",
+            Scope::All,
+            Constraints::none()
+        )
         .is_err());
 }
 
@@ -118,10 +145,19 @@ fn invariant_revocation_cascades_to_descendants() {
     let mut e = CapEngine::new(0xA5A5, 1000);
     let root = e.mint("user", "entity.*", Scope::All, Constraints::none());
     let child = e
-        .delegate(root, "agent", "entity.derive", Scope::All, Constraints::none())
+        .delegate(
+            root,
+            "agent",
+            "entity.derive",
+            Scope::All,
+            Constraints::none(),
+        )
         .unwrap();
     e.revoke(root);
-    assert!(e.is_revoked(child), "revoking a parent revokes its children transitively");
+    assert!(
+        e.is_revoked(child),
+        "revoking a parent revokes its children transitively"
+    );
     let d = e.evaluate("entity.derive", &Target::default(), &[child]);
     assert!(matches!(d, Decision::Deny(_)));
 }
@@ -133,7 +169,11 @@ fn invariant_malformed_plan_cannot_execute() {
     let doc = s.put(EntityType::Document, "x", "u");
     let cap = e.mint("u", "entity.derive", Scope::All, Constraints::none());
     let bad = Plan {
-        steps: vec![Step { op: "rm -rf /".into(), source: doc, content: "".into() }],
+        steps: vec![Step {
+            op: "rm -rf /".into(),
+            source: doc,
+            content: "".into(),
+        }],
     };
     let r = run_pipeline(&e, &mut s, "u", &bad, &[cap]);
     assert!(!r.ok && !r.executed && r.validation == "rejected");
@@ -147,21 +187,39 @@ fn invariant_expired_capability_denied() {
         "u",
         "entity.derive",
         Scope::All,
-        Constraints { expires_at: Some(1000), approval_required: false, local_only: true },
+        Constraints {
+            expires_at: Some(1000),
+            approval_required: false,
+            local_only: true,
+        },
     );
-    assert!(matches!(e.evaluate("entity.derive", &Target::default(), &[cap]), Decision::Deny(_)));
+    assert!(matches!(
+        e.evaluate("entity.derive", &Target::default(), &[cap]),
+        Decision::Deny(_)
+    ));
 }
 
 #[test]
 fn invariant_scope_confinement() {
     let mut e = CapEngine::new(0xA5A5, 1000);
-    let cap = e.mint("u", "entity.derive", Scope::Entities(vec![0x1000]), Constraints::none());
+    let cap = e.mint(
+        "u",
+        "entity.derive",
+        Scope::Entities(vec![0x1000]),
+        Constraints::none(),
+    );
     let d = e.evaluate(
         "entity.derive",
-        &Target { id: Some(0x2000), etype: Some(EntityType::Document) },
+        &Target {
+            id: Some(0x2000),
+            etype: Some(EntityType::Document),
+        },
         &[cap],
     );
-    assert!(matches!(d, Decision::Deny(_)), "a cap scoped to entity A does not authorize entity B");
+    assert!(
+        matches!(d, Decision::Deny(_)),
+        "a cap scoped to entity A does not authorize entity B"
+    );
 }
 
 #[test]
@@ -183,7 +241,11 @@ fn invariant_secure_ipc_is_capability_gated() {
 // ---------------------------------------------------------------------------
 
 fn grant(action: &str, scope: Scope) -> CapGrant {
-    CapGrant { action: action.into(), scope, constraints: Constraints::none() }
+    CapGrant {
+        action: action.into(),
+        scope,
+        constraints: Constraints::none(),
+    }
 }
 
 #[test]
@@ -204,12 +266,19 @@ fn ipc_capability_transfer_is_attenuated_and_usable_by_recipient() {
         .expect("authorized transfer succeeds");
     // The delivered message carries the minted token, and it equals the returned handle.
     let msg = ch.recv().expect("message delivered");
-    assert_eq!(msg.cap, Some(token), "recipient receives the transferred capability");
+    assert_eq!(
+        msg.cap,
+        Some(token),
+        "recipient receives the transferred capability"
+    );
     // The recipient can use it for exactly the granted action/scope...
     assert_eq!(
         e.evaluate(
             "entity.derive",
-            &Target { id: None, etype: Some(EntityType::Document) },
+            &Target {
+                id: None,
+                etype: Some(EntityType::Document)
+            },
             &[token],
         ),
         Decision::Allow
@@ -222,7 +291,10 @@ fn ipc_capability_transfer_is_attenuated_and_usable_by_recipient() {
     assert!(matches!(
         e.evaluate(
             "entity.derive",
-            &Target { id: None, etype: Some(EntityType::Summary) },
+            &Target {
+                id: None,
+                etype: Some(EntityType::Summary)
+            },
             &[token]
         ),
         Decision::Deny(_)
@@ -234,7 +306,12 @@ fn ipc_capability_transfer_cannot_amplify_fail_closed() {
     let mut e = CapEngine::new(0xA5A5, 1000);
     let mut ch = Channel::new("ipc.send");
     // Sender holds only a NARROW capability but tries to transfer a BROADER one.
-    let narrow = e.mint("A", "entity.derive", Scope::Type(EntityType::Document), Constraints::none());
+    let narrow = e.mint(
+        "A",
+        "entity.derive",
+        Scope::Type(EntityType::Document),
+        Constraints::none(),
+    );
     let send_cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
     let result = ch.send_transfer(
         &mut e,
@@ -243,9 +320,15 @@ fn ipc_capability_transfer_cannot_amplify_fail_closed() {
         grant("entity.delete", Scope::All), // amplification
         &[send_cap],
     );
-    assert!(matches!(result, Err(Decision::Deny(_))), "amplifying transfer is denied");
+    assert!(
+        matches!(result, Err(Decision::Deny(_))),
+        "amplifying transfer is denied"
+    );
     // Fail-closed: nothing enqueued, and no usable token leaked to the recipient.
-    assert!(ch.recv().is_none(), "no message enqueued on a denied transfer");
+    assert!(
+        ch.recv().is_none(),
+        "no message enqueued on a denied transfer"
+    );
 }
 
 #[test]
@@ -254,8 +337,13 @@ fn ipc_capability_transfer_denied_when_send_unauthorized() {
     let mut ch = Channel::new("ipc.send");
     let root = e.mint("A", "entity.*", Scope::All, Constraints::none());
     // No ipc.send capability offered => the send itself is unauthorized; no delegation occurs.
-    let result =
-        ch.send_transfer(&mut e, Message::new("A", "B", 1), root, grant("entity.derive", Scope::All), &[]);
+    let result = ch.send_transfer(
+        &mut e,
+        Message::new("A", "B", 1),
+        root,
+        grant("entity.derive", Scope::All),
+        &[],
+    );
     assert!(matches!(result, Err(Decision::Deny(_))));
     assert!(ch.recv().is_none());
 }
@@ -266,12 +354,21 @@ fn ipc_bounded_channel_refuses_when_full_fail_closed() {
     let cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
     let mut ch = Channel::bounded("ipc.send", 1);
     // First authorized send fills the single slot.
-    assert_eq!(ch.send(&e, Message::new("A", "B", 1), &[cap]), Decision::Allow);
+    assert_eq!(
+        ch.send(&e, Message::new("A", "B", 1), &[cap]),
+        Decision::Allow
+    );
     // Second send is refused fail-closed even though it is authorized — the queue is full.
-    assert!(matches!(ch.send(&e, Message::new("A", "B", 2), &[cap]), Decision::Deny(_)));
+    assert!(matches!(
+        ch.send(&e, Message::new("A", "B", 2), &[cap]),
+        Decision::Deny(_)
+    ));
     // Draining one frees a slot again.
     assert_eq!(ch.recv().map(|m| m.body), Some(1));
-    assert_eq!(ch.send(&e, Message::new("A", "B", 3), &[cap]), Decision::Allow);
+    assert_eq!(
+        ch.send(&e, Message::new("A", "B", 3), &[cap]),
+        Decision::Allow
+    );
     assert_eq!(ch.recv().map(|m| m.body), Some(3));
 }
 
@@ -279,7 +376,10 @@ fn ipc_bounded_channel_refuses_when_full_fail_closed() {
 fn invariant_destructive_action_requires_approval() {
     let mut e = CapEngine::new(0xA5A5, 1000);
     let cap = e.mint("u", "entity.delete", Scope::All, Constraints::approval());
-    assert_eq!(e.evaluate("entity.delete", &Target::default(), &[cap]), Decision::RequireApproval);
+    assert_eq!(
+        e.evaluate("entity.delete", &Target::default(), &[cap]),
+        Decision::RequireApproval
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +388,14 @@ fn invariant_destructive_action_requires_approval() {
 
 #[test]
 fn invariant_content_hash_is_deterministic_and_distinguishing() {
-    assert_eq!(content_hash(b"alpha"), content_hash(b"alpha"), "same bytes -> same hash");
-    assert_ne!(content_hash(b"alpha"), content_hash(b"beta"), "different bytes -> different hash");
+    assert_eq!(
+        content_hash(b"alpha"),
+        content_hash(b"alpha"),
+        "same bytes -> same hash"
+    );
+    assert_ne!(
+        content_hash(b"alpha"),
+        content_hash(b"beta"),
+        "different bytes -> different hash"
+    );
 }

@@ -23,8 +23,14 @@ fn no_capability_denies_real_io() {
 
     // No offered capability: both directions are refused, and no bytes move.
     let mut buf = [0u8; BLOCK_SIZE];
-    assert_eq!(guard.read_block(&engine, &[], IDX, &mut buf), Err(DeviceError::Denied));
-    assert_eq!(guard.write_block(&engine, &[], IDX, &full(0xAA)), Err(DeviceError::Denied));
+    assert_eq!(
+        guard.read_block(&engine, &[], IDX, &mut buf),
+        Err(DeviceError::Denied)
+    );
+    assert_eq!(
+        guard.write_block(&engine, &[], IDX, &full(0xAA)),
+        Err(DeviceError::Denied)
+    );
     assert_eq!(guard.flush(&engine, &[]), Err(DeviceError::Denied));
 }
 
@@ -36,7 +42,9 @@ fn read_only_capability_reads_but_cannot_write() {
 
     // The read capability reads (the block is still zero).
     let mut buf = [0xFFu8; BLOCK_SIZE];
-    guard.read_block(&engine, &[read_cap], IDX, &mut buf).expect("read allowed");
+    guard
+        .read_block(&engine, &[read_cap], IDX, &mut buf)
+        .expect("read allowed");
     assert_eq!(buf, full(0), "read returns the real (zero) block");
 
     // …but it cannot write — the attenuated authority genuinely blocks mutation.
@@ -46,7 +54,9 @@ fn read_only_capability_reads_but_cannot_write() {
     );
     // Confirm no bytes moved: an authorized read still sees zero.
     let mut check = [0xFFu8; BLOCK_SIZE];
-    guard.read_block(&engine, &[read_cap], IDX, &mut check).unwrap();
+    guard
+        .read_block(&engine, &[read_cap], IDX, &mut check)
+        .unwrap();
     assert_eq!(check, full(0), "a denied write left the device unchanged");
 }
 
@@ -58,11 +68,19 @@ fn write_capability_writes_and_reads_back() {
     let caps = [read_cap, write_cap];
     let mut guard = DeviceGuard::new(MemBlockDevice::new(8), READ, WRITE);
 
-    guard.write_block(&engine, &caps, IDX, &full(0xC5)).expect("write allowed");
+    guard
+        .write_block(&engine, &caps, IDX, &full(0xC5))
+        .expect("write allowed");
     guard.flush(&engine, &caps).expect("flush allowed");
     let mut buf = [0u8; BLOCK_SIZE];
-    guard.read_block(&engine, &caps, IDX, &mut buf).expect("read allowed");
-    assert_eq!(buf, full(0xC5), "the authorized write's bytes actually landed");
+    guard
+        .read_block(&engine, &caps, IDX, &mut buf)
+        .expect("read allowed");
+    assert_eq!(
+        buf,
+        full(0xC5),
+        "the authorized write's bytes actually landed"
+    );
 }
 
 #[test]
@@ -72,8 +90,12 @@ fn wildcard_capability_authorizes_both() {
     let cap = engine.mint("client", "dev.blk.*", Scope::All, Constraints::none());
     let mut guard = DeviceGuard::new(MemBlockDevice::new(8), READ, WRITE);
 
-    guard.write_block(&engine, &[cap], IDX, &full(0x42)).expect("write via wildcard");
+    guard
+        .write_block(&engine, &[cap], IDX, &full(0x42))
+        .expect("write via wildcard");
     let mut buf = [0u8; BLOCK_SIZE];
-    guard.read_block(&engine, &[cap], IDX, &mut buf).expect("read via wildcard");
+    guard
+        .read_block(&engine, &[cap], IDX, &mut buf)
+        .expect("read via wildcard");
     assert_eq!(buf, full(0x42));
 }
