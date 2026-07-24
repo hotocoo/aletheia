@@ -38,7 +38,10 @@ fn endpoint_access_is_capability_gated_fail_closed() {
     let mut s = PriorityScheduler::new(ACQ);
     s.admit(t(1), LOW);
     // No capability offered ⇒ cannot acquire a kernel endpoint.
-    assert_eq!(s.acquire(&e, Endpoint(1), t(1), &[]), Err(SchedError::Unauthorized));
+    assert_eq!(
+        s.acquire(&e, Endpoint(1), t(1), &[]),
+        Err(SchedError::Unauthorized)
+    );
     assert_eq!(s.holder_of(Endpoint(1)), None);
 }
 
@@ -52,9 +55,15 @@ fn acquire_free_then_busy_then_wait_semantics() {
     assert_eq!(s.acquire(&e, Endpoint(1), t(1), &[cap]), Ok(()));
     assert_eq!(s.holder_of(Endpoint(1)), Some(t(1)));
     // A second acquirer of a held endpoint is refused (must wait).
-    assert_eq!(s.acquire(&e, Endpoint(1), t(2), &[cap]), Err(SchedError::Held));
+    assert_eq!(
+        s.acquire(&e, Endpoint(1), t(2), &[cap]),
+        Err(SchedError::Held)
+    );
     // Waiting on a FREE endpoint is refused — acquire it instead.
-    assert_eq!(s.wait(&e, Endpoint(2), t(2), &[cap]), Err(SchedError::NotHeld));
+    assert_eq!(
+        s.wait(&e, Endpoint(2), t(2), &[cap]),
+        Err(SchedError::NotHeld)
+    );
 }
 
 #[test]
@@ -103,7 +112,11 @@ fn donation_is_transitive_across_a_chain() {
     s.wait(&e, Endpoint(1), t(9), &[cap]).unwrap(); // H blocks on L1's endpoint
 
     assert_eq!(s.effective_priority(t(1)), HIGH, "L1 inherits H");
-    assert_eq!(s.effective_priority(t(0)), HIGH, "L0 inherits H transitively through L1");
+    assert_eq!(
+        s.effective_priority(t(0)),
+        HIGH,
+        "L0 inherits H transitively through L1"
+    );
 }
 
 #[test]
@@ -144,5 +157,8 @@ fn release_by_non_holder_is_fail_closed() {
 fn unknown_task_cannot_acquire() {
     let (e, cap) = engine();
     let mut s = PriorityScheduler::new(ACQ);
-    assert_eq!(s.acquire(&e, Endpoint(1), t(42), &[cap]), Err(SchedError::UnknownTask));
+    assert_eq!(
+        s.acquire(&e, Endpoint(1), t(42), &[cap]),
+        Err(SchedError::UnknownTask)
+    );
 }

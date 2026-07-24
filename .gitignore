@@ -7,3 +7,7 @@ bun.lockb
 # Rust build artifacts
 target/
 aletheia/target/
+
+# Local tool metadata
+.serena/
+.understand-anything/

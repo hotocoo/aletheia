@@ -7,7 +7,9 @@
 //! points" quantifier is what earns the phrase *crash-consistent*. Two more prove the checksum is
 //! load-bearing: a torn commit record and a torn journal payload are both rolled back, never applied.
 
-use kernel_core::storage::{BlockDevice, Journal, StorageError, BLOCK_SIZE, DATA_START, JOURNAL_START};
+use kernel_core::storage::{
+    BlockDevice, Journal, StorageError, BLOCK_SIZE, DATA_START, JOURNAL_START,
+};
 
 /// A block device that records the ordered write log (when recording) so a test can replay any crash
 /// prefix. Backed by an in-`alloc` array; `flush` is a no-op (durability is modelled by the prefix).
@@ -19,10 +21,18 @@ struct RecDevice {
 
 impl RecDevice {
     fn new(n: usize) -> Self {
-        RecDevice { blocks: vec![[0u8; BLOCK_SIZE]; n], log: Vec::new(), recording: false }
+        RecDevice {
+            blocks: vec![[0u8; BLOCK_SIZE]; n],
+            log: Vec::new(),
+            recording: false,
+        }
     }
     fn from_blocks(blocks: Vec<[u8; BLOCK_SIZE]>) -> Self {
-        RecDevice { blocks, log: Vec::new(), recording: false }
+        RecDevice {
+            blocks,
+            log: Vec::new(),
+            recording: false,
+        }
     }
 }
 
@@ -81,7 +91,16 @@ fn run_txn() -> Txn {
     Journal::new()
         .commit(&mut dev, &[(h1, post1), (h2, post2)])
         .expect("commit");
-    Txn { log: dev.log.clone(), pre, h1, h2, pre1, pre2, post1, post2 }
+    Txn {
+        log: dev.log.clone(),
+        pre,
+        h1,
+        h2,
+        pre1,
+        pre2,
+        post1,
+        post2,
+    }
 }
 
 #[test]
@@ -117,7 +136,10 @@ fn recovery_after_full_commit_is_the_applied_state() {
         dev.blocks[*idx] = *data; // all writes landed
     }
     let replayed = Journal::new().recover(&mut dev).expect("recover");
-    assert!(replayed, "a committed transaction is recognized and replayed");
+    assert!(
+        replayed,
+        "a committed transaction is recognized and replayed"
+    );
     assert_eq!(dev.blocks[t.h1], t.post1);
     assert_eq!(dev.blocks[t.h2], t.post2);
 }
@@ -126,7 +148,10 @@ fn recovery_after_full_commit_is_the_applied_state() {
 fn fresh_device_has_no_committed_transaction() {
     let mut dev = RecDevice::new(DATA_START + 2);
     let replayed = Journal::new().recover(&mut dev).expect("recover");
-    assert!(!replayed, "a blank device recovers to nothing (fail closed, no magic)");
+    assert!(
+        !replayed,
+        "a blank device recovers to nothing (fail closed, no magic)"
+    );
 }
 
 #[test]
@@ -134,7 +159,11 @@ fn torn_commit_record_is_rejected() {
     // Crash with the commit record half-written (a flipped byte) BEFORE the home apply. The checksum
     // fails, so recovery treats the transaction as uncommitted — the home blocks keep their pre-state.
     let t = run_txn();
-    let block0_pos = t.log.iter().position(|(idx, _)| *idx == 0).expect("record write logged");
+    let block0_pos = t
+        .log
+        .iter()
+        .position(|(idx, _)| *idx == 0)
+        .expect("record write logged");
     let mut crashed = RecDevice::from_blocks(t.pre.clone());
     for (i, (idx, data)) in t.log.iter().enumerate().take(block0_pos + 1) {
         let mut d = *data;
@@ -144,8 +173,14 @@ fn torn_commit_record_is_rejected() {
         crashed.blocks[*idx] = d;
     }
     Journal::new().recover(&mut crashed).expect("recover");
-    assert_eq!(crashed.blocks[t.h1], t.pre1, "torn commit record ⇒ home unchanged");
-    assert_eq!(crashed.blocks[t.h2], t.pre2, "torn commit record ⇒ home unchanged");
+    assert_eq!(
+        crashed.blocks[t.h1], t.pre1,
+        "torn commit record ⇒ home unchanged"
+    );
+    assert_eq!(
+        crashed.blocks[t.h2], t.pre2,
+        "torn commit record ⇒ home unchanged"
+    );
 }
 
 #[test]
@@ -154,7 +189,11 @@ fn torn_journal_payload_is_rejected() {
     // checksum covers the journal payload too, so recovery detects it and rolls back — never applies a
     // corrupt block to a home location (corruption surfaced, not swallowed).
     let t = run_txn();
-    let block0_pos = t.log.iter().position(|(idx, _)| *idx == 0).expect("record write logged");
+    let block0_pos = t
+        .log
+        .iter()
+        .position(|(idx, _)| *idx == 0)
+        .expect("record write logged");
     let mut crashed = RecDevice::from_blocks(t.pre.clone());
     for (idx, data) in t.log.iter().take(block0_pos + 1) {
         let mut d = *data;
@@ -164,6 +203,12 @@ fn torn_journal_payload_is_rejected() {
         crashed.blocks[*idx] = d;
     }
     Journal::new().recover(&mut crashed).expect("recover");
-    assert_eq!(crashed.blocks[t.h1], t.pre1, "corrupt journal payload ⇒ home unchanged");
-    assert_eq!(crashed.blocks[t.h2], t.pre2, "corrupt journal payload ⇒ home unchanged");
+    assert_eq!(
+        crashed.blocks[t.h1], t.pre1,
+        "corrupt journal payload ⇒ home unchanged"
+    );
+    assert_eq!(
+        crashed.blocks[t.h2], t.pre2,
+        "corrupt journal payload ⇒ home unchanged"
+    );
 }

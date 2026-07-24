@@ -48,7 +48,12 @@ fn recv_at_delivers_message_before_its_deadline() {
     let mut e = CapEngine::new(0xA5A5, 1000);
     let cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
     let mut ch = Channel::new("ipc.send");
-    send_ok(&mut ch, &e, cap, Message::new("A", "B", 42).with_deadline(100));
+    send_ok(
+        &mut ch,
+        &e,
+        cap,
+        Message::new("A", "B", 42).with_deadline(100),
+    );
     match ch.recv_at(50) {
         RecvOutcome::Delivered(m) => assert_eq!(m.body, 42),
         other => panic!("expected delivery before deadline, got {other:?}"),
@@ -60,7 +65,12 @@ fn recv_at_drops_expired_message_fail_closed() {
     let mut e = CapEngine::new(0xA5A5, 1000);
     let cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
     let mut ch = Channel::new("ipc.send");
-    send_ok(&mut ch, &e, cap, Message::new("A", "B", 7).with_deadline(100));
+    send_ok(
+        &mut ch,
+        &e,
+        cap,
+        Message::new("A", "B", 7).with_deadline(100),
+    );
     // now (150) > deadline (100): the message is dropped, never delivered late.
     match ch.recv_at(150) {
         RecvOutcome::Expired(1) => {}
@@ -76,10 +86,22 @@ fn recv_at_skips_expired_and_delivers_the_live_one() {
     let mut e = CapEngine::new(0xA5A5, 1000);
     let cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
     let mut ch = Channel::new("ipc.send");
-    send_ok(&mut ch, &e, cap, Message::new("A", "B", 1).with_deadline(100)); // will expire
-    send_ok(&mut ch, &e, cap, Message::new("A", "B", 2).with_deadline(200)); // still live at 150
+    send_ok(
+        &mut ch,
+        &e,
+        cap,
+        Message::new("A", "B", 1).with_deadline(100),
+    ); // will expire
+    send_ok(
+        &mut ch,
+        &e,
+        cap,
+        Message::new("A", "B", 2).with_deadline(200),
+    ); // still live at 150
     match ch.recv_at(150) {
-        RecvOutcome::Delivered(m) => assert_eq!(m.body, 2, "expired head skipped, live tail delivered"),
+        RecvOutcome::Delivered(m) => {
+            assert_eq!(m.body, 2, "expired head skipped, live tail delivered")
+        }
         other => panic!("expected delivery of the live message, got {other:?}"),
     }
 }
@@ -113,7 +135,10 @@ fn cancel_after_delivery_returns_false() {
     let m = ch.recv().unwrap();
     assert_eq!(m.id, id);
     // Already delivered — cancellation is a no-op that reports it could not act.
-    assert!(!ch.cancel(id), "a delivered message can no longer be cancelled");
+    assert!(
+        !ch.cancel(id),
+        "a delivered message can no longer be cancelled"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -127,24 +152,41 @@ fn trace_replay_reconstructs_exact_delivery_order() {
     let mut ch = Channel::new("ipc.send");
 
     // A mixed run exercising every op: a denied send, two live sends, a cancel, a delivery.
-    assert!(matches!(ch.send(&e, Message::new("A", "B", 1), &[]), Decision::Deny(_))); // unauthorized
+    assert!(matches!(
+        ch.send(&e, Message::new("A", "B", 1), &[]),
+        Decision::Deny(_)
+    )); // unauthorized
     send_ok(&mut ch, &e, cap, Message::new("A", "B", 10));
     send_ok(&mut ch, &e, cap, Message::new("A", "B", 20));
     let ids = ch.pending_ids();
     assert!(ch.cancel(ids[0])); // cancel body 10
     let observed: Vec<u64> = core::iter::from_fn(|| ch.recv().map(|m| m.body)).collect();
-    assert_eq!(observed, vec![20], "only the uncancelled message is delivered");
+    assert_eq!(
+        observed,
+        vec![20],
+        "only the uncancelled message is delivered"
+    );
 
     // The trace records every operation, in order...
     let trace = ch.trace();
     let ops: Vec<IpcOp> = trace.iter().map(|t| t.op).collect();
     assert_eq!(
         ops,
-        vec![IpcOp::SendDenied, IpcOp::Send, IpcOp::Send, IpcOp::Cancel, IpcOp::Recv],
+        vec![
+            IpcOp::SendDenied,
+            IpcOp::Send,
+            IpcOp::Send,
+            IpcOp::Cancel,
+            IpcOp::Recv
+        ],
         "the trace is a complete, ordered log of every IPC operation"
     );
     // ...and replay() reconstructs the exact delivered sequence from the trace ALONE.
-    assert_eq!(replay(trace), observed, "the trace deterministically replays the delivery behaviour");
+    assert_eq!(
+        replay(trace),
+        observed,
+        "the trace deterministically replays the delivery behaviour"
+    );
 }
 
 #[test]
@@ -152,14 +194,27 @@ fn trace_replay_matches_deadline_expiry_run() {
     let mut e = CapEngine::new(0xA5A5, 1000);
     let cap = e.mint("A", "ipc.send", Scope::All, Constraints::none());
     let mut ch = Channel::new("ipc.send");
-    send_ok(&mut ch, &e, cap, Message::new("A", "B", 1).with_deadline(100)); // expires at 150
-    send_ok(&mut ch, &e, cap, Message::new("A", "B", 2).with_deadline(200)); // survives
+    send_ok(
+        &mut ch,
+        &e,
+        cap,
+        Message::new("A", "B", 1).with_deadline(100),
+    ); // expires at 150
+    send_ok(
+        &mut ch,
+        &e,
+        cap,
+        Message::new("A", "B", 2).with_deadline(200),
+    ); // survives
     let delivered = match ch.recv_at(150) {
         RecvOutcome::Delivered(m) => vec![m.body],
         other => panic!("unexpected {other:?}"),
     };
     assert_eq!(delivered, vec![2]);
     // The expired message is in the trace as Expired and replay agrees only body 2 was delivered.
-    assert!(ch.trace().iter().any(|t| t.op == IpcOp::Expired && t.body == 1));
+    assert!(ch
+        .trace()
+        .iter()
+        .any(|t| t.op == IpcOp::Expired && t.body == 1));
     assert_eq!(replay(ch.trace()), delivered);
 }

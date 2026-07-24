@@ -41,15 +41,30 @@ fn authorized_share_maps_zero_copy_and_reader_sees_writer() {
     assert_eq!(gt.region_refcount(region), 1);
 
     let writer = gt
-        .share(&engine, region, "owner", "producer", ShareMode::ReadWrite, &[cap])
+        .share(
+            &engine,
+            region,
+            "owner",
+            "producer",
+            ShareMode::ReadWrite,
+            &[cap],
+        )
         .expect("authorized RW share");
     let reader = gt
-        .share(&engine, region, "owner", "consumer", ShareMode::Read, &[cap])
+        .share(
+            &engine,
+            region,
+            "owner",
+            "consumer",
+            ShareMode::Read,
+            &[cap],
+        )
         .expect("authorized RO share");
     // region + writer grant + reader grant all reference one backing store.
     assert_eq!(gt.region_refcount(region), 3);
 
-    gt.write(writer, 8, b"aletheia").expect("RW grant may write");
+    gt.write(writer, 8, b"aletheia")
+        .expect("RW grant may write");
     // The reader observes the writer's bytes with no intervening copy — zero-copy shared memory.
     assert_eq!(gt.read(reader, 8, 8).unwrap(), b"aletheia");
 }
@@ -61,7 +76,14 @@ fn read_only_grant_cannot_write() {
     let mut gt = GrantTable::new(SHARE);
     let region = gt.create_region("owner", 0x4000, 32);
     let ro = gt
-        .share(&engine, region, "owner", "consumer", ShareMode::Read, &[cap])
+        .share(
+            &engine,
+            region,
+            "owner",
+            "consumer",
+            ShareMode::Read,
+            &[cap],
+        )
         .unwrap();
 
     assert_eq!(gt.write(ro, 0, b"x"), Err(GrantError::ReadOnly));
@@ -80,16 +102,37 @@ fn share_can_attenuate_but_never_amplify() {
     let region = gt.create_region("owner", 0x4000, 16);
 
     let ro = gt
-        .share(&engine, region, "owner", "peer", ShareMode::Read, &[owner_cap])
+        .share(
+            &engine,
+            region,
+            "owner",
+            "peer",
+            ShareMode::Read,
+            &[owner_cap],
+        )
         .expect("owner shares Read to peer");
     assert_eq!(gt.grant_mode(ro), Some(ShareMode::Read));
 
     // Peer re-shares: Read is allowed (attenuation)…
-    let ro2 = gt.share(&engine, region, "peer", "third", ShareMode::Read, &[peer_cap]);
+    let ro2 = gt.share(
+        &engine,
+        region,
+        "peer",
+        "third",
+        ShareMode::Read,
+        &[peer_cap],
+    );
     assert!(ro2.is_ok(), "read-only holder may pass on read-only");
 
     // …but ReadWrite is refused — the peer cannot amplify beyond the read access it holds.
-    let amp = gt.share(&engine, region, "peer", "third", ShareMode::ReadWrite, &[peer_cap]);
+    let amp = gt.share(
+        &engine,
+        region,
+        "peer",
+        "third",
+        ShareMode::ReadWrite,
+        &[peer_cap],
+    );
     assert_eq!(amp, Err(GrantError::Amplify));
 }
 
@@ -101,7 +144,14 @@ fn cannot_share_a_region_without_holding_access() {
     let mut gt = GrantTable::new(SHARE);
     let region = gt.create_region("owner", 0x4000, 16);
 
-    let denied = gt.share(&engine, region, "stranger", "x", ShareMode::Read, &[stranger_cap]);
+    let denied = gt.share(
+        &engine,
+        region,
+        "stranger",
+        "x",
+        ShareMode::Read,
+        &[stranger_cap],
+    );
     assert_eq!(denied, Err(GrantError::NoAccess));
 }
 
@@ -113,7 +163,14 @@ fn access_is_bounded_to_the_region() {
     let mut gt = GrantTable::new(SHARE);
     let region = gt.create_region("owner", 0x4000, 16);
     let rw = gt
-        .share(&engine, region, "owner", "peer", ShareMode::ReadWrite, &[cap])
+        .share(
+            &engine,
+            region,
+            "owner",
+            "peer",
+            ShareMode::ReadWrite,
+            &[cap],
+        )
         .unwrap();
 
     assert_eq!(gt.read(rw, 12, 8), Err(GrantError::OutOfBounds));
@@ -131,12 +188,23 @@ fn revocation_unmaps_and_releases_the_backing() {
     let mut gt = GrantTable::new(SHARE);
     let region = gt.create_region("owner", 0x4000, 16);
     let rw = gt
-        .share(&engine, region, "owner", "peer", ShareMode::ReadWrite, &[cap])
+        .share(
+            &engine,
+            region,
+            "owner",
+            "peer",
+            ShareMode::ReadWrite,
+            &[cap],
+        )
         .unwrap();
     assert_eq!(gt.region_refcount(region), 2);
 
     assert!(gt.revoke(rw), "live grant revokes");
-    assert_eq!(gt.region_refcount(region), 1, "backing share released on revoke");
+    assert_eq!(
+        gt.region_refcount(region),
+        1,
+        "backing share released on revoke"
+    );
     assert_eq!(gt.read(rw, 0, 4), Err(GrantError::Revoked));
     assert_eq!(gt.write(rw, 0, b"x"), Err(GrantError::Revoked));
     assert!(!gt.revoke(rw), "double-revoke is a no-op");
