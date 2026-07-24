@@ -223,6 +223,17 @@ pub fn unmap_page(root: usize, va: usize) -> bool {
     true
 }
 
+/// Core-LOCAL TLB fence for one VA (`sfence.vma va, x0`, this hart only) — the per-hart half of a
+/// software TLB shootdown (REQ-SMP-004): the SBI RFENCE path fences remote harts via firmware, and
+/// this is what a hart runs itself when servicing a shootdown request (uniform with the aarch64
+/// local `tlbi` and the x86 `invlpg` service callbacks).
+///
+/// SAFETY: `sfence.vma` is always sound at S-mode; over-fencing an unmapped VA is harmless.
+#[inline]
+pub unsafe fn sfence_page(va: usize) {
+    sfence_va(va);
+}
+
 /// Fence the TLB for one VA (`sfence.vma va, x0`).
 #[inline]
 unsafe fn sfence_va(va: usize) {
