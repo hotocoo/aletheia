@@ -554,6 +554,37 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-24 — REQ-SMP-003: per-CPU run queues + work stealing, ADR-021 Phase 2 policy)
+
+The scheduler shape that scales past one core. One global run queue serializes every scheduling
+decision behind one lock; `kernel-core/src/smpsched.rs` (`SmpSched`) gives each CPU its OWN queue —
+dispatch is **local-first** (the common case contends with nobody) and an idle CPU **steals from
+the most-loaded** victim. **Lock discipline (load-bearing):** never two queue locks at once — a
+steal snapshots loads via brief single locks, then locks exactly ONE victim; with at most one queue
+lock held per CPU at any instant, no lock-order cycle can exist. The steal path is **alloc-free**
+past construction (kernel CPUs spin on it while waiting for stragglers, and the bare-metal bump
+allocators never reclaim).
+
+- **Host-proved under real threads** (`kernel-core/tests/smpsched.rs`, 5 tests, progress-gated):
+  exactly-once dispatch under 4-thread contention with everything seeded on one queue (none lost,
+  none duplicated; the other CPUs progress only by stealing), local-first, steal liveness + victim
+  attribution, most-loaded-victim preference, least-loaded placement balance. `kernel-core` hosted
+  suite grows to **79 passed** (13 suites).
+- **VM-gated on REAL cores** (`kernel/src/smp.rs` phase 5 — aarch64 suite now **16 invariants** at
+  `-smp 4`, total 74): core 0 seeds all 64 work items on CPU 1's queue alone, so core 0 and CPUs
+  2..3 can progress ONLY by stealing; the gate asserts the phase completes on every core, every
+  task is dispatched EXACTLY once across cores, and stealing drains the unbalanced queue. The
+  steal invariant is structural, not a race: core 0 performs one uncontended steal before opening
+  the phase to the other cores.
+- **Honesty:** this is the scheduling *policy* proved on real cores dispatching kernel work items
+  (what runs where). Preemptive cross-core *task migration* (a stolen EL0 task resuming on the
+  thief CPU through the `TaskContext` seam), RISC-V/x86-64 suite parity, TLB shootdown, and the
+  lock-hierarchy/atomic-ordering audit stay open under **REQ-SMP-001 (partial)**.
+
+Gates: aarch64 vm-e2e PASS (74 invariants incl. SMP 16) · riscv64 PASS (66) · x86-64 smoke PASS
+(59) · e2e-all 3/3 · conformance 3/3 · kernel-core hosted 79 · clippy `-D warnings` + fmt clean.
+Traceability: **55 reqs — 47 delivered / 5 partial / 3 deferred**.
+
 ## Delivered (2026-07-24 — REQ-SMP-002: SMP secondary bring-up + cross-core concurrency substrate, VM-gated at -smp 4)
 
 The SMP cliff (gap #4, ADR-021 Phase 1) is broken: Aletheia now **boots and runs on multiple real

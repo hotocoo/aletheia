@@ -1,7 +1,8 @@
 # ADR-021: SMP and multicore scheduling
 
 **Status:** Accepted — Phase 1 DELIVERED on ALL THREE targets (aarch64 + RISC-V + x86-64,
-REQ-SMP-002); Phases 2-3 open under REQ-SMP-001 · **Date:** 2026-07-22 · **Updated:** 2026-07-24
+REQ-SMP-002); Phase 2 scheduling POLICY delivered (kernel-core + aarch64 VM-gated, REQ-SMP-003);
+migration/parity + Phase 3 open under REQ-SMP-001 · **Date:** 2026-07-22 · **Updated:** 2026-07-24
 
 ## Context
 
@@ -63,8 +64,30 @@ shared scheduler/memory paths; CPU affinity; NUMA abstraction as a later refinem
   invariants, gated by `kernel-x86_64/scripts/smoke-test.sh` at `-smp 4`. Ordering is load-bearing:
   the suite runs BEFORE the ring-3 suite, which repoints IRQ0 and strands the PIT deadline clock.
 - **Honesty line:** with `-smp 1` the suite skips green (like virtio with no disk); the VM gates pin
-  `-smp 4` so CI cannot silently skip. Phase 2 (per-CPU run queues, work stealing), TLB shootdown,
-  and the lock-hierarchy/atomic-ordering audit remain open under REQ-SMP-001 (partial).
+  `-smp 4` so CI cannot silently skip.
+
+## Delivery (2026-07-24, same day) — Phase 2 scheduling policy (REQ-SMP-003)
+
+`kernel-core/src/smpsched.rs` (`SmpSched`): one run queue per CPU, each behind its own `SpinLock`;
+dispatch is local-first, an empty CPU **steals from the most-loaded** victim. **Lock discipline:**
+never two queue locks at once — local pop locks only the local queue; a steal snapshots loads via
+brief single locks then locks exactly ONE victim; with at most one queue lock held per CPU, no
+lock-order cycle can exist (deliberately stronger than an ordered two-lock hierarchy). The steal
+path is **alloc-free** past construction (kernel CPUs spin on it; bump allocators never reclaim).
+
+- **Host-proved** (`kernel-core/tests/smpsched.rs`, 5 tests, real threads, progress-gated):
+  exactly-once dispatch under 4-thread contention with an all-on-one-queue seed (none lost, none
+  duplicated), local-first, steal liveness + victim attribution, most-loaded victim preference,
+  least-loaded placement balance.
+- **VM-gated on real cores** (`kernel/src/smp.rs` phase 5, suite now 16 invariants at `-smp 4`):
+  every task seeded on CPU 1's queue alone, so core 0 + CPUs 2..3 progress ONLY by stealing;
+  invariants: scheduling completes on every core, every task dispatched EXACTLY once, stealing
+  drains the unbalanced queue (core 0 performs one uncontended steal before opening the phase, so
+  the steal invariant is structural, never a race).
+- **Honesty:** this is the *policy* on real cores dispatching kernel work items. Preemptive
+  cross-core *task migration* (a stolen EL0 task resuming on the thief CPU via the `TaskContext`
+  seam), RISC-V/x86-64 suite parity, TLB shootdown, and the lock-hierarchy/atomic-ordering audit
+  remain open under REQ-SMP-001 (partial).
 
 ## Consequences
 

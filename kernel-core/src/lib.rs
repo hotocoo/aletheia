@@ -30,6 +30,7 @@ pub mod ipc;
 pub mod priosched;
 pub mod sched;
 pub mod selftest;
+pub mod smpsched;
 pub mod spine;
 pub mod storage;
 pub mod sync;
