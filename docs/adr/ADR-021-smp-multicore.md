@@ -2,9 +2,9 @@
 
 **Status:** Accepted — Phase 1 DELIVERED on ALL THREE targets (aarch64 + RISC-V + x86-64,
 REQ-SMP-002); Phase 2 scheduling POLICY delivered (kernel-core + all-target VM-gated, REQ-SMP-003);
-Phase 3 cross-core TLB shootdown DELIVERED on ALL THREE targets (REQ-SMP-004); preemptive cross-core
-task migration + CPU affinity + lock-hierarchy audit open under REQ-SMP-001 · **Date:** 2026-07-22 ·
-**Updated:** 2026-07-24
+Phase 3 cross-core TLB shootdown DELIVERED on ALL THREE targets (REQ-SMP-004); Phase 4 CPU affinity +
+cross-core task migration + lock-hierarchy/atomic-ordering audit DELIVERED on ALL THREE targets
+(REQ-SMP-005, ADR-028) — REQ-SMP-001 now `delivered` · **Date:** 2026-07-22 · **Updated:** 2026-07-24
 
 ## Context
 
@@ -89,10 +89,10 @@ path is **alloc-free** past construction (kernel CPUs spin on it; bump allocator
   every task dispatched EXACTLY once, stealing drains the unbalanced queue (the boot CPU performs
   one uncontended steal before opening the phase, so the steal invariant is structural, never a
   race).
-- **Honesty:** this is the *policy* on real cores dispatching kernel work items. Preemptive
-  cross-core *task migration* (a stolen EL0 task resuming on the thief CPU via the `TaskContext`
-  seam), TLB shootdown, and the lock-hierarchy/atomic-ordering audit remain open under
-  REQ-SMP-001 (partial).
+- **Honesty (at the time of this slice):** this is the *policy* on real cores dispatching kernel work
+  items. Preemptive cross-core *task migration* (a stolen task resuming on the thief CPU via the
+  `TaskContext` seam), TLB shootdown, and the lock-hierarchy/atomic-ordering audit were still open
+  under REQ-SMP-001 — all subsequently delivered by Phase 3 (REQ-SMP-004) and Phase 4 (REQ-SMP-005).
 
 ## Delivery (2026-07-24, same day) — Phase 3 cross-core TLB shootdown (REQ-SMP-004)
 
@@ -134,6 +134,45 @@ stale translation has **completed** its local invalidation.
   host-thread test `kernel-core/tests/shootdown.rs` (5 tests: barrier ordering, the use-after-free
   scenario, no-lost-request under concurrent requesters, fail-visible on an unresponsive target,
   FIFO+count). kernel-core hosted suite 79 → 84.
+
+## Delivery (2026-07-24, same day) — Phase 4 CPU affinity + cross-core migration + lock audit (REQ-SMP-005)
+
+Closes the three named-open items of REQ-SMP-001. `kernel_core::smpsched` grows affinity + migration
+(arch-independent policy, Issue 1); the lock-hierarchy/atomic-ordering audit is **ADR-028**.
+
+- **CPU affinity** — every run-queue element is now `(TaskId, AffinityMask)`; the mask lives INLINE,
+  never in a second locked side-table, so the load-bearing "never two queue locks at once" discipline
+  is preserved. `enqueue_least_loaded_affine` places only on a permitted queue (or returns `None`
+  rather than dumping onto CPU 0); `next_for` filters both the local pop and the steal — a bounded
+  rotate skips tasks pinned away from the asking CPU, and a most-loaded victim that yields nothing
+  eligible is retired via a stack `u64` bitmask so a less-loaded victim with permitted work is still
+  reached and the scan always terminates (still alloc-free). The pre-affinity API (`enqueue_on`,
+  `enqueue_least_loaded`, `next_for`) is unchanged (`AffinityMask::ANY`), so REQ-SMP-003 and its gates
+  are untouched.
+- **Cross-core migration** — a task enqueued on one CPU and dispatched by another (a steal,
+  `Dispatch::stolen_from = Some(origin)`) HAS migrated; the arch context switch that resumes it stays
+  the `kernel_core::sched::TaskContext` seam. The hosted test pairs a `SmpSched` steal with a
+  `TaskContext` resume and asserts the task resumed on the thief, not its origin.
+- **Lock-hierarchy / atomic-ordering audit (ADR-028)** — a total lock order (engine ≺ run-queue ≈
+  shootdown-inbox ≺ allocator, a forest ⇒ no deadlock), a per-atomic-site ordering justification, and
+  a per-instance debug tripwire that asserts "≤1 run-queue lock per CPU" on every dispatch-path lock —
+  live under the mixed-affinity contention suite AND the `-smp 4` VM gates (which build debug), with a
+  `#[should_panic]` proof that the tripwire is armed.
+- **Host-proved** (`kernel-core/tests/smpsched.rs`, now 11 tests): affinity honored, FIFO preserved
+  among eligible tasks, affine placement balances, migration resumes on the thief through the seam,
+  exactly-once under 4-thread MIXED-affinity contention, and the tripwire fires on a deliberate nest.
+  kernel-core hosted suite 84 → 90.
+- **VM-gated on ALL THREE targets** — each SMP suite adds invariants 19-21 (affinity honored,
+  cross-core migration by stealing, resume via the `TaskContext` seam with a minimal GPR restore:
+  aarch64 `mov`, x86-64 `mov`, RISC-V `mv`), driven deterministically by the boot core over a private
+  `SmpSched` (the invariant-12 first-steal doctrine — no race). Each target now reports **ALL 22 SMP
+  INVARIANTS HOLD**; `scripts/e2e-all.sh` is green on all three.
+- **Honesty:** this proves the migration MECHANISM + the resume seam on real cores. Preemptive
+  *timing* (a timer IRQ yanking a running task mid-slice) is the per-target preemption already gated by
+  the EL0/ring-3/U-mode usermode suites; this brick does not rewire `usermode.rs` onto the shared
+  scheduler (that remains the documented `sched.rs` follow-on). Affinity + stealing can STARVE a task
+  pinned to a permanently-busy CPU — inherent to affinity, documented in `smpsched`/ADR-028, callers
+  must supply satisfiable masks.
 
 ## Consequences
 

@@ -554,6 +554,33 @@ suite grows **17 → 41** (6 suites).
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
 
+## Delivered (2026-07-24 — REQ-SMP-005: CPU affinity + cross-core migration + lock-hierarchy audit, ADR-021 Phase 4 / ADR-028)
+
+The REQ-SMP-001 tail — **REQ-SMP-001 now `delivered`**. `kernel_core::smpsched` gains **CPU affinity**
+(an `AffinityMask` INLINE in every run-queue element — placement + steal both honor it, never a second
+locked side-table, so the "one queue lock per CPU" discipline holds) and **cross-core migration** (a
+task enqueued on one CPU, dispatched by another via a steal, resumed on the thief through the
+`kernel_core::sched::TaskContext` seam). The **lock-hierarchy + atomic-ordering audit** is **ADR-028**:
+a total lock order (a forest ⇒ deadlock-free), a per-atomic-site ordering justification, and a
+per-instance debug tripwire asserting "≤1 run-queue lock per CPU" — live under the mixed-affinity
+contention suite AND every `-smp 4` VM gate, with a `#[should_panic]` proof that it is armed.
+
+- **Host-proved** (`kernel-core/tests/smpsched.rs`, 11 tests): affinity honored, FIFO preserved among
+  eligible tasks, affine placement balances, migration resumes on the thief via the seam, exactly-once
+  under 4-thread MIXED-affinity contention, tripwire fires on a deliberate nest.
+- **VM-gated on ALL THREE targets**: SMP invariants 19-21 (affinity honored, cross-core migration by
+  stealing, resume via the `TaskContext` seam — a minimal GPR restore: aarch64/x86 `mov`, RISC-V `mv`),
+  driven deterministically by the boot core over a private `SmpSched` (the invariant-12 first-steal
+  doctrine — no race). Each target now reports **ALL 22 SMP INVARIANTS HOLD**.
+- **Honesty:** proves the migration MECHANISM + resume seam on real cores; preemptive *timing* stays the
+  per-target usermode preemption suites; NO `usermode.rs` rewire (the documented `sched.rs` follow-on).
+  Affinity + stealing can starve a task pinned to a permanently-busy CPU — inherent to affinity; callers
+  must supply satisfiable masks.
+
+Gates: aarch64 vm-e2e PASS (80 invariants incl. SMP 22) · riscv64 PASS (75 incl. SMP 22) · x86-64
+smoke PASS (68 incl. SMP 22) · e2e-all 3/3 · conformance 3/3 · kernel-core hosted **90** · clippy
+`-D warnings` + fmt clean. Traceability: **57 reqs — 50 delivered / 4 partial / 3 deferred**.
+
 ## Delivered (2026-07-24 — REQ-SMP-004: cross-core TLB shootdown, ADR-021 Phase 3)
 
 The SMP correctness cliff the audit flags in THREE gap docs (GAPS4 **ALET-P1-005**, GAP3 §4.2,
@@ -586,9 +613,9 @@ until every CPU that could hold a stale translation has **completed** its local 
   (a broken barrier = a genuine failure) is the deterministic host-thread test
   `kernel-core/tests/shootdown.rs` (5 tests: barrier ordering, the use-after-free scenario,
   no-lost-request under concurrent requesters, fail-visible on an unresponsive target, FIFO+count).
-- **Honesty (still open under REQ-SMP-001):** preemptive cross-core *task migration* (a stolen EL0
-  task resuming on the thief CPU through the `TaskContext` seam), CPU affinity, and the
-  lock-hierarchy / atomic-ordering audit.
+- **Honesty (open at the time of this slice; delivered by REQ-SMP-005 above):** preemptive cross-core
+  *task migration* (a stolen task resuming on the thief CPU through the `TaskContext` seam), CPU
+  affinity, and the lock-hierarchy / atomic-ordering audit.
 
 Gates: aarch64 vm-e2e PASS (77 invariants incl. SMP 19) · riscv64 PASS (72 incl. SMP 19) · x86-64
 smoke PASS (65 incl. SMP 19) · e2e-all 3/3 · conformance 3/3 · kernel-core hosted **84** · clippy
