@@ -12,9 +12,12 @@
 //!
 //! SCOPE (contract-honest, ADR-010/ADR-019/ADR-021): bring-up + the concurrency substrate + the
 //! ADR-021 Phase 2 scheduling policy on real cores (per-CPU run queues + work stealing via
-//! `kernel_core::smpsched`, REQ-SMP-003 parity) on QEMU q35 + OVMF. Preemptive cross-core task
-//! *migration*, TLB shootdown and the lock-order audit stay the named next slices under
-//! REQ-SMP-001. With `-smp 1` (MADT lists only the BSP) the suite skips green, exactly like
+//! `kernel_core::smpsched`, REQ-SMP-003 parity) on QEMU q35 + OVMF + cross-core TLB shootdown
+//! (Phase 6: per-core `invlpg` via the `kernel_core::shootdown` all-acknowledged barrier — x86 has
+//! no hardware TLB broadcast, so this is the genuine software shootdown; REQ-SMP-004 / ADR-021
+//! Phase 3). Preemptive cross-core task *migration*, CPU affinity, and the lock-hierarchy /
+//! atomic-ordering audit stay the named next slices under REQ-SMP-001. With `-smp 1` (MADT lists
+//! only the BSP) the suite skips green, exactly like
 //! virtio-with-no-disk; the smoke test boots `-smp 4` and asserts the full marker so a silent
 //! skip cannot pass CI.
 //!
@@ -33,14 +36,19 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 
 use alloc::boxed::Box;
 
+use crate::frames;
 use crate::pit;
+use crate::vm;
+use kernel_core::shootdown::{Invalidation, TlbShootdown};
 use kernel_core::smpsched::SmpSched;
 use kernel_core::spine::{CapEngine, CapToken, Constraints, Scope, Target};
 use kernel_core::sync::SpinLock;
 
+use x86_64::instructions::tlb;
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr3, Cr4};
 use x86_64::registers::model_specific::Msr;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::VirtAddr;
 
 // --- ACPI MADT discovery ----------------------------------------------------------------------
 /// RSDP physical address, captured from the UEFI config table BEFORE ExitBootServices (the ACPI
@@ -399,6 +407,39 @@ fn sched_worker_turn(cpu: usize) {
     }
 }
 
+// Phase 6 — cross-core TLB shootdown on REAL cores (REQ-SMP-004, ADR-021 Phase 3). x86-64 has NO
+// hardware TLB broadcast: `invlpg` is strictly core-local, so this is the GENUINE software
+// shootdown — the BSP remaps a VA and each AP must run its OWN `invlpg` (via the shootdown service
+// callback) and acknowledge before the BSP treats the remap as globally effective. That per-core
+// invalidate-then-ack IS the mechanism the `kernel_core::shootdown` barrier coordinates (uniform
+// with RISC-V's SBI RFENCE; on aarch64 the hardware `tlbi …is` broadcast does the propagation and
+// the barrier proves the coordination). Honesty (ADR-021 Phase 3): the discriminating stale-vs-
+// fresh proof is the deterministic host-thread test — the VM side proves mechanism + barrier.
+/// A spare canonical VA in an unused PML4 region (distinct from vm.rs's TEST_VA) — safe to map/
+/// remap in the shared kernel root the APs also run on.
+const SHOOTDOWN_VA: u64 = 0x0000_6000_0000_0000;
+/// A scratch VA (next page) used ONLY to write frame B's magic through a writable mapping before it
+/// is remapped in at SHOOTDOWN_VA; unmapped immediately after the write.
+const SHOOTDOWN_VA_SCRATCH: u64 = 0x0000_6000_0000_1000;
+const SHOOTDOWN_ASID: u64 = 1;
+const MAGIC_A: u64 = 0xA1E7_0000_1111_0001;
+const MAGIC_B: u64 = 0xB0B0_0000_2222_0002;
+/// The `&'static TlbShootdown` (leaked by the BSP), published as an address for the APs.
+static SHOOTDOWN_PTR: AtomicUsize = AtomicUsize::new(0);
+/// Value each AP read through SHOOTDOWN_VA at priming (must be MAGIC_A) and after the shootdown
+/// (must be MAGIC_B). Init u64::MAX = "not read yet".
+static SEEN_MAP_A: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static SEEN_MAP_B: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static PRIMED: AtomicUsize = AtomicUsize::new(0);
+static DONE_SHOOTDOWN: AtomicUsize = AtomicUsize::new(0);
+
+/// The shootdown coordinator the BSP published. Callers must be past the PHASE=6 gate.
+fn shootdown_ref() -> &'static TlbShootdown {
+    // SAFETY: SHOOTDOWN_PTR is a Box::leak'd TlbShootdown published with Release before PHASE
+    // reaches 6; readers gate on PHASE (SeqCst) first, so the pointer is non-null and immortal.
+    unsafe { &*(SHOOTDOWN_PTR.load(Ordering::Acquire) as *const TlbShootdown) }
+}
+
 // --- Capability engine behind the SHARED kernel-core SpinLock (Issue 1: defined once) --------
 struct CapState {
     engine: CapEngine,
@@ -562,6 +603,27 @@ pub extern "C" fn ap_entry() -> ! {
         sched_worker_turn(cpu);
     }
     DONE_SCHED.fetch_add(1, Ordering::SeqCst);
+
+    // Phase 6 — TLB shootdown. Prime this AP's TLB by reading the mapped VA, service the BSP's
+    // shootdown (core-local `invlpg`, then acknowledge), and re-read to observe the remapped frame.
+    // AP-side waits are gated on the BSP-advanced phase (no AP clock): the BSP moves to PHASE 7
+    // once every AP has acknowledged, so the poll loop cannot hang.
+    while PHASE.load(Ordering::SeqCst) < 6 {
+        core::hint::spin_loop();
+    }
+    // SAFETY: SHOOTDOWN_VA is mapped to frame A in the shared kernel root before PHASE reaches 6.
+    let primed_val = unsafe { core::ptr::read_volatile(SHOOTDOWN_VA as *const u64) };
+    SEEN_MAP_A[cpu].store(primed_val, Ordering::SeqCst);
+    PRIMED.fetch_add(1, Ordering::SeqCst);
+    let sd = shootdown_ref();
+    while sd.acked(cpu) == 0 && PHASE.load(Ordering::SeqCst) < 7 {
+        sd.service(cpu, |_inv| tlb::flush(VirtAddr::new(SHOOTDOWN_VA)));
+        core::hint::spin_loop();
+    }
+    // SAFETY: the VA is remapped (not unmapped) by the BSP before it posts the shootdown.
+    let reread_val = unsafe { core::ptr::read_volatile(SHOOTDOWN_VA as *const u64) };
+    SEEN_MAP_B[cpu].store(reread_val, Ordering::SeqCst);
+    DONE_SHOOTDOWN.fetch_add(1, Ordering::SeqCst);
 
     PARKED.fetch_add(1, Ordering::SeqCst);
     park();
@@ -839,8 +901,67 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "smp: work stealing drains an unbalanced queue across cores (smpsched live on real CPUs)"
     );
 
-    // 13 — the machine is still coherent: every AP parked, nothing regressed.
+    // 16..18 — cross-core TLB shootdown (REQ-SMP-004, ADR-021 Phase 3). Map SHOOTDOWN_VA -> frame A
+    // in the SHARED kernel root the APs run on; each AP primes its TLB; remap -> frame B and shoot
+    // down (each AP runs its OWN core-local invlpg via the barrier's service callback and acks);
+    // each AP re-reads and must observe B. x86 has no hardware TLB broadcast, so the per-core invlpg
+    // IS the real mechanism; the barrier proves each AP completed before the BSP proceeds.
+    let shootdown: &'static TlbShootdown = Box::leak(Box::new(TlbShootdown::new(ncpus)));
+    SHOOTDOWN_PTR.store(shootdown as *const TlbShootdown as usize, Ordering::Release);
+    let frame_a = frames::alloc().expect("shootdown frame A");
+    let frame_b = frames::alloc().expect("shootdown frame B");
+    let root = vm::active_root();
+    // Write each tenant magic THROUGH a writable mapping — unlike aarch64/RISC-V, x86-64 does not
+    // guarantee the raw-physical identity map is writable for an arbitrary allocator frame, so a
+    // direct `*(frame.addr())` write can take a protection-violation #PF. Frame B is prepared via a
+    // scratch VA that is then unmapped; only SHOOTDOWN_VA (== frame A) stays live for priming.
+    let mapped_a = vm::map_kernel_frame(root, SHOOTDOWN_VA, frame_a.addr() as u64);
+    let prepped_b = vm::map_kernel_frame(root, SHOOTDOWN_VA_SCRATCH, frame_b.addr() as u64);
+    // SAFETY: both VAs are freshly mapped PRESENT|WRITABLE supervisor pages on the BSP.
+    unsafe {
+        core::ptr::write_volatile(SHOOTDOWN_VA as *mut u64, MAGIC_A);
+        core::ptr::write_volatile(SHOOTDOWN_VA_SCRATCH as *mut u64, MAGIC_B);
+    }
+    vm::unmap_user(root, SHOOTDOWN_VA_SCRATCH); // frame B now holds MAGIC_B; scratch mapping gone
+    let mapped_a = mapped_a && prepped_b;
     PHASE.store(6, Ordering::SeqCst);
+    check!(
+        mapped_a
+            && wait_until(deadline_after(10), || PRIMED.load(Ordering::SeqCst)
+                == secondaries)
+            && (1..=secondaries).all(|c| SEEN_MAP_A[c].load(Ordering::SeqCst) == MAGIC_A),
+        "smp: every AP primed a shared-address-space mapping (observed frame A)"
+    );
+
+    // Remap the SAME VA to frame B (unmap then map — x86 map_to rejects an already-mapped page),
+    // then shoot it down across every AP. The barrier proves each AP ran invlpg + acknowledged
+    // BEFORE the BSP treats the remap as globally effective (the load-bearing ordering).
+    vm::unmap_user(root, SHOOTDOWN_VA);
+    let mapped_b = vm::map_kernel_frame(root, SHOOTDOWN_VA, frame_b.addr() as u64);
+    let mut tgt = [0usize; MAX_CPUS];
+    for (i, slot) in tgt.iter_mut().enumerate().take(secondaries) {
+        *slot = i + 1;
+    }
+    let barrier_deadline = deadline_after(10);
+    let barrier_ok = shootdown.request(
+        &tgt[..secondaries],
+        Invalidation::page(SHOOTDOWN_ASID, SHOOTDOWN_VA),
+        || pit::ticks() <= barrier_deadline,
+    );
+    check!(
+        mapped_b
+            && barrier_ok
+            && wait_until(deadline_after(10), || DONE_SHOOTDOWN.load(Ordering::SeqCst)
+                == secondaries),
+        "smp: TLB shootdown barrier acknowledged by every AP (all-acknowledged completion)"
+    );
+    check!(
+        (1..=secondaries).all(|c| SEEN_MAP_B[c].load(Ordering::SeqCst) == MAGIC_B),
+        "smp: every AP observes the remapped frame B after the shootdown (coherent)"
+    );
+
+    // 19 — the machine is still coherent: every AP parked, nothing regressed.
+    PHASE.store(7, Ordering::SeqCst);
     check!(
         wait_until(deadline_after(5), || PARKED.load(Ordering::SeqCst)
             == secondaries)
