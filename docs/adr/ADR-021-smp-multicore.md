@@ -1,6 +1,7 @@
 # ADR-021: SMP and multicore scheduling
 
-**Status:** Proposed (deferred — phased plan, no blind code) · **Date:** 2026-07-22
+**Status:** Accepted — Phase 1 DELIVERED on aarch64 (REQ-SMP-002); Phases 2-3 open under
+REQ-SMP-001 · **Date:** 2026-07-22 · **Updated:** 2026-07-24
 
 ## Context
 
@@ -26,6 +27,28 @@ lock hierarchy.
 **Phase 3 — cross-CPU correctness.** IPIs for cross-core wakeups + reschedule; TLB shootdown on
 unmap (sender broadcasts, waits for ack); a documented lock ordering; an atomic-ordering audit of all
 shared scheduler/memory paths; CPU affinity; NUMA abstraction as a later refinement.
+
+## Delivery (2026-07-24) — Phase 1 + concurrency-substrate slice (REQ-SMP-002)
+
+`kernel/src/smp.rs` + `kernel/src/boot.s::_secondary_start`, VM-gated by `scripts/vm-e2e.sh` at
+`-smp 4` (13 invariants, marker `ALL 13 SMP INVARIANTS HOLD`):
+
+- **Bring-up:** PSCI `CPU_ON` (HVC conduit) powers on every present secondary; each gets a private
+  16 KiB stack, sets `TPIDR_EL1` (per-CPU identity, proved distinct), and enables its MMU over the
+  SAME kernel tables core 0 built (shared address space).
+- **Cross-core memory model:** exact atomic accounting under 4-core contention (the bump allocator
+  moved from load-then-store to CAS — the first removed single-core assumption), and a
+  release/acquire mailbox observed exactly by every core.
+- **ADR-027 on real cores:** the `with_authorization` primitive runs under a new kernel `SpinLock`
+  hammered by 3 secondaries while core 0 revokes: commits flow pre-revoke (progress-gated), the
+  revoke linearizes inside the lock, ZERO commits land after it, and every post-revoke attempt on
+  every core fails closed. This upgrades GAPS2 #9 from host-thread proof to real-SMP proof.
+- **IPI:** GICv2 SGI 0 from core 0 is claimed on each secondary's banked CPU interface (polled IAR,
+  masked PSTATE — never re-enters the core-0-owned vector table) and EOI'd.
+- **Honesty line:** with `-smp 1` the suite skips green (like virtio with no disk); the VM gate pins
+  `-smp 4` so CI cannot silently skip. Phase 2 (per-CPU run queues, work stealing), TLB shootdown,
+  the lock-hierarchy/atomic-ordering audit, and x86-64/RISC-V bring-up parity remain open under
+  REQ-SMP-001 (partial).
 
 ## Consequences
 

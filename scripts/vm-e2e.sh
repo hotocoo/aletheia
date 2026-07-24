@@ -24,9 +24,9 @@ cargo build || { echo "FAIL: build"; exit 3; }
 IMG="$KDIR/target/virtio-blk-test.img"
 dd if=/dev/zero of="$IMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create disk image"; exit 3; }
 
-echo "==> booting in QEMU (60s watchdog, virtio-blk attached)"
-OUT="$(perl -e 'alarm 60; exec @ARGV or die' \
-  qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 1 -m 128M -nographic \
+echo "==> booting in QEMU (120s watchdog, virtio-blk attached, -smp 4 for the SMP suite)"
+OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
+  qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0)"
@@ -44,6 +44,7 @@ echo "$OUT" | grep -q "MEMORY INVARIANTS HOLD"        || { echo "FAIL: memory in
 echo "$OUT" | grep -q "VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "EL0-BOUNDARY INVARIANTS HOLD"  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "VIRTIO-BLK INVARIANTS HOLD"    || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
+echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then

@@ -77,7 +77,8 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-USER-AARCH64-001 | EL0 user-mode: cap-gated syscall + per-process address space + preemptive multitasking (aarch64) | ADR-019 | kernel/src/usermode.rs | kernel/src/usermode.rs | scripts/vm-e2e.sh | delivered |
 | REQ-USER-X86-001 | ring-3 user-mode: cap-gated syscall + per-process PML4 + PIT preemption (x86-64) | ADR-019 | kernel-x86_64/src/usermode.rs | kernel-x86_64/src/usermode.rs | kernel-x86_64/scripts/smoke-test.sh | delivered |
 | REQ-USER-RISCV-001 | U-mode: cap-gated ecall + per-process satp + S-timer preemption (RISC-V) | ADR-019 | kernel-riscv64/src/usermode.rs | kernel-riscv64/src/usermode.rs | scripts/vm-e2e-riscv.sh | delivered |
-| REQ-SMP-001 | SMP / multicore scheduling | ADR-021 | - | - | - | deferred |
+| REQ-SMP-001 | SMP / multicore (umbrella: per-CPU scheduling, TLB shootdown, lock audit, x86/RISC-V bring-up) | ADR-021 | kernel/src/smp.rs | kernel/src/smp.rs | scripts/vm-e2e.sh | partial |
+| REQ-SMP-002 | Secondary-CPU bring-up + cross-core concurrency substrate (PSCI CPU_ON, per-CPU TPIDR, SpinLock, atomic authorize+execute on real cores, SGI IPI) — aarch64, `-smp 4` VM-gated | ADR-021 | kernel/src/smp.rs; kernel/src/boot.s; kernel/src/heap.rs | kernel/src/smp.rs | scripts/vm-e2e.sh | delivered |
 | REQ-SEC-001 | Adversarial security-behaviour regressions | ADR-003 | kernel-core/src/spine.rs | kernel-core/tests/security_behavior.rs | - | delivered |
 | REQ-DRV-001 | Device / driver architecture (discovery, real driver, hotplug, DMA/IOMMU, restart) | ADR-023 | kernel-core/src/device.rs | kernel-core/tests/device.rs | - | partial |
 | REQ-DRV-002 | Capability-authorized device access (hosted, over the BlockDevice seam) | ADR-023 | kernel-core/src/device.rs | kernel-core/tests/device.rs | - | delivered |

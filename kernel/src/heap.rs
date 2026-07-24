@@ -1,6 +1,8 @@
 //! Minimal bump allocator over the linker-reserved heap region (`__heap_start..__heap_end`).
-//! Single-core, no preemption, never frees — sufficient for a boot-run-exit reference kernel.
-//! Enables `alloc` (Vec/String/BTreeMap) so the in-kernel spine can mirror the hosted
+//! Never frees — sufficient for a boot-run-exit reference kernel. SMP-safe as of REQ-SMP-002:
+//! the bump pointer advances by compare-and-swap, so concurrent allocations on different cores
+//! each carve a disjoint region (the old load-then-store pair could hand two cores the same
+//! bytes). Enables `alloc` (Vec/String/BTreeMap) so the in-kernel spine can mirror the hosted
 //! System Core's data structures without a full page allocator (that lands in a later phase).
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -22,8 +24,9 @@ impl BumpAlloc {
     }
 }
 
-// SAFETY: the kernel is single-core with no preemption while allocating, so Relaxed
-// load/store on `next` cannot race. Sync is required for a #[global_allocator] static.
+// SAFETY: the bump pointer is advanced by CAS, so concurrent `alloc` calls (multiple cores,
+// REQ-SMP-002) each win a disjoint region or retry. Sync is required for a
+// #[global_allocator] static.
 unsafe impl Sync for BumpAlloc {}
 
 unsafe impl GlobalAlloc for BumpAlloc {
@@ -31,18 +34,26 @@ unsafe impl GlobalAlloc for BumpAlloc {
         let heap_start = &__heap_start as *const u8 as usize;
         let heap_end = &__heap_end as *const u8 as usize;
 
-        let cur = self.next.load(Ordering::Relaxed);
-        let base = if cur == 0 { heap_start } else { cur };
-        let aligned = (base + layout.align() - 1) & !(layout.align() - 1);
-        let new_next = match aligned.checked_add(layout.size()) {
-            Some(n) => n,
-            None => return core::ptr::null_mut(),
-        };
-        if new_next > heap_end {
-            return core::ptr::null_mut(); // out of heap -> allocation fails (fail closed)
+        loop {
+            let cur = self.next.load(Ordering::Relaxed);
+            let base = if cur == 0 { heap_start } else { cur };
+            let aligned = (base + layout.align() - 1) & !(layout.align() - 1);
+            let new_next = match aligned.checked_add(layout.size()) {
+                Some(n) => n,
+                None => return core::ptr::null_mut(),
+            };
+            if new_next > heap_end {
+                return core::ptr::null_mut(); // out of heap -> allocation fails (fail closed)
+            }
+            // CAS: if another core advanced `next` since our load, retry with the fresh value.
+            if self
+                .next
+                .compare_exchange_weak(cur, new_next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return aligned as *mut u8;
+            }
         }
-        self.next.store(new_next, Ordering::Relaxed);
-        aligned as *mut u8
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {

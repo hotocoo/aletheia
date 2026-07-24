@@ -27,6 +27,7 @@ mod frames;
 mod hal;
 mod heap;
 mod semihosting;
+mod smp;
 mod usermode;
 mod virtio;
 mod vm;
@@ -127,6 +128,22 @@ pub extern "C" fn kmain() -> ! {
         Err((idx, name)) => {
             kprintln!("[virtio] FAILED at virtio invariant {}: {}", idx, name);
             semihosting::exit(120 + idx as i32);
+        }
+    }
+
+    // SMP: power on the other CPUs via PSCI and prove the cross-core substrate (REQ-SMP-002,
+    // ADR-028). Skips green on a single-CPU machine (bare `cargo run`); the VM gate boots
+    // `-smp 4` and asserts the invariant marker below.
+    kprintln!("");
+    kprintln!(
+        "--- SMP selftests (secondary bring-up + cross-core atomics/caps/IPI, real cores) ---"
+    );
+    match smp::selftest() {
+        Ok(0) => {} // single-CPU machine — graceful skip, already logged
+        Ok(n) => kprintln!("[smp] ALL {} SMP INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[smp] FAILED at SMP invariant {}: {}", idx, name);
+            semihosting::exit(140 + idx as i32);
         }
     }
 
