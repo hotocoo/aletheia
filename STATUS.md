@@ -1,6 +1,6 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-07-21
+**As of:** 2026-07-24
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..013`.
@@ -553,6 +553,46 @@ suite grows **17 → 41** (6 suites).
   (SMP, AI execution substrate, device/driver model, persistent storage, secure boot, fault recovery)
   so no deferred requirement implies code that does not exist; each names its hosted-testable first
   slice where one exists.
+
+## Delivered (2026-07-24 — REQ-SMP-004: cross-core TLB shootdown, ADR-021 Phase 3)
+
+The SMP correctness cliff the audit flags in THREE gap docs (GAPS4 **ALET-P1-005**, GAP3 §4.2,
+GAPS2 #4): once a second CPU exists, one CPU editing a page table (unmap / remap to a new frame) in
+an address space another CPU has active leaves that CPU using a STALE TLB translation — a
+cross-address-space use-after-free. The contract: a CPU about to **reclaim** a frame must not proceed
+until every CPU that could hold a stale translation has **completed** its local invalidation.
+
+- **Arch-independent coordination — `kernel_core::shootdown::TlbShootdown`** (defined ONCE, Issue 1):
+  an all-acknowledged barrier. `request(targets, inv, keep_waiting)` posts an `Invalidation` to each
+  target and blocks until every one has drained it, run its local invalidation via the `service`
+  callback, AND acknowledged — the ack is bumped strictly AFTER the invalidation, so a reached
+  watermark proves the work happened-before the reclaim. An offline / unresponsive / failed CPU makes
+  `request` hit its deadline and return `false` → the reclaiming CPU refuses to reclaim (fail closed),
+  never hangs. Alloc-free `request` past construction.
+- **Native mechanism per target** (NOT forced-uniform — a hardware broadcast exists on only one):
+  **aarch64** — the initiator's `tlbi vaae1is` broadcasts across the inner-shareable domain in
+  hardware (the real invalidation); the barrier proves per-core acknowledgement. **x86-64** — NO
+  hardware broadcast, so each AP runs its own core-local `invlpg` via the service callback (the
+  genuine software shootdown; `map_kernel_frame` clears/restores CR0.WP so a PTE write into OVMF's
+  read-only live page tables does not `#PF`). **RISC-V** — the SBI RFENCE `remote_sfence_vma` firmware
+  fence + each hart's own `sfence.vma` through the barrier.
+- **19 SMP invariants per target** (was 16; +3 = shootdown invariants 16-18): each Phase 6 maps a
+  fresh VA to frame A in the shared kernel root, every secondary primes its TLB, the initiator remaps
+  the VA to frame B and shoots down, and every secondary re-reads and observes B coherently, all
+  `-smp 4` VM-gated.
+- **Honesty (ADR-021 Phase 3):** the VM gates prove the mechanism + barrier RAN on real cores and the
+  initiator waited for every acknowledgement — NOT that QEMU exhibits a stale entry (TCG's softmmu TLB
+  is a performance cache, not a faithful retention model). The *discriminating* stale-vs-fresh proof
+  (a broken barrier = a genuine failure) is the deterministic host-thread test
+  `kernel-core/tests/shootdown.rs` (5 tests: barrier ordering, the use-after-free scenario,
+  no-lost-request under concurrent requesters, fail-visible on an unresponsive target, FIFO+count).
+- **Honesty (still open under REQ-SMP-001):** preemptive cross-core *task migration* (a stolen EL0
+  task resuming on the thief CPU through the `TaskContext` seam), CPU affinity, and the
+  lock-hierarchy / atomic-ordering audit.
+
+Gates: aarch64 vm-e2e PASS (77 invariants incl. SMP 19) · riscv64 PASS (72 incl. SMP 19) · x86-64
+smoke PASS (65 incl. SMP 19) · e2e-all 3/3 · conformance 3/3 · kernel-core hosted **84** · clippy
+`-D warnings` + fmt clean. Traceability: **56 reqs — 48 delivered / 5 partial / 3 deferred**.
 
 ## Delivered (2026-07-24 — REQ-SMP-003: per-CPU run queues + work stealing, ADR-021 Phase 2 policy)
 

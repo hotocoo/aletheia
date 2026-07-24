@@ -21,9 +21,14 @@
 >   mailbox, GICv2 SGI IPI end-to-end. **RISC-V parity delivered same day**: SBI HSM `hart_start`
 >   (+ boot-hart-lottery-safe claim in `_start`), per-hart `tp`, Sv39 over shared tables, SBI IPI
 >   via polled `sip.SSIP` — same 13 invariants, `scripts/vm-e2e-riscv.sh` at `-smp 4`; the
->   SpinLock now lives ONCE in `kernel-core/src/sync.rs` (host-proved, both targets). STILL open
->   under REQ-SMP-001: per-CPU run-queues / work-stealing scheduler, TLB shootdown,
->   lock-hierarchy + atomic-ordering audit, x86-64 (INIT-SIPI-SIPI) bring-up parity.
+>   SpinLock now lives ONCE in `kernel-core/src/sync.rs` (host-proved, both targets). **Since:**
+>   x86-64 INIT-SIPI-SIPI bring-up parity (REQ-SMP-002 all-target), per-CPU run-queues +
+>   work-stealing scheduler on all three targets (REQ-SMP-003), and **cross-core TLB shootdown on all
+>   three targets** (REQ-SMP-004 / ADR-021 Phase 3 — `kernel_core::shootdown` all-acknowledged
+>   barrier + aarch64 broadcast `tlbi …is` / x86 `invlpg` / RISC-V SBI RFENCE) are all delivered.
+>   STILL open under REQ-SMP-001: preemptive cross-core task *migration* (stolen EL0 task resuming on
+>   the thief CPU via the `TaskContext` seam), CPU affinity, and the lock-hierarchy + atomic-ordering
+>   audit.
 > - **#5 Priority inheritance end-to-end VM-tested — ✅ ADDRESSED (all three targets).** REQ-IPC-009
 >   proved through the REAL blocking-IPC path: a HIGH receiver blocks on the endpoint a LOW task
 >   services, donates its priority, and the boosted LOW is dispatched ahead of a Ready MEDIUM
