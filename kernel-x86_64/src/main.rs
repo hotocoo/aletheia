@@ -10,6 +10,7 @@
 //! machine-checkable verdict; the GOP framebuffer is the human-visible one (VMware shows this):
 //!   exit 33  => all invariants held (e2e PASS)   [isa-debug-exit encodes success 0 as 0x10]
 //!   exit 0x10+i (i=10+idx) => spine invariant idx failed
+//!   i = 30+idx memory · 40+idx virtual-memory · 60+idx SMP · 80+idx ring-3
 //!   101 => panic, 102 => double fault, 103 => #GP, 104 => #PF, 105 => #UD
 
 #![no_std]
@@ -31,6 +32,7 @@ mod idt;
 mod pic;
 mod pit;
 mod serial;
+mod smp;
 mod usermode;
 mod vm;
 
@@ -63,6 +65,16 @@ fn efi_main() -> Status {
     kprintln!("[uefi] firmware handoff stage; locating GOP framebuffer...");
 
     let fb = capture_framebuffer();
+
+    // Stash the ACPI RSDP while the config table is still reachable: the SMP suite discovers the
+    // application processors from the MADT after ExitBootServices (ACPI-reclaim memory persists).
+    uefi::system::with_config_table(|entries| {
+        for e in entries {
+            if e.guid == uefi::table::cfg::ConfigTableEntry::ACPI2_GUID {
+                smp::stash_rsdp(e.address as usize);
+            }
+        }
+    });
 
     kprintln!("[uefi] calling ExitBootServices — Aletheia takes ownership of the machine");
     // SAFETY: the only boot-services borrows (GOP ScopedProtocol + FrameBuffer) were dropped inside
@@ -228,6 +240,23 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // SMP: discover the APs from the ACPI MADT, wake them with INIT-SIPI-SIPI through the
+    // real-mode trampoline, and prove the 13-invariant cross-core substrate (REQ-SMP-002 parity
+    // with aarch64/RISC-V). MUST run before the ring-3 suite: that suite repoints IRQ0 at its own
+    // context-switching entry and leaves IF=0, which would strand the PIT deadline clock used here.
+    kprintln!("");
+    kprintln!(
+        "--- SMP selftests (MADT + INIT-SIPI-SIPI bring-up + cross-core concurrency substrate) ---"
+    );
+    match smp::selftest() {
+        Ok(0) => {}
+        Ok(n) => kprintln!("[smp] ALL {} SMP INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[smp] FAILED at SMP invariant {}: {}", idx, name);
+            ActiveHal::exit(60 + idx as i32);
+        }
+    }
+
     // Ring-3 user-mode: drop to unprivileged ring 3 and prove the capability-gated syscall boundary,
     // hardware address-space isolation, per-process PML4 spaces, and PIT-driven preemptive
     // multitasking (the x86-64 twin of the aarch64 EL0 suite). Masks interrupts for its duration.
@@ -248,7 +277,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     }
 
     kprintln!("");
-    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants + ring-3 user-mode");
+    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants + SMP + ring-3 user-mode");
     kprintln!("[e2e] Aletheia booted as its own OS on AMD64. Halting.");
     ActiveHal::exit(0)
 }

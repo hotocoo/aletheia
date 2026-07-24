@@ -592,11 +592,29 @@ before BSS zeroing) — per-hart `tp` identity, Sv39 enable over the shared tabl
 **`kernel-core/src/sync.rs`** — defined ONCE (Issue 1), host-proved under real threads
 (`kernel-core/tests/sync.rs`: exclusion exactness + no torn publication), used by both targets.
 
+**x86-64 parity (2026-07-24, same wave):** `kernel-x86_64/src/smp.rs` closes the last bring-up leg
+— the hardest one, because x86 has NO firmware bring-up service after `ExitBootServices`; the OS
+itself is the protocol. The ACPI **MADT** (RSDP stashed from the UEFI config table pre-exit)
+enumerates the APs; the LAPIC **INIT-SIPI-SIPI** sequence wakes each into a 16-bit real-mode
+**trampoline** at physical `0x8000` (a `global_asm!` blob copied + parameterized at runtime — all
+addresses are assembler-time constants against the fixed base, so no relocation; its PTE is made
+present/writable/executable via a manual CR3 walk because OVMF may cover the low megabyte with a
+2 MiB NX leaf) that climbs real→long mode in ONE hop by cloning the BSP's CR4/CR3/EFER/CR0 over
+the SHARED page tables. Per-CPU identity = `IA32_GS_BASE` + LAPIC ID (the TPIDR/tp twin); the IPI
+is a fixed-vector LAPIC interrupt taken through a dedicated **AP IDT** (handler tags the CPU via
+GS_BASE and writes EOI — the BSP's IDT stays untouched for the ring-3 suite that runs later).
+Ordering is load-bearing: the SMP suite runs BEFORE `usermode::selftest`, which repoints IRQ0 at
+its own context-switch entry and leaves IF=0 — running after would strand the PIT deadline clock.
+Same 13 invariants, gated by `kernel-x86_64/scripts/smoke-test.sh` at `-smp 4` (x86-64 total now
+59 invariants); `-smp 1` skips green (verified). APs launch strictly sequentially (each reads its
+stack + index from the trampoline data block before signalling online), never print, and park in
+`cli; hlt` before the ring-3 suite touches the machine.
+
 Gates: aarch64 vm-e2e PASS (71 invariants incl. SMP 13) · riscv64 vm-e2e PASS (66 incl. SMP 13) ·
-x86-64 e2e PASS · conformance 3/3 PASS · kernel-core hosted 74 · clippy/fmt clean. **Honesty:**
-this is ADR-021 Phase 1 + the concurrency-substrate slice — per-CPU run queues/work stealing
-(Phase 2), TLB shootdown, the lock-hierarchy/atomic-ordering audit, and x86-64 bring-up parity
-(INIT-SIPI-SIPI real-mode trampoline) stay open under **REQ-SMP-001 (partial)**. Traceability:
+x86-64 smoke PASS (59 incl. SMP 13, `-smp 4`) · conformance 3/3 PASS · kernel-core hosted 74 ·
+clippy/fmt clean. **Honesty:** this is ADR-021 Phase 1 + the concurrency-substrate slice, now on
+ALL THREE targets — per-CPU run queues/work stealing (Phase 2), TLB shootdown, and the
+lock-hierarchy/atomic-ordering audit stay open under **REQ-SMP-001 (partial)**. Traceability:
 **54 reqs — 46 delivered / 5 partial / 3 deferred**.
 
 ## Delivered (2026-07-22 — REQ-CAP-006: capability concurrency semantics, the SMP prerequisite)
@@ -1010,7 +1028,8 @@ bash scripts/smoke-test.sh                         # boot the image in QEMU+OVMF
 #   • VMware:     attach build/aletheia-x86_64.vmdk to a UEFI VM
 #   • VirtualBox: attach build/aletheia-x86_64.img (see scripts/build-vbox.sh)
 # NOTE: the x86-64 image now proves 7 memory (frame allocator from the UEFI map) + 6 virtual-memory
-# (map/unmap over the live UEFI PML4 hierarchy) + 11 spine invariants. x86-64 can't do aarch64's
-# "MMU off->on" flip (long mode requires paging), so its vm suite proves the honest subset: walk +
-# edit the live hierarchy. smoke-test.sh gates all three marker families + exit 33.
+# (map/unmap over the live UEFI PML4 hierarchy) + 11 spine + 13 SMP (MADT + INIT-SIPI-SIPI at
+# -smp 4) + 22 ring-3 invariants. x86-64 can't do aarch64's "MMU off->on" flip (long mode requires
+# paging), so its vm suite proves the honest subset: walk + edit the live hierarchy.
+# smoke-test.sh boots -smp 4 and gates all four marker families + exit 33.
 ```
