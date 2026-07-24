@@ -328,6 +328,44 @@ pub fn map_supervisor(root: u64, va: u64) -> Option<frames::Frame> {
     }
 }
 
+/// Map `va -> pa` in `root` as a SUPERVISOR (ring-0-only, no USER bit) PRESENT|WRITABLE page — the
+/// kernel-owned counterpart to [`map_user_frame`]. Used by the SMP TLB-shootdown suite for a page
+/// the kernel (ring 0) reads on every core regardless of SMAP, without exposing it to ring 3.
+/// Returns `false` if the VA is already mapped (remap = [`unmap_user`] then map) or on exhaustion.
+pub fn map_kernel_frame(root: u64, va: u64, pa: u64) -> bool {
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE; // supervisor leaf (no USER)
+    let parent =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    // When mapping into the LIVE (firmware-owned) root, `map_to` must write a new entry into an
+    // upper-level table OVMF mapped READ-ONLY — a ring-0 write there #PFs (PROTECTION_VIOLATION)
+    // unless CR0.WP is cleared. Mirror `selftest`'s dance: clear WP across the map, restore it after.
+    let wp_was_set = Cr0::read().contains(Cr0Flags::WRITE_PROTECT);
+    if wp_was_set {
+        // SAFETY: clearing WP only relaxes ring-0 write protection; restored below. Single-core.
+        unsafe { Cr0::update(|f| f.remove(Cr0Flags::WRITE_PROTECT)) };
+    }
+    // SAFETY: `root` is a live/own PML4; `pa` is a real frame; intermediate tables come from our
+    // own allocator via `GlobalFrames`. `flush.flush()` invalidates the BSP's own TLB entry.
+    let ok = unsafe {
+        let mut mapper = mapper_for(root);
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+        let x86f = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(pa));
+        let mut fa = frames::GlobalFrames;
+        match mapper.map_to_with_table_flags(page, x86f, flags, parent, &mut fa) {
+            Ok(flush) => {
+                flush.flush();
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    if wp_was_set {
+        // SAFETY: re-arm the write-protect bit exactly as found.
+        unsafe { Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT)) };
+    }
+    ok
+}
+
 /// Remove the mapping for `va` in `root` (ignoring an already-absent mapping).
 pub fn unmap_user(root: u64, va: u64) {
     // SAFETY: `root` is identity-accessible; single-core. An unmapped `va` yields `Err`, ignored.
