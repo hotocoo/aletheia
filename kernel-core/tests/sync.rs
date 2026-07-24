@@ -28,7 +28,11 @@ fn spinlock_serializes_read_modify_write_across_threads() {
     for h in handles {
         h.join().unwrap();
     }
-    assert_eq!(*lock.lock(), THREADS * ROUNDS, "lost increments => lock failed to exclude");
+    assert_eq!(
+        *lock.lock(),
+        THREADS * ROUNDS,
+        "lost increments => lock failed to exclude"
+    );
 }
 
 #[test]
@@ -64,5 +68,9 @@ fn spinlock_release_publishes_writes_to_next_holder() {
     for r in readers {
         r.join().unwrap();
     }
-    assert_eq!(seen_torn.load(Ordering::Relaxed), 0, "reader observed a torn write");
+    assert_eq!(
+        seen_torn.load(Ordering::Relaxed),
+        0,
+        "reader observed a torn write"
+    );
 }
