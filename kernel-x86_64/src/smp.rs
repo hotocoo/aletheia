@@ -39,8 +39,9 @@ use alloc::boxed::Box;
 use crate::frames;
 use crate::pit;
 use crate::vm;
+use kernel_core::sched::TaskContext;
 use kernel_core::shootdown::{Invalidation, TlbShootdown};
-use kernel_core::smpsched::SmpSched;
+use kernel_core::smpsched::{AffinityMask, Dispatch, SmpSched};
 use kernel_core::spine::{CapEngine, CapToken, Constraints, Scope, Target};
 use kernel_core::sync::SpinLock;
 
@@ -960,7 +961,65 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "smp: every AP observes the remapped frame B after the shootdown (coherent)"
     );
 
-    // 19 — the machine is still coherent: every AP parked, nothing regressed.
+    // 19..21 — CPU affinity + cross-core migration (REQ-SMP-005, ADR-021 Phase 4). Driven entirely by
+    // the BSP over a PRIVATE 4-CPU SmpSched (the deterministic-first-steal doctrine: no AP touches
+    // `mig`, so nothing here races). Policy on real cores; the arch resume is the
+    // kernel_core::sched::TaskContext seam. Preemptive timing is the PIT's job (gated by the ring-3
+    // preemption suite) — this proves the migration MECHANISM + the resume seam.
+    const AFFINE_TASK: u64 = 1_001;
+    const MIG_TASK: u64 = 1_002;
+    const MIG_MAGIC: u64 = 0xA110_C0DE_F00D_5EED;
+    // Minimal saved-context stand-in: a real backend restores the task's full register file + address
+    // space and `iretq`s into it; this restores ONE saved GPR through a register move, enough to prove
+    // the TaskContext seam ran on the thief CPU.
+    struct GpCtx {
+        saved: u64,
+        restored: u64,
+    }
+    impl TaskContext for GpCtx {
+        fn resume(&mut self) {
+            let out: u64;
+            // SAFETY: pure register-to-register move; no memory or stack effects.
+            unsafe {
+                core::arch::asm!("mov {o}, {i}", i = in(reg) self.saved, o = out(reg) out, options(nomem, nostack, pure));
+            }
+            self.restored = out;
+        }
+    }
+    let mig = SmpSched::new(4);
+    // Affinity: a task pinned to CPU 1 but seeded on CPU 0's queue is refused by every non-permitted
+    // CPU and taken only by CPU 1 (an affinity-honored cross-core steal).
+    mig.enqueue_on_affine(0, AFFINE_TASK, AffinityMask::only(1));
+    let affinity_refused =
+        mig.next_for(0).is_none() && mig.next_for(2).is_none() && mig.next_for(3).is_none();
+    let affinity_taken = mig.next_for(1).map(|d| d.task) == Some(AFFINE_TASK);
+    check!(
+        affinity_refused && affinity_taken,
+        "smp: CPU affinity honored — a pinned task runs only on its permitted CPU (REQ-SMP-005)"
+    );
+    // Migration: a task seeded on CPU 1's queue is stolen by CPU 0 (its own queue empty).
+    mig.enqueue_on(1, MIG_TASK);
+    let migrated = mig.next_for(0)
+        == Some(Dispatch {
+            task: MIG_TASK,
+            stolen_from: Some(1),
+        });
+    check!(
+        migrated,
+        "smp: a task seeded on CPU 1 migrates to CPU 0 by stealing (cross-core task migration)"
+    );
+    // Resume the migrated task on the thief through the TaskContext seam (a minimal GPR restore).
+    let mut ctx = GpCtx {
+        saved: MIG_MAGIC,
+        restored: 0,
+    };
+    ctx.resume();
+    check!(
+        ctx.restored == MIG_MAGIC,
+        "smp: the migrated task resumes on the thief via the TaskContext seam (GPR restore ran here)"
+    );
+
+    // 22 — the machine is still coherent: every AP parked, nothing regressed.
     PHASE.store(7, Ordering::SeqCst);
     check!(
         wait_until(deadline_after(5), || PARKED.load(Ordering::SeqCst)
