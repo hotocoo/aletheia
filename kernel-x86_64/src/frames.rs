@@ -223,6 +223,12 @@ pub fn total_count() -> usize {
     kframes().total_count()
 }
 
+/// First physical address the global pool owns. `vm.rs` builds its `AddrPlan` window from this and
+/// `total_count()`, so the mapping check can never drift from the pool it protects.
+pub fn base() -> usize {
+    kframes().base()
+}
+
 /// Zero-size adapter so the global allocator satisfies `x86_64`'s `FrameAllocator<Size4KiB>` —
 /// the trait `Mapper::map_to` needs to pull intermediate page-table frames. `vm.rs` hands a
 /// `&mut GlobalFrames` to the mapper.

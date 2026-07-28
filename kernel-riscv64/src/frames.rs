@@ -214,6 +214,12 @@ pub fn total_count() -> usize {
     kframes().total_count()
 }
 
+/// First physical address the global pool owns. `vm.rs` builds its `AddrPlan` window from this and
+/// `total_count()`, so the mapping check can never drift from the pool it protects.
+pub fn base() -> usize {
+    kframes().base()
+}
+
 // ---------------------------------------------------------------------------
 // Selftest — physical-memory invariants, riscv64-only (NOT in the shared `selftest.rs`, which
 // compiles for all three kernels). Same shape + same 5 invariants as the aarch64 frame allocator:

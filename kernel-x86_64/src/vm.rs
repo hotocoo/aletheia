@@ -31,6 +31,7 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::frames;
+use kernel_core::vmaddr::{self, AddrPlan};
 
 /// A canonical lower-half virtual address far above any RAM OVMF identity-maps at `-m 256M`
 /// (which tops out in the low GiB): PML4 slot 0xA0. Its paging entries are absent at boot, so
@@ -161,6 +162,58 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "vm: unmap removes the page; VA no longer resolves"
     );
 
+    // 7 — MAPPING-API ADMISSION CHECK (ALET-P1-001, REQ-MM-001): raw addresses are untrusted input.
+    //     On x86-64 the two failure modes are not merely logical: `Page::containing_address`
+    //     TRUNCATES a misaligned VA to its page base (mapping a page the caller never named), and
+    //     `VirtAddr::new` PANICS on a non-canonical address. Both become a fail-closed `false` here.
+    //     A fresh frame is held for the whole block, so each refusal is attributable to the address
+    //     rather than to allocator exhaustion.
+    let probe = match frames::alloc_zeroed() {
+        Some(f) => f,
+        None => return Err((n + 1, "vm: no free frame for the admission-check probe")),
+    };
+    let probe_pa = probe.addr() as u64;
+    let root = active_root();
+    let non_canonical: u64 = 0x0001_0000_0000_0000; // inside 48 bits, outside the canonical form
+    let refusals = [
+        (
+            !map_kernel_frame(root, non_canonical, probe_pa),
+            "vm: mapping a non-canonical VA is refused (would #GP, not page-fault)",
+        ),
+        (
+            !map_kernel_frame(root, TEST_VA + 1, probe_pa),
+            "vm: mapping an unaligned VA is refused (would silently map its page base)",
+        ),
+        (
+            !map_kernel_frame(root, TEST_VA, probe_pa + 1),
+            "vm: mapping an unaligned PA is refused",
+        ),
+        (
+            !map_kernel_frame(root, TEST_VA, 0),
+            "vm: mapping a PA outside the frame-allocator window is refused",
+        ),
+        (
+            !map_kernel_frame(root, 0, probe_pa),
+            "vm: mapping the null page is refused (null dereferences keep faulting)",
+        ),
+        (
+            !unmap_user(root, non_canonical),
+            "vm: unmapping a non-canonical VA is refused",
+        ),
+    ];
+    // The check is a filter, not a blanket denial: a legal request still succeeds afterwards.
+    let legal_still_works = map_kernel_frame(root, TEST_VA, probe_pa)
+        && translate_in(root, TEST_VA) == Some(probe_pa)
+        && unmap_user(root, TEST_VA);
+    frames::free(probe);
+    for (ok, name) in refusals {
+        check!(ok, name);
+    }
+    check!(
+        legal_still_works,
+        "vm: a legal map/translate/unmap still succeeds after the refusals"
+    );
+
     Ok(n)
 }
 
@@ -229,6 +282,22 @@ pub fn build_space() -> Option<u64> {
     Some(pml4)
 }
 
+/// This target's address-space geometry, for the arch-independent mapping-API admission check
+/// (ALET-P1-001, REQ-MM-001). 4-level paging decodes 48 virtual-address bits and the ISA requires
+/// bits 63:47 to repeat bit 47; an address in the non-canonical hole is a #GP, not a page fault.
+/// Both matter here beyond correctness: `Page::containing_address` silently TRUNCATES a misaligned
+/// VA to its page base (mapping a different page than the caller named), and `VirtAddr::new`
+/// PANICS on a non-canonical address — so the check converts two crash/corruption paths into a
+/// fail-closed `false`. The physical window is read from the frame allocator itself.
+fn addr_plan() -> AddrPlan {
+    AddrPlan::new(
+        48,
+        true,
+        frames::base(),
+        frames::total_count() * vmaddr::PAGE_SIZE,
+    )
+}
+
 /// Software translate `va` in address space `root` (or `None` if unmapped). Used to assert the user
 /// slot is empty before trusting it as private, and to prove per-process isolation.
 pub fn translate_in(root: u64, va: u64) -> Option<u64> {
@@ -246,6 +315,9 @@ pub fn translate_in(root: u64, va: u64) -> Option<u64> {
 /// We do NOT set the NX bit (EFER.NXE is not guaranteed by firmware), so pages are effectively RWX
 /// to ring 3 — W^X is not one of the invariants this milestone proves.
 pub fn map_user_frame(root: u64, va: u64, pa: u64, writable: bool) -> bool {
+    if addr_plan().validate_map(va as usize, pa as usize).is_err() {
+        return false;
+    }
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
         flags |= PageTableFlags::WRITABLE;
@@ -305,6 +377,9 @@ pub fn map_stub_frame(root: u64, va: u64, bytes: &[u8]) -> Option<frames::Frame>
 /// a guaranteed U/S-violation `#PF` (the parents are USER, only the leaf is supervisor) — the
 /// OVMF-independent way to prove the ring-3 -> kernel-memory isolation boundary. Returns the frame.
 pub fn map_supervisor(root: u64, va: u64) -> Option<frames::Frame> {
+    if addr_plan().validate_unmap(va as usize).is_err() {
+        return None;
+    }
     let f = frames::alloc_zeroed()?;
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE; // deliberately NO user bit
     let parent =
@@ -333,6 +408,9 @@ pub fn map_supervisor(root: u64, va: u64) -> Option<frames::Frame> {
 /// the kernel (ring 0) reads on every core regardless of SMAP, without exposing it to ring 3.
 /// Returns `false` if the VA is already mapped (remap = [`unmap_user`] then map) or on exhaustion.
 pub fn map_kernel_frame(root: u64, va: u64, pa: u64) -> bool {
+    if addr_plan().validate_map(va as usize, pa as usize).is_err() {
+        return false;
+    }
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE; // supervisor leaf (no USER)
     let parent =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
@@ -366,14 +444,23 @@ pub fn map_kernel_frame(root: u64, va: u64, pa: u64) -> bool {
     ok
 }
 
-/// Remove the mapping for `va` in `root` (ignoring an already-absent mapping).
-pub fn unmap_user(root: u64, va: u64) {
-    // SAFETY: `root` is identity-accessible; single-core. An unmapped `va` yields `Err`, ignored.
+/// Remove the mapping for `va` in `root` (ignoring an already-absent mapping). Returns `false` when
+/// the request is refused by the admission check or no mapping was present, so a caller that cares
+/// (the selftest) can observe a refusal; the ordinary teardown callers ignore it.
+pub fn unmap_user(root: u64, va: u64) -> bool {
+    if addr_plan().validate_unmap(va as usize).is_err() {
+        return false;
+    }
+    // SAFETY: `root` is identity-accessible; single-core. An unmapped `va` yields `Err`.
     unsafe {
         let mut mapper = mapper_for(root);
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
-        if let Ok((_f, flush)) = mapper.unmap(page) {
-            flush.flush();
+        match mapper.unmap(page) {
+            Ok((_f, flush)) => {
+                flush.flush();
+                true
+            }
+            Err(_) => false,
         }
     }
 }

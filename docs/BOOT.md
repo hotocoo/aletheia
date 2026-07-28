@@ -36,6 +36,10 @@ Individual hosted + per-target gates:
 cd aletheia && cargo test          # hosted System Core suite (M1 + P2 + policy + AI + search)
 ./scripts/vm-e2e.sh                # aarch64 microkernel in QEMU (spine + memory + virtual-memory + user-mode)
 ./scripts/vm-e2e-riscv.sh          # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
+./scripts/vm-e2e-x86.sh            # x86-64/AMD64 first-class target (QEMU + OVMF UEFI, mtools ESP)
+./scripts/e2e-all.sh               # all three legs, one aggregate pass/fail
+./scripts/conformance.sh           # every target proves the SAME core semantic contract
+./scripts/build-all.sh             # every crate, each with its own pinned toolchain/target
 ```
 
 ---
@@ -91,16 +95,18 @@ qemu-system-riscv64 -machine virt -cpu rv64 -smp 1 -m 128M -nographic \
 
 The only target that produces a **bootable disk image**: Aletheia boots as its own OS under
 **UEFI firmware**, calls `ExitBootServices` to take the machine, brings up its own GDT/IDT +
-8259 PIC + 8254 PIT, and re-proves **11 spine + 7 memory + 6 virtual-memory + 13 ring-3
-user-mode** invariants. The image is GPT with a FAT32 **EFI System Partition** holding
+8259 PIC + 8254 PIT, and re-proves **11 spine + 7 memory + 13 virtual-memory + 22 ring-3
+user-mode + 22 SMP** invariants (the virtual-memory count includes the mapping-API admission
+check, REQ-MM-001/ADR-029). The image is GPT with a FAT32 **EFI System Partition** holding
 `\EFI\BOOT\BOOTX64.EFI` — so it needs **UEFI firmware, never legacy BIOS**.
 
 ### Build the image
 
 ```bash
 cd kernel-x86_64
-bash scripts/build-image.sh        # -> build/aletheia-x86_64.img  (raw GPT/ESP)
-                                   #    build/aletheia-x86_64.vmdk (VMware)
+bash scripts/build-image.sh        # macOS -> build/aletheia-x86_64.img  (raw GPT/ESP)
+                                   #          build/aletheia-x86_64.vmdk (VMware)
+bash scripts/build-image-linux.sh  # portable (Linux/CI) -> build/aletheia-x86_64.img
 bash scripts/build-vbox.sh         # -> build/aletheia-x86_64.vdi  (VirtualBox, optional)
 ```
 
@@ -108,12 +114,22 @@ bash scripts/build-vbox.sh         # -> build/aletheia-x86_64.vdi  (VirtualBox, 
 `qemu-img` (no `mtools`/`xorriso`/`grub`). By default it embeds the **release** `.efi`; set
 `PROFILE=debug` or `EFI=/path/to.efi` to override, and `SIZE_MB=` to resize.
 
+`build-image-linux.sh` is the **portable** builder the CI boot gate uses: `mtools` only, no root,
+no loop devices, no `hdiutil` — it writes a single FAT volume onto the whole raw disk (UEFI treats
+a partition-less FAT disk as removable-media ESP and boots `\EFI\BOOT\BOOTX64.EFI`, so no GPT is
+required). Same `PROFILE`/`EFI`/`SIZE_MB` overrides.
+
 ### Boot it — QEMU + OVMF (the automated gate)
 
 ```bash
+./scripts/vm-e2e-x86.sh            # the CI gate: build .efi from HEAD -> ESP image -> boot -> assert
 cd kernel-x86_64
 bash scripts/smoke-test.sh         # boots build/aletheia-x86_64.img, asserts exit 33 + [e2e] PASS
 ```
+
+`scripts/vm-e2e-x86.sh` is the canonical x86-64 gate (the leg CI runs, at parity with
+`scripts/vm-e2e.sh` and `scripts/vm-e2e-riscv.sh`); it drops any stale `.efi`, drives
+`build-image-linux.sh`, then runs `smoke-test.sh` as its boot step.
 
 Manual QEMU line (OVMF **must** be attached as `pflash`, not `-bios`):
 

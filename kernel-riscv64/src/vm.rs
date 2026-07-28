@@ -27,6 +27,7 @@
 //! 4 KiB page at level 0.
 use crate::frames;
 use core::arch::asm;
+use kernel_core::vmaddr::{self, AddrPlan};
 
 // --- Fixed platform addresses (QEMU virt, RISC-V) ------------------------------------------
 const RAM_BASE: usize = frames::RAM_BASE; // 0x8000_0000
@@ -124,6 +125,20 @@ pub fn build_identity() -> Option<usize> {
     Some(root)
 }
 
+/// This target's address-space geometry, for the arch-independent mapping-API admission check
+/// (ALET-P1-001, REQ-MM-001). Sv39 decodes 39 virtual-address bits INCLUDING the sign bit: bits
+/// 63:39 must repeat bit 38, so the low half is `[0, 2^38)` and anything between the halves is a
+/// non-addressable hole, not a mappable page. A `va` with bit 39 set aliases a low-half entry. The
+/// physical window is read from the frame allocator itself, so the check cannot drift from the pool.
+fn addr_plan() -> AddrPlan {
+    AddrPlan::new(
+        39,
+        true,
+        frames::base(),
+        frames::total_count() * vmaddr::PAGE_SIZE,
+    )
+}
+
 /// Software page-table walk: translate `va` to its physical address using `root`, or `None` if
 /// unmapped. Used to *assert the map is correct before paging is enabled* (turning a would-be
 /// silent hang into a testable pre-check) and to verify dynamic map/unmap afterwards.
@@ -161,6 +176,9 @@ pub fn translate(root: usize, va: usize) -> Option<usize> {
 /// needed. Returns `false` on allocator exhaustion or if an intermediate level is already a leaf
 /// (this wave never splits a giga/megapage). Fences the TLB for `va`.
 pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
+    if addr_plan().validate_map(va, pa).is_err() {
+        return false;
+    }
     let (i2, i1, i0) = indices(va);
     // SAFETY: table entries are identity-accessible; new tables come from `frames::alloc_zeroed`.
     unsafe {
@@ -201,6 +219,9 @@ pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
 /// Unmap the 4 KiB page at `va` (clear its level-0 entry) and fence its TLB entry. Returns `false`
 /// if the page was not present as a 4 KiB mapping.
 pub fn unmap_page(root: usize, va: usize) -> bool {
+    if addr_plan().validate_unmap(va).is_err() {
+        return false;
+    }
     let (i2, i1, i0) = indices(va);
     // SAFETY: identity-accessible table walk; writing a zero (invalid) entry is always sound.
     unsafe {
@@ -397,6 +418,47 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         translate(root, TEST_VA).is_none(),
         "vm: unmapped VA no longer resolves"
+    );
+
+    // 8 — MAPPING-API ADMISSION CHECK (ALET-P1-001, REQ-MM-001): raw addresses are untrusted
+    //     input. Each rejection below is a real corruption the check prevents on live tables:
+    //     an aliasing VA silently overwrites another page's entry, a misaligned address maps a
+    //     different page than the caller named, and a PA outside the allocator's window maps
+    //     memory the kernel does not own. The reference frame is still allocated, so every
+    //     rejection is attributable to the address, not to allocator exhaustion.
+    let alias_va = TEST_VA + (1usize << 39); // bit 39 set: non-canonical under Sv39, aliases TEST_VA
+    check!(
+        !map_page(root, alias_va, frame.addr(), NORMAL_PAGE),
+        "vm: mapping a VA outside the Sv39 canonical form is refused (would alias another entry)"
+    );
+    check!(
+        translate(root, TEST_VA).is_none(),
+        "vm: the refused aliasing map left the aliased VA untouched"
+    );
+    check!(
+        !map_page(root, TEST_VA + 1, frame.addr(), NORMAL_PAGE),
+        "vm: mapping an unaligned VA is refused"
+    );
+    check!(
+        !map_page(root, TEST_VA, frame.addr() + 1, NORMAL_PAGE),
+        "vm: mapping an unaligned PA is refused"
+    );
+    check!(
+        !map_page(root, TEST_VA, 0, NORMAL_PAGE),
+        "vm: mapping a PA outside the frame-allocator window is refused"
+    );
+    check!(
+        !map_page(root, 0, frame.addr(), NORMAL_PAGE),
+        "vm: mapping the null page is refused (null dereferences keep faulting)"
+    );
+    check!(
+        !unmap_page(root, alias_va),
+        "vm: unmapping an aliasing VA is refused (cannot tear down another page)"
+    );
+    // The check is a filter, not a blanket denial: a legal request still succeeds afterwards.
+    check!(
+        map_page(root, TEST_VA, frame.addr(), NORMAL_PAGE) && unmap_page(root, TEST_VA),
+        "vm: a legal map/unmap still succeeds after the refusals"
     );
 
     frames::free(frame);

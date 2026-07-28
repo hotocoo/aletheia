@@ -126,7 +126,12 @@ cargo run -- serve --ensure-model &   # (or start llama-server yourself:)
 llama-server -m "$(python3 -c 'import glob,os;print(glob.glob(os.path.expanduser("~/.cache/huggingface/hub/models--GnLOLot--MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF/snapshots/*/*.gguf"))[0])')" -c 8192 --port 8080
 MODEL_ENDPOINT=http://localhost:8080 cargo run   # provider becomes healthy → model interprets intents
 
-./scripts/vm-e2e.sh              # build + boot the microkernel in QEMU + assert invariants (P4)
+./scripts/vm-e2e.sh              # build + boot the aarch64 microkernel in QEMU + assert invariants (P4)
+./scripts/vm-e2e-riscv.sh        # ...the RISC-V target        ./scripts/vm-e2e-x86.sh   # ...the x86-64 target
+./scripts/e2e-all.sh             # all three CPU targets, one aggregate pass/fail
+./scripts/conformance.sh         # every target proves the SAME core semantic contract
+./scripts/check-traceability.sh  # every "delivered" requirement maps to evidence that EXISTS
+./scripts/check-ci-parity.sh     # ...and that CI actually RUNS it (every arch boot-gated, both pipelines agree)
 ```
 
 Configuration (all optional; defaults shown):
