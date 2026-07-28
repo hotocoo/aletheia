@@ -15,6 +15,26 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
+## Latest wave — Qualification infrastructure (2026-07-24, GAPS4 P0 cluster)
+
+Closing the audit's #1 risk (`docs/gap/ARCHITECTURE-GAPS4.md`): "qualification systems are behind
+the number of architectural claims." Disposition of all 67 findings lives in
+`docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`.
+
+- **ALET-P0-001 — x86-64 boot gate at CI parity (RESOLVED).** x86-64 was first-class in the
+  architecture but had no automated boot gate (its ring-3/syscall/timer/paging code could regress
+  while CI stayed green). Root cause the gate didn't exist: `build-image.sh` is macOS-only
+  (hdiutil/diskutil). Added `kernel-x86_64/scripts/build-image-linux.sh` (portable FAT ESP via
+  `mtools`, no root/loop devices), generalized `smoke-test.sh` OVMF discovery to Linux, added
+  `scripts/vm-e2e-x86.sh`, and wired the `vm-e2e-x86` CI job — booted green under QEMU+OVMF at
+  `-smp 4` (exit 33, 22 ring-3 + memory + vm + spine + SMP markers).
+- **ALET-P0-002 — single repository-wide integration build (RESOLVED).** `scripts/build-all.sh`
+  builds every crate with its own pinned toolchain/target (host crates also tested) with one
+  aggregate pass/fail; wired as the `build-all` CI job. `E2E-ALL: PASS` across all three CPU targets.
+- **Reliability fix (root cause of local `E0463 can't find crate for core` / `FAIL: build`):** a
+  Homebrew/system `cargo` earlier in `PATH` ignores each kernel's `rust-toolchain.toml` and builds
+  for the host triple. All build/boot scripts now prepend the rustup shim (`~/.cargo/bin`).
+
 ## Delivered (M1)
 
 A Rust hosted reference implementation of the System Core (`aletheia/`), enforcing the same invariants
@@ -1125,7 +1145,8 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 cd kernel && cargo run          # boots Aletheia, proves 11+7+13+10 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
 
 # A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
-cd kernel-x86_64 && bash scripts/build-image.sh   # -> build/aletheia-x86_64.{img,vmdk}
+cd kernel-x86_64 && bash scripts/build-image.sh   # macOS host -> build/aletheia-x86_64.{img,vmdk}
+#   ...or portable (Linux/CI, mtools only — no hdiutil/root): bash scripts/build-image-linux.sh
 bash scripts/smoke-test.sh                         # boot the image in QEMU+OVMF, assert exit 33
 #   • QEMU:       qemu-system-x86_64 -bios <OVMF_CODE.fd> -drive format=raw,file=build/aletheia-x86_64.img -serial stdio
 #   • VMware:     attach build/aletheia-x86_64.vmdk to a UEFI VM
