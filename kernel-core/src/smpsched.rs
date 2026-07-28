@@ -295,6 +295,7 @@ impl SmpSched {
     /// run-queue lock for the duration — the ADR-028 tripwire. `acting_cpu` is the CPU *doing the
     /// dispatch* (which may lock a victim's queue during a steal); it is what the "at most one queue
     /// lock per CPU" invariant is stated over.
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))] // acting_cpu drives the debug-only tripwire
     fn with_queue<R>(
         &self,
         acting_cpu: usize,

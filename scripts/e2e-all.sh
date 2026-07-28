@@ -35,19 +35,21 @@ hr; echo "==> [2/3] RISC-V/RV64GC vm-e2e (S-mode + SBI + rdtime + spine + mm + S
 if bash "$ROOT/scripts/vm-e2e-riscv.sh"; then riscv_res="PASS"; else riscv_res="FAIL"; fi
 
 hr; echo "==> [3/3] AMD64/x86-64 disk-image boot smoke-test (UEFI + timer IRQ + spine)"; hr
+# Portable leg: scripts/vm-e2e-x86.sh builds the .efi from HEAD, assembles a FAT ESP image with
+# mtools (no hdiutil/loop devices), and boots it under QEMU+OVMF — so this leg now runs on Linux/CI
+# at parity with the aarch64/RISC-V legs, not just macOS. It only SKIPs (never silent-passes) when
+# the host lacks qemu-system-x86_64 + mtools + OVMF firmware.
 X86="$ROOT/kernel-x86_64"
-QSHARE="$(brew --prefix qemu 2>/dev/null)/share/qemu"; [ -d "$QSHARE" ] || QSHARE=/opt/homebrew/share/qemu
-if [ "$(uname -s)" = "Darwin" ] && command -v hdiutil >/dev/null 2>&1 && [ -f "$QSHARE/edk2-x86_64-code.fd" ]; then
-  # Build from current source: drop the cached .efi so the image reflects HEAD, not a stale artifact.
-  rm -f "$X86/target/x86_64-unknown-uefi/release/aletheia-kernel-x86_64.efi"
-  if bash "$X86/scripts/build-image.sh" && bash "$X86/scripts/smoke-test.sh"; then
-    x86_res="PASS"
-  else
-    x86_res="FAIL"
-  fi
+have_ovmf=0
+for c in /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE_4M.fd \
+         /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd; do
+  [ -f "$c" ] && { have_ovmf=1; break; }
+done
+if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && [ "$have_ovmf" = "1" ]; then
+  if bash "$ROOT/scripts/vm-e2e-x86.sh"; then x86_res="PASS"; else x86_res="FAIL"; fi
 else
-  x86_res="SKIP (needs macOS host + hdiutil + OVMF firmware)"
-  echo "    x86-64 image build unavailable on this host — leg skipped."
+  x86_res="SKIP (needs qemu-system-x86_64 + mtools + OVMF firmware)"
+  echo "    x86-64 image build/boot tooling unavailable on this host — leg skipped."
 fi
 
 hr; echo "E2E SUMMARY"; hr

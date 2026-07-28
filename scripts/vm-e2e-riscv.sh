@@ -11,6 +11,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Honor the per-crate nightly toolchain via the rustup shim. A Homebrew/system `cargo` earlier in
+# PATH ignores rust-toolchain.toml and builds for the host triple, failing the cross build with
+# E0463 "can't find crate for core" — which surfaces here only as "FAIL: build".
+if [ -x "$HOME/.cargo/bin/cargo" ]; then export PATH="$HOME/.cargo/bin:$PATH"; fi
 KDIR="$ROOT/kernel-riscv64"
 TARGET="riscv64gc-unknown-none-elf"
 ELF="$KDIR/target/$TARGET/debug/aletheia-kernel-riscv64"

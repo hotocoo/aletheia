@@ -11,11 +11,27 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="${1:-$HERE/build/aletheia-x86_64.img}"
 [ -f "$IMG" ] || { echo "missing image: $IMG (run scripts/build-image.sh first)"; exit 1; }
 
+# Locate OVMF/edk2 UEFI firmware across hosts: macOS (Homebrew qemu) and Linux/CI (Debian/Ubuntu
+# `ovmf` package). CODE is the read-only firmware; VARSSRC is a writable NVRAM template we copy.
+# Override with OVMF_CODE / OVMF_VARS to point at a custom build.
 QSHARE="$(brew --prefix qemu 2>/dev/null)/share/qemu"
-[ -d "$QSHARE" ] || QSHARE=/opt/homebrew/share/qemu
-CODE="$QSHARE/edk2-x86_64-code.fd"
-VARSSRC="$QSHARE/edk2-i386-vars.fd"
-[ -f "$CODE" ] || { echo "OVMF firmware not found: $CODE"; exit 1; }
+CODE=""
+for c in "${OVMF_CODE:-}" \
+         "$QSHARE/edk2-x86_64-code.fd" /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+         /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+         /usr/share/OVMF/OVMF_CODE.secboot.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd \
+         /usr/share/qemu/edk2-x86_64-code.fd; do
+  [ -n "$c" ] && [ -f "$c" ] && { CODE="$c"; break; }
+done
+VARSSRC=""
+for v in "${OVMF_VARS:-}" \
+         "$QSHARE/edk2-i386-vars.fd" /opt/homebrew/share/qemu/edk2-i386-vars.fd \
+         /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+         /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/qemu/edk2-i386-vars.fd; do
+  [ -n "$v" ] && [ -f "$v" ] && { VARSSRC="$v"; break; }
+done
+[ -n "$CODE" ]    || { echo "OVMF firmware (CODE) not found — install ovmf (apt-get install -y ovmf) or set OVMF_CODE"; exit 1; }
+[ -n "$VARSSRC" ] || { echo "OVMF NVRAM (VARS) template not found — install ovmf or set OVMF_VARS"; exit 1; }
 
 WORK="$(mktemp -d)"
 VARS="$WORK/vars.fd"

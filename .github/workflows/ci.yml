@@ -46,6 +46,33 @@ jobs:
       - name: Boot riscv64 kernel in VM and assert 11/11 invariants + exit 0
         run: ./scripts/vm-e2e-riscv.sh
 
+  build-all:
+    name: Repository-wide integration build (all crates + all CPU targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust nightly + all cross targets (build-std needs rust-src)
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add rust-src --toolchain nightly
+          rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly
+      - name: Build every crate with its own pinned toolchain/target; test host crates
+        run: ./scripts/build-all.sh
+
+  vm-e2e-x86:
+    name: Microkernel VM boot e2e — x86-64/AMD64 (QEMU+OVMF)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU (x86-64 system emulation), OVMF firmware, mtools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf mtools
+      - name: Install Rust nightly + x86_64-unknown-uefi target
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup target add x86_64-unknown-uefi --toolchain nightly
+      - name: Build .efi from HEAD, assemble FAT ESP image, boot under OVMF, assert 22 ring-3 + exit 33
+        run: ./scripts/vm-e2e-x86.sh
+
   traceability:
     name: Requirement traceability (delivered ⇒ evidence)
     runs-on: ubuntu-latest
