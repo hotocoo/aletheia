@@ -15,7 +15,45 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — Qualification infrastructure (2026-07-24, GAPS4 P0 cluster)
+## Latest wave — Memory safety: the mapping API stops trusting raw addresses (2026-07-28, GAPS4 ALET-P1-001)
+
+First slice of the audit's P1 memory-safety cluster. Every target's dynamic mapping API took a raw
+`va`/`pa` and walked straight into live page tables. A walker decodes a fixed VA width (39 bits on
+aarch64 TTBR0, 39 on RISC-V Sv39, 48 on x86-64), so bits above it are not part of the walk — two
+different virtual addresses **alias the same page-table entry**: a second map silently overwrites the
+first, and unmapping one tears down the other. Same class on the physical side: a misaligned `pa` has
+its low bits swallowed by the entry's address mask, and a `pa` outside the frame allocator's window
+maps firmware tables, MMIO, or another address space's frames. On x86-64 two of these were not even
+logical faults — `Page::containing_address` silently truncates a misaligned VA to its page base, and
+`VirtAddr::new` *panics* on a non-canonical address, turning caller-supplied input into a kernel abort.
+
+- **One arch-independent rule set (REQ-MM-001, ADR-029).** `kernel-core/src/vmaddr.rs`: each target
+  declares an `AddrPlan` once — decoded VA width, whether the ISA requires canonical sign-extension,
+  and the physical window, read from the frame allocator at call time so the check cannot drift from
+  the pool it protects. Refusals are typed (`MapFault`), fail-closed, at the entry of every mapping
+  API on all three targets.
+- **`canonical` is a real architectural difference, not a style flag.** aarch64 TTBR0 (T0SZ=25)
+  covers a flat `[0, 2^39)` with TTBR1 disabled, so every higher bit must be zero. x86-64
+  sign-extends from bit 47. **RISC-V Sv39 sign-extends from bit 38** — its 39 bits *include* the sign
+  bit, so its low half is `[0, 2^38)`; modelling it like aarch64 would have wrongly accepted
+  `[2^38, 2^39)`. Each plan is judged by its own ISA rule.
+- **Proved as properties, not examples.** `kernel-core/tests/vmaddr.rs` enumerates candidate
+  addresses across every target plan and asserts the two properties the rules exist to guarantee: no
+  two *accepted* virtual addresses may alias, and the exact alias of every accepted address is
+  refused; every *accepted* physical address is a frame the allocator owns.
+- **VM-gated on live page tables.** aarch64 21 and RISC-V 21 virtual-memory invariants (was 13 each),
+  x86-64 13 (was 6). Each target holds a still-allocated frame across the block, so every refusal is
+  attributable to the address rather than to allocator exhaustion, and each ends by proving a legal
+  map/translate/unmap still succeeds — "everything is refused" cannot masquerade as a pass. The
+  gates now pin the invariant COUNT, so losing an invariant fails instead of passing quietly.
+- **The refusals are part of the cross-architecture contract.** `scripts/conformance.sh` requires the
+  four identically-worded refusals from all three targets: a target that accepts an address the
+  others refuse is a security boundary that varies by CPU.
+- **Scope, stated honestly.** This closes address *admission* only. Frame ownership / double-free
+  defense (ALET-P1-003), intermediate page-table reclamation (ALET-P1-002), address-space destruction
+  (ALET-P1-004) and a global W^X invariant (ALET-P1-007) remain **open** in the GAPS4 register.
+
+## Previous wave — Qualification infrastructure (2026-07-24, GAPS4 P0 cluster)
 
 Closing the audit's #1 risk (`docs/gap/ARCHITECTURE-GAPS4.md`): "qualification systems are behind
 the number of architectural claims." Disposition of all 67 findings lives in

@@ -16,7 +16,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P0-001 | P0 | resolved | x86-64 boot gate at CI parity: `kernel-x86_64/scripts/build-image-linux.sh` (portable mtools ESP), `scripts/vm-e2e-x86.sh`, `.github/workflows/ci.yml` job `vm-e2e-x86`; boots exit 33 + 22 ring-3 markers |
 | ALET-P0-002 | P0 | resolved | `scripts/build-all.sh` (every crate, own toolchain/target, host crates tested) + CI job `build-all`; `E2E-ALL: PASS` 3 targets |
 | ALET-P0-003 | P0 | resolved | `scripts/check-ci-parity.sh` (REQ-QUAL-001) + CI job `ci-parity` in BOTH pipelines: FS-discovered bootable crates must each have a CI-executed boot gate, GitHub↔GitLab script sets must match, every matrix `VM Gate` must actually run, STATUS↔CI cross-check. Wiring it exposed and fixed 3 real gaps (GitLab missing `build-all`/`vm-e2e-x86`; `conformance.sh` claimed but never CI-run and macOS-gated on x86) |
-| ALET-P1-001 | P1 | open | mapping APIs must validate raw phys/virt addrs (alignment, canonical form, range) |
+| ALET-P1-001 | P1 | resolved | `kernel-core/src/vmaddr.rs` (REQ-MM-001, ADR-029) enforced at every mapping API on all three targets; host property proof `kernel-core/tests/vmaddr.rs` (no accepted VA pair aliases; every accepted PA is an owned frame) + 8/8/7 live-table VM invariants (aarch64 21, riscv64 21, x86-64 13 vm invariants) + refusals added to the conformance core contract |
 | ALET-P1-002 | P1 | open | page-table reclamation after unmap (free now-empty intermediate tables) |
 | ALET-P1-003 | P1 | open | physical frame ownership model (who owns a frame; double-free/use-after-free defenses) |
 | ALET-P1-004 | P1 | open | address-space destruction fully qualified (teardown frees all frames + tables) |
@@ -81,4 +81,4 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-07-28):** 67 findings — 5 resolved (every P0 closed), 51 open, 11 deferred (milestone subsystems).
+**Rollup (2026-07-28):** 67 findings — 6 resolved (every P0 closed; P1 memory-safety cluster started), 50 open, 11 deferred (milestone subsystems).

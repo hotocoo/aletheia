@@ -7,7 +7,7 @@
 # in that target's live invariant log.
 #
 # It is spec'd on NAMED BEHAVIORS, not identical invariant COUNTS: architectures legitimately differ
-# (e.g. x86-64 proves 6 virtual-memory invariants where aarch64/RISC-V prove 13, because long mode
+# (e.g. x86-64 proves 13 virtual-memory invariants where aarch64/RISC-V prove 21, because long mode
 # cannot do the MMU-off→on flip — an honest arch difference, not a regression). Such per-arch invariants
 # are EXTENSIONS, reported informationally, never conformance failures. Only the core contract below is
 # required of all three.
@@ -28,6 +28,13 @@ CONTRACT=(
   "a send WAKES the blocked receiver"
   "the woken receiver RESUMES past its"
   "scheduler dispatches boosted LOW over Ready MEDIUM"
+  # Mapping-API admission check (ALET-P1-001, REQ-MM-001). Worded identically on every target on
+  # purpose: these are the refusals that must NOT differ by architecture, since a target that
+  # accepts an address the others refuse is a security boundary that varies by CPU.
+  "mapping an unaligned VA is refused"
+  "mapping an unaligned PA is refused"
+  "mapping a PA outside the frame-allocator window is refused"
+  "mapping the null page is refused"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )
