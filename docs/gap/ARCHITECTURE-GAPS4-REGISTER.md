@@ -9,13 +9,13 @@ milestone work, carrying no false "done" claim).
 **Disposition legend:** `resolved` — fix landed + verified; `open` — accepted, queued;
 `deferred` — real work, scoped to a later milestone via ADR/roadmap (not counted as delivered).
 
-**As of:** 2026-07-24.
+**As of:** 2026-07-28.
 
 | ID | Sev | Disposition | Evidence / Note |
 |----|-----|-------------|-----------------|
 | ALET-P0-001 | P0 | resolved | x86-64 boot gate at CI parity: `kernel-x86_64/scripts/build-image-linux.sh` (portable mtools ESP), `scripts/vm-e2e-x86.sh`, `.github/workflows/ci.yml` job `vm-e2e-x86`; boots exit 33 + 22 ring-3 markers |
 | ALET-P0-002 | P0 | resolved | `scripts/build-all.sh` (every crate, own toolchain/target, host crates tested) + CI job `build-all`; `E2E-ALL: PASS` 3 targets |
-| ALET-P0-003 | P0 | open | traceability gate exists (`scripts/check-traceability.sh`); next: mechanically assert each first-class arch has a CI boot gate + STATUS↔CI cross-check |
+| ALET-P0-003 | P0 | resolved | `scripts/check-ci-parity.sh` (REQ-QUAL-001) + CI job `ci-parity` in BOTH pipelines: FS-discovered bootable crates must each have a CI-executed boot gate, GitHub↔GitLab script sets must match, every matrix `VM Gate` must actually run, STATUS↔CI cross-check. Wiring it exposed and fixed 3 real gaps (GitLab missing `build-all`/`vm-e2e-x86`; `conformance.sh` claimed but never CI-run and macOS-gated on x86) |
 | ALET-P1-001 | P1 | open | mapping APIs must validate raw phys/virt addrs (alignment, canonical form, range) |
 | ALET-P1-002 | P1 | open | page-table reclamation after unmap (free now-empty intermediate tables) |
 | ALET-P1-003 | P1 | open | physical frame ownership model (who owns a frame; double-free/use-after-free defenses) |
@@ -57,7 +57,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P2-009 | P2 | open | long-running soak testing |
 | ALET-P2-010 | P2 | open | larger/more diverse property-test campaigns |
 | ALET-P2-011 | P2 | resolved | this register + `check-traceability.sh` prevent manual-metric drift |
-| ALET-P2-012 | P2 | open | machine-checked requirement traceability (gate exists; extend to finding-register) |
+| ALET-P2-012 | P2 | open | machine-checked requirement traceability — evidence-exists (`check-traceability.sh`) and evidence-runs (`check-ci-parity.sh`) are gated; remaining: mechanically bind THIS register's rows to their evidence |
 | ALET-P2-013 | P2 | open | separate "implemented" vs "production-ready" in all status docs |
 | ALET-P2-014 | P2 | deferred | complete production boot chain — milestone work |
 | ALET-P2-015 | P2 | deferred | secure boot — milestone work (ADR needed) |
@@ -81,4 +81,4 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-07-24):** 67 findings — 4 resolved, 52 open, 11 deferred (milestone subsystems).
+**Rollup (2026-07-28):** 67 findings — 5 resolved (every P0 closed), 51 open, 11 deferred (milestone subsystems).

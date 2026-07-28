@@ -31,6 +31,27 @@ the number of architectural claims." Disposition of all 67 findings lives in
 - **ALET-P0-002 — single repository-wide integration build (RESOLVED).** `scripts/build-all.sh`
   builds every crate with its own pinned toolchain/target (host crates also tested) with one
   aggregate pass/fail; wired as the `build-all` CI job. `E2E-ALL: PASS` across all three CPU targets.
+- **ALET-P0-003 — CI-coverage gate: claims must RUN, not merely exist (RESOLVED).**
+  `check-traceability.sh` proves a `delivered` requirement points at evidence that exists; it cannot
+  prove CI executes that evidence. ALET-P0-001 was exactly that hole — an x86-64 boot script on disk,
+  named in the matrix, run by nobody. `scripts/check-ci-parity.sh` (REQ-QUAL-001) closes it with four
+  mechanical checks: (1) every **bootable kernel crate discovered from the tree** (`Cargo.toml` +
+  `src/main.rs`) must have a boot gate CI executes — so adding a fourth CPU target without a gate
+  fails the build instead of shipping an unqualified architecture; (2) `.github/workflows/ci.yml` and
+  `.gitlab-ci.yml` must execute the **same** script set, because the repo pushes to both GitHub and
+  the self-hosted GitLab origin and a one-sided gate is enforced for half the pushes; (3) every path
+  in the matrix's `VM Gate` column must actually be executed by CI — no "aggregate runner" exemption,
+  since a wrapper can carry assertions of its own that nothing would run; (4) STATUS.md must name
+  every script CI runs. Comments are stripped before resolution, so a script mentioned in prose can
+  never stand in for a job.
+- **Wiring the gate found real gaps, now fixed.** `.gitlab-ci.yml` was missing `build-all` and
+  `vm-e2e-x86` (they existed only on GitHub); `scripts/conformance.sh` (REQ-CONF-001, the
+  cross-architecture semantic-divergence gate) was claimed as a VM gate but had **no CI job at all**,
+  and its x86-64 column was hard-gated on macOS/`hdiutil` so it could never compare x86 in CI. Both
+  pipelines now run `build-all`, `vm-e2e-x86`, `conformance`, `traceability` and `ci-parity`, and
+  `conformance.sh` drives the portable `scripts/vm-e2e-x86.sh` leg. The matrix's x86-64 gate is now
+  canonically `scripts/vm-e2e-x86.sh` (the CI-executed leg; `smoke-test.sh` is the boot step it
+  invokes), and REQ-SMP-001 names the three legs it relies on rather than the `e2e-all.sh` wrapper.
 - **Reliability fix (root cause of local `E0463 can't find crate for core` / `FAIL: build`):** a
   Homebrew/system `cargo` earlier in `PATH` ignores each kernel's `rust-toolchain.toml` and builds
   for the host triple. All build/boot scripts now prepend the rustup shim (`~/.cargo/bin`).

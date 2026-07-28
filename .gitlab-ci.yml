@@ -28,8 +28,42 @@ vm-e2e-riscv:
     - rustup component add rust-src --toolchain nightly
     - ./scripts/vm-e2e-riscv.sh
 
+build-all:
+  stage: test
+  image: rust:latest
+  script:
+    - rustup toolchain install nightly --profile minimal
+    - rustup component add rust-src --toolchain nightly
+    - rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly
+    - ./scripts/build-all.sh
+
+vm-e2e-x86:
+  stage: test
+  image: rust:latest
+  script:
+    - apt-get update && apt-get install -y qemu-system-x86 ovmf mtools
+    - rustup toolchain install nightly --profile minimal
+    - rustup target add x86_64-unknown-uefi --toolchain nightly
+    - ./scripts/vm-e2e-x86.sh
+
+conformance:
+  stage: test
+  image: rust:latest
+  script:
+    - apt-get update && apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf mtools perl
+    - rustup toolchain install nightly --profile minimal
+    - rustup component add rust-src --toolchain nightly
+    - rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly
+    - ./scripts/conformance.sh
+
 traceability:
   stage: test
   image: rust:latest
   script:
     - ./scripts/check-traceability.sh
+
+ci-parity:
+  stage: test
+  image: rust:latest
+  script:
+    - ./scripts/check-ci-parity.sh

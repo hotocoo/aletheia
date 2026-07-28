@@ -38,15 +38,21 @@ hr; echo "==> Booting all three targets to capture their live invariant logs"; h
 echo "--> aarch64 …";  AOUT="$(bash "$ROOT/scripts/vm-e2e.sh" 2>&1)"
 echo "--> RISC-V …";   ROUT="$(bash "$ROOT/scripts/vm-e2e-riscv.sh" 2>&1)"
 echo "--> x86-64 …"
-XQ="$(brew --prefix qemu 2>/dev/null)/share/qemu"; [ -d "$XQ" ] || XQ=/opt/homebrew/share/qemu
+# Drive the portable leg (scripts/vm-e2e-x86.sh: mtools ESP, no hdiutil/root) so the x86-64 column
+# is really compared on Linux/CI too, not only on a macOS workstation. It builds the .efi from HEAD
+# and boots under QEMU+OVMF. The leg SKIPs — never silently passes — when the host lacks the tools.
 x86_ran=0
-if [ "$(uname -s)" = "Darwin" ] && command -v hdiutil >/dev/null 2>&1 && [ -f "$XQ/edk2-x86_64-code.fd" ]; then
-  rm -f "$ROOT/kernel-x86_64/target/x86_64-unknown-uefi/release/aletheia-kernel-x86_64.efi"
-  XOUT="$( (bash "$ROOT/kernel-x86_64/scripts/build-image.sh" && bash "$ROOT/kernel-x86_64/scripts/smoke-test.sh") 2>&1 )"
+have_ovmf=0
+for c in /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE_4M.fd \
+         /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd; do
+  [ -f "$c" ] && { have_ovmf=1; break; }
+done
+if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && [ "$have_ovmf" = "1" ]; then
+  XOUT="$(bash "$ROOT/scripts/vm-e2e-x86.sh" 2>&1)"
   x86_ran=1
 else
   XOUT=""
-  echo "    x86-64 boot unavailable on this host — its column is SKIPPED (never a silent pass)."
+  echo "    x86-64 boot unavailable on this host (needs qemu-system-x86_64 + mtools + OVMF) — its column is SKIPPED (never a silent pass)."
 fi
 
 fail=0

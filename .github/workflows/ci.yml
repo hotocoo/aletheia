@@ -73,6 +73,21 @@ jobs:
       - name: Build .efi from HEAD, assemble FAT ESP image, boot under OVMF, assert 22 ring-3 + exit 33
         run: ./scripts/vm-e2e-x86.sh
 
+  conformance:
+    name: Cross-architecture semantic conformance (all three targets, one core contract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU for all three targets, OVMF firmware, mtools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf mtools perl
+      - name: Install Rust nightly + all cross targets
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add rust-src --toolchain nightly
+          rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly
+      - name: Boot every target and assert each proves the same core semantic contract
+        run: ./scripts/conformance.sh
+
   traceability:
     name: Requirement traceability (delivered ⇒ evidence)
     runs-on: ubuntu-latest
@@ -80,3 +95,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Assert every delivered/partial requirement maps to existing evidence
         run: ./scripts/check-traceability.sh
+
+  ci-parity:
+    name: CI coverage (every architecture boot-gated, both pipelines agree, claimed gates run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert no architecture or claimed VM gate is unenforced by CI
+        run: ./scripts/check-ci-parity.sh
