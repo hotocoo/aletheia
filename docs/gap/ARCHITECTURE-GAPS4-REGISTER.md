@@ -71,7 +71,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P2-023 | P2 | deferred | hardware discovery (ACPI/DT) completion — milestone work |
 | ALET-P2-024 | P2 | deferred | native AI runtime as a complete OS subsystem — milestone work |
 | ALET-P2-025 | P2 | open | context lifecycle resource boundaries |
-| ALET-P2-026 | P2 | open | memory as a security boundary (zeroing on free/reuse) |
+| ALET-P2-026 | P2 | resolved | erase-on-free (REQ-MM-005, ADR-033): every target zeroes a frame at release — the choke point explicit frees, reclamation and teardown all share — so no frame carries a previous owner's bytes. Proved by the reuse case (pattern → free → same frame back → zeros) in each VM gate (memory invariants 17 → 21, x86-64 22) + the erase behavior added to the conformance core contract. Not claimed: frames never owned still hold firmware bytes (pre-boot memory, not task data) |
 | ALET-P2-027 | P2 | open | relationship-graph access capability enforcement |
 | ALET-P2-028 | P2 | open | intent-confusion attack testing |
 | ALET-P2-029 | P2 | open | continuous threat-model maintenance |
@@ -81,10 +81,10 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-02):** 67 findings — 9 resolved (every P0 closed; the P1 memory-safety cluster now
-has address admission ALET-P1-001, page-table reclamation ALET-P1-002, frame ownership ALET-P1-003 and
-address-space destruction ALET-P1-004), 47 open, 11 deferred (milestone subsystems). Physical memory is
-now conserved across the full lifetime of an address space: frames cannot be aliased, double-freed,
-leaked by unmapping, or leaked by dying. Not yet closed in this cluster: zeroing on free
-(ALET-P2-026 — a freed page's bytes are still readable by its next owner), W^X as a global invariant
-(ALET-P1-007), and per-arch memory-attribute validation (ALET-P1-008).
+**Rollup (2026-08-02):** 67 findings — 10 resolved (every P0 closed; the P1/P2 memory cluster now has
+address admission ALET-P1-001, page-table reclamation ALET-P1-002, frame ownership ALET-P1-003,
+address-space destruction ALET-P1-004 and erase-on-free ALET-P2-026), 46 open, 11 deferred (milestone
+subsystems). A frame can no longer be aliased, double-freed, leaked by unmapping, leaked by dying, or
+read by its next owner. Still open in this area: W^X as a global invariant (ALET-P1-007),
+per-architecture memory-attribute validation (ALET-P1-008), and kernel/user layout hardening
+(ALET-P1-006).

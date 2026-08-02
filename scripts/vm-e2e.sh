@@ -44,7 +44,7 @@ echo "vm exit code: $CODE"
 fail=0
 [ "$CODE" -eq 0 ] || { echo "FAIL: expected exit 0, got $CODE"; fail=1; }
 echo "$OUT" | grep -q "ALL 11 INVARIANTS HOLD"        || { echo "FAIL: spine invariants marker missing"; fail=1; }
-echo "$OUT" | grep -q "ALL 17 MEMORY INVARIANTS HOLD"        || { echo "FAIL: memory invariants marker missing"; fail=1; }
+echo "$OUT" | grep -q "ALL 21 MEMORY INVARIANTS HOLD"        || { echo "FAIL: memory invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 42 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "EL0-BOUNDARY INVARIANTS HOLD"  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "VIRTIO-BLK INVARIANTS HOLD"    || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }

@@ -3,7 +3,7 @@
 **As of:** 2026-08-02
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..032`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..033`.
 
 ## What Aletheia is
 
@@ -15,7 +15,41 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — Memory safety: a dying address space gives everything back (2026-08-02, GAPS4 ALET-P1-004)
+## Latest wave — Memory safety: a freed frame carries nothing (2026-08-02, GAPS4 ALET-P2-026)
+
+The previous three waves made frame ownership explicit, so two owners can never hold one frame at
+the same TIME. That is a temporal guarantee, and it was silent about what the NEXT owner could READ.
+A frame returned to the pool kept its bytes verbatim — and the pool is LIFO, so the very next
+`alloc`, in any address space, for any task, was usually that exact frame. Keys, plaintext message
+bodies, decrypted store content and IPC payloads all travelled that way. Every return path fed it:
+explicit frees, page-table reclamation, and address-space destruction — which is precisely the path
+a *crashing* task takes. The previous three wave entries each disclosed this as still-open; this
+closes it.
+
+- **Erase at release, not at allocation (REQ-MM-005, ADR-033).** Each target's `free_as` zeroes the
+  whole frame once the ownership check has confirmed the caller really held it, and before the
+  free-list link word is written. A refused free still erases nothing — it remains a total no-op.
+  Because the erase sits in the one choke point every return path shares, reclamation and teardown
+  inherit it without knowing it exists, and no caller can opt out by using plain `alloc`.
+- **The guarantee is stated precisely: no frame ever carries a previous OWNER's bytes.** It is NOT
+  "every allocation returns zeros" — a frame that has never been owned still holds whatever firmware
+  left there. That is pre-boot memory, not another task's data. `alloc_zeroed` is kept deliberately
+  for callers that need a guaranteed-blank page (page tables demand it), not by oversight.
+- **Proved by the reuse case, which is the only honest proof.** Each gate writes a recognizable
+  pattern across a frame, frees it, allocates again, asserts it got the SAME frame back (LIFO), and
+  requires every word past the free-list link to be zero. Asserting that `alloc_zeroed` returns zeros
+  would prove nothing about what a plain `alloc` hands the next task. Memory invariants 17 → **21**
+  on aarch64 and RISC-V, → **22** on x86-64.
+- **Part of the contract.** `scripts/conformance.sh` requires the erase behavior from all three
+  targets (31 core behaviors, up from 29): a CPU on which a reused frame still holds the last owner's
+  bytes is a cross-task information leak, whatever its instruction set.
+- **Honesty about the x86-64 clamp.** `init_from_uefi` clamps the managed window to what the
+  ownership state array covers, but under the gate's `-m 256` the pool is far below that ceiling, so
+  **the clamp branch itself never executes in CI**. What the gate now proves is the invariant the
+  clamp exists to maintain — every managed frame has ownership state (`total_count() <= MAX_FRAMES`).
+  The clamp path remains unexercised, and is recorded as such here rather than counted as covered.
+
+## Previous wave — Memory safety: a dying address space gives everything back (2026-08-02, GAPS4 ALET-P1-004)
 
 Fourth and final slice of the P1 memory-safety cluster's reclamation arc, and the one the previous
 three unlocked. Reclamation (ALET-P1-002) serves a task that tidies up page by page. A task that
@@ -57,7 +91,7 @@ down on its first teardown.
   are still readable by its next owner), W^X is still not a global invariant (ALET-P1-007), and
   per-arch memory-attribute validation (ALET-P1-008) is untouched. All **open** in the register.
 
-## Previous wave — Memory safety: an unmap gives the page tables back (2026-08-02, GAPS4 ALET-P1-002)
+## Earlier wave — Memory safety: an unmap gives the page tables back (2026-08-02, GAPS4 ALET-P1-002)
 
 Third slice of the P1 memory-safety cluster, landed the same day as the frame-ownership model it
 depends on. Mapping one page allocates a chain of translation tables (L2+L3 on the 3-level aarch64
@@ -736,7 +770,7 @@ suite grows **17 → 41** (6 suites).
   leakage** (scope confinement + action-wildcard does not over-match a neighbouring namespace).
   9 hosted tests; all green (the engine holds).
 - **Machine-checkable traceability gate** (gap Issue 12) — `docs/TRACEABILITY.md` is a machine-readable
-  matrix of **62 requirements** (55 delivered, 4 partial, 3 deferred as of 2026-08-02; it was 45 —
+  matrix of **63 requirements** (56 delivered, 4 partial, 3 deferred as of 2026-08-02; it was 45 —
   34/2/9 — when the gate was introduced), each mapping
   ReqID → ADR → implementation → test → VM gate → status. `scripts/check-traceability.sh` (pure bash,
   no new CI dep) FAILS the build if any delivered/partial requirement lacks Implementation+Test
@@ -1321,8 +1355,8 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 17 memory + 42 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 17 memory + 42 Sv39 vm + 22 U-mode + 22 SMP invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 21 memory + 42 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 21 memory + 42 Sv39 vm + 22 U-mode + 22 SMP invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 
@@ -1331,7 +1365,7 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ```bash
 # The NEW P5 memory-management work (frame allocator + MMU) runs on the aarch64 dev backend.
 # Boot it directly as a -kernel ELF in QEMU (this IS the e2e VM test):
-cd kernel && cargo run          # boots Aletheia, proves 11+17+42+22 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
+cd kernel && cargo run          # boots Aletheia, proves 11+21+42+22 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
 
 # A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
 cd kernel-x86_64 && bash scripts/build-image.sh   # macOS host -> build/aletheia-x86_64.{img,vmdk}
@@ -1340,7 +1374,7 @@ bash scripts/smoke-test.sh                         # boot the image in QEMU+OVMF
 #   • QEMU:       qemu-system-x86_64 -bios <OVMF_CODE.fd> -drive format=raw,file=build/aletheia-x86_64.img -serial stdio
 #   • VMware:     attach build/aletheia-x86_64.vmdk to a UEFI VM
 #   • VirtualBox: attach build/aletheia-x86_64.img (see scripts/build-vbox.sh)
-# NOTE: the x86-64 image now proves 17 memory (frame allocator from the UEFI map + frame ownership)
+# NOTE: the x86-64 image now proves 22 memory (frame allocator from the UEFI map + ownership + erase-on-free)
 # + 33 virtual-memory (map/unmap + reclamation + address-space teardown over the live UEFI PML4 hierarchy) + 11 spine + 22 SMP (MADT +
 # INIT-SIPI-SIPI at -smp 4) + 22 ring-3 invariants. x86-64 can't do aarch64's "MMU off->on" flip (long mode requires
 # paging), so its vm suite proves the honest subset: walk + edit the live hierarchy.
