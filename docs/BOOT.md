@@ -46,9 +46,11 @@ cd aletheia && cargo test          # hosted System Core suite (M1 + P2 + policy 
 
 ## aarch64 (bootstrap / dev backend)
 
-Boots on QEMU `virt` at EL1, drops to EL0 user-mode, and re-proves **11 spine + 7 memory
-+ 13 virtual-memory + 10 EL0 user-mode** invariants (incl. cap-gated `svc` syscall,
-per-process TTBR0 address spaces, and GIC/generic-timer preemption).
+Boots on QEMU `virt` at EL1, drops to EL0 user-mode, and re-proves **11 spine + 17 memory
++ 21 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP** invariants (incl. cap-gated `svc`
+syscall, per-process TTBR0 address spaces, and GIC/generic-timer preemption). The memory count
+includes the frame-ownership refusals (REQ-MM-002/ADR-030) and the virtual-memory count the
+mapping-API admission check (REQ-MM-001/ADR-029).
 
 ```bash
 cd kernel
@@ -71,8 +73,8 @@ S→M **SBI** boundary, brings up the **Sv39 MMU** (physical frame allocator + i
 invariants. Machine exit is the **SiFive-test** device (MMIO `0x0010_0000`), which can encode a
 failing invariant — SBI SRST cannot.
 
-Gated: **11 spine + 7 memory + 13 virtual-memory + 13 U-mode boundary** invariants (full parity
-with the aarch64 and x86-64 user-mode suites).
+Gated: **11 spine + 17 memory + 21 virtual-memory + 22 U-mode boundary + 22 SMP** invariants (full
+parity with the aarch64 and x86-64 suites).
 
 ```bash
 cd kernel-riscv64
@@ -95,7 +97,7 @@ qemu-system-riscv64 -machine virt -cpu rv64 -smp 1 -m 128M -nographic \
 
 The only target that produces a **bootable disk image**: Aletheia boots as its own OS under
 **UEFI firmware**, calls `ExitBootServices` to take the machine, brings up its own GDT/IDT +
-8259 PIC + 8254 PIT, and re-proves **11 spine + 7 memory + 13 virtual-memory + 22 ring-3
+8259 PIC + 8254 PIT, and re-proves **11 spine + 17 memory + 13 virtual-memory + 22 ring-3
 user-mode + 22 SMP** invariants (the virtual-memory count includes the mapping-API admission
 check, REQ-MM-001/ADR-029). The image is GPT with a FAT32 **EFI System Partition** holding
 `\EFI\BOOT\BOOTX64.EFI` — so it needs **UEFI firmware, never legacy BIOS**.

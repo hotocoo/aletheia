@@ -1,9 +1,9 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-07-24
+**As of:** 2026-08-02
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..013`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..030`.
 
 ## What Aletheia is
 
@@ -15,7 +15,53 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — Memory safety: the mapping API stops trusting raw addresses (2026-07-28, GAPS4 ALET-P1-001)
+## Latest wave — Memory safety: a frame has an owner (2026-08-02, GAPS4 ALET-P1-003)
+
+Second slice of the audit's P1 memory-safety cluster, and the one the reclamation work was waiting
+on. Every target runs the same intrusive free-list allocator, whose `free` checked only two things:
+is the address 4 KiB-aligned, and is it inside the managed window. Both are true of a frame that is
+**already on the free list** — so a double free pushed one frame onto the list twice, and two later
+`alloc` calls handed ONE physical page to two owners (typically a page table and a user page over
+one another). Both are equally true of a frame that is **live in another address space**, so a
+caller could donate someone else's page to the next allocation. Neither faults; the address space
+quietly aliases and the corruption surfaces much later as a wrong-page read.
+
+- **One arch-independent model (REQ-MM-002, ADR-030).** `kernel-core/src/frameown.rs`:
+  `FrameOwnerTable` keeps one byte of state per frame — free, an owner tag, or permanently reserved
+  — and every allocator transition is checked against it. Ownership is *claimed before the frame
+  leaves the list* and *released only by its holder*, so `AlreadyOwned`, `NotOwned` (the double
+  free), `WrongOwner` and `Reserved` are named, fail-closed refusals rather than a bare `false`.
+- **The tags describe the kernel's real structure.** Page tables are `Owner::PAGETABLE` and
+  EL0/U-mode/ring-3 pages are `Owner::USER` on all three targets, with `Owner::address_space(id)`
+  reserved for per-address-space identities. `transfer` moves ownership atomically, because doing it
+  as release+claim would leave the frame momentarily allocatable by a third party — the same
+  reasoning as `CapEngine`'s atomic authorize-and-execute (REQ-CAP-006).
+- **Proved as properties, not examples.** `kernel-core/tests/frameown.rs` drives a deterministic
+  20 000-operation mix of legal and illegal calls and asserts after EVERY step that no frame is held
+  by two owners, that `owned + reserved + free` still equals the window, and that every refusal left
+  the whole table byte-identical. (The first run of that suite caught its own weakness: an LCG's low
+  bits cycle with period 4, so `next() % 4` produced 1 accepted operation in 20 000 — the generator
+  now returns high bits, and the suite asserts both paths were exercised.)
+- **VM-gated on live pools, count-pinned.** Each target's memory suite goes 7 → **17** invariants,
+  run against the real global allocator: an allocated frame reports its owner, a cross-owner free is
+  refused and moves nothing, a double free is refused without pushing the frame twice, a
+  never-allocated frame cannot be freed, a legal free still succeeds afterwards, and the ownership
+  table's free count matches the allocator's own. All three gates now pin the count, so losing an
+  invariant fails instead of passing quietly.
+- **Part of the cross-architecture contract.** `scripts/conformance.sh` requires the five ownership
+  refusals, identically worded, from all three targets (19 core behaviors, up from 14): a CPU on
+  which a double free is accepted is a different memory-safety boundary, not a detail.
+- **A qualification hole found on the way.** `kernel-x86_64/scripts/build-image.sh` (and its Linux
+  twin) skipped `cargo build` whenever an `.efi` already existed, so an edited tree produced an image
+  built from the PREVIOUS binary — the boot gate passed against code no longer in the tree, which is
+  how the first x86-64 run of this wave "proved" 7 invariants. Both scripts now always compile;
+  `EFI=/path` remains the deliberate escape hatch.
+- **Scope, stated honestly.** This closes frame *ownership*. Page-table reclamation (ALET-P1-002),
+  address-space destruction (ALET-P1-004), zeroing on free (ALET-P2-026) and a global W^X invariant
+  (ALET-P1-007) remain **open** in the GAPS4 register — but 002 and 004 are now unblocked, since both
+  free frames in bulk and needed an owner to check against.
+
+## Previous wave — Memory safety: the mapping API stops trusting raw addresses (2026-07-28, GAPS4 ALET-P1-001)
 
 First slice of the audit's P1 memory-safety cluster. Every target's dynamic mapping API took a raw
 `va`/`pa` and walked straight into live page tables. A walker decodes a fixed VA width (39 bits on
@@ -53,7 +99,7 @@ logical faults — `Page::containing_address` silently truncates a misaligned VA
   defense (ALET-P1-003), intermediate page-table reclamation (ALET-P1-002), address-space destruction
   (ALET-P1-004) and a global W^X invariant (ALET-P1-007) remain **open** in the GAPS4 register.
 
-## Previous wave — Qualification infrastructure (2026-07-24, GAPS4 P0 cluster)
+## Earlier wave — Qualification infrastructure (2026-07-24, GAPS4 P0 cluster)
 
 Closing the audit's #1 risk (`docs/gap/ARCHITECTURE-GAPS4.md`): "qualification systems are behind
 the number of architectural claims." Disposition of all 67 findings lives in
@@ -607,7 +653,8 @@ suite grows **17 → 41** (6 suites).
   leakage** (scope confinement + action-wildcard does not over-match a neighbouring namespace).
   9 hosted tests; all green (the engine holds).
 - **Machine-checkable traceability gate** (gap Issue 12) — `docs/TRACEABILITY.md` is a machine-readable
-  matrix of **45 requirements** (34 delivered, 2 partial, 9 deferred), each mapping
+  matrix of **60 requirements** (53 delivered, 4 partial, 3 deferred as of 2026-08-02; it was 45 —
+  34/2/9 — when the gate was introduced), each mapping
   ReqID → ADR → implementation → test → VM gate → status. `scripts/check-traceability.sh` (pure bash,
   no new CI dep) FAILS the build if any delivered/partial requirement lacks Implementation+Test
   evidence that exists in the tree, or carries an unknown status; deferred work is explicitly
@@ -1182,17 +1229,17 @@ one physical frame region between endpoints under explicit authority; this wave 
 
 ```bash
 cd aletheia
-cargo test        # 67 passed — M1 acceptance + conformance + property + security + P2 component + policy + AI
+cargo test        # 81 passed (13 suites) — M1 acceptance + conformance + property + security + P2 component + policy + AI
 cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundary (clients issue Requests)
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 41 passed — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+(cd ../kernel-core && cargo test)  # 122 passed (16 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 7 memory + 13 virtual-memory + 13 EL0 user-mode invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 7 memory + 13 Sv39 vm + 13 U-mode invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 17 memory + 21 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 17 memory + 21 Sv39 vm + 22 U-mode + 22 SMP invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 
@@ -1201,7 +1248,7 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ```bash
 # The NEW P5 memory-management work (frame allocator + MMU) runs on the aarch64 dev backend.
 # Boot it directly as a -kernel ELF in QEMU (this IS the e2e VM test):
-cd kernel && cargo run          # boots Aletheia, proves 11+7+13+10 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
+cd kernel && cargo run          # boots Aletheia, proves 11+17+21+22 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
 
 # A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
 cd kernel-x86_64 && bash scripts/build-image.sh   # macOS host -> build/aletheia-x86_64.{img,vmdk}
@@ -1210,9 +1257,9 @@ bash scripts/smoke-test.sh                         # boot the image in QEMU+OVMF
 #   • QEMU:       qemu-system-x86_64 -bios <OVMF_CODE.fd> -drive format=raw,file=build/aletheia-x86_64.img -serial stdio
 #   • VMware:     attach build/aletheia-x86_64.vmdk to a UEFI VM
 #   • VirtualBox: attach build/aletheia-x86_64.img (see scripts/build-vbox.sh)
-# NOTE: the x86-64 image now proves 7 memory (frame allocator from the UEFI map) + 6 virtual-memory
-# (map/unmap over the live UEFI PML4 hierarchy) + 11 spine + 13 SMP (MADT + INIT-SIPI-SIPI at
-# -smp 4) + 22 ring-3 invariants. x86-64 can't do aarch64's "MMU off->on" flip (long mode requires
+# NOTE: the x86-64 image now proves 17 memory (frame allocator from the UEFI map + frame ownership)
+# + 13 virtual-memory (map/unmap over the live UEFI PML4 hierarchy) + 11 spine + 22 SMP (MADT +
+# INIT-SIPI-SIPI at -smp 4) + 22 ring-3 invariants. x86-64 can't do aarch64's "MMU off->on" flip (long mode requires
 # paging), so its vm suite proves the honest subset: walk + edit the live hierarchy.
 # smoke-test.sh boots -smp 4 and gates all four marker families + exit 33.
 ```

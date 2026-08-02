@@ -37,6 +37,7 @@ use core::ptr::{addr_of, addr_of_mut};
 // REQ-KERN-005: the x86-64 target DRIVES the shared arch-independent scheduling policy from
 // kernel-core rather than hand-rolling its own rotation — kernel-core decides which task runs next;
 // this module performs only the context-switch MECHANISM (resume_frame + CR3 address-space switch).
+use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's PML4 `vm.rs` performs the real page mapping into each space.
@@ -629,7 +630,7 @@ fn take_trial() -> Trial {
 fn free_leaf(root: u64, va: u64, f: Option<frames::Frame>) {
     if let Some(f) = f {
         vm::unmap_user(root, va);
-        frames::free(f);
+        frames::free_as(f, Owner::USER);
     }
 }
 

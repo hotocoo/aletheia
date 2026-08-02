@@ -126,7 +126,7 @@ impl AddrPlan {
     /// Order matters for diagnosis, not for safety: alignment is reported before range so a caller
     /// passing a byte address inside a valid page learns the real problem.
     pub fn validate_unmap(&self, va: usize) -> Result<(), MapFault> {
-        if va % PAGE_SIZE != 0 {
+        if !va.is_multiple_of(PAGE_SIZE) {
             return Err(MapFault::UnalignedVirt);
         }
         if va == 0 {
@@ -153,7 +153,7 @@ impl AddrPlan {
     /// window.
     pub fn validate_map(&self, va: usize, pa: usize) -> Result<(), MapFault> {
         self.validate_unmap(va)?;
-        if pa % PAGE_SIZE != 0 {
+        if !pa.is_multiple_of(PAGE_SIZE) {
             return Err(MapFault::UnalignedPhys);
         }
         let end = match pa.checked_add(PAGE_SIZE) {

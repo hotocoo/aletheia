@@ -31,6 +31,7 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::frames;
+use kernel_core::frameown::Owner;
 use kernel_core::vmaddr::{self, AddrPlan};
 
 /// A canonical lower-half virtual address far above any RAM OVMF identity-maps at `-m 256M`
@@ -260,8 +261,8 @@ unsafe fn mapper_for(pml4_phys: u64) -> x86_64::structures::paging::OffsetPageTa
 /// USER-accessible so ring 3 can walk to its pages (kernel leaves stay supervisor, so the U/S AND
 /// keeps them ring-0-only). Returns the new PML4 physical address, or `None` on exhaustion.
 pub fn build_space() -> Option<u64> {
-    let pml4 = frames::alloc_zeroed()?.addr() as u64;
-    let pdpt = frames::alloc_zeroed()?.addr() as u64;
+    let pml4 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
+    let pdpt = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
     let cur = active_root();
     // SAFETY: PML4/PDPT frames are 4 KiB and identity-accessible under OVMF's map; single-core.
     unsafe {
@@ -344,11 +345,11 @@ pub fn map_user_frame(root: u64, va: u64, pa: u64, writable: bool) -> bool {
 /// Allocate a fresh zeroed frame and map it USER at `va` in `root`. Returns the backing frame (so
 /// the caller can reclaim it) or `None` on exhaustion/failure.
 pub fn map_user(root: u64, va: u64, writable: bool) -> Option<frames::Frame> {
-    let f = frames::alloc_zeroed()?;
+    let f = frames::alloc_zeroed_as(Owner::USER)?;
     if map_user_frame(root, va, f.addr() as u64, writable) {
         Some(f)
     } else {
-        frames::free(f);
+        frames::free_as(f, Owner::USER);
         None
     }
 }
@@ -356,7 +357,7 @@ pub fn map_user(root: u64, va: u64, writable: bool) -> Option<frames::Frame> {
 /// Map `bytes` into a fresh USER (read/execute) code page at `va` in `root`: copy the bytes into a
 /// zeroed frame (x86 caches are coherent for I/D, so no explicit sync is needed), then map it.
 pub fn map_stub_frame(root: u64, va: u64, bytes: &[u8]) -> Option<frames::Frame> {
-    let f = frames::alloc_zeroed()?;
+    let f = frames::alloc_zeroed_as(Owner::USER)?;
     let pa = f.addr();
     // SAFETY: `f` is a fresh, identity-accessible frame we hold; `bytes` fits in one 4 KiB page.
     unsafe {
@@ -368,7 +369,7 @@ pub fn map_stub_frame(root: u64, va: u64, bytes: &[u8]) -> Option<frames::Frame>
     if map_user_frame(root, va, pa as u64, false) {
         Some(f)
     } else {
-        frames::free(f);
+        frames::free_as(f, Owner::USER);
         None
     }
 }
@@ -380,7 +381,7 @@ pub fn map_supervisor(root: u64, va: u64) -> Option<frames::Frame> {
     if addr_plan().validate_unmap(va as usize).is_err() {
         return None;
     }
-    let f = frames::alloc_zeroed()?;
+    let f = frames::alloc_zeroed_as(Owner::USER)?;
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE; // deliberately NO user bit
     let parent =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
@@ -396,7 +397,7 @@ pub fn map_supervisor(root: u64, va: u64) -> Option<frames::Frame> {
                 Some(f)
             }
             Err(_) => {
-                frames::free(f);
+                frames::free_as(f, Owner::USER);
                 None
             }
         }

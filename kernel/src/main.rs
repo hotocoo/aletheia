@@ -55,8 +55,13 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("[boot] timer freq: {} Hz", ActiveHal::timer_freq_hz());
     kprintln!("[boot] heap: {} B used after init", heap::used_bytes());
 
-    // Physical memory: bring up the frame allocator over the RAM above the static kernel region.
-    frames::init();
+    // Physical memory: bring up the frame allocator over the RAM above the static kernel region,
+    // with its ownership table attached (REQ-MM-002). A pool whose tail has no ownership state
+    // could not detect a double free there, so failing to attach is fatal, not a warning.
+    if !frames::init() {
+        kprintln!("[mm] FATAL: frame ownership table does not cover the pool");
+        semihosting::exit(39);
+    }
     kprintln!(
         "[mm] frame allocator: {} frames ({} MiB) free above kernel, up to {:#x}",
         frames::free_count(),

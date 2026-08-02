@@ -36,6 +36,7 @@ use core::ptr::{addr_of, addr_of_mut};
 // REQ-KERN-005: the RISC-V target DRIVES the shared arch-independent scheduling policy from
 // kernel-core rather than hand-rolling its own rotation — kernel-core decides which task runs next;
 // this module performs only the context-switch MECHANISM (run_one_shot + satp address-space switch).
+use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's Sv39 `vm.rs` performs the real page mapping into each space.
@@ -598,7 +599,7 @@ fn install_trap_vector() {
 
 /// Copy a stub into a fresh frame, `fence.i` so the write is fetchable, and map it U-executable.
 fn map_user_code(root: usize, va: usize, s: Stub) -> Option<frames::PhysFrame> {
-    let f = frames::alloc_zeroed()?;
+    let f = frames::alloc_zeroed_as(Owner::USER)?;
     let len = s.end - s.start;
     // SAFETY: `s.start..s.end` is a stub in the kernel image (identity-accessible); `f` is a fresh
     // frame we own; both are within RAM. `fence.i` serializes the instruction stream after the write.
@@ -607,7 +608,7 @@ fn map_user_code(root: usize, va: usize, s: Stub) -> Option<frames::PhysFrame> {
         asm!("fence.i", options(nostack));
     }
     if !vm::map_page(root, va, f.addr(), vm::USER_CODE) {
-        frames::free(f);
+        frames::free_as(f, Owner::USER);
         return None;
     }
     Some(f)
@@ -615,9 +616,9 @@ fn map_user_code(root: usize, va: usize, s: Stub) -> Option<frames::PhysFrame> {
 
 /// Map a fresh zeroed frame as a U-mode data/stack page.
 fn map_user_data(root: usize, va: usize) -> Option<frames::PhysFrame> {
-    let f = frames::alloc_zeroed()?;
+    let f = frames::alloc_zeroed_as(Owner::USER)?;
     if !vm::map_page(root, va, f.addr(), vm::USER_DATA) {
-        frames::free(f);
+        frames::free_as(f, Owner::USER);
         return None;
     }
     Some(f)

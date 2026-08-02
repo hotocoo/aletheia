@@ -17,6 +17,8 @@ This SAD is a ground-up rewrite that agrees with PRD-002. It defines the *archit
 
 Implementation MUST follow this document. Changes require an ADR (`docs/adr/`).
 
+**Currency:** last reconciled with the tree on 2026-08-02 (ADR list through ADR-030; memory-safety contract in §5).
+
 ---
 
 # 1. Purpose and Scope
@@ -99,7 +101,7 @@ The microkernel (P4) provides privileged primitives; in M1 these are realized by
 - **KC-CAP:** A capability table mints typed, unforgeable handles and validates them. User code holds/delegates handles; it cannot fabricate one. In M1 this is an in-process authority holding a private table keyed by opaque tokens (no token is constructible from outside). On metal this becomes kernel-enforced capability slots.
 - **KC-IPC:** Secure IPC requires a capability naming the endpoint; there is no global connectable namespace. In M1 this is typed in-process channels obtained only via a capability.
 - **KC-TASK:** Task isolation — a task touches only entities/devices/endpoints for which it holds capabilities; a task crash cannot corrupt core state. In M1 this is enforced by construction (no task is handed a raw store handle; all access goes through capability-checked APIs).
-- **KC-MEM:** Address-space/memory isolation (metal). In M1, Rust ownership + module boundaries stand in; the contract is "no shared mutable global authority."
+- **KC-MEM:** Address-space/memory isolation (metal). In M1, Rust ownership + module boundaries stand in; the contract is "no shared mutable global authority." On metal the contract is now concrete and arch-independent, enforced by `kernel-core` and re-proved by every target's VM gate: (a) **address admission** — a mapping API treats a raw `va`/`pa` as untrusted input and refuses aliasing, non-canonical, misaligned, null-page and out-of-window addresses (REQ-MM-001, ADR-029); (b) **frame ownership** — every physical frame has exactly one owner, so a double free, a free of a never-allocated frame, and a free of another owner's frame are refused rather than silently aliasing two owners onto one page (REQ-MM-002, ADR-030). Both rule sets are identical across aarch64, RISC-V and x86-64 by conformance gate, because a memory-safety boundary that varies by CPU is not a boundary. Still open (tracked in `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`, not claimed here): page-table reclamation, address-space teardown, W^X as a global invariant, and zeroing on free.
 - **KC-BOOT:** Secure-boot primitives (metal only).
 
 Contract honesty (AP-009): the System Core is written against these traits, never against host-OS services, so P4 swaps the hosted realization for the real kernel without touching the layers above.
@@ -325,6 +327,25 @@ Required ADRs (in `docs/adr/`):
 - ADR-009 Native compositor & experience layer; hosted surface first.
 - ADR-010 Hosted System-Core reference before microkernel-on-metal (contract-honest).
 - ADR-011 Linux/POSIX only as an optional sandboxed compatibility environment.
+- ADR-012 Validation pyramid (host properties → VM gates → conformance).
+- ADR-013 VM-then-hardware qualification.
+- ADR-014 WASM component runtime.
+- ADR-015 Policy/approval separation.
+- ADR-016 Service API ↔ IPC boundary.
+- ADR-017 AI subsystem.
+- ADR-018 Context engine.
+- ADR-019 HAL: AMD64 + RISC-V first-class targets.
+- ADR-020 IPC substrate.
+- ADR-021 SMP / multicore.
+- ADR-022 AI execution substrate.
+- ADR-023 Device / driver architecture.
+- ADR-024 Persistent storage + recovery.
+- ADR-025 Secure boot / chain of trust.
+- ADR-026 Fault recovery + supervision.
+- ADR-027 Capability concurrency model (atomic authorize-and-execute).
+- ADR-028 Lock hierarchy.
+- ADR-029 Mapping-API admission check (raw addresses are untrusted input).
+- ADR-030 Frame ownership model (a frame has an owner).
 
 ---
 

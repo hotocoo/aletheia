@@ -35,6 +35,15 @@ CONTRACT=(
   "mapping an unaligned PA is refused"
   "mapping a PA outside the frame-allocator window is refused"
   "mapping the null page is refused"
+  # Frame-ownership model (ALET-P1-003, REQ-MM-002, ADR-030). The physical-memory twin of the
+  # rules above: a double free hands ONE page to two owners, and freeing a frame you do not hold
+  # takes a live page from whoever does. Every target must refuse both, in the same words — an
+  # architecture where a double free is accepted is a different memory-safety boundary.
+  "double free is refused (would hand one page to two owners)"
+  "freeing another owner's frame is refused (fail-closed)"
+  "freeing a never-allocated frame is refused"
+  "a freed frame has no owner"
+  "ownership table and free list agree on the free count"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )
