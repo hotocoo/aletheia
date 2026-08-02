@@ -3,7 +3,7 @@
 **As of:** 2026-08-02
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..030`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..031`.
 
 ## What Aletheia is
 
@@ -15,7 +15,48 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — Memory safety: a frame has an owner (2026-08-02, GAPS4 ALET-P1-003)
+## Latest wave — Memory safety: an unmap gives the page tables back (2026-08-02, GAPS4 ALET-P1-002)
+
+Third slice of the P1 memory-safety cluster, landed the same day as the frame-ownership model it
+depends on. Mapping one page allocates a chain of translation tables (L2+L3 on the 3-level aarch64
+TTBR0 and RISC-V Sv39 walks; PDPT+PD+PT on x86-64's 4-level walk). Unmapping it cleared the leaf
+entry and stopped — every intermediate table stayed **allocated and still referenced**.
+
+At boot-test scale that was a bounded, documented leak. As a running-OS property it is a denial of
+service: a task that maps and unmaps across a wide virtual range consumes one frame per 512-page
+span it has ever *visited*, regardless of how few pages it *holds*, and any unprivileged task can
+drive that with a loop. It also blocked address-space teardown outright, since nothing knew which
+tables belonged to a space.
+
+- **One arch-independent rule set (REQ-MM-003, ADR-031).** `kernel-core/src/ptreclaim.rs`: a table
+  is freed only when EVERY entry is absent; the parent reference is cleared BEFORE the frame is
+  freed (free-then-clear leaves a live entry pointing at a re-allocatable frame); the root is never
+  freed; the walk stops at the first table still in use; and a refused free RESTORES the parent
+  entry, because a refusal must not leave a table unreachable-but-allocated. Each target implements
+  a four-method `TableOps` over its own descriptor format — the only architectural knowledge is the
+  present bit and the entry width.
+- **Ownership-checked, which is why it is safe.** Tables are freed as `Owner::PAGETABLE` through the
+  allocator from ADR-030, so reclaiming a user page, another space's frame, or an already-free frame
+  is refused rather than obeyed. This wave was only buildable because that one landed first.
+- **Invalidation stays architectural.** Detaching an ancestor can leave stale paging-structure
+  (walk) cache entries. Every target calls reclamation BEFORE the invalidation it already did for
+  the unmapped VA, so one `tlbi vae1` / `sfence.vma` / `invlpg` covers the leaf and its detached
+  ancestors. On x86-64 the walk path is captured before `Mapper::unmap` runs, while the chain is
+  still intact.
+- **VM-gated on live hierarchies, count-pinned.** Virtual-memory invariants go 21 → **33** on
+  aarch64 and RISC-V and 13 → **25** on x86-64: mapping consumes table frames; unmapping one of two
+  pages in a leaf table reclaims NOTHING and the sibling still resolves; emptying the table returns
+  every intermediate frame to the allocator; neither VA resolves afterwards; and the address space
+  REBUILDS the chain, which proves the root survived and the freed frames were genuinely reusable.
+- **Contract by behavior, not by count.** A 3-level walk reclaims two tables where a 4-level walk
+  reclaims three — an honest architectural difference. `scripts/conformance.sh` requires the five
+  reclamation *behaviors* from all three targets (24 core behaviors, up from 19) and lets the counts
+  differ.
+- **Scope, stated honestly.** This reclaims tables an unmap empties. It does NOT free the tree of a
+  dying address space (ALET-P1-004, now unblocked), zero reclaimed frames (ALET-P2-026), or enforce
+  W^X (ALET-P1-007) — all still **open** in the GAPS4 register.
+
+## Previous wave — Memory safety: a frame has an owner (2026-08-02, GAPS4 ALET-P1-003)
 
 Second slice of the audit's P1 memory-safety cluster, and the one the reclamation work was waiting
 on. Every target runs the same intrusive free-list allocator, whose `free` checked only two things:
@@ -61,7 +102,7 @@ quietly aliases and the corruption surfaces much later as a wrong-page read.
   (ALET-P1-007) remain **open** in the GAPS4 register — but 002 and 004 are now unblocked, since both
   free frames in bulk and needed an owner to check against.
 
-## Previous wave — Memory safety: the mapping API stops trusting raw addresses (2026-07-28, GAPS4 ALET-P1-001)
+## Earlier wave — Memory safety: the mapping API stops trusting raw addresses (2026-07-28, GAPS4 ALET-P1-001)
 
 First slice of the audit's P1 memory-safety cluster. Every target's dynamic mapping API took a raw
 `va`/`pa` and walked straight into live page tables. A walker decodes a fixed VA width (39 bits on
@@ -653,7 +694,7 @@ suite grows **17 → 41** (6 suites).
   leakage** (scope confinement + action-wildcard does not over-match a neighbouring namespace).
   9 hosted tests; all green (the engine holds).
 - **Machine-checkable traceability gate** (gap Issue 12) — `docs/TRACEABILITY.md` is a machine-readable
-  matrix of **60 requirements** (53 delivered, 4 partial, 3 deferred as of 2026-08-02; it was 45 —
+  matrix of **61 requirements** (54 delivered, 4 partial, 3 deferred as of 2026-08-02; it was 45 —
   34/2/9 — when the gate was introduced), each mapping
   ReqID → ADR → implementation → test → VM gate → status. `scripts/check-traceability.sh` (pure bash,
   no new CI dep) FAILS the build if any delivered/partial requirement lacks Implementation+Test
@@ -1234,12 +1275,12 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 122 passed (16 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+(cd ../kernel-core && cargo test)  # 131 passed (16 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 17 memory + 21 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 17 memory + 21 Sv39 vm + 22 U-mode + 22 SMP invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 17 memory + 33 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 17 memory + 33 Sv39 vm + 22 U-mode + 22 SMP invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 
@@ -1248,7 +1289,7 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ```bash
 # The NEW P5 memory-management work (frame allocator + MMU) runs on the aarch64 dev backend.
 # Boot it directly as a -kernel ELF in QEMU (this IS the e2e VM test):
-cd kernel && cargo run          # boots Aletheia, proves 11+17+21+22 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
+cd kernel && cargo run          # boots Aletheia, proves 11+17+33+22 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
 
 # A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
 cd kernel-x86_64 && bash scripts/build-image.sh   # macOS host -> build/aletheia-x86_64.{img,vmdk}
@@ -1258,7 +1299,7 @@ bash scripts/smoke-test.sh                         # boot the image in QEMU+OVMF
 #   • VMware:     attach build/aletheia-x86_64.vmdk to a UEFI VM
 #   • VirtualBox: attach build/aletheia-x86_64.img (see scripts/build-vbox.sh)
 # NOTE: the x86-64 image now proves 17 memory (frame allocator from the UEFI map + frame ownership)
-# + 13 virtual-memory (map/unmap over the live UEFI PML4 hierarchy) + 11 spine + 22 SMP (MADT +
+# + 25 virtual-memory (map/unmap + reclamation over the live UEFI PML4 hierarchy) + 11 spine + 22 SMP (MADT +
 # INIT-SIPI-SIPI at -smp 4) + 22 ring-3 invariants. x86-64 can't do aarch64's "MMU off->on" flip (long mode requires
 # paging), so its vm suite proves the honest subset: walk + edit the live hierarchy.
 # smoke-test.sh boots -smp 4 and gates all four marker families + exit 33.
