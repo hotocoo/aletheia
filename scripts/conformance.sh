@@ -66,6 +66,15 @@ CONTRACT=(
   "every table in the tree was one this space owned"
   "destroying the space returned every frame it held, including its root"
   "the surviving address space is intact after the teardown"
+  # W^X and attribute validation (ALET-P1-007/008, REQ-MM-006, ADR-034). Every target must refuse a
+  # writable+executable mapping and must be able to audit a live tree and find none among the pages
+  # its own APIs created. The third rule (a user page that is kernel-executable) is expressible on
+  # aarch64 (PXN) and x86-64 (SMEP) but NOT on RISC-V, whose single X bit is qualified by PTE_U — an
+  # honest architectural difference, so it is not part of the shared contract.
+  "wx: mapping a writable+executable page is refused (W^X)"
+  "wx: a legal non-executable writable mapping still succeeds"
+  "wx: the attribute audit actually walked the live address space"
+  "wx: NO dynamically mapped page in the live tree is writable+executable"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

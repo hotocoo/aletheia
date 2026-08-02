@@ -28,6 +28,7 @@ pub mod device;
 pub mod frameown;
 pub mod grant;
 pub mod ipc;
+pub mod memattr;
 pub mod priosched;
 pub mod ptreclaim;
 pub mod sched;

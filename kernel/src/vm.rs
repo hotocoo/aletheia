@@ -22,6 +22,7 @@ use crate::frames;
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frameown::Owner;
+use kernel_core::memattr::{self, AttrOps, MemKind, PageAttrs};
 use kernel_core::ptreclaim::{self, PathStep, TableOps};
 use kernel_core::teardown::{self, SpaceOps, Teardown};
 use kernel_core::vmaddr::{self, AddrPlan};
@@ -46,6 +47,7 @@ const AF: u64 = 1 << 10; // Access Flag — MUST be set or first access faults
 const SH_INNER: u64 = 0b11 << 8; // inner shareable (Normal cacheable memory)
 const AP_RW_EL1: u64 = 0b00 << 6; // EL1 read/write, no EL0 access
 const AP_RW_EL0: u64 = 0b01 << 6; // EL1 + EL0 read/write (user-accessible)
+const AP_RO_EL0: u64 = 0b11 << 6; // EL1 + EL0 read-only (user-accessible, not writable)
 const PXN: u64 = 1 << 53; // privileged execute-never
 const UXN: u64 = 1 << 54; // unprivileged execute-never
 const ATTR_NORMAL: u64 = 0 << 2; // AttrIndx = 0 (MAIR attr0, Normal)
@@ -58,10 +60,16 @@ const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
 const NORMAL_BLOCK: u64 = DESC_BLOCK | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF | UXN;
 /// Attributes for a Device-memory 2 MiB block (MMIO — never executable).
 const DEVICE_BLOCK: u64 = DESC_BLOCK | ATTR_DEVICE | AP_RW_EL1 | AF | UXN | PXN;
-/// Attributes for a Normal-memory 4 KiB page (dynamic mappings).
-pub const NORMAL_PAGE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF | UXN;
-/// EL0-executable user code page: EL0 RW+X (AP_RW_EL0, UXN clear), EL1 execute-never (PXN).
-pub const USER_CODE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL0 | SH_INNER | AF | PXN;
+/// Attributes for a Normal-memory 4 KiB page (dynamic mappings): kernel read/write, executable at
+/// NEITHER level (UXN | PXN). W^X (REQ-MM-006, ADR-034): a dynamically mapped writable page must
+/// never be executable, or any kernel write primitive becomes code execution.
+pub const NORMAL_PAGE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF | UXN | PXN;
+/// EL0-executable user code page: EL0 read-only + executable (AP_RO_EL0, UXN clear), EL1
+/// execute-never (PXN). Read-ONLY by W^X (REQ-MM-006, ADR-034): a page EL0 can both write and
+/// execute is the mapping that turns any user-space write primitive into code execution. The stub
+/// is written through the frame's kernel identity address BEFORE it is mapped here, so nothing
+/// needs to write it through this mapping.
+pub const USER_CODE: u64 = DESC_TABLE | ATTR_NORMAL | AP_RO_EL0 | SH_INNER | AF | PXN;
 /// EL0 data/stack page: EL0 RW, never executable at either level.
 pub const USER_DATA: u64 = DESC_TABLE | ATTR_NORMAL | AP_RW_EL0 | SH_INNER | AF | UXN | PXN;
 
@@ -135,6 +143,41 @@ pub fn destroy_space(root: usize) -> Option<Teardown> {
         return None;
     }
     Some(teardown::destroy_address_space(root, &mut Tables))
+}
+
+/// Decode aarch64 descriptor bits into the arch-neutral permission model, and audit live trees
+/// against it (REQ-MM-006, ADR-034).
+impl AttrOps for Tables {
+    fn levels(&self) -> usize {
+        3
+    }
+    fn is_leaf(&self, entry: u64, level: usize) -> bool {
+        <Self as SpaceOps>::is_leaf(self, entry, level)
+    }
+    fn entry_addr(&self, entry: u64) -> usize {
+        (entry & ADDR_MASK) as usize
+    }
+    fn decode(&self, entry: u64, _level: usize) -> PageAttrs {
+        let ap = entry & (0b11 << 6);
+        let user = ap == AP_RW_EL0 || ap == AP_RO_EL0;
+        let write = ap == AP_RW_EL0 || ap == AP_RW_EL1;
+        PageAttrs {
+            kind: if entry & ATTR_DEVICE != 0 {
+                MemKind::Device
+            } else {
+                MemKind::Normal
+            },
+            write,
+            exec_user: user && entry & UXN == 0,
+            exec_kernel: entry & PXN == 0,
+            user,
+        }
+    }
+}
+
+/// Audit every mapping reachable from `root` against the W^X and attribute rules (REQ-MM-006).
+pub fn audit_attrs(root: usize) -> memattr::AuditReport {
+    memattr::audit(root, &Tables)
 }
 
 /// Total intermediate tables reclaimed since boot, so the VM gate can prove reclamation actually
@@ -234,6 +277,12 @@ pub fn translate(root: usize, va: usize) -> Option<usize> {
 /// wave never splits blocks). Invalidates the TLB entry for `va`.
 pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
     if addr_plan().validate_map(va, pa).is_err() {
+        return false;
+    }
+    // W^X and attribute admission (REQ-MM-006, ADR-034): a writable+executable page, an executable
+    // device mapping, or a user page that is executable at EL1 is refused here rather than created
+    // and audited later. `flags` is caller-supplied, so it is untrusted input like `va`/`pa`.
+    if Tables.decode(flags, 2).validate().is_err() {
         return false;
     }
     let (l1i, l2i, l3i) = indices(va);
@@ -727,6 +776,67 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         check!(
             translate(root, TEST_VA).is_none() && active_root() == root,
             "vm: the surviving address space is intact after the teardown"
+        );
+    }
+
+    // 11 — W^X AND ATTRIBUTE VALIDATION (ALET-P1-007/008, REQ-MM-006, ADR-034). A page that is
+    //      both writable and executable turns any memory-corruption bug into code execution. The
+    //      mapping API refuses such a request outright, and the audit then walks the LIVE tree so
+    //      the property is checked against what is actually mapped, not against what the API was
+    //      asked for. The bootstrap identity map is the honest exception: it covers kernel text,
+    //      rodata, data, stack and heap in single 2 MiB blocks, so those blocks are writable AND
+    //      kernel-executable until the image is split at page granularity. The audit counts that
+    //      class separately and the gate PINS it, so it is measured, not hidden.
+    {
+        check!(
+            !map_page(
+                root,
+                TEST_VA,
+                frame.addr(),
+                DESC_TABLE | ATTR_NORMAL | AP_RW_EL1 | SH_INNER | AF
+            ),
+            "wx: mapping a writable+executable page is refused (W^X)"
+        );
+        check!(
+            !map_page(
+                root,
+                TEST_VA,
+                frame.addr(),
+                DESC_TABLE | ATTR_DEVICE | AP_RW_EL1 | SH_INNER | AF | UXN
+            ),
+            "wx: mapping executable device memory is refused"
+        );
+        check!(
+            !map_page(
+                root,
+                TEST_VA,
+                frame.addr(),
+                DESC_TABLE | ATTR_NORMAL | AP_RW_EL0 | SH_INNER | AF | UXN
+            ),
+            "wx: mapping a user page that is kernel-executable is refused (ret2usr)"
+        );
+        check!(
+            map_page(root, TEST_VA, frame.addr(), NORMAL_PAGE) && unmap_page(root, TEST_VA),
+            "wx: a legal non-executable writable mapping still succeeds"
+        );
+        let report = audit_attrs(root);
+        kprintln!(
+            "  [info  ] attr audit: {} leaves, {} dynamic violations, {} bootstrap violations",
+            report.leaves,
+            report.dynamic_violations,
+            report.bootstrap_violations
+        );
+        check!(
+            report.leaves > 0,
+            "wx: the attribute audit actually walked the live address space"
+        );
+        check!(
+            report.dynamic_violations == 0,
+            "wx: NO dynamically mapped page in the live tree is writable+executable"
+        );
+        check!(
+            report.bootstrap_violations == 64,
+            "wx: the bootstrap identity blocks are the only W^X exception, and their count is pinned"
         );
     }
 

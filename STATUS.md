@@ -3,7 +3,7 @@
 **As of:** 2026-08-02
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..033`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..034`.
 
 ## What Aletheia is
 
@@ -15,7 +15,45 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — Memory safety: a freed frame carries nothing (2026-08-02, GAPS4 ALET-P2-026)
+## Latest wave — W^X: permissions are validated, not assumed (2026-08-02, GAPS4 ALET-P1-007 / ALET-P1-008)
+
+The memory model so far answered which memory a mapping may name and who owns it. It said nothing
+about what a mapping is allowed to DO — and all three permission mistakes were live in the tree.
+aarch64's dynamic kernel page was writable AND kernel-executable; user code pages were writable and
+user-executable on aarch64 and RISC-V; x86-64 mapped everything executable because NX was never
+enabled (the code said so: "EFER.NXE is not guaranteed by firmware... W^X is not one of the
+invariants this milestone proves"). A W+X page is what turns any memory-corruption bug into code
+execution.
+
+- **One rule set (REQ-MM-006, ADR-034).** `kernel-core/src/memattr.rs` decodes each target's
+  descriptor bits into `PageAttrs { kind, write, exec_user, exec_kernel, user }` and refuses:
+  write+execute, executable device memory, a user page executable at kernel privilege (ret2usr), and
+  a descriptor claiming user-execute without user-access. Caller-supplied flags are untrusted input
+  exactly like `va`/`pa`, so validation happens where they enter.
+- **Real mappings changed, not just checks added.** User code pages are now **read-only +
+  executable** on all three targets (the stub is written through the frame's kernel identity address
+  before the user mapping exists). aarch64's dynamic kernel page gained `PXN`. x86-64 marks writable
+  pages `NO_EXECUTE`, which meant actually **enabling `EFER.NXE` and `CR4.SMEP`** after a CPUID
+  check, and printing what the CPU allows instead of assuming it.
+- **A checker, because API enforcement is not proof about the tree.** `memattr::audit` walks a live
+  hierarchy through the same `TableOps` seam reclamation uses and counts violations by class. Every
+  gate requires **zero** among the mappings that kernel created (virtual-memory invariants 42 → **49**
+  on aarch64 and RISC-V, 33 → **40** on x86-64; 35 shared conformance behaviors, up from 31).
+- **Per-architecture honesty rather than a lowest common denominator.** aarch64 has separate
+  UXN/PXN, so all three rules are expressible. RISC-V Sv39 has ONE execute bit qualified by `PTE_U`,
+  so "user-accessible AND kernel-executable" is *unrepresentable* — its gate proves the U-mode W+X
+  analogue and the shared contract omits the rule instead of pretending. x86-64 also has one NX bit,
+  so a USER page with NX clear is ring-0-fetchable by paging alone; `CR4.SMEP` is what forbids it,
+  and the decode says so.
+- **Delivered as `partial`, deliberately.** ALET-P1-008 (attribute validation) is **resolved**.
+  ALET-P1-007 (W^X as a COMPLETE global invariant) stays **open**: aarch64 and RISC-V identity-map
+  the kernel image in 2 MiB blocks spanning text, rodata, data, stack and heap together, so **64 W^X
+  block descriptors remain on each — a number the gates now PIN**, so the exception cannot grow
+  unnoticed. On x86-64 the inherited OVMF tree holds ~524 795 W^X violations across ~524 799 leaves;
+  it is the firmware's map, reported informationally at every boot. Closing this needs a
+  page-granular kernel-image split via linker symbols — its own wave, not a footnote in this one.
+
+## Previous wave — Memory safety: a freed frame carries nothing (2026-08-02, GAPS4 ALET-P2-026)
 
 The previous three waves made frame ownership explicit, so two owners can never hold one frame at
 the same TIME. That is a temporal guarantee, and it was silent about what the NEXT owner could READ.
@@ -49,7 +87,7 @@ closes it.
   clamp exists to maintain — every managed frame has ownership state (`total_count() <= MAX_FRAMES`).
   The clamp path remains unexercised, and is recorded as such here rather than counted as covered.
 
-## Previous wave — Memory safety: a dying address space gives everything back (2026-08-02, GAPS4 ALET-P1-004)
+## Earlier wave — Memory safety: a dying address space gives everything back (2026-08-02, GAPS4 ALET-P1-004)
 
 Fourth and final slice of the P1 memory-safety cluster's reclamation arc, and the one the previous
 three unlocked. Reclamation (ALET-P1-002) serves a task that tidies up page by page. A task that
@@ -770,7 +808,7 @@ suite grows **17 → 41** (6 suites).
   leakage** (scope confinement + action-wildcard does not over-match a neighbouring namespace).
   9 hosted tests; all green (the engine holds).
 - **Machine-checkable traceability gate** (gap Issue 12) — `docs/TRACEABILITY.md` is a machine-readable
-  matrix of **63 requirements** (56 delivered, 4 partial, 3 deferred as of 2026-08-02; it was 45 —
+  matrix of **64 requirements** (56 delivered, 5 partial, 3 deferred as of 2026-08-02; it was 45 —
   34/2/9 — when the gate was introduced), each mapping
   ReqID → ADR → implementation → test → VM gate → status. `scripts/check-traceability.sh` (pure bash,
   no new CI dep) FAILS the build if any delivered/partial requirement lacks Implementation+Test
@@ -1351,12 +1389,12 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 137 passed (16 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+(cd ../kernel-core && cargo test)  # 146 passed (16 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 21 memory + 42 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 21 memory + 42 Sv39 vm + 22 U-mode + 22 SMP invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 21 memory + 49 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 21 memory + 49 Sv39 vm + 22 U-mode + 22 SMP invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 
@@ -1365,7 +1403,7 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ```bash
 # The NEW P5 memory-management work (frame allocator + MMU) runs on the aarch64 dev backend.
 # Boot it directly as a -kernel ELF in QEMU (this IS the e2e VM test):
-cd kernel && cargo run          # boots Aletheia, proves 11+21+42+22 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
+cd kernel && cargo run          # boots Aletheia, proves 11+21+49+22 invariants live (incl. EL0 user-mode + preemptive multitasking), exits 0
 
 # A real bootable DISK IMAGE (Aletheia as its own OS on AMD64/x86-64 under UEFI):
 cd kernel-x86_64 && bash scripts/build-image.sh   # macOS host -> build/aletheia-x86_64.{img,vmdk}
@@ -1375,7 +1413,7 @@ bash scripts/smoke-test.sh                         # boot the image in QEMU+OVMF
 #   • VMware:     attach build/aletheia-x86_64.vmdk to a UEFI VM
 #   • VirtualBox: attach build/aletheia-x86_64.img (see scripts/build-vbox.sh)
 # NOTE: the x86-64 image now proves 22 memory (frame allocator from the UEFI map + ownership + erase-on-free)
-# + 33 virtual-memory (map/unmap + reclamation + address-space teardown over the live UEFI PML4 hierarchy) + 11 spine + 22 SMP (MADT +
+# + 40 virtual-memory (map/unmap + reclamation + teardown + W^X audit over the live UEFI PML4 hierarchy) + 11 spine + 22 SMP (MADT +
 # INIT-SIPI-SIPI at -smp 4) + 22 ring-3 invariants. x86-64 can't do aarch64's "MMU off->on" flip (long mode requires
 # paging), so its vm suite proves the honest subset: walk + edit the live hierarchy.
 # smoke-test.sh boots -smp 4 and gates all four marker families + exit 33.
