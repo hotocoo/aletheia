@@ -29,6 +29,7 @@ use crate::frames;
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frameown::Owner;
+use kernel_core::memattr::{self, AttrOps, MemKind, PageAttrs};
 use kernel_core::ptreclaim::{self, PathStep, TableOps};
 use kernel_core::teardown::{self, SpaceOps, Teardown};
 use kernel_core::vmaddr::{self, AddrPlan};
@@ -61,8 +62,11 @@ const DEV_LEAF: u64 = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
 const RAM_LEAF: u64 = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
 /// Normal-memory 4 KiB kernel page (dynamic mappings): RW. A/D set.
 pub const NORMAL_PAGE: u64 = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
-/// U-mode executable code page: user R/W/X. A/D set.
-pub const USER_CODE: u64 = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+/// U-mode executable code page: user R+X, NOT writable. Read-only by W^X (REQ-MM-006, ADR-034) —
+/// a page U-mode can both write and execute is the mapping that turns any user write primitive into
+/// code execution. The stub is copied through the frame's kernel identity address before this
+/// mapping exists, so nothing writes it through this PTE.
+pub const USER_CODE: u64 = PTE_V | PTE_R | PTE_X | PTE_U | PTE_A;
 /// U-mode data/stack page: user R/W, not executable. A/D set.
 pub const USER_DATA: u64 = PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D;
 
@@ -147,6 +151,42 @@ pub fn destroy_space(root: usize) -> Option<Teardown> {
         return None;
     }
     Some(teardown::destroy_address_space(root, &mut Tables))
+}
+
+/// Decode Sv39 PTE bits into the arch-neutral permission model, and audit live trees against it
+/// (REQ-MM-006, ADR-034). RISC-V has no separate user/kernel execute bits: a leaf is executable by
+/// whichever privilege level may access it, so `PTE_U` decides which of the two exec flags is set —
+/// which is exactly why the ret2usr rule matters here (S-mode execution of a U page is prevented by
+/// SUM/hardware, and by refusing to create the mapping at all).
+impl AttrOps for Tables {
+    fn levels(&self) -> usize {
+        3
+    }
+    fn is_leaf(&self, entry: u64, level: usize) -> bool {
+        <Self as SpaceOps>::is_leaf(self, entry, level)
+    }
+    fn entry_addr(&self, entry: u64) -> usize {
+        pte_pa(entry)
+    }
+    fn decode(&self, entry: u64, _level: usize) -> PageAttrs {
+        let user = entry & PTE_U != 0;
+        let exec = entry & PTE_X != 0;
+        PageAttrs {
+            // Sv39 PTEs carry no cacheability field (memory type comes from the platform's PMAs),
+            // so every leaf is modelled as Normal and the device rule is enforced by the addresses
+            // the device map uses rather than by a bit. Stated rather than silently assumed.
+            kind: MemKind::Normal,
+            write: entry & PTE_W != 0,
+            exec_user: exec && user,
+            exec_kernel: exec && !user,
+            user,
+        }
+    }
+}
+
+/// Audit every mapping reachable from `root` against the W^X and attribute rules (REQ-MM-006).
+pub fn audit_attrs(root: usize) -> memattr::AuditReport {
+    memattr::audit(root, &Tables)
 }
 
 /// Total intermediate tables reclaimed since boot, so the VM gate proves reclamation actually ran.
@@ -243,6 +283,11 @@ pub fn translate(root: usize, va: usize) -> Option<usize> {
 /// (this wave never splits a giga/megapage). Fences the TLB for `va`.
 pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
     if addr_plan().validate_map(va, pa).is_err() {
+        return false;
+    }
+    // W^X and attribute admission (REQ-MM-006, ADR-034): caller-supplied flags are untrusted input
+    // exactly like `va`/`pa`, so a writable+executable or mis-encoded leaf is refused here.
+    if Tables.decode(flags, 2).validate().is_err() {
         return false;
     }
     let (i2, i1, i0) = indices(va);
@@ -684,6 +729,71 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         check!(
             translate(root, TEST_VA).is_none() && active_root() == root,
             "vm: the surviving address space is intact after the teardown"
+        );
+    }
+
+    // 11 — W^X AND ATTRIBUTE VALIDATION (ALET-P1-007/008, REQ-MM-006, ADR-034). A page that is
+    //      both writable and executable turns any memory-corruption bug into code execution. The
+    //      mapping API refuses such a request outright, and the audit then walks the LIVE tree so
+    //      the property is checked against what is actually mapped, not against what the API was
+    //      asked for. The bootstrap identity map is the honest exception: it covers kernel text,
+    //      rodata, data, stack and heap in single 2 MiB blocks, so those blocks are writable AND
+    //      kernel-executable until the image is split at page granularity. The audit counts that
+    //      class separately and the gate PINS it, so it is measured, not hidden.
+    {
+        check!(
+            !map_page(
+                root,
+                TEST_VA,
+                frame.addr(),
+                PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D
+            ),
+            "wx: mapping a writable+executable page is refused (W^X)"
+        );
+        check!(
+            !map_page(
+                root,
+                TEST_VA,
+                frame.addr(),
+                PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D
+            ),
+            "wx: mapping executable device memory is refused"
+        );
+        // Sv39 has ONE execute bit and lets PTE_U decide whose execution it authorizes, so the
+        // aarch64/x86-64 case "user-accessible AND kernel-executable" is unrepresentable here — an
+        // honest architectural difference, not a missing check. The U-mode analogue of the same
+        // attack surface is a user page that is writable and executable, which is refused:
+        check!(
+            !map_page(
+                root,
+                TEST_VA,
+                frame.addr(),
+                PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D
+            ),
+            "wx: mapping a user page that is writable+executable is refused"
+        );
+        check!(
+            map_page(root, TEST_VA, frame.addr(), NORMAL_PAGE) && unmap_page(root, TEST_VA),
+            "wx: a legal non-executable writable mapping still succeeds"
+        );
+        let report = audit_attrs(root);
+        kprintln!(
+            "  [info  ] attr audit: {} leaves, {} dynamic violations, {} bootstrap violations",
+            report.leaves,
+            report.dynamic_violations,
+            report.bootstrap_violations
+        );
+        check!(
+            report.leaves > 0,
+            "wx: the attribute audit actually walked the live address space"
+        );
+        check!(
+            report.dynamic_violations == 0,
+            "wx: NO dynamically mapped page in the live tree is writable+executable"
+        );
+        check!(
+            report.bootstrap_violations == 64,
+            "wx: the bootstrap identity blocks are the only W^X exception, and their count is pinned"
         );
     }
 

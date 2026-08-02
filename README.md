@@ -149,7 +149,7 @@ MODEL_REF=GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF
 See [STATUS.md](STATUS.md) for the delivered milestones and test counts, and
 [docs/](docs/) for the PRD, SAD, and ADRs (ADR-015 policy/approval separation, ADR-016 Service
 API/IPC boundary, ADR-017 AI subsystem, ADR-018 Context Engine, ADR-021 SMP, ADR-027 capability
-concurrency, ADR-029 mapping-API admission check, ADR-030 frame ownership, ADR-031 page-table reclamation, ADR-032 address-space destruction, ADR-033 erase on free). Open findings — what is
+concurrency, ADR-029 mapping-API admission check, ADR-030 frame ownership, ADR-031 page-table reclamation, ADR-032 address-space destruction, ADR-033 erase on free, ADR-034 W^X). Open findings — what is
 NOT claimed — live in [docs/gap/ARCHITECTURE-GAPS4-REGISTER.md](docs/gap/ARCHITECTURE-GAPS4-REGISTER.md).
 
 ## Strategic path

@@ -24,6 +24,7 @@
 //! clear CR0.WP for the duration of the map/unmap and restore it after — a standard, localized
 //! kernel technique; the window is single-core with no preemption.
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr3};
+use x86_64::registers::model_specific::{Efer, EferFlags};
 use x86_64::structures::paging::mapper::{Mapper, Translate};
 use x86_64::structures::paging::{
     Page, PageTable, PageTableFlags, PhysFrame as X86PhysFrame, Size4KiB,
@@ -33,6 +34,7 @@ use x86_64::{PhysAddr, VirtAddr};
 use crate::frames;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frameown::Owner;
+use kernel_core::memattr::{self, AttrOps, MemKind, PageAttrs};
 use kernel_core::ptreclaim::{self, PathStep, TableOps};
 use kernel_core::teardown::{self, SpaceOps, Teardown};
 use kernel_core::vmaddr::{self, AddrPlan};
@@ -146,6 +148,124 @@ pub fn destroy_space(root: u64) -> Option<Teardown> {
         unsafe { Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT)) };
     }
     Some(out)
+}
+
+/// Decode x86-64 paging bits into the arch-neutral permission model, and audit live trees against
+/// it (REQ-MM-006, ADR-034). x86-64 has one NX bit and no separate user/kernel execute control, so
+/// a USER page without NX is executable at BOTH levels — which is exactly the ret2usr mapping the
+/// rules refuse (hardware SMEP is the mitigation of last resort; not creating the mapping is the
+/// first). Memory type comes from PAT/MTRRs rather than a leaf field, so every leaf is modelled as
+/// Normal and that is stated rather than silently assumed.
+impl AttrOps for Tables {
+    fn levels(&self) -> usize {
+        4
+    }
+    fn is_leaf(&self, entry: u64, level: usize) -> bool {
+        <Self as SpaceOps>::is_leaf(self, entry, level)
+    }
+    fn entry_addr(&self, entry: u64) -> usize {
+        (entry & ENTRY_ADDR_MASK) as usize
+    }
+    fn in_scope(&self, level: usize, index: usize) -> bool {
+        // Audit only what WE mapped: the private user region of a space we built. The live root is
+        // OVMF's, and its firmware leaves are inherited rather than created here.
+        <Self as SpaceOps>::is_private(self, level, index)
+    }
+    fn decode(&self, entry: u64, _level: usize) -> PageAttrs {
+        let user = entry & PageTableFlags::USER_ACCESSIBLE.bits() != 0;
+        let exec = entry & PageTableFlags::NO_EXECUTE.bits() == 0;
+        PageAttrs {
+            kind: MemKind::Normal,
+            write: entry & PageTableFlags::WRITABLE.bits() != 0,
+            exec_user: exec && user,
+            // A USER page with NX clear IS fetchable at ring 0 as far as paging is concerned —
+            // x86-64 has no per-privilege execute bit. What forbids it is CR4.SMEP, enabled by
+            // `enable_exec_protections` below, so ring-0 execution of a user page faults in
+            // hardware. Modelling `exec_kernel` as `exec && !user` states that division of labour
+            // honestly: paging expresses "executable", SMEP expresses "not by the kernel". Without
+            // SMEP this target cannot enforce that rule by paging at all, and the boot says so.
+            exec_kernel: exec && !user,
+            user,
+        }
+    }
+}
+
+/// Turn on the two hardware features W^X depends on here, and report what the CPU actually allows
+/// (REQ-MM-006, ADR-034):
+///
+/// * **EFER.NXE** — without it the NO_EXECUTE bit is a *reserved* bit that faults rather than a
+///   permission, so every writable page would have to stay executable.
+/// * **CR4.SMEP** — x86-64 has no per-privilege execute bit, so a USER page with NX clear is
+///   fetchable at ring 0 by paging alone. SMEP is what makes that fault, and it is therefore the
+///   mechanism that enforces the "a user page is never kernel-executable" rule on this target.
+///
+/// Returns `(nx, smep)`. Neither is guaranteed by firmware; a missing one is printed at boot rather
+/// than silently degrading the invariant.
+pub fn enable_exec_protections() -> (bool, bool) {
+    // CPUID is unprivileged and side-effect free (safe in current core).
+    let nx = core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 20) != 0;
+    if nx {
+        // SAFETY: setting EFER.NXE only gives bit 63 its permission meaning; every mapping we
+        // create afterwards is built with that meaning, and pre-existing entries have it clear.
+        unsafe { Efer::update(|f| f.insert(EferFlags::NO_EXECUTE_ENABLE)) };
+    }
+    // SMEP is CPUID leaf 7, subleaf 0, EBX[7].
+    let smep = core::arch::x86_64::__cpuid_count(7, 0).ebx & (1 << 7) != 0;
+    if smep {
+        // SAFETY: enabling SMEP only makes ring-0 instruction fetches from USER pages fault. The
+        // kernel never executes from a user page — every kernel mapping is supervisor-only.
+        unsafe {
+            x86_64::registers::control::Cr4::update(|f| {
+                f.insert(x86_64::registers::control::Cr4Flags::SUPERVISOR_MODE_EXECUTION_PROTECTION)
+            })
+        };
+    }
+    (nx, smep)
+}
+
+/// The same decode with NO scoping, for auditing the firmware tree we inherited (informational).
+struct UnscopedTables;
+
+impl TableOps for UnscopedTables {
+    fn read(&self, table: usize, index: usize) -> u64 {
+        Tables.read(table, index)
+    }
+    fn write(&mut self, table: usize, index: usize, value: u64) {
+        Tables.write(table, index, value)
+    }
+    fn is_present(&self, entry: u64) -> bool {
+        Tables.is_present(entry)
+    }
+    fn free_table(&mut self, _table: usize) -> bool {
+        false // never frees: this view exists only to look
+    }
+}
+
+impl AttrOps for UnscopedTables {
+    fn levels(&self) -> usize {
+        4
+    }
+    fn is_leaf(&self, entry: u64, level: usize) -> bool {
+        <Tables as AttrOps>::is_leaf(&Tables, entry, level)
+    }
+    fn entry_addr(&self, entry: u64) -> usize {
+        <Tables as AttrOps>::entry_addr(&Tables, entry)
+    }
+    fn decode(&self, entry: u64, level: usize) -> PageAttrs {
+        <Tables as AttrOps>::decode(&Tables, entry, level)
+    }
+}
+
+/// Audit every mapping reachable from `root` against the W^X and attribute rules (REQ-MM-006).
+pub fn audit_attrs(root: u64) -> memattr::AuditReport {
+    memattr::audit(root as usize, &Tables)
+}
+
+/// Refuse a leaf whose permissions break W^X or the attribute rules (REQ-MM-006, ADR-034). Called
+/// at the entry of every mapping API, because caller-supplied flags are untrusted input exactly
+/// like `va`/`pa`.
+fn attrs_ok(flags: PageTableFlags) -> bool {
+    Tables.decode(flags.bits(), 3).validate().is_ok()
 }
 
 /// Total intermediate tables reclaimed since boot, so the boot gate proves reclamation actually ran.
@@ -486,7 +606,125 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
     }
 
+    // 10 — W^X AND ATTRIBUTE VALIDATION (ALET-P1-007/008, REQ-MM-006, ADR-034). A writable AND
+    //      executable page turns any memory-corruption bug into code execution. The mapping APIs
+    //      refuse such a request; the audit then walks the LIVE tree, so the property is checked
+    //      against what is actually mapped. On x86-64 the honest exception is everything OVMF
+    //      mapped before we took over — the firmware's own identity map is writable and executable
+    //      and we inherited it — so the audit counts violations by class and the gate requires zero
+    //      among the pages OUR mapping APIs created.
+    {
+        let probe2 = match frames::alloc_zeroed() {
+            Some(f) => f,
+            None => return Err((n + 1, "vm: no frame for the W^X checks")),
+        };
+        let root = active_root();
+        check!(
+            !map_user_frame_raw(
+                root,
+                TEST_VA,
+                probe2.addr() as u64,
+                PageTableFlags::PRESENT | PageTableFlags::WRITABLE
+            ),
+            "wx: mapping a writable+executable page is refused (W^X)"
+        );
+        check!(
+            !map_user_frame_raw(
+                root,
+                TEST_VA,
+                probe2.addr() as u64,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::USER_ACCESSIBLE
+                    | PageTableFlags::WRITABLE
+            ),
+            "wx: mapping a writable+executable user page is refused"
+        );
+        check!(
+            map_kernel_frame(root, TEST_VA, probe2.addr() as u64) && unmap_user(root, TEST_VA),
+            "wx: a legal non-executable writable mapping still succeeds"
+        );
+        // Audit a space WE built: the live root is OVMF's, whose half-million firmware leaves are
+        // writable+executable and inherited, not created by our APIs. Auditing our own space is the
+        // property we can honestly assert; the firmware's tree is reported below for scale.
+        let space = match build_space() {
+            Some(r) => r,
+            None => return Err((n + 1, "vm: no space for the W^X audit")),
+        };
+        let code = map_user(space, 0x4000_0000, false); // RX user page
+        let data = map_user(space, 0x4000_1000, true); // RW+NX user page
+        check!(
+            code.is_some() && data.is_some(),
+            "wx: mapped an executable-read-only and a writable-non-executable user page"
+        );
+        let report = audit_attrs(space);
+        kprintln!(
+            "  [info  ] attr audit (our space): {} leaves, {} dynamic violations, {} block violations",
+            report.leaves,
+            report.dynamic_violations,
+            report.bootstrap_violations
+        );
+        let firmware = memattr::audit(active_root() as usize, &UnscopedTables);
+        kprintln!(
+            "  [info  ] attr audit (inherited OVMF tree, informational): {} leaves, {} W^X violations",
+            firmware.leaves,
+            firmware.dynamic_violations + firmware.bootstrap_violations
+        );
+        check!(
+            report.leaves >= 2,
+            "wx: the attribute audit actually walked the live address space"
+        );
+        check!(
+            report.dynamic_violations == 0 && report.bootstrap_violations == 0,
+            "wx: NO dynamically mapped page in the live tree is writable+executable"
+        );
+        if let Some(t) = destroy_space(space) {
+            check!(
+                t.leaves_freed == 2,
+                "wx: the audited space was destroyed and its pages returned"
+            );
+        }
+        frames::free(probe2);
+    }
+
     Ok(n)
+}
+
+/// Map with EXACTLY the given leaf flags, running the same attribute admission check as the public
+/// APIs. Test-only seam: the public APIs choose their own (already legal) flags, so this is how the
+/// gate proves an ILLEGAL combination is refused rather than silently corrected.
+fn map_user_frame_raw(root: u64, va: u64, pa: u64, flags: PageTableFlags) -> bool {
+    if addr_plan().validate_map(va as usize, pa as usize).is_err() {
+        return false;
+    }
+    if !attrs_ok(flags) {
+        return false;
+    }
+    let parent =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let wp_was_set = Cr0::read().contains(Cr0Flags::WRITE_PROTECT);
+    if wp_was_set {
+        // SAFETY: clearing WP only relaxes ring-0 write protection; restored below.
+        unsafe { Cr0::update(|f| f.remove(Cr0Flags::WRITE_PROTECT)) };
+    }
+    // SAFETY: `root` is a live PML4; `pa` a real frame; tables come from our own allocator.
+    let ok = unsafe {
+        let mut mapper = mapper_for(root);
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+        let x86f = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(pa));
+        let mut fa = frames::GlobalFrames;
+        match mapper.map_to_with_table_flags(page, x86f, flags, parent, &mut fa) {
+            Ok(flush) => {
+                flush.flush();
+                true
+            }
+            Err(_) => false,
+        }
+    };
+    if wp_was_set {
+        // SAFETY: re-arm the write-protect bit exactly as found.
+        unsafe { Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT)) };
+    }
+    ok
 }
 
 // ---------------------------------------------------------------------------
@@ -582,17 +820,23 @@ pub fn translate_in(root: u64, va: u64) -> Option<u64> {
     }
 }
 
-/// Map `va -> pa` in `root` as a ring-3 (user-accessible) page; `writable` sets RW vs read/execute.
-/// Every intermediate table is created USER_ACCESSIBLE (else ring 3 would fault on its OWN pages).
-/// We do NOT set the NX bit (EFER.NXE is not guaranteed by firmware), so pages are effectively RWX
-/// to ring 3 — W^X is not one of the invariants this milestone proves.
+/// Map `va -> pa` in `root` as a ring-3 (user-accessible) page; `writable` sets RW+NX vs
+/// read/execute. Every intermediate table is created USER_ACCESSIBLE (else ring 3 would fault on
+/// its OWN pages).
+///
+/// W^X (REQ-MM-006, ADR-034): a writable page is mapped NO_EXECUTE, so a ring-3 write primitive
+/// cannot become ring-3 (or ring-0) code execution. This requires EFER.NXE, which firmware does not
+/// guarantee — [`enable_nx`] turns it on at boot after checking CPUID, and reports whether it could.
 pub fn map_user_frame(root: u64, va: u64, pa: u64, writable: bool) -> bool {
     if addr_plan().validate_map(va as usize, pa as usize).is_err() {
         return false;
     }
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if writable {
-        flags |= PageTableFlags::WRITABLE;
+        flags |= PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    }
+    if !attrs_ok(flags) {
+        return false;
     }
     let parent =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
@@ -653,7 +897,8 @@ pub fn map_supervisor(root: u64, va: u64) -> Option<frames::Frame> {
         return None;
     }
     let f = frames::alloc_zeroed_as(Owner::USER)?;
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE; // deliberately NO user bit
+    // Deliberately NO user bit; writable ⇒ NO_EXECUTE (REQ-MM-006, ADR-034).
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
     let parent =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
     // SAFETY: see `map_user_frame`; single-core.
@@ -683,7 +928,11 @@ pub fn map_kernel_frame(root: u64, va: u64, pa: u64) -> bool {
     if addr_plan().validate_map(va as usize, pa as usize).is_err() {
         return false;
     }
-    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE; // supervisor leaf (no USER)
+    // Writable ⇒ never executable (REQ-MM-006, ADR-034).
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    if !attrs_ok(flags) {
+        return false;
+    }
     let parent =
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
     // When mapping into the LIVE (firmware-owned) root, `map_to` must write a new entry into an

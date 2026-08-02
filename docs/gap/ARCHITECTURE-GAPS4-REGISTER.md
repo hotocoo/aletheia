@@ -22,8 +22,8 @@ milestone work, carrying no false "done" claim).
 | ALET-P1-004 | P1 | resolved | `kernel-core/src/teardown.rs` (REQ-MM-004, ADR-032): a dying space returns every page/table/root it owns and nothing else, behind two independent guards (per-target privacy predicate + the ownership model); destroying the ACTIVE space is refused everywhere. Host-proved against an in-memory model + VM-gated on live hierarchies (aarch64/RISC-V 42 vm invariants, x86-64 33) with the frame count returning EXACTLY to its pre-space value + five teardown behaviors in the conformance core contract |
 | ALET-P1-005 | P1 | open | SMP TLB shootdown formal contract (REQ-SMP-004 delivered; needs written invariant contract + adversarial test) |
 | ALET-P1-006 | P1 | open | kernel/user virtual address layout hardening (guard pages, layout constants, KASLR posture) |
-| ALET-P1-007 | P1 | open | W^X as a complete global invariant across all map paths + a checker |
-| ALET-P1-008 | P1 | open | memory-attribute validation per-arch (cacheability/permissions enforced, not assumed) |
+| ALET-P1-007 | P1 | open | **checker + dynamic paths landed** (REQ-MM-006, ADR-034): `kernel-core/src/memattr.rs` validates permissions at every dynamic mapping API on all three targets and audits live trees; user code is RX, kernel dynamic pages NX, x86-64 enables NX+SMEP; gates require ZERO violations among kernel-created mappings. Still open — and why this row is not resolved: the bootstrap identity map spans kernel text+data in 2 MiB blocks (64 W^X descriptors per QEMU target, PINNED by each gate). Needs a page-granular kernel-image split via linker symbols |
+| ALET-P1-008 | P1 | resolved | permissions decoded and validated per-arch at every mapping API (REQ-MM-006, ADR-034): aarch64 AP/UXN/PXN/AttrIndx, RISC-V R/W/X/U, x86-64 WRITABLE/NO_EXECUTE/USER_ACCESSIBLE with EFER.NXE + CR4.SMEP enabled after a CPUID check and reported at boot. Cacheability is enforced where the ISA expresses it (aarch64 AttrIndx ⇒ device memory is never executable) and explicitly modelled as Normal where it does not (RISC-V PMAs, x86-64 PAT/MTRRs) rather than silently assumed. Four attribute behaviors in the conformance core contract |
 | ALET-P1-009 | P1 | open | x86-64 trap-frame layout hardening (manual ABI — add static asserts + fuzz) |
 | ALET-P1-010 | P1 | open | shared mutable trap state reentrancy guarantees |
 | ALET-P1-011 | P1 | open | interrupt/fault entry adversarial testing |
@@ -81,10 +81,11 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-02):** 67 findings — 10 resolved (every P0 closed; the P1/P2 memory cluster now has
-address admission ALET-P1-001, page-table reclamation ALET-P1-002, frame ownership ALET-P1-003,
-address-space destruction ALET-P1-004 and erase-on-free ALET-P2-026), 46 open, 11 deferred (milestone
-subsystems). A frame can no longer be aliased, double-freed, leaked by unmapping, leaked by dying, or
-read by its next owner. Still open in this area: W^X as a global invariant (ALET-P1-007),
-per-architecture memory-attribute validation (ALET-P1-008), and kernel/user layout hardening
-(ALET-P1-006).
+**Rollup (2026-08-02):** 67 findings — 11 resolved (every P0 closed; the memory cluster now has address
+admission ALET-P1-001, page-table reclamation ALET-P1-002, frame ownership ALET-P1-003, address-space
+destruction ALET-P1-004, erase-on-free ALET-P2-026 and per-arch attribute validation ALET-P1-008),
+45 open, 11 deferred (milestone subsystems). A frame can no longer be aliased, double-freed, leaked by
+unmapping, leaked by dying, or read by its next owner, and no mapping the kernel creates is
+writable+executable. ALET-P1-007 remains open ON PURPOSE: its checker and dynamic-path enforcement
+landed, but W^X is not yet a COMPLETE global invariant while the bootstrap identity map spans kernel
+text and data in single 2 MiB blocks (64 pinned exceptions per QEMU target).

@@ -196,6 +196,19 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     kprintln!("[hal] rdtsc monotonic sample: {}", ActiveHal::timer_ticks());
 
     // --- physical memory management (P5): take ownership of the RAM the firmware handed us ---
+    // W^X needs EFER.NXE before any page is mapped (REQ-MM-006, ADR-034); firmware does not
+    // guarantee it, so we enable it ourselves and report what the CPU allows.
+    match vm::enable_exec_protections() {
+        (true, true) => kprintln!(
+            "[mm] EFER.NXE + CR4.SMEP enabled — W^X enforceable by paging, user pages not ring-0 executable"
+        ),
+        (nx, smep) => kprintln!(
+            "[mm] WARNING: exec protections incomplete (NX={}, SMEP={}) — W^X degraded on this CPU",
+            nx,
+            smep
+        ),
+    }
+
     let (fbase, fcount) = frames::init_from_uefi(memory_map);
     // Fail-closed (REQ-MM-002): no conventional RAM, or an ownership table that could not cover the
     // pool, both surface as a zero-frame pool. Running on would mean allocating frames nothing owns.
