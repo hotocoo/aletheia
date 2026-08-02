@@ -30,6 +30,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frameown::Owner;
 use kernel_core::ptreclaim::{self, PathStep, TableOps};
+use kernel_core::teardown::{self, SpaceOps, Teardown};
 use kernel_core::vmaddr::{self, AddrPlan};
 
 // --- Fixed platform addresses (QEMU virt, RISC-V) ------------------------------------------
@@ -116,6 +117,36 @@ impl TableOps for Tables {
         // else and reclamation then restores the parent entry (REQ-MM-002).
         frames::free_addr_as(table, Owner::PAGETABLE)
     }
+}
+
+/// The same PTE view, extended with what address-space DESTRUCTION needs (REQ-MM-004, ADR-032). An
+/// Sv39 entry is a LEAF when any of R/W/X is set (`is_leaf`), which covers 4 KiB pages, 2 MiB
+/// megapages and 1 GiB gigapages alike. Every slot of a per-process Sv39 tree belongs to that
+/// space, so the default `is_private` (everything) is correct here.
+impl SpaceOps for Tables {
+    fn levels(&self) -> usize {
+        3
+    }
+    fn is_leaf(&self, entry: u64, _level: usize) -> bool {
+        entry & PTE_RWX != 0
+    }
+    fn entry_addr(&self, entry: u64) -> usize {
+        pte_pa(entry)
+    }
+    fn free_leaf(&mut self, pa: usize) -> bool {
+        // USER-owned pages only; the identity map's RAM/device megapage leaves are refused by the
+        // ownership model and counted as skipped.
+        frames::free_addr_as(pa, Owner::USER)
+    }
+}
+
+/// Destroy the address space rooted at `root` (REQ-MM-004, ADR-032). Refuses — returning `None` —
+/// to destroy the space `satp` is currently translating through.
+pub fn destroy_space(root: usize) -> Option<Teardown> {
+    if root == active_root() {
+        return None;
+    }
+    Some(teardown::destroy_address_space(root, &mut Tables))
 }
 
 /// Total intermediate tables reclaimed since boot, so the VM gate proves reclamation actually ran.
@@ -583,6 +614,77 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         frames::free(f1);
         frames::free(f2);
+    }
+
+    // 10 — ADDRESS-SPACE DESTRUCTION (ALET-P1-004, REQ-MM-004, ADR-032). Reclamation (above) only
+    //      helps a space that tidies up page by page. A space that DIES — a task that faults, is
+    //      killed, or exits without unmapping — used to keep every page, every table and its root
+    //      forever, so a crashed process was a permanent physical-memory loss. Teardown frees what
+    //      the space owns and, critically, nothing else: the identity map's RAM/device BLOCK
+    //      descriptors are addresses the allocator does not hold under this space's tag, so the
+    //      ownership model refuses them and they are reported as SKIPPED rather than freed.
+    {
+        let free_before_space = frames::free_count();
+        let victim = match build_identity() {
+            Some(r) => r,
+            None => return Err((n + 1, "vm: no frames to build a victim address space")),
+        };
+        check!(
+            victim != root && frames::free_count() < free_before_space,
+            "vm: built a second address space with its own tables"
+        );
+        // Give it two user pages, as a live process would have.
+        let p1 = match frames::alloc_zeroed_as(Owner::USER) {
+            Some(f) => f,
+            None => return Err((n + 1, "vm: no user page for the teardown check")),
+        };
+        let p2 = match frames::alloc_zeroed_as(Owner::USER) {
+            Some(f) => f,
+            None => return Err((n + 1, "vm: no second user page for the teardown check")),
+        };
+        // Above RAM_END, so neither VA collides with the identity map's block descriptors, and
+        // 2 MiB apart, so the two pages land in DIFFERENT leaf tables — teardown must walk more
+        // than one branch.
+        const V1: usize = frames::RAM_END + 0x20_0000;
+        const V2: usize = frames::RAM_END + 0x60_0000;
+        check!(
+            map_page(victim, V1, p1.addr(), NORMAL_PAGE)
+                && map_page(victim, V2, p2.addr(), NORMAL_PAGE),
+            "vm: mapped two user pages into the victim address space"
+        );
+        check!(
+            destroy_space(root).is_none(),
+            "vm: destroying the ACTIVE address space is refused (the kernel is running in it)"
+        );
+        let t = match destroy_space(victim) {
+            Some(t) => t,
+            None => return Err((n + 1, "vm: teardown refused a non-active address space")),
+        };
+        check!(
+            t.leaves_freed == 2,
+            "vm: teardown freed exactly the pages the space owned"
+        );
+        check!(
+            t.leaves_skipped > 0,
+            "vm: teardown SKIPPED the identity map's block descriptors (not this space's frames)"
+        );
+        check!(
+            t.tables_refused == 0,
+            "vm: every table in the tree was one this space owned"
+        );
+        check!(
+            frames::free_count() == free_before_space,
+            "vm: destroying the space returned every frame it held, including its root"
+        );
+        check!(
+            frames::owner_of(p1.addr()).is_none() && frames::owner_of(p2.addr()).is_none(),
+            "vm: the destroyed space's pages have no owner (they are genuinely back in the pool)"
+        );
+        // The kernel's own address space is untouched and still works.
+        check!(
+            translate(root, TEST_VA).is_none() && active_root() == root,
+            "vm: the surviving address space is intact after the teardown"
+        );
     }
 
     frames::free(frame);

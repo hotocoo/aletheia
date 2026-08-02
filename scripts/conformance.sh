@@ -53,6 +53,14 @@ CONTRACT=(
   "the reclaimed table frames came back to the allocator"
   "neither VA resolves after reclamation"
   "the address space rebuilds the reclaimed chain (root intact, frames reusable)"
+  # Address-space destruction (ALET-P1-004, REQ-MM-004, ADR-032). A dying space must give back
+  # everything it owned and nothing else, and no target may allow the running kernel to destroy the
+  # space it is executing in.
+  "destroying the ACTIVE address space is refused (the kernel is running in it)"
+  "teardown freed exactly the pages the space owned"
+  "every table in the tree was one this space owned"
+  "destroying the space returned every frame it held, including its root"
+  "the surviving address space is intact after the teardown"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

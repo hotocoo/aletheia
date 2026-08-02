@@ -19,7 +19,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P1-001 | P1 | resolved | `kernel-core/src/vmaddr.rs` (REQ-MM-001, ADR-029) enforced at every mapping API on all three targets; host property proof `kernel-core/tests/vmaddr.rs` (no accepted VA pair aliases; every accepted PA is an owned frame) + 8/8/7 live-table VM invariants (aarch64 21, riscv64 21, x86-64 13 vm invariants) + refusals added to the conformance core contract |
 | ALET-P1-002 | P1 | resolved | `kernel-core/src/ptreclaim.rs` (REQ-MM-003, ADR-031): an unmap that empties a table frees it — empty-only, parent cleared before the free, root never freed, stop at the first table in use, refused free restores the reference. Wired into all three targets' unmap paths; host-proved against an in-memory table model + VM-gated (aarch64/RISC-V 33 vm invariants, x86-64 25) + five reclamation behaviors added to the conformance core contract |
 | ALET-P1-003 | P1 | resolved | `kernel-core/src/frameown.rs` (REQ-MM-002, ADR-030): one owner per frame, claimed/released through the allocator on all three targets; host property proof `kernel-core/tests/frameown.rs` (no frame held twice; counters balance; every refusal is a no-op, asserted after each of 20 000 deterministic ops) + 17 memory invariants per target in the VM gates (was 7) + the five ownership refusals added to the conformance core contract |
-| ALET-P1-004 | P1 | open | address-space destruction fully qualified (teardown frees all frames + tables) |
+| ALET-P1-004 | P1 | resolved | `kernel-core/src/teardown.rs` (REQ-MM-004, ADR-032): a dying space returns every page/table/root it owns and nothing else, behind two independent guards (per-target privacy predicate + the ownership model); destroying the ACTIVE space is refused everywhere. Host-proved against an in-memory model + VM-gated on live hierarchies (aarch64/RISC-V 42 vm invariants, x86-64 33) with the frame count returning EXACTLY to its pre-space value + five teardown behaviors in the conformance core contract |
 | ALET-P1-005 | P1 | open | SMP TLB shootdown formal contract (REQ-SMP-004 delivered; needs written invariant contract + adversarial test) |
 | ALET-P1-006 | P1 | open | kernel/user virtual address layout hardening (guard pages, layout constants, KASLR posture) |
 | ALET-P1-007 | P1 | open | W^X as a complete global invariant across all map paths + a checker |
@@ -81,9 +81,10 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-02):** 67 findings — 8 resolved (every P0 closed; the P1 memory-safety cluster now
-has address admission ALET-P1-001, frame ownership ALET-P1-003, and page-table reclamation
-ALET-P1-002), 48 open, 11 deferred (milestone subsystems). ALET-P1-004 (address-space teardown) is
-*unblocked*: ownership tags say which frames belong to a space and reclamation is the operation that
-returns tables.
-
+**Rollup (2026-08-02):** 67 findings — 9 resolved (every P0 closed; the P1 memory-safety cluster now
+has address admission ALET-P1-001, page-table reclamation ALET-P1-002, frame ownership ALET-P1-003 and
+address-space destruction ALET-P1-004), 47 open, 11 deferred (milestone subsystems). Physical memory is
+now conserved across the full lifetime of an address space: frames cannot be aliased, double-freed,
+leaked by unmapping, or leaked by dying. Not yet closed in this cluster: zeroing on free
+(ALET-P2-026 — a freed page's bytes are still readable by its next owner), W^X as a global invariant
+(ALET-P1-007), and per-arch memory-attribute validation (ALET-P1-008).

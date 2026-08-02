@@ -37,6 +37,7 @@ pub mod smpsched;
 pub mod spine;
 pub mod storage;
 pub mod sync;
+pub mod teardown;
 pub mod vmaddr;
 
 /// The arch-independent hardware primitives the Aletheia kernel needs from a target backend. Every
