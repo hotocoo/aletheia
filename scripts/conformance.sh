@@ -44,6 +44,11 @@ CONTRACT=(
   "freeing a never-allocated frame is refused"
   "a freed frame has no owner"
   "ownership table and free list agree on the free count"
+  # Erase on free (ALET-P2-026, REQ-MM-005, ADR-033). Ownership stops two owners holding one frame
+  # at the same TIME; this is what stops the next owner READING the last one's bytes. A target that
+  # hands back a dirty frame is a cross-task information leak, whatever its CPU.
+  "a reused frame carries NO bytes of its previous owner (erased on free)"
+  "the next allocation reuses the just-freed frame (LIFO)"
   # Page-table reclamation (ALET-P1-002, REQ-MM-003, ADR-031). The level COUNT differs honestly by
   # architecture (3-level aarch64/Sv39 vs 4-level x86-64), so the contract names the behavior, not
   # the number: a sibling mapping must protect the tables, an emptied chain must come back to the

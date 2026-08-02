@@ -197,6 +197,17 @@ impl FrameAllocator {
                 return false;
             }
         }
+        // ERASE ON FREE (REQ-MM-005, ADR-033, GAPS4 ALET-P2-026). Ownership stops two owners from
+        // holding one frame at the same TIME; it says nothing about what the next owner can READ.
+        // A page released by a task carrying keys, message bodies, or decrypted content kept those
+        // bytes verbatim until someone overwrote them, so the next `alloc` — in any address space,
+        // for any task — could read them. Erasing at RELEASE (not at allocation) makes the
+        // guarantee unconditional: it holds for every path that returns a frame, including page-table
+        // reclamation and address-space teardown, and it cannot be skipped by a caller who used
+        // plain `alloc`. The link word `push_raw` writes below is the only thing left in the frame.
+        // SAFETY: the release above proves this frame is ours and now unowned; it is identity-
+        // accessible, so writing its whole 4 KiB is sound and observed by nobody else.
+        unsafe { frame_bytes_mut(a).fill(0) };
         // SAFETY: `a` is a valid, aligned, in-range frame address; writing its link word is sound.
         unsafe { self.push_raw(a) };
         true
@@ -227,6 +238,15 @@ impl FrameAllocator {
     pub fn base(&self) -> usize {
         self.base
     }
+}
+
+/// Mutable byte view of the frame at physical address `a`, for erase-on-free.
+///
+/// SAFETY: `a` must be a frame this allocator owns, aligned and in range, with no other live
+/// reference to its contents.
+#[inline]
+unsafe fn frame_bytes_mut(a: usize) -> &'static mut [u8] {
+    core::slice::from_raw_parts_mut(a as *mut u8, FRAME_SIZE)
 }
 
 /// Single-core interior-mutability wrapper: the kernel is uniprocessor with no preemption during
@@ -484,6 +504,63 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             kframes().owned_free_count() == Some(free_count()),
             "frames: ownership table and free list agree on the free count"
         );
+    }
+
+    // 8 — ERASE ON FREE (REQ-MM-005, ADR-033, ALET-P2-026). Ownership stops two owners holding one
+    //     frame at the same TIME; it says nothing about what the next owner can READ. Write a
+    //     recognizable pattern across a frame, free it, take it back, and require zeros — the only
+    //     honest proof, since asserting `alloc_zeroed` returns zeros would prove nothing about what
+    //     a plain `alloc` hands the next task.
+    {
+        let secret = match alloc_as(Owner::USER) {
+            Some(f) => f,
+            None => return Err((n + 1, "frames: no frame for the erase-on-free check")),
+        };
+        const SECRET: u64 = 0x5EC7_0000_5EC7_0000;
+        let addr = secret.addr();
+        // SAFETY: we hold this frame; it is identity-accessible.
+        unsafe {
+            let p = addr as *mut u64;
+            for i in 0..(FRAME_SIZE / 8) {
+                core::ptr::write_volatile(p.add(i), SECRET);
+            }
+            check!(
+                core::ptr::read_volatile(p) == SECRET,
+                "frames: a live frame holds the owner's data"
+            );
+        }
+        check!(
+            free_as(secret, Owner::USER),
+            "frames: the owner frees the frame carrying its data"
+        );
+        // The pool is LIFO, so the very next allocation is that same frame — the exact case a
+        // leak would expose.
+        let reused = match alloc_as(Owner::KERNEL) {
+            Some(f) => f,
+            None => return Err((n + 1, "frames: the freed frame did not come back")),
+        };
+        check!(
+            reused.addr() == addr,
+            "frames: the next allocation reuses the just-freed frame (LIFO)"
+        );
+        let mut leaked = false;
+        // SAFETY: we now hold the frame; reading its own bytes is sound.
+        unsafe {
+            let p = addr as *const u64;
+            // Skip the first word: the allocator's own free-list link lives there and is
+            // overwritten by the next push, not by the previous owner.
+            for i in 1..(FRAME_SIZE / 8) {
+                if core::ptr::read_volatile(p.add(i)) != 0 {
+                    leaked = true;
+                    break;
+                }
+            }
+        }
+        check!(
+            !leaked,
+            "frames: a reused frame carries NO bytes of its previous owner (erased on free)"
+        );
+        free(reused);
     }
 
     Ok(n)
