@@ -19,7 +19,19 @@
 //! DESIGN: an intrusive LIFO free-list — each free frame stores the next free frame's physical
 //! address in its own first 8 bytes, so no side table is needed. Single-core, no preemption,
 //! fail-closed on exhaustion. Identical strategy to the aarch64 backend.
+//!
+//! OWNERSHIP (REQ-MM-002, ADR-030, GAPS4 ALET-P1-003): the free-list alone cannot tell a frame it
+//! already holds from one a caller legitimately owns, so `free` used to accept any aligned
+//! in-window address — including one already on the list. That pushes the same frame twice, and two
+//! later `alloc` calls hand ONE page to two owners. Every alloc/free now goes through the shared
+//! arch-independent [`kernel_core::frameown::FrameOwnerTable`], identically to the aarch64 and
+//! RISC-V backends. One x86-64-specific wrinkle: the window comes from the UEFI map at runtime, so
+//! it is not a compile-time constant like the QEMU `virt` targets' DRAM. The state array therefore
+//! covers a fixed [`MAX_FRAMES`] and the seeded window is CLAMPED to it — a machine with more
+//! conventional RAM manages less of it rather than running a tail with no ownership state, and
+//! `init_from_uefi` reports the clamp so it is never silent.
 use core::cell::UnsafeCell;
+use kernel_core::frameown::{FrameOwnerTable, Owner};
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 use x86_64::structures::paging::{
     FrameAllocator as X86FrameAllocator, PhysFrame as X86PhysFrame, Size4KiB,
@@ -60,6 +72,8 @@ struct FrameAllocator {
     total: usize,
     base: usize,
     end: usize,
+    /// `None` until `attach_owners` runs; the global pool always attaches one during init.
+    owners: Option<FrameOwnerTable<'static>>,
 }
 
 impl FrameAllocator {
@@ -70,6 +84,7 @@ impl FrameAllocator {
             total: 0,
             base: 0,
             end: 0,
+            owners: None,
         }
     }
 
@@ -107,32 +122,76 @@ impl FrameAllocator {
         self.free += 1;
     }
 
-    fn alloc(&mut self) -> Option<Frame> {
+    /// Give this pool an ownership table covering exactly the frames it manages, built from the
+    /// pool's OWN base and frame count so the two can never describe different windows.
+    fn attach_owners(&mut self, state: &'static mut [u8]) -> bool {
+        match FrameOwnerTable::new(self.base, self.total, state) {
+            Ok(t) => {
+                self.owners = Some(t);
+                true
+            }
+            Err(_) => false, // fail-closed: an unprotected tail is worse than no pool
+        }
+    }
+
+    /// Allocate one frame for `owner`. Ownership is claimed BEFORE the frame leaves the list, so a
+    /// frame the table already considers owned stays put and the caller gets `None`.
+    fn alloc_as(&mut self, owner: Owner) -> Option<Frame> {
         if self.head == 0 {
             return None;
         }
         let f = self.head;
+        if let Some(t) = self.owners.as_mut() {
+            t.claim(f, owner).ok()?;
+        }
         // SAFETY: `f` is a frame we previously pushed; its first word is the next-free link.
         self.head = unsafe { *(f as *const usize) };
         self.free -= 1;
         Some(Frame(f))
     }
 
-    fn alloc_zeroed(&mut self) -> Option<Frame> {
-        let frame = self.alloc()?;
+    fn alloc(&mut self) -> Option<Frame> {
+        self.alloc_as(Owner::KERNEL)
+    }
+
+    fn alloc_zeroed_as(&mut self, owner: Owner) -> Option<Frame> {
+        let frame = self.alloc_as(owner)?;
         // SAFETY: we hold `frame` exclusively; identity-accessible.
         unsafe { frame.as_bytes_mut().fill(0) };
         Some(frame)
     }
 
-    fn free(&mut self, frame: Frame) -> bool {
+    fn alloc_zeroed(&mut self) -> Option<Frame> {
+        self.alloc_zeroed_as(Owner::KERNEL)
+    }
+
+    /// Return a frame held by `owner`. Rejected (list untouched) when misaligned, out of region,
+    /// already free (double free), or held by a different owner.
+    fn free_as(&mut self, frame: Frame, owner: Owner) -> bool {
         let a = frame.addr();
         if a < self.base || a >= self.end || !a.is_multiple_of(FRAME_SIZE) {
             return false;
         }
+        if let Some(t) = self.owners.as_mut() {
+            if t.release(a, owner).is_err() {
+                return false;
+            }
+        }
         // SAFETY: `a` is a valid, aligned, in-range frame address.
         unsafe { self.push_raw(a) };
         true
+    }
+
+    fn free(&mut self, frame: Frame) -> bool {
+        self.free_as(frame, Owner::KERNEL)
+    }
+
+    fn owner_of(&self, pa: usize) -> Option<Owner> {
+        self.owners.as_ref()?.owner_of(pa).ok().flatten()
+    }
+
+    fn owned_free_count(&self) -> Option<usize> {
+        Some(self.owners.as_ref()?.free_count())
     }
 
     fn free_count(&self) -> usize {
@@ -156,6 +215,14 @@ struct Locked(UnsafeCell<FrameAllocator>);
 unsafe impl Sync for Locked {}
 
 static KFRAMES: Locked = Locked(UnsafeCell::new(FrameAllocator::empty()));
+
+/// Frames the ownership state array covers — 1 GiB at one byte per 4 KiB frame (256 KiB of
+/// `.bss`). Unlike the QEMU `virt` targets, x86-64 learns its window from the UEFI map at runtime,
+/// so this is a ceiling rather than the exact pool size; `init_from_uefi` clamps and reports.
+pub const MAX_FRAMES: usize = 262_144;
+
+/// Backing store for the global pool's ownership table (no heap exists this early).
+static mut OWNER_STATE: [u8; MAX_FRAMES] = [0; MAX_FRAMES];
 
 #[allow(clippy::mut_from_ref)]
 fn kframes() -> &'static mut FrameAllocator {
@@ -190,12 +257,41 @@ pub fn init_from_uefi(map: &MemoryMapOwned) -> (usize, usize) {
         return (0, 0);
     }
     let base = best_base as usize;
-    let end = (best_base + best_len) as usize;
+    // Clamp to what the ownership state array covers: managing RAM with no ownership state would
+    // reintroduce exactly the double-free window this model closes. The caller reports the clamp.
+    let end = ((best_base + best_len) as usize).min(base + MAX_FRAMES * FRAME_SIZE);
     // SAFETY: the largest CONVENTIONAL region is RAM the UEFI spec frees to the OS at
     // ExitBootServices; it never overlaps our loaded image/stack/firmware tables, and OVMF
     // identity-maps it (writable at its identity address).
     unsafe { kframes().init(base, end) };
+    // SAFETY: `OWNER_STATE` is a private static touched only here, once, before any allocation.
+    let state: &'static mut [u8] = unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(OWNER_STATE) as *mut u8, MAX_FRAMES)
+    };
+    if !kframes().attach_owners(state) {
+        return (0, 0); // fail-closed: no ownership table, no pool
+    }
     (kframes().base(), kframes().total_count())
+}
+
+/// Allocate one physical frame owned by `owner`.
+pub fn alloc_as(owner: Owner) -> Option<Frame> {
+    kframes().alloc_as(owner)
+}
+
+/// Allocate one zeroed physical frame owned by `owner`.
+pub fn alloc_zeroed_as(owner: Owner) -> Option<Frame> {
+    kframes().alloc_zeroed_as(owner)
+}
+
+/// Return a frame held by `owner` to the global pool.
+pub fn free_as(frame: Frame, owner: Owner) -> bool {
+    kframes().free_as(frame, owner)
+}
+
+/// Current holder of the frame at `pa`.
+pub fn owner_of(pa: usize) -> Option<Owner> {
+    kframes().owner_of(pa)
 }
 
 /// Allocate one physical frame from the global pool.
@@ -238,7 +334,9 @@ pub struct GlobalFrames;
 // 4 KiB-aligned RAM — exactly the contract `x86_64::FrameAllocator` requires.
 unsafe impl X86FrameAllocator<Size4KiB> for GlobalFrames {
     fn allocate_frame(&mut self) -> Option<X86PhysFrame<Size4KiB>> {
-        alloc().map(|f| X86PhysFrame::containing_address(PhysAddr::new(f.addr() as u64)))
+        // The mapper pulls these for intermediate page tables, so they are PAGETABLE-owned.
+        alloc_as(Owner::PAGETABLE)
+            .map(|f| X86PhysFrame::containing_address(PhysAddr::new(f.addr() as u64)))
     }
 }
 
@@ -334,6 +432,63 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         check!(
             scratch.alloc().is_some(),
             "frames: freeing an exhausted pool revives allocation"
+        );
+    }
+
+    // 6 — OWNERSHIP (REQ-MM-002, ADR-030, ALET-P1-003). Identical checks and identical wording to
+    //     the aarch64 and RISC-V backends: `scripts/conformance.sh` requires all three targets to
+    //     refuse the same things in the same words, because a security boundary that varies by CPU
+    //     is not a boundary.
+    {
+        let f = match alloc_as(Owner::USER) {
+            Some(f) => f,
+            None => return Err((n + 1, "frames: no frame for the ownership checks")),
+        };
+        check!(
+            owner_of(f.addr()) == Some(Owner::USER),
+            "frames: an allocated frame reports the owner that claimed it"
+        );
+        let before = free_count();
+        check!(
+            !free_as(f, Owner::KERNEL),
+            "frames: freeing another owner's frame is refused (fail-closed)"
+        );
+        check!(
+            free_count() == before && owner_of(f.addr()) == Some(Owner::USER),
+            "frames: the refused cross-owner free left the pool and the owner untouched"
+        );
+        check!(
+            free_as(f, Owner::USER),
+            "frames: the real owner can free its frame"
+        );
+        check!(
+            owner_of(f.addr()).is_none(),
+            "frames: a freed frame has no owner"
+        );
+        check!(
+            !free_as(f, Owner::USER),
+            "frames: double free is refused (would hand one page to two owners)"
+        );
+        check!(
+            free_count() == before + 1,
+            "frames: the refused double free did not push the frame twice"
+        );
+        let never = match alloc_as(Owner::KERNEL) {
+            Some(f) => f,
+            None => return Err((n + 1, "frames: no frame for the never-allocated check")),
+        };
+        let stranger = Frame(never.addr() + FRAME_SIZE);
+        check!(
+            owner_of(stranger.addr()).is_none() && !free_as(stranger, Owner::KERNEL),
+            "frames: freeing a never-allocated frame is refused"
+        );
+        check!(
+            free_as(never, Owner::KERNEL),
+            "frames: legal free still succeeds after the refusals"
+        );
+        check!(
+            kframes().owned_free_count() == Some(free_count()),
+            "frames: ownership table and free list agree on the free count"
         );
     }
 

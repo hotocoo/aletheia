@@ -20,6 +20,7 @@
 //! page descriptor sets the **Access Flag (bit 10)** — an unset AF faults on first access.
 use crate::frames;
 use core::arch::asm;
+use kernel_core::frameown::Owner;
 use kernel_core::vmaddr::{self, AddrPlan};
 
 // --- Fixed platform addresses (QEMU virt) -------------------------------------------------
@@ -80,10 +81,10 @@ fn indices(va: usize) -> (usize, usize, usize) {
 /// `None` if the frame allocator is exhausted. Tables live in RAM, so they remain reachable at
 /// their identity address once the MMU is on.
 pub fn build_identity() -> Option<usize> {
-    let l1 = frames::alloc_zeroed()?.addr();
+    let l1 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
 
     // L1[0] -> peripheral GiB (0..1 GiB), 2 MiB Device blocks (covers the PL011 UART).
-    let l2_dev = frames::alloc_zeroed()?.addr();
+    let l2_dev = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
     for i in 0..512 {
         let pa = (i * BLOCK_2M) as u64;
         // SAFETY: `l2_dev` is a fresh, in-RAM, identity-accessible frame; `i` < 512 entries.
@@ -93,7 +94,7 @@ pub fn build_identity() -> Option<usize> {
     unsafe { write_entry(l1, 0, (l2_dev as u64) | DESC_TABLE) };
 
     // L1[1] -> the RAM GiB (1..2 GiB). RAM occupies 0x4000_0000..RAM_END => L2 blocks 0..N.
-    let l2_ram = frames::alloc_zeroed()?.addr();
+    let l2_ram = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
     let ram_blocks = (frames::RAM_END - RAM_BASE) / BLOCK_2M;
     for i in 0..ram_blocks {
         let pa = (RAM_BASE + i * BLOCK_2M) as u64;
@@ -165,7 +166,7 @@ pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
     unsafe {
         let l1e = read_entry(root, l1i);
         let l2t = if l1e & VALID == 0 {
-            let t = match frames::alloc_zeroed() {
+            let t = match frames::alloc_zeroed_as(Owner::PAGETABLE) {
                 Some(f) => f.addr(),
                 None => return false,
             };
@@ -179,7 +180,7 @@ pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
 
         let l2e = read_entry(l2t, l2i);
         let l3t = if l2e & VALID == 0 {
-            let t = match frames::alloc_zeroed() {
+            let t = match frames::alloc_zeroed_as(Owner::PAGETABLE) {
                 Some(f) => f.addr(),
                 None => return false,
             };

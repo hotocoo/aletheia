@@ -197,6 +197,14 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
 
     // --- physical memory management (P5): take ownership of the RAM the firmware handed us ---
     let (fbase, fcount) = frames::init_from_uefi(memory_map);
+    // Fail-closed (REQ-MM-002): no conventional RAM, or an ownership table that could not cover the
+    // pool, both surface as a zero-frame pool. Running on would mean allocating frames nothing owns.
+    if fcount == 0 {
+        kprintln!(
+            "[mm] FATAL: no owned frame pool (no conventional RAM or ownership table too small)"
+        );
+        ActiveHal::exit(29);
+    }
     kprintln!(
         "[mm] frame allocator: {} frames ({} MiB) from the largest conventional region @ {:#x}",
         fcount,

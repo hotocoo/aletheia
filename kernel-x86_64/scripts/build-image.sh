@@ -17,14 +17,16 @@ mkdir -p "$BUILD"
 
 echo "==> [1/5] build kernel .efi (x86_64-unknown-uefi)"
 # Embed the RELEASE artifact by default. Override with EFI=/path or PROFILE=debug|release.
-# If the artifact already exists we DO NOT recompile — the image is built from the exact
-# .efi that was already produced (keeps an existing release build as-is).
+# ALWAYS recompile first (cargo is a no-op when nothing changed). Skipping the build when an .efi
+# already existed silently shipped a STALE kernel: an edited source tree produced an image built
+# from the previous binary, so the boot gate passed against code that was no longer in the tree.
+# An explicit EFI=/path still bypasses the build — that is the deliberate escape hatch.
 PROFILE="${PROFILE:-release}"
-EFI="${EFI:-$HERE/target/x86_64-unknown-uefi/$PROFILE/aletheia-kernel-x86_64.efi}"
-if [ ! -f "$EFI" ]; then
+if [ -z "${EFI:-}" ]; then
   BUILD_FLAGS=""; [ "$PROFILE" = "release" ] && BUILD_FLAGS="--release"
   ( cd "$HERE" && cargo build $BUILD_FLAGS )
 fi
+EFI="${EFI:-$HERE/target/x86_64-unknown-uefi/$PROFILE/aletheia-kernel-x86_64.efi}"
 [ -f "$EFI" ] || { echo "missing $EFI"; exit 1; }
 echo "    using .efi: $EFI"
 

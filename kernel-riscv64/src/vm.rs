@@ -27,6 +27,7 @@
 //! 4 KiB page at level 0.
 use crate::frames;
 use core::arch::asm;
+use kernel_core::frameown::Owner;
 use kernel_core::vmaddr::{self, AddrPlan};
 
 // --- Fixed platform addresses (QEMU virt, RISC-V) ------------------------------------------
@@ -103,7 +104,7 @@ fn indices(va: usize) -> (usize, usize, usize) {
 /// Returns `None` if the frame allocator is exhausted. Tables live in RAM, so they stay reachable
 /// at their identity address once paging is on.
 pub fn build_identity() -> Option<usize> {
-    let root = frames::alloc_zeroed()?.addr();
+    let root = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
 
     // Root[0] -> peripheral GiB (0..1 GiB) as a Device gigapage leaf.
     // SAFETY: `root` is a fresh, in-RAM, identity-accessible table; index 0 < 512.
@@ -112,7 +113,7 @@ pub fn build_identity() -> Option<usize> {
     // Root[2] -> a level-1 table of RAM megapages. RAM occupies 0x8000_0000.., which lands in
     // level-2 index 2 (0x8000_0000 >> 30 == 2); within that gigabyte the RAM megapages start at
     // level-1 index 0.
-    let l1 = frames::alloc_zeroed()?.addr();
+    let l1 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
     let ram_megs = (frames::RAM_END - RAM_BASE) / MEG_2M;
     for i in 0..ram_megs {
         let pa = RAM_BASE + i * MEG_2M;
@@ -184,7 +185,7 @@ pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
     unsafe {
         let e2 = read_entry(root, i2);
         let t1 = if e2 & PTE_V == 0 {
-            let t = match frames::alloc_zeroed() {
+            let t = match frames::alloc_zeroed_as(Owner::PAGETABLE) {
                 Some(f) => f.addr(),
                 None => return false,
             };
@@ -198,7 +199,7 @@ pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
 
         let e1 = read_entry(t1, i1);
         let t0 = if e1 & PTE_V == 0 {
-            let t = match frames::alloc_zeroed() {
+            let t = match frames::alloc_zeroed_as(Owner::PAGETABLE) {
                 Some(f) => f.addr(),
                 None => return false,
             };

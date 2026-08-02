@@ -34,6 +34,7 @@ use core::ptr::{addr_of, addr_of_mut};
 // REQ-KERN-005: the aarch64 target DRIVES the shared arch-independent scheduling policy from
 // kernel-core rather than hand-rolling its own rotation. kernel-core decides which task runs next;
 // this module performs only the context-switch MECHANISM (resume_frame + address-space switch).
+use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's `vm.rs` performs the real page mapping into each address space.
@@ -576,7 +577,7 @@ unsafe fn sync_icache(addr: usize, len: usize) {
 /// Map a fresh frame at `va` as EL0-executable code, writing `code` (aarch64 machine words) into
 /// it first. Returns the backing frame (caller unmaps+frees).
 fn map_user_code(root: usize, va: usize, code: &[u32]) -> Option<frames::PhysFrame> {
-    let f = frames::alloc_zeroed()?;
+    let f = frames::alloc_zeroed_as(Owner::USER)?;
     let pa = f.addr();
     // SAFETY: `pa` is a fresh, identity-mapped, kernel-writable frame; `code` ≤ one page.
     unsafe {
@@ -586,7 +587,7 @@ fn map_user_code(root: usize, va: usize, code: &[u32]) -> Option<frames::PhysFra
         sync_icache(pa, code.len() * 4);
     }
     if !vm::map_page(root, va, pa, vm::USER_CODE) {
-        frames::free(f);
+        frames::free_as(f, Owner::USER);
         return None;
     }
     Some(f)
@@ -594,9 +595,9 @@ fn map_user_code(root: usize, va: usize, code: &[u32]) -> Option<frames::PhysFra
 
 /// Map a fresh EL0 data/stack frame at `va`.
 fn map_user_stack(root: usize, va: usize) -> Option<frames::PhysFrame> {
-    let f = frames::alloc_zeroed()?;
+    let f = frames::alloc_zeroed_as(Owner::USER)?;
     if !vm::map_page(root, va, f.addr(), vm::USER_DATA) {
-        frames::free(f);
+        frames::free_as(f, Owner::USER);
         return None;
     }
     Some(f)
@@ -605,7 +606,7 @@ fn map_user_stack(root: usize, va: usize) -> Option<frames::PhysFrame> {
 /// Tear down a mapped user page and reclaim its frame.
 fn drop_user_page(root: usize, va: usize, f: frames::PhysFrame) {
     vm::unmap_page(root, va);
-    frames::free(f);
+    frames::free_as(f, Owner::USER);
 }
 
 /// Run a one-shot EL0 excursion in the current address space: build a fresh-task frame and resume
