@@ -31,7 +31,9 @@ use x86_64::structures::paging::{
 use x86_64::{PhysAddr, VirtAddr};
 
 use crate::frames;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frameown::Owner;
+use kernel_core::ptreclaim::{self, PathStep, TableOps};
 use kernel_core::vmaddr::{self, AddrPlan};
 
 /// A canonical lower-half virtual address far above any RAM OVMF identity-maps at `-m 256M`
@@ -52,6 +54,74 @@ unsafe fn active_mapper() -> x86_64::structures::paging::OffsetPageTable<'static
     let l4_phys = l4_frame.start_address().as_u64();
     let l4: &'static mut PageTable = &mut *(l4_phys as *mut PageTable);
     x86_64::structures::paging::OffsetPageTable::new(l4, VirtAddr::new(0))
+}
+
+/// Bits of a 4-level x86-64 paging entry this module needs: the present bit and the physical
+/// address field. (`PageTableFlags::PRESENT` is bit 0; the address occupies bits 51:12.)
+const PRESENT: u64 = 1;
+const ENTRY_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+/// Index of `va` at each of the four paging levels, PML4 first.
+#[inline]
+fn indices4(va: u64) -> [usize; 4] {
+    [
+        ((va >> 39) & 0x1ff) as usize,
+        ((va >> 30) & 0x1ff) as usize,
+        ((va >> 21) & 0x1ff) as usize,
+        ((va >> 12) & 0x1ff) as usize,
+    ]
+}
+
+/// The x86-64 paging-entry view the shared reclamation policy walks (REQ-MM-003, ADR-031). The only
+/// architecture knowledge here is the present bit and the 8-byte entry width; the rules live once
+/// in `kernel_core::ptreclaim`, identically to aarch64 and RISC-V.
+struct Tables;
+
+impl TableOps for Tables {
+    fn read(&self, table: usize, index: usize) -> u64 {
+        // SAFETY: paging structures are identity-accessible under OVMF's map; index < 512.
+        unsafe { core::ptr::read_volatile((table + index * 8) as *const u64) }
+    }
+    fn write(&mut self, table: usize, index: usize, value: u64) {
+        // SAFETY: as above. Callers clear CR0.WP first, because an upper-level table may be a
+        // firmware page OVMF left read-only.
+        unsafe { core::ptr::write_volatile((table + index * 8) as *mut u64, value) }
+    }
+    fn is_present(&self, entry: u64) -> bool {
+        entry & PRESENT != 0
+    }
+    fn free_table(&mut self, table: usize) -> bool {
+        frames::free_addr_as(table, Owner::PAGETABLE)
+    }
+}
+
+/// Total intermediate tables reclaimed since boot, so the boot gate proves reclamation actually ran.
+static TABLES_RECLAIMED: AtomicUsize = AtomicUsize::new(0);
+
+/// Intermediate page tables freed since boot (REQ-MM-003).
+pub fn tables_reclaimed() -> usize {
+    TABLES_RECLAIMED.load(Ordering::Relaxed)
+}
+
+/// Walk `root` for `va` and return the four-step path (PML4 → PDPT → PD → PT) reclamation needs, or
+/// `None` when the walk hits an absent entry or a huge-page leaf (nothing to reclaim there).
+fn walk_path(root: u64, va: u64) -> Option<[PathStep; 4]> {
+    let idx = indices4(va);
+    let ops = Tables;
+    let mut table = root as usize;
+    let mut path = [PathStep::new(0, 0); 4];
+    for level in 0..4 {
+        path[level] = PathStep::new(table, idx[level]);
+        if level == 3 {
+            break;
+        }
+        let e = ops.read(table, idx[level]);
+        if e & PRESENT == 0 || e & PageTableFlags::HUGE_PAGE.bits() != 0 {
+            return None;
+        }
+        table = (e & ENTRY_ADDR_MASK) as usize;
+    }
+    Some(path)
 }
 
 /// Prove the virtual-memory invariants against the live page-table hierarchy. `Ok(n)` = all n
@@ -214,6 +284,81 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         legal_still_works,
         "vm: a legal map/translate/unmap still succeeds after the refusals"
     );
+
+    // 8 — PAGE-TABLE RECLAMATION (ALET-P1-002, REQ-MM-003, ADR-031). `Mapper::unmap` clears the
+    //     leaf entry and stops, leaving every intermediate table allocated AND still referenced: a
+    //     task that maps and unmaps across a wide VA range drains the pool in proportion to
+    //     addresses VISITED. TEST_VA sits in a PML4 slot that is absent at boot, so mapping it
+    //     allocates a fresh PDPT+PD+PT from our pool — three levels here against two on the
+    //     3-level aarch64/RISC-V walks (an honest architectural difference, same rule).
+    {
+        const R_SIBLING: u64 = TEST_VA + 4096; // same PT as TEST_VA
+        let f1 = match frames::alloc_zeroed() {
+            Some(f) => f,
+            None => return Err((n + 1, "vm: no frame for the reclamation checks")),
+        };
+        let f2 = match frames::alloc_zeroed() {
+            Some(f) => f,
+            None => return Err((n + 1, "vm: no second frame for the reclamation checks")),
+        };
+        let reclaimed0 = tables_reclaimed();
+        let free_before = frames::free_count();
+        check!(
+            map_kernel_frame(root, TEST_VA, f1.addr() as u64)
+                && translate_in(root, TEST_VA) == Some(f1.addr() as u64),
+            "vm: map a page whose intermediate tables are freshly allocated"
+        );
+        let free_mapped = frames::free_count();
+        check!(
+            free_mapped < free_before,
+            "vm: mapping consumed frames for the intermediate tables"
+        );
+        check!(
+            map_kernel_frame(root, R_SIBLING, f2.addr() as u64),
+            "vm: map a sibling page in the same leaf table"
+        );
+        let free_two = frames::free_count();
+        check!(
+            unmap_user(root, TEST_VA) && tables_reclaimed() == reclaimed0,
+            "vm: unmapping one of two pages in a leaf table reclaims NO table (sibling still mapped)"
+        );
+        check!(
+            translate_in(root, R_SIBLING) == Some(f2.addr() as u64),
+            "vm: the sibling mapping still resolves after the neighbour was unmapped"
+        );
+        check!(
+            frames::free_count() == free_two,
+            "vm: no table frame was returned while the leaf table was still in use"
+        );
+        check!(
+            unmap_user(root, R_SIBLING),
+            "vm: unmap the last page in the leaf table"
+        );
+        let freed = tables_reclaimed() - reclaimed0;
+        check!(
+            freed == 3,
+            "vm: emptying the leaf table reclaimed all three intermediate tables (PT, PD, PDPT)"
+        );
+        check!(
+            frames::free_count() == free_two + freed,
+            "vm: the reclaimed table frames came back to the allocator"
+        );
+        check!(
+            translate_in(root, TEST_VA).is_none() && translate_in(root, R_SIBLING).is_none(),
+            "vm: neither VA resolves after reclamation"
+        );
+        check!(
+            map_kernel_frame(root, TEST_VA, f1.addr() as u64)
+                && translate_in(root, TEST_VA) == Some(f1.addr() as u64),
+            "vm: the address space rebuilds the reclaimed chain (root intact, frames reusable)"
+        );
+        check!(
+            unmap_user(root, TEST_VA) && translate_in(root, TEST_VA).is_none(),
+            "vm: reclamation left the rest of the address space untouched"
+        );
+        frames::free(f1);
+        frames::free(f2);
+    }
 
     Ok(n)
 }
@@ -452,8 +597,11 @@ pub fn unmap_user(root: u64, va: u64) -> bool {
     if addr_plan().validate_unmap(va as usize).is_err() {
         return false;
     }
+    // The walk is captured BEFORE the unmap, while the chain is still intact — afterwards the leaf
+    // entry is gone but the tables are exactly the ones that may now be empty.
+    let path = walk_path(root, va);
     // SAFETY: `root` is identity-accessible; single-core. An unmapped `va` yields `Err`.
-    unsafe {
+    let unmapped = unsafe {
         let mut mapper = mapper_for(root);
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
         match mapper.unmap(page) {
@@ -463,7 +611,30 @@ pub fn unmap_user(root: u64, va: u64) -> bool {
             }
             Err(_) => false,
         }
+    };
+    if unmapped {
+        if let Some(path) = path {
+            // REQ-MM-003 / ADR-031: `Mapper::unmap` clears the leaf entry and stops, leaving every
+            // intermediate table allocated AND still referenced. Reclaim upward, never the root.
+            // CR0.WP must be down for the same reason the map path clears it: an upper-level table
+            // may be a firmware page OVMF left read-only, and clearing its entry is a ring-0 write.
+            let wp_was_set = Cr0::read().contains(Cr0Flags::WRITE_PROTECT);
+            if wp_was_set {
+                // SAFETY: clearing WP only relaxes ring-0 write protection; restored below.
+                unsafe { Cr0::update(|f| f.remove(Cr0Flags::WRITE_PROTECT)) };
+            }
+            if let Ok(r) = ptreclaim::reclaim_empty_tables(&path, &mut Tables) {
+                TABLES_RECLAIMED.fetch_add(r.tables_freed, Ordering::Relaxed);
+            }
+            if wp_was_set {
+                // SAFETY: re-arm the write-protect bit exactly as found.
+                unsafe { Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT)) };
+            }
+            // The detached ancestors can leave stale paging-structure cache entries for this VA.
+            x86_64::instructions::tlb::flush(VirtAddr::new(va));
+        }
     }
+    unmapped
 }
 
 /// Switch the active address space by writing CR3 (preserving the current CR3 flags).

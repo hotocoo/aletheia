@@ -29,6 +29,7 @@ pub mod frameown;
 pub mod grant;
 pub mod ipc;
 pub mod priosched;
+pub mod ptreclaim;
 pub mod sched;
 pub mod selftest;
 pub mod shootdown;

@@ -20,7 +20,9 @@
 //! page descriptor sets the **Access Flag (bit 10)** — an unset AF faults on first access.
 use crate::frames;
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frameown::Owner;
+use kernel_core::ptreclaim::{self, PathStep, TableOps};
 use kernel_core::vmaddr::{self, AddrPlan};
 
 // --- Fixed platform addresses (QEMU virt) -------------------------------------------------
@@ -69,6 +71,40 @@ unsafe fn read_entry(table: usize, idx: usize) -> u64 {
 #[inline]
 unsafe fn write_entry(table: usize, idx: usize, val: u64) {
     core::ptr::write_volatile((table + idx * 8) as *mut u64, val);
+}
+
+/// The aarch64 descriptor view the shared reclamation policy walks (REQ-MM-003, ADR-031). The only
+/// architecture knowledge here is the VALID bit and the 8-byte entry width; the rules — empty
+/// tables only, parent cleared before the free, never the root, stop at the first table still in
+/// use, restore on a refused free — live once in `kernel_core::ptreclaim`.
+struct Tables;
+
+impl TableOps for Tables {
+    fn read(&self, table: usize, index: usize) -> u64 {
+        // SAFETY: page tables are identity-accessible; `index` < 512 by construction of the walk.
+        unsafe { read_entry(table, index) }
+    }
+    fn write(&mut self, table: usize, index: usize, value: u64) {
+        // SAFETY: as above; writing a descriptor (or zero) into a live table is sound.
+        unsafe { write_entry(table, index, value) }
+    }
+    fn is_present(&self, entry: u64) -> bool {
+        entry & VALID != 0
+    }
+    fn free_table(&mut self, table: usize) -> bool {
+        // The frame must be one this kernel holds AS A PAGE TABLE — the ownership model refuses a
+        // user page or an already-free frame, and reclamation then restores the parent entry.
+        frames::free_addr_as(table, Owner::PAGETABLE)
+    }
+}
+
+/// Total intermediate tables reclaimed since boot, so the VM gate can prove reclamation actually
+/// ran rather than inferring it from a frame count that other allocations also move.
+static TABLES_RECLAIMED: AtomicUsize = AtomicUsize::new(0);
+
+/// Intermediate page tables freed since boot (REQ-MM-003).
+pub fn tables_reclaimed() -> usize {
+    TABLES_RECLAIMED.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -221,6 +257,17 @@ pub fn unmap_page(root: usize, va: usize) -> bool {
             return false;
         }
         write_entry(l3t, l3i, 0);
+        // REQ-MM-003 / ADR-031: the leaf entry is gone, so any table this emptied is pure leak —
+        // still allocated AND still referenced. Reclaim upward (never the root) BEFORE the
+        // invalidation below, so one `tlbi vae1` covers the leaf and the ancestors it detaches.
+        let path = [
+            PathStep::new(root, l1i),
+            PathStep::new(l2t, l2i),
+            PathStep::new(l3t, l3i),
+        ];
+        if let Ok(r) = ptreclaim::reclaim_empty_tables(&path, &mut Tables) {
+            TABLES_RECLAIMED.fetch_add(r.tables_freed, Ordering::Relaxed);
+        }
         tlbi_va(va);
     }
     true
@@ -493,6 +540,85 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         map_page(root, TEST_VA, frame.addr(), NORMAL_PAGE) && unmap_page(root, TEST_VA),
         "vm: a legal map/unmap still succeeds after the refusals"
     );
+
+    // 9 — PAGE-TABLE RECLAMATION (ALET-P1-002, REQ-MM-003, ADR-031). An unmap that clears only the
+    //     leaf leaves every intermediate table allocated AND still referenced: a task that maps and
+    //     unmaps across a wide VA range drains the pool in proportion to addresses VISITED. These
+    //     checks prove the tables come back, that a sibling mapping protects them, and that the
+    //     address space's root is never freed.
+    {
+        // A VA far from TEST_VA so its L2/L3 tables are freshly allocated for this check alone.
+        const R_VA: usize = TEST_VA + (1usize << 30); // a different L1 slot entirely
+        const R_SIBLING: usize = R_VA + 4096; // same L3 table as R_VA
+        let f1 = match frames::alloc_zeroed() {
+            Some(f) => f,
+            None => return Err((n + 1, "vm: no frame for the reclamation checks")),
+        };
+        let reclaimed0 = tables_reclaimed();
+        let free_before = frames::free_count();
+        check!(
+            map_page(root, R_VA, f1.addr(), NORMAL_PAGE)
+                && translate(root, R_VA) == Some(f1.addr()),
+            "vm: map a page whose L2/L3 tables are freshly allocated"
+        );
+        let free_mapped = frames::free_count();
+        check!(
+            free_mapped < free_before,
+            "vm: mapping consumed frames for the intermediate tables"
+        );
+        // A second page in the SAME L3 table: unmapping the first must free nothing.
+        let f2 = match frames::alloc_zeroed() {
+            Some(f) => f,
+            None => return Err((n + 1, "vm: no second frame for the reclamation checks")),
+        };
+        check!(
+            map_page(root, R_SIBLING, f2.addr(), NORMAL_PAGE),
+            "vm: map a sibling page in the same leaf table"
+        );
+        let free_two = frames::free_count();
+        check!(
+            unmap_page(root, R_VA) && tables_reclaimed() == reclaimed0,
+            "vm: unmapping one of two pages in a leaf table reclaims NO table (sibling still mapped)"
+        );
+        check!(
+            translate(root, R_SIBLING) == Some(f2.addr()),
+            "vm: the sibling mapping still resolves after the neighbour was unmapped"
+        );
+        check!(
+            frames::free_count() == free_two,
+            "vm: no table frame was returned while the leaf table was still in use"
+        );
+        // Now the last page goes: the whole chain below the root must be reclaimed.
+        check!(
+            unmap_page(root, R_SIBLING),
+            "vm: unmap the last page in the leaf table"
+        );
+        check!(
+            tables_reclaimed() == reclaimed0 + 2,
+            "vm: emptying the leaf table reclaimed both intermediate tables (L3 and L2)"
+        );
+        check!(
+            frames::free_count() == free_two + 2,
+            "vm: the reclaimed table frames came back to the allocator"
+        );
+        check!(
+            translate(root, R_VA).is_none() && translate(root, R_SIBLING).is_none(),
+            "vm: neither VA resolves after reclamation"
+        );
+        // The root survived, and the address space still works: map/translate/unmap again, which
+        // also proves the freed tables were genuinely reusable rather than corrupt.
+        check!(
+            map_page(root, R_VA, f1.addr(), NORMAL_PAGE)
+                && translate(root, R_VA) == Some(f1.addr()),
+            "vm: the address space rebuilds the reclaimed chain (root intact, frames reusable)"
+        );
+        check!(
+            unmap_page(root, R_VA) && translate(root, TEST_VA).is_none(),
+            "vm: reclamation left the rest of the address space untouched"
+        );
+        frames::free(f1);
+        frames::free(f2);
+    }
 
     frames::free(frame);
     Ok(n)

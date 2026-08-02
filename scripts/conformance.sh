@@ -44,6 +44,15 @@ CONTRACT=(
   "freeing a never-allocated frame is refused"
   "a freed frame has no owner"
   "ownership table and free list agree on the free count"
+  # Page-table reclamation (ALET-P1-002, REQ-MM-003, ADR-031). The level COUNT differs honestly by
+  # architecture (3-level aarch64/Sv39 vs 4-level x86-64), so the contract names the behavior, not
+  # the number: a sibling mapping must protect the tables, an emptied chain must come back to the
+  # allocator, the root must survive, and the address space must still work afterwards.
+  "unmapping one of two pages in a leaf table reclaims NO table (sibling still mapped)"
+  "no table frame was returned while the leaf table was still in use"
+  "the reclaimed table frames came back to the allocator"
+  "neither VA resolves after reclamation"
+  "the address space rebuilds the reclaimed chain (root intact, frames reusable)"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

@@ -289,6 +289,13 @@ pub fn free_as(frame: Frame, owner: Owner) -> bool {
     kframes().free_as(frame, owner)
 }
 
+/// Return the frame at physical address `pa`, held by `owner`, to the global pool — the
+/// address-taking form page-table reclamation needs (it walks live tables and knows physical
+/// addresses, not `Frame` handles). Every ownership rule still applies (REQ-MM-002).
+pub fn free_addr_as(pa: usize, owner: Owner) -> bool {
+    kframes().free_as(Frame(pa), owner)
+}
+
 /// Current holder of the frame at `pa`.
 pub fn owner_of(pa: usize) -> Option<Owner> {
     kframes().owner_of(pa)
