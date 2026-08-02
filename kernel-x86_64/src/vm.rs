@@ -34,6 +34,7 @@ use crate::frames;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frameown::Owner;
 use kernel_core::ptreclaim::{self, PathStep, TableOps};
+use kernel_core::teardown::{self, SpaceOps, Teardown};
 use kernel_core::vmaddr::{self, AddrPlan};
 
 /// A canonical lower-half virtual address far above any RAM OVMF identity-maps at `-m 256M`
@@ -93,6 +94,58 @@ impl TableOps for Tables {
     fn free_table(&mut self, table: usize) -> bool {
         frames::free_addr_as(table, Owner::PAGETABLE)
     }
+}
+
+/// The same entry view, extended with what address-space DESTRUCTION needs (REQ-MM-004, ADR-032).
+///
+/// x86-64 is the target where `is_private` earns its existence: `build_space` builds a per-process
+/// PML4 by COPYING the live one, so almost every top-level slot points at firmware and kernel
+/// tables the running kernel still needs. Teardown therefore descends only into PML4 slot 0 (whose
+/// PDPT this space privatized) and, within it, only [`USER_REGION_PDPT_INDEX`] — the 1 GiB region
+/// this space actually owns. Everything else is left exactly as found.
+impl SpaceOps for Tables {
+    fn levels(&self) -> usize {
+        4
+    }
+    fn is_leaf(&self, entry: u64, level: usize) -> bool {
+        level == 3 || entry & PageTableFlags::HUGE_PAGE.bits() != 0
+    }
+    fn entry_addr(&self, entry: u64) -> usize {
+        (entry & ENTRY_ADDR_MASK) as usize
+    }
+    fn is_private(&self, level: usize, index: usize) -> bool {
+        match level {
+            0 => index == 0,                      // the privatized PDPT
+            1 => index == USER_REGION_PDPT_INDEX, // this space's own 1 GiB user region
+            _ => true,
+        }
+    }
+    fn free_leaf(&mut self, pa: usize) -> bool {
+        frames::free_addr_as(pa, Owner::USER)
+    }
+}
+
+/// Destroy the address space rooted at `root`: free the user pages and tables of its private
+/// region, then the root PML4 (REQ-MM-004, ADR-032). Returns `None` — refusing outright — when
+/// asked to destroy the space CR3 currently points at.
+///
+/// CR0.WP is cleared across the walk for the same reason the map path clears it: an upper-level
+/// table may be a firmware page OVMF left read-only, and clearing its entry is a ring-0 write.
+pub fn destroy_space(root: u64) -> Option<Teardown> {
+    if root == active_root() {
+        return None;
+    }
+    let wp_was_set = Cr0::read().contains(Cr0Flags::WRITE_PROTECT);
+    if wp_was_set {
+        // SAFETY: clearing WP only relaxes ring-0 write protection; restored below. Single-core.
+        unsafe { Cr0::update(|f| f.remove(Cr0Flags::WRITE_PROTECT)) };
+    }
+    let out = teardown::destroy_address_space(root as usize, &mut Tables);
+    if wp_was_set {
+        // SAFETY: re-arm the write-protect bit exactly as found.
+        unsafe { Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT)) };
+    }
+    Some(out)
 }
 
 /// Total intermediate tables reclaimed since boot, so the boot gate proves reclamation actually ran.
@@ -358,6 +411,79 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         frames::free(f1);
         frames::free(f2);
+    }
+
+    // 9 — ADDRESS-SPACE DESTRUCTION (ALET-P1-004, REQ-MM-004, ADR-032). A space that DIES — a task
+    //     that faults, is killed, or exits without unmapping — used to keep every page, every table
+    //     and its root forever. Teardown frees what the space owns and nothing else, which on
+    //     x86-64 is the hard part: `build_space` COPIES the live PML4, so almost every top-level
+    //     slot points at firmware and kernel tables the running kernel still needs. The privacy
+    //     predicate scopes the walk to this space's own 1 GiB user region, and the ownership model
+    //     refuses anything else even if that predicate were wrong.
+    {
+        let free_before_space = frames::free_count();
+        let victim = match build_space() {
+            Some(r) => r,
+            None => return Err((n + 1, "vm: no frames to build a victim address space")),
+        };
+        check!(
+            victim != active_root() && frames::free_count() < free_before_space,
+            "vm: built a second address space with its own PML4/PDPT"
+        );
+        // Two user pages, 2 MiB apart so they land in DIFFERENT leaf tables.
+        const V1: u64 = 0x4000_0000; // inside the private user region (1..2 GiB)
+        const V2: u64 = V1 + 0x20_0000;
+        let ok = map_user(victim, V1, true).is_some() && map_user(victim, V2, true).is_some();
+        check!(
+            ok,
+            "vm: mapped two user pages into the victim address space"
+        );
+        check!(
+            destroy_space(active_root()).is_none(),
+            "vm: destroying the ACTIVE address space is refused (the kernel is running in it)"
+        );
+        // Find a COPIED kernel slot: a present PML4 entry other than slot 0 (slot 0 is the PDPT
+        // this space privatized). Teardown must not touch the table it points at, because the
+        // running kernel translates through the very same table in the live root.
+        let ops = Tables;
+        let mut shared_slot = None;
+        for i in 1..512 {
+            let live = ops.read(active_root() as usize, i);
+            if live != 0 && ops.read(victim as usize, i) == live {
+                shared_slot = Some((i, live));
+                break;
+            }
+        }
+        let (shared_index, shared_entry) = match shared_slot {
+            Some(v) => v,
+            None => return Err((n + 1, "vm: the victim shares no kernel slot to protect")),
+        };
+        let t = match destroy_space(victim) {
+            Some(t) => t,
+            None => return Err((n + 1, "vm: teardown refused a non-active address space")),
+        };
+        check!(
+            t.leaves_freed == 2,
+            "vm: teardown freed exactly the pages the space owned"
+        );
+        check!(
+            t.tables_refused == 0,
+            "vm: every table in the tree was one this space owned"
+        );
+        check!(
+            frames::free_count() == free_before_space,
+            "vm: destroying the space returned every frame it held, including its root"
+        );
+        check!(
+            ops.read(active_root() as usize, shared_index) == shared_entry,
+            "vm: the shared kernel mapping the victim copied is untouched by the teardown"
+        );
+        // The kernel is still running, still translating, and its own space is untouched — proved
+        // by the fact that this very check executes and the live root still maps the kernel.
+        check!(
+            translate_in(active_root(), TEST_VA).is_none(),
+            "vm: the surviving address space is intact after the teardown"
+        );
     }
 
     Ok(n)

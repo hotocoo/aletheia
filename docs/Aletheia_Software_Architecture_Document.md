@@ -17,7 +17,7 @@ This SAD is a ground-up rewrite that agrees with PRD-002. It defines the *archit
 
 Implementation MUST follow this document. Changes require an ADR (`docs/adr/`).
 
-**Currency:** last reconciled with the tree on 2026-08-02 (ADR list through ADR-031; memory-safety contract in §5).
+**Currency:** last reconciled with the tree on 2026-08-02 (ADR list through ADR-032; memory-safety contract in §5).
 
 ---
 
@@ -101,7 +101,7 @@ The microkernel (P4) provides privileged primitives; in M1 these are realized by
 - **KC-CAP:** A capability table mints typed, unforgeable handles and validates them. User code holds/delegates handles; it cannot fabricate one. In M1 this is an in-process authority holding a private table keyed by opaque tokens (no token is constructible from outside). On metal this becomes kernel-enforced capability slots.
 - **KC-IPC:** Secure IPC requires a capability naming the endpoint; there is no global connectable namespace. In M1 this is typed in-process channels obtained only via a capability.
 - **KC-TASK:** Task isolation — a task touches only entities/devices/endpoints for which it holds capabilities; a task crash cannot corrupt core state. In M1 this is enforced by construction (no task is handed a raw store handle; all access goes through capability-checked APIs).
-- **KC-MEM:** Address-space/memory isolation (metal). In M1, Rust ownership + module boundaries stand in; the contract is "no shared mutable global authority." On metal the contract is now concrete and arch-independent, enforced by `kernel-core` and re-proved by every target's VM gate: (a) **address admission** — a mapping API treats a raw `va`/`pa` as untrusted input and refuses aliasing, non-canonical, misaligned, null-page and out-of-window addresses (REQ-MM-001, ADR-029); (b) **frame ownership** — every physical frame has exactly one owner, so a double free, a free of a never-allocated frame, and a free of another owner's frame are refused rather than silently aliasing two owners onto one page (REQ-MM-002, ADR-030); (c) **reclamation** — an unmap that empties an intermediate page table frees it, ownership-checked, parent reference cleared first and the root never freed, so a map/unmap loop over a wide address range cannot drain the frame pool (REQ-MM-003, ADR-031). Both rule sets are identical across aarch64, RISC-V and x86-64 by conformance gate, because a memory-safety boundary that varies by CPU is not a boundary. Still open (tracked in `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`, not claimed here): address-space teardown, W^X as a global invariant, and zeroing on free.
+- **KC-MEM:** Address-space/memory isolation (metal). In M1, Rust ownership + module boundaries stand in; the contract is "no shared mutable global authority." On metal the contract is now concrete and arch-independent, enforced by `kernel-core` and re-proved by every target's VM gate: (a) **address admission** — a mapping API treats a raw `va`/`pa` as untrusted input and refuses aliasing, non-canonical, misaligned, null-page and out-of-window addresses (REQ-MM-001, ADR-029); (b) **frame ownership** — every physical frame has exactly one owner, so a double free, a free of a never-allocated frame, and a free of another owner's frame are refused rather than silently aliasing two owners onto one page (REQ-MM-002, ADR-030); (c) **reclamation** — an unmap that empties an intermediate page table frees it, ownership-checked, parent reference cleared first and the root never freed, so a map/unmap loop over a wide address range cannot drain the frame pool (REQ-MM-003, ADR-031); (d) **address-space destruction** — a dying space returns every page and table it owns and nothing else, guarded independently by a per-target privacy predicate (shared kernel slots are never walked) and by ownership, with destruction of the ACTIVE space refused (REQ-MM-004, ADR-032). Both rule sets are identical across aarch64, RISC-V and x86-64 by conformance gate, because a memory-safety boundary that varies by CPU is not a boundary. Still open (tracked in `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`, not claimed here): W^X as a global invariant, zeroing frames on free, and per-architecture memory-attribute validation.
 - **KC-BOOT:** Secure-boot primitives (metal only).
 
 Contract honesty (AP-009): the System Core is written against these traits, never against host-OS services, so P4 swaps the hosted realization for the real kernel without touching the layers above.
@@ -347,6 +347,7 @@ Required ADRs (in `docs/adr/`):
 - ADR-029 Mapping-API admission check (raw addresses are untrusted input).
 - ADR-030 Frame ownership model (a frame has an owner).
 - ADR-031 Page-table reclamation (an unmap gives the tables back).
+- ADR-032 Address-space destruction (a dying space gives everything back).
 
 ---
 
