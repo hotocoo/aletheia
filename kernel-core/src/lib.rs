@@ -42,6 +42,7 @@ pub mod shootdown;
 pub mod smpsched;
 pub mod spine;
 pub mod storage;
+pub mod supervisor;
 pub mod sync;
 pub mod teardown;
 pub mod virtioblk;

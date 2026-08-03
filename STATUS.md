@@ -5,7 +5,7 @@
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..041`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..042`.
 
 ## What Aletheia is
 
@@ -17,7 +17,40 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — the network answers back (2026-08-03, GAPS4 ALET-P2-020, REQ-NET-001/002)
+## Latest wave — kill the task, keep the system (2026-08-03, REQ-REL-002)
+
+ADR-039 gave every fault a verdict, and `KillTask` had **nowhere to go**: each target's handler ended the
+boot, because nothing could remove one task and let the rest continue. That is why `docs/MATURITY.md` listed
+a task supervisor first among the things production would additionally require — without it the kernel
+*detects* a bad access rather than *surviving* one, and every user bug is a system outage.
+
+- **The mechanism was closer than it looked.** On x86-64 `isr_pf_entry` already abandons the faulting task
+  and returns to the scheduler — but only for an *armed* fault the isolation trial declared in advance;
+  anything else was fatal. The missing piece was policy, not assembly.
+- **`kernel_core::supervisor`** turns a verdict into an action: a **user** fault terminates the task; a
+  kernel fault, corrupt translation or unknown report **escalates**, because the kernel cannot sensibly kill
+  a task for its own bad access. A `KillTask` verdict with **no task to blame** escalates too — that is a
+  kernel bug wearing a user fault's clothes.
+- **A terminated task is terminated forever, with a reason.** `may_run` is what a scheduler asks before
+  dispatch and never answers yes again; the reason distinguishes a fault from an exit from a policy kill, and
+  termination is idempotent keeping the **first** reason — a later sweep must not overwrite the fault that
+  actually killed it. Contained and escalated faults are counted separately, because a system that quietly
+  turned kernel bugs into task deaths would look healthier than it is.
+- **The live proof is a fault taken on purpose.** A ring-3 task reads a supervisor-only page it never
+  declared. Four invariants require: exactly one task terminated; the dead task may never run again and its
+  recorded reason is the fault; **zero** escalations; and — the point — **a later ring-3 task still runs and
+  proves its own invariant**. The boot log now reads
+  `task 7 TERMINATED (Fault(UserNotMapped)); system continues`. Ring-3 invariants 22 → **26**.
+- **Not claimed:** the supervisor does not free the dead task's address space (that is
+  `teardown::destroy_address_space`, and doing it on a trap stack belongs in a scheduler reap step rather
+  than being claimed here), does not restart anything (REQ-REL-001 needs a supervision tree, still
+  architecture only), has no quotas or rate limits, and is wired live on **x86-64 only** — aarch64 and
+  RISC-V still treat an unexpected user fault as fatal and need the same three lines.
+
+Gates after the wave: `quality-gate` PASS, `build-all` PASS, `e2e-all` PASS, `conformance` PASS (68 × 3),
+`register` PASS, `ci-parity` PASS, `traceability` PASS (77 requirements).
+
+## Previous wave — the network answers back (2026-08-03, GAPS4 ALET-P2-020, REQ-NET-001/002)
 
 Networking was the largest remaining "an operating system does this" hole: architecture text and nothing
 else. It could not reuse the block driver, for a precise reason — a block device has ONE queue with one

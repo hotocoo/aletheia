@@ -27,7 +27,7 @@ target, host property tests with crash sweeps at every prefix — and none of th
 | Intent→Action pipeline | **P** | Malformed model output cannot execute; every effect authorized | No adversarial campaign against intent confusion (P2-028) |
 | Memory: admission, ownership, reclamation, teardown, erase-on-free, W^X | **P** | All three targets, live-tree audits, 0 violations | No DMA isolation (P1-018 — bus-master is now enabled); no higher-half split |
 | Address-space layout + guard pages + VA 0 unmapped | **P** | Guard pages and a dead null page on all three targets | Not re-asserted inside derived per-process spaces; no heap/secondary-stack guards |
-| Fault classification + trap re-entrancy | **P** (model) / **I** (wiring) | Exhaustive host proof; live on x86-64 | aarch64/RISC-V decoders not wired into their handlers; no adversarial ring-3 `#UD`/`#GP` entry trials (P1-011) |
+| Fault classification + trap re-entrancy + task supervisor | **P** (model) / **I** (wiring) | Exhaustive host proof; live on x86-64 | aarch64/RISC-V decoders not wired into their handlers; no adversarial ring-3 `#UD`/`#GP` entry trials (P1-011) |
 | IPC (blocking, grants, priority inheritance, cancellation) | **P** | 25 written invariants with adversarial tests | Single-queue bounds only; no soak (P2-009) |
 | SMP (bring-up, per-CPU queues, stealing, shootdown, affinity) | **P** | 22 invariants per target at `-smp 4` | Contention depth untested at scale (P1-014); task lifecycle transitions (P1-015) |
 | Storage: journal, namespace, atomic replace, durable store | **P** | Crash sweep at EVERY prefix, host + real device; cross-reboot proof | One flat namespace, one bitmap block, contiguous extents, no encryption at rest (P1-028/029) |
@@ -40,8 +40,11 @@ target, host property tests with crash sweeps at every prefix — and none of th
 
 ## What production-ready would additionally require
 
-1. **A supervisor.** Today a `KillTask` verdict ends the boot, because there is no task supervisor to kill
-   a task *and continue*. Fault recovery (REQ-REL-001) is architecture only.
+1. **A supervisor — partially built (REQ-REL-002, ADR-042).** A user fault now terminates that task and the
+   boot continues, proved live on x86-64 by faulting a ring-3 task on purpose and then running another one.
+   What remains: reaping the dead task's address space in the fault path, restart policy / supervision trees
+   (REQ-REL-001, still architecture only), quotas and rate limits, and the same three lines wired into the
+   aarch64 and RISC-V handlers, which still treat an unexpected user fault as fatal.
 2. **DMA isolation.** Devices receive raw physical addresses; an IOMMU/SMMU model is the answer (P1-018).
 3. **Interrupt-driven I/O.** Every driver polls. That is provable and slow, and it does not survive real
    device latencies.
