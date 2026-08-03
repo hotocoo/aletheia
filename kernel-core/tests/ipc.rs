@@ -218,3 +218,215 @@ fn trace_replay_matches_deadline_expiry_run() {
         .any(|t| t.op == IpcOp::Expired && t.body == 1));
     assert_eq!(replay(ch.trace()), delivered);
 }
+
+// ---------------------------------------------------------------------------
+// INV-IPC-CANCEL contract (docs/INVARIANT-CONTRACTS.md) — adversarial cases, ALET-P1-017.
+//
+// Cancellation is a sender WITHDRAWING an undelivered command. The failure mode these defend against
+// is a withdrawn command executing anyway — or a cancel that lies about having won the race.
+// ---------------------------------------------------------------------------
+
+/// A channel plus an engine that authorizes sends on it.
+fn cancel_fixture() -> (CapEngine, CapToken, Channel) {
+    let mut e = CapEngine::new(0x0CA1, 1_000_000);
+    let cap = e.mint("sender", "ipc.send", Scope::All, Constraints::none());
+    (e, cap, Channel::new("ipc.send"))
+}
+
+/// INV-IPC-CANCEL-1: a cancelled message is never delivered by ANY later receive — not by `recv`, not
+/// by `recv_at`, no matter how many receives follow.
+#[test]
+fn a_cancelled_message_is_never_delivered_afterwards() {
+    let (e, cap, mut ch) = cancel_fixture();
+    for body in 1..=5u64 {
+        assert_eq!(
+            ch.send(&e, Message::new("A", "B", body), &[cap.clone()]),
+            Decision::Allow
+        );
+    }
+    let ids = ch.pending_ids();
+    // Withdraw the middle three.
+    for id in &ids[1..4] {
+        assert!(ch.cancel(*id), "a queued message must be cancellable");
+    }
+    let mut delivered = Vec::new();
+    while let Some(m) = ch.recv() {
+        delivered.push(m.body);
+    }
+    assert_eq!(
+        delivered,
+        vec![1, 5],
+        "INV-IPC-CANCEL-1: a cancelled command was delivered"
+    );
+    // Further receives cannot resurrect them either.
+    assert!(ch.recv().is_none());
+    assert!(matches!(ch.recv_at(u64::MAX), RecvOutcome::Empty));
+}
+
+/// INV-IPC-CANCEL-2: cancelling an id that is already gone — delivered, cancelled, or never queued —
+/// returns false and changes nothing. A `true` return is the sender's evidence it won the race.
+#[test]
+fn cancelling_something_already_gone_is_a_refusal_not_a_lie() {
+    let (e, cap, mut ch) = cancel_fixture();
+    ch.send(&e, Message::new("A", "B", 1), &[cap.clone()]);
+    ch.send(&e, Message::new("A", "B", 2), &[cap.clone()]);
+    let ids = ch.pending_ids();
+
+    let first = ch.recv().expect("delivered").id;
+    assert!(
+        !ch.cancel(first),
+        "INV-IPC-CANCEL-2: cancelling an already-DELIVERED message claimed success"
+    );
+    assert!(ch.cancel(ids[1]), "the still-queued message is cancellable");
+    assert!(
+        !ch.cancel(ids[1]),
+        "INV-IPC-CANCEL-2: a second cancel of the same id claimed success"
+    );
+    assert!(!ch.cancel(0), "id 0 is never a queued message");
+    assert!(
+        !ch.cancel(u64::MAX),
+        "INV-IPC-CANCEL-2: a forged id claimed success"
+    );
+    assert!(ch.pending_ids().is_empty(), "a refused cancel mutated the queue");
+}
+
+/// INV-IPC-CANCEL-3: cancellation removes exactly the named message and preserves the order of the
+/// rest — removing the wrong one would execute a command the sender never withdrew.
+#[test]
+fn cancellation_removes_exactly_the_named_message_and_keeps_the_order() {
+    let (e, cap, mut ch) = cancel_fixture();
+    for body in 10..20u64 {
+        ch.send(&e, Message::new("A", "B", body), &[cap.clone()]);
+    }
+    let ids = ch.pending_ids();
+    // Cancel every third, from the back so indices stay meaningful in the expectation below.
+    let mut cancelled = Vec::new();
+    for (i, id) in ids.iter().enumerate() {
+        if i % 3 == 2 {
+            assert!(ch.cancel(*id));
+            cancelled.push(*id);
+        }
+    }
+    let remaining = ch.pending_ids();
+    assert_eq!(
+        remaining.len(),
+        ids.len() - cancelled.len(),
+        "INV-IPC-CANCEL-3: the wrong number of messages disappeared"
+    );
+    for id in &cancelled {
+        assert!(!remaining.contains(id), "a cancelled id is still queued");
+    }
+    // Order preserved: the surviving ids appear in their original relative order.
+    let expected: Vec<u64> = ids.iter().copied().filter(|i| !cancelled.contains(i)).collect();
+    assert_eq!(remaining, expected, "INV-IPC-CANCEL-3: queue order changed");
+    // And delivery follows that same order.
+    let mut delivered = Vec::new();
+    while let Some(m) = ch.recv() {
+        delivered.push(m.id);
+    }
+    assert_eq!(delivered, expected);
+}
+
+/// INV-IPC-CANCEL-4: every message ends in EXACTLY ONE terminal trace event — Recv, Expired or
+/// Cancel. Two fates (or none) makes the audit log useless.
+#[test]
+fn every_message_reaches_exactly_one_terminal_trace_event() {
+    let (e, cap, mut ch) = cancel_fixture();
+    // A mix: some delivered, some cancelled, some expired.
+    for body in 0..9u64 {
+        let msg = if body % 3 == 0 {
+            Message::new("A", "B", body).with_deadline(5)
+        } else {
+            Message::new("A", "B", body)
+        };
+        ch.send(&e, msg, &[cap.clone()]);
+    }
+    let ids = ch.pending_ids();
+    assert!(ch.cancel(ids[1]));
+    assert!(ch.cancel(ids[4]));
+    // Advance past the deadline so the deadlined ones expire, and drain everything.
+    while !matches!(ch.recv_at(9), RecvOutcome::Empty) {}
+
+    let mut terminal: Vec<(u64, usize)> = Vec::new();
+    for ev in ch.trace() {
+        if matches!(ev.op, IpcOp::Recv | IpcOp::Expired | IpcOp::Cancel) {
+            match terminal.iter_mut().find(|(id, _)| *id == ev.msg_id) {
+                Some((_, n)) => *n += 1,
+                None => terminal.push((ev.msg_id, 1)),
+            }
+        }
+    }
+    for id in &ids {
+        let count = terminal.iter().find(|(i, _)| i == id).map(|(_, n)| *n);
+        assert_eq!(
+            count,
+            Some(1),
+            "INV-IPC-CANCEL-4: message {id} has {count:?} terminal events, not exactly one"
+        );
+    }
+}
+
+/// INV-IPC-CANCEL-5: a cancelled slot is reusable — cancelling frees capacity on a bounded channel —
+/// and cancellation never lifts the bound.
+#[test]
+fn cancelling_frees_the_slot_for_a_later_send() {
+    let mut e = CapEngine::new(0x0CA2, 1_000_000);
+    let cap = e.mint("sender", "ipc.send", Scope::All, Constraints::none());
+    let mut ch = Channel::bounded("ipc.send", 2);
+    assert_eq!(ch.send(&e, Message::new("A", "B", 1), &[cap.clone()]), Decision::Allow);
+    assert_eq!(ch.send(&e, Message::new("A", "B", 2), &[cap.clone()]), Decision::Allow);
+    // Full: refused fail-closed.
+    assert!(matches!(
+        ch.send(&e, Message::new("A", "B", 3), &[cap.clone()]),
+        Decision::Deny(_)
+    ));
+    let ids = ch.pending_ids();
+    assert!(ch.cancel(ids[0]));
+    // Exactly ONE slot came back — not the bound lifted.
+    assert_eq!(ch.send(&e, Message::new("A", "B", 4), &[cap.clone()]), Decision::Allow);
+    assert!(
+        matches!(ch.send(&e, Message::new("A", "B", 5), &[cap.clone()]), Decision::Deny(_)),
+        "INV-IPC-CANCEL-5: cancellation lifted the capacity bound"
+    );
+    let bodies: Vec<u64> = {
+        let mut v = Vec::new();
+        while let Some(m) = ch.recv() {
+            v.push(m.body);
+        }
+        v
+    };
+    assert_eq!(bodies, vec![2, 4], "the cancelled message must not be delivered");
+}
+
+/// INV-IPC-CANCEL-6: a deadline and a cancel never both claim the same message.
+#[test]
+fn a_deadline_and_a_cancel_never_both_claim_the_same_message() {
+    let (e, cap, mut ch) = cancel_fixture();
+    ch.send(&e, Message::new("A", "B", 1).with_deadline(3), &[cap.clone()]);
+    let id = ch.pending_ids()[0];
+    // Expire it by receiving past the deadline...
+    assert!(matches!(ch.recv_at(10), RecvOutcome::Expired(1)));
+    // ...then a cancel must REFUSE: the message already has its fate.
+    assert!(
+        !ch.cancel(id),
+        "INV-IPC-CANCEL-6: a cancel claimed a message the deadline had already dropped"
+    );
+    let terminals = ch
+        .trace()
+        .iter()
+        .filter(|ev| ev.msg_id == id && matches!(ev.op, IpcOp::Recv | IpcOp::Expired | IpcOp::Cancel))
+        .count();
+    assert_eq!(terminals, 1, "INV-IPC-CANCEL-6: two terminal events for one message");
+
+    // The reverse order: cancelled first, then a deadline sweep must not also expire it.
+    ch.send(&e, Message::new("A", "B", 2).with_deadline(3), &[cap.clone()]);
+    let id2 = ch.pending_ids()[0];
+    assert!(ch.cancel(id2));
+    assert!(matches!(ch.recv_at(10), RecvOutcome::Empty));
+    let terminals2 = ch
+        .trace()
+        .iter()
+        .filter(|ev| ev.msg_id == id2 && matches!(ev.op, IpcOp::Recv | IpcOp::Expired | IpcOp::Cancel))
+        .count();
+    assert_eq!(terminals2, 1, "INV-IPC-CANCEL-6: the deadline also claimed a cancelled message");
+}

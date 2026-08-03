@@ -49,7 +49,7 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-IPC-003 | Bounded message queues | ADR-016 | kernel-core/src/ipc.rs | kernel-core/tests/invariants.rs | - | delivered |
 | REQ-IPC-004 | Asynchronous notifications (coalescing badge) | ADR-020 | kernel-core/src/ipc.rs | kernel-core/tests/ipc.rs | - | delivered |
 | REQ-IPC-005 | Deadline / timeout-aware receive | ADR-020 | kernel-core/src/ipc.rs | kernel-core/tests/ipc.rs | - | delivered |
-| REQ-IPC-006 | Message cancellation | ADR-020 | kernel-core/src/ipc.rs | kernel-core/tests/ipc.rs | - | delivered |
+| REQ-IPC-006 | Message cancellation (contract: INV-IPC-CANCEL) | ADR-020 | kernel-core/src/ipc.rs | kernel-core/tests/ipc.rs; docs/INVARIANT-CONTRACTS.md | - | delivered |
 | REQ-IPC-007 | IPC tracing + deterministic replay | ADR-020 | kernel-core/src/ipc.rs | kernel-core/tests/ipc.rs | - | delivered |
 | REQ-IPC-008 | Zero-copy shared-memory channels (policy + all-target real MMU path) | ADR-020 | kernel-core/src/grant.rs; kernel/src/usermode.rs; kernel-x86_64/src/usermode.rs; kernel-riscv64/src/usermode.rs | kernel-core/tests/grant.rs | scripts/vm-e2e.sh; scripts/vm-e2e-x86.sh; scripts/vm-e2e-riscv.sh | delivered |
 | REQ-IPC-009 | Priority inheritance / donation | ADR-020 | kernel-core/src/priosched.rs; kernel/src/usermode.rs; kernel-riscv64/src/usermode.rs; kernel-x86_64/src/usermode.rs | kernel-core/tests/priosched.rs; kernel/src/usermode.rs; kernel-riscv64/src/usermode.rs; kernel-x86_64/src/usermode.rs | scripts/vm-e2e.sh; scripts/vm-e2e-riscv.sh; scripts/vm-e2e-x86.sh | delivered |

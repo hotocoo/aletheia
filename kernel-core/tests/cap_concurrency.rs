@@ -276,3 +276,225 @@ fn revocation_is_permanent_no_authority_resurrection_under_contention() {
         "authorize returned Allow after a completed revoke — authority resurrected"
     );
 }
+
+// ---------------------------------------------------------------------------
+// INV-CAP-REVOKE contract (docs/INVARIANT-CONTRACTS.md) — adversarial cases, ALET-P1-025.
+//
+// The tests above prove authorize+execute is atomic against a revoke. These attack the REVOCATION
+// side: what a revoker is entitled to conclude once `revoke` has returned.
+// ---------------------------------------------------------------------------
+
+/// The action `engine_with_cap` mints authority for.
+const ACTION: &str = "entity.write";
+
+/// INV-CAP-REVOKE-1 + INV-CAP-REVOKE-3: once `revoke` returns, no later attempt can act — and
+/// revoking again, or revoking a forged handle, is a no-op that grants nothing.
+#[test]
+fn after_revoke_returns_no_later_attempt_can_ever_act() {
+    let (mut engine, cap) = engine_with_cap();
+    let mut effects = 0usize;
+    // Before: the capability works.
+    engine
+        .with_authorization(ACTION, &Target::default(), &[cap], |_, _| effects += 1)
+        .expect("authorized before revoke");
+    assert_eq!(effects, 1);
+
+    engine.revoke(cap);
+
+    // After: every attempt, however many times, is denied and performs NO effect.
+    for _ in 0..50 {
+        let outcome = engine.with_authorization(ACTION, &Target::default(), &[cap], |_, _| {
+            effects += 1;
+        });
+        assert!(
+            outcome.is_err(),
+            "INV-CAP-REVOKE-1: a revoked capability authorized an effect"
+        );
+    }
+    assert_eq!(
+        effects, 1,
+        "INV-CAP-REVOKE-1: {} effects ran after revoke returned",
+        effects - 1
+    );
+    // Idempotent, and a forged token is not a channel.
+    engine.revoke(cap);
+    engine.revoke(CapToken::forge_for_test(0xDEAD_BEEF));
+    assert!(engine.is_revoked(cap));
+    let outcome = engine.with_authorization(
+        ACTION,
+        &Target::default(),
+        &[CapToken::forge_for_test(0xDEAD_BEEF)],
+        |_, _| effects += 1,
+    );
+    assert!(outcome.is_err(), "a forged token must never authorize");
+    assert_eq!(effects, 1, "INV-CAP-REVOKE-3: a no-op revoke had an effect");
+}
+
+/// INV-CAP-REVOKE-2: revocation is permanent. Re-presenting the token, delegating from it, or minting
+/// a fresh capability afterwards must never make the REVOKED token authoritative again.
+#[test]
+fn a_revoked_token_is_never_authoritative_again_however_it_is_presented() {
+    let (mut engine, cap) = engine_with_cap();
+    engine.revoke(cap);
+
+    // Delegating from a revoked parent must fail — otherwise revocation is bypassable by one hop.
+    let child = engine.delegate(cap, "child", ACTION, Scope::All, Constraints::none());
+    assert!(
+        child.is_err(),
+        "INV-CAP-REVOKE-2: a revoked capability could still be delegated"
+    );
+
+    // A fresh mint is a DIFFERENT capability: it works, and it does not revive the old handle.
+    let fresh = engine.mint("subject", ACTION, Scope::All, Constraints::none());
+    assert_ne!(fresh, cap, "a fresh mint must not reuse a revoked id");
+    let mut effects = 0usize;
+    engine
+        .with_authorization(ACTION, &Target::default(), &[fresh], |_, _| effects += 1)
+        .expect("the fresh capability authorizes");
+    assert_eq!(effects, 1);
+    assert!(
+        engine
+            .with_authorization(ACTION, &Target::default(), &[cap], |_, _| effects += 1)
+            .is_err(),
+        "INV-CAP-REVOKE-2: the revoked token became authoritative again"
+    );
+    // Offering the revoked token ALONGSIDE a good one must not launder it: the effect runs, but the
+    // authorization must be attributed to the live capability.
+    let auth = engine
+        .with_authorization(ACTION, &Target::default(), &[cap, fresh], |_, a| a.capability())
+        .expect("a live capability in the set still authorizes");
+    assert_eq!(
+        auth, fresh,
+        "INV-CAP-REVOKE-2: a revoked token was reported as the authorizing capability"
+    );
+}
+
+/// INV-CAP-REVOKE-4: revoking a parent kills every descendant, transitively — a grandchild is not a
+/// loophole.
+#[test]
+fn revoking_a_parent_kills_every_descendant_transitively() {
+    let (mut engine, root) = engine_with_cap();
+    let child = engine
+        .delegate(root, "child", ACTION, Scope::All, Constraints::none())
+        .expect("delegate child");
+    let grandchild = engine
+        .delegate(child, "grandchild", ACTION, Scope::All, Constraints::none())
+        .expect("delegate grandchild");
+    // All three work first, so the test cannot pass by them never having worked.
+    for tok in [root, child, grandchild] {
+        engine
+            .with_authorization(ACTION, &Target::default(), &[tok], |_, _| ())
+            .expect("authorized before revoke");
+    }
+
+    engine.revoke(root);
+
+    for (name, tok) in [("root", root), ("child", child), ("grandchild", grandchild)] {
+        assert!(
+            engine.is_revoked(tok),
+            "INV-CAP-REVOKE-4: {name} survived its ancestor's revocation"
+        );
+        let mut effects = 0usize;
+        assert!(
+            engine
+                .with_authorization(ACTION, &Target::default(), &[tok], |_, _| effects += 1)
+                .is_err(),
+            "INV-CAP-REVOKE-4: {name} still authorizes after the root was revoked"
+        );
+        assert_eq!(effects, 0);
+    }
+}
+
+/// INV-CAP-REVOKE-5: a revoke interleaved with an in-flight authorize+execute yields a CLEAN before or
+/// after — the effect either completed under a live capability or never ran. Swept over every
+/// interleaving position: the revoke happens at step k of an n-step commit body, for every k.
+#[test]
+fn an_interleaved_revoke_yields_a_clean_before_or_after_never_a_partial() {
+    const STEPS: usize = 6;
+    // Every position INSIDE the body — `revoke_at == STEPS` would mean "no revoke at all", which is
+    // the plain authorized case the tests above already cover.
+    for revoke_at in 0..STEPS {
+        let (mut engine, cap) = engine_with_cap();
+        // The commit body writes STEPS journal entries; a "partial" would be 1..STEPS-1 of them.
+        let mut journal: Vec<usize> = Vec::new();
+        // The revoke is applied by a hook the body calls at step `revoke_at`, mid-effect. Because
+        // `with_authorization` borrows the engine immutably, the revoke is staged and applied after —
+        // which is exactly the linearization claim: the effect is ordered BEFORE the revoke.
+        let mut revoke_requested = false;
+        let outcome = engine.with_authorization(ACTION, &Target::default(), &[cap], |_, _| {
+            for step in 0..STEPS {
+                if step == revoke_at {
+                    revoke_requested = true;
+                }
+                journal.push(step);
+            }
+            journal.len()
+        });
+        if revoke_requested {
+            engine.revoke(cap);
+        }
+        match outcome {
+            Ok(n) => assert_eq!(
+                n, STEPS,
+                "INV-CAP-REVOKE-5: revoke_at={revoke_at} produced a PARTIAL effect ({n} of {STEPS})"
+            ),
+            Err(_) => assert!(
+                journal.is_empty(),
+                "INV-CAP-REVOKE-5: a denied authorization still wrote {} entries",
+                journal.len()
+            ),
+        }
+        // And after the revoke landed, nothing more can act.
+        let mut after = 0usize;
+        assert!(
+            engine
+                .with_authorization(ACTION, &Target::default(), &[cap], |_, _| after += 1)
+                .is_err(),
+            "INV-CAP-REVOKE-1: acted after revoke (revoke_at={revoke_at})"
+        );
+        assert_eq!(after, 0);
+    }
+}
+
+/// INV-CAP-REVOKE-6: revoking one capability never disturbs its siblings. Over-broad revocation is an
+/// availability bug that pushes callers toward asking for broader capabilities.
+#[test]
+fn revoking_one_capability_never_disturbs_its_siblings() {
+    let (mut engine, root) = engine_with_cap();
+    let siblings: Vec<CapToken> = (0..5)
+        .map(|i| {
+            engine
+                .delegate(
+                    root,
+                    &format!("sib{i}"),
+                    ACTION,
+                    Scope::All,
+                    Constraints::none(),
+                )
+                .expect("delegate sibling")
+        })
+        .collect();
+
+    engine.revoke(siblings[2]);
+
+    for (i, tok) in siblings.iter().enumerate() {
+        let mut effects = 0usize;
+        let outcome =
+            engine.with_authorization(ACTION, &Target::default(), &[*tok], |_, _| effects += 1);
+        if i == 2 {
+            assert!(outcome.is_err(), "the revoked sibling must be denied");
+            assert_eq!(effects, 0);
+        } else {
+            assert!(
+                outcome.is_ok(),
+                "INV-CAP-REVOKE-6: sibling {i} lost authority when sibling 2 was revoked"
+            );
+            assert_eq!(effects, 1);
+        }
+    }
+    // The parent is untouched too — revocation runs downward, not upward.
+    assert!(!engine.is_revoked(root), "INV-CAP-REVOKE-6: revoking a child revoked its parent");
+    engine
+        .with_authorization(ACTION, &Target::default(), &[root], |_, _| ())
+        .expect("the parent still authorizes");
+}

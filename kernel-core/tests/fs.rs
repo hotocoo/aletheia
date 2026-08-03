@@ -372,3 +372,49 @@ fn replacing_an_absent_name_creates_it() {
     assert_eq!(fs.read(&mut dev, "fresh").expect("read"), data);
     assert_structurally_sound(&mut dev);
 }
+
+#[test]
+fn a_replace_whose_new_extent_overlaps_the_old_at_a_shifted_start_writes_each_block_once() {
+    // The five-transition sweep covers extents that are identical or fully disjoint. This is the third
+    // case: a hole BELOW the object, so first-fit places the new extent shifted but overlapping. A block
+    // then belongs to the old extent and to the new one at a DIFFERENT index — and must appear exactly
+    // once in the transaction (a duplicated home index would be written twice and would mis-count the
+    // transaction bound).
+    let mut dev = fresh(24);
+    let mut fs = Filesystem::mount(&mut dev).expect("mount");
+    // Lay out: [hole (2 blk)][obj (4 blk)] by creating and removing a 2-block filler first.
+    fs.create(&mut dev, "filler", &body(1, 2 * BLOCK_SIZE)).expect("filler");
+    let obj = body(2, 4 * BLOCK_SIZE);
+    fs.create(&mut dev, "obj", &obj).expect("obj");
+    let before = fs.stat(&mut dev, "obj").expect("stat").start;
+    fs.remove(&mut dev, "filler").expect("remove filler");
+
+    // Same size: first-fit now starts in the hole, so the new extent overlaps the old one shifted by 2.
+    let next = body(3, 4 * BLOCK_SIZE);
+    fs.replace(&mut dev, "obj", &next).expect("replace");
+    let after = fs.stat(&mut dev, "obj").expect("stat").start;
+    assert!(
+        after < before && after + 4 > before,
+        "expected a SHIFTED, overlapping extent (old start {before}, new start {after})"
+    );
+    assert_eq!(fs.read(&mut dev, "obj").expect("read"), next);
+    let entries = assert_structurally_sound(&mut dev);
+    assert_eq!(entries.len(), 1);
+
+    // And the shifted-overlap case is crash-atomic too, at every prefix.
+    let snap = dev.snapshot();
+    let again = body(4, 4 * BLOCK_SIZE);
+    for allow in 0..=2 * (4 + 4 + 2) + 3 {
+        dev.restore(&snap);
+        let mut fs_run = Filesystem::mount(&mut dev).expect("remount");
+        {
+            let mut faulty = FaultDevice::new(&mut dev, allow);
+            let _ = fs_run.replace(&mut faulty, "obj", &again);
+        }
+        let entries = assert_structurally_sound(&mut dev);
+        assert!(entries.iter().any(|e| e.name == "obj"), "name lost at allow={allow}");
+        let fs_after = Filesystem::mount(&mut dev).expect("mount after");
+        let got = fs_after.read(&mut dev, "obj").expect("readable");
+        assert!(got == next || got == again, "mixture at allow={allow}");
+    }
+}

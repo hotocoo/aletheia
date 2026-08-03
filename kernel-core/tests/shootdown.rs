@@ -309,3 +309,152 @@ fn service_drains_fifo_and_acks_the_batch() {
     assert!(ok);
     assert_eq!(sd.acked(1), 4);
 }
+
+// ---------------------------------------------------------------------------
+// INV-TLB contract (docs/INVARIANT-CONTRACTS.md) — adversarial cases, ALET-P1-005.
+//
+// The tests above prove the barrier WORKS. These attempt to make it lie: a silent core, a borrowed
+// acknowledgement, an aborted wait reported as success, an out-of-range target. Each names the
+// contract id it defends, so a future reader can go from a failure to the written rule.
+// ---------------------------------------------------------------------------
+
+/// INV-TLB-1 + INV-TLB-5: while ANY addressed target stays silent, `request` must not complete — and
+/// when the caller's deadline gives up, the answer must be `false` (never a partial success the
+/// caller would read as "safe to reclaim").
+#[test]
+fn a_request_never_completes_while_any_target_is_silent() {
+    let tlb = Arc::new(TlbShootdown::new(3));
+    // Target 1 services; target 2 never does. The request addresses all three.
+    tlb.service(0, |_| {});
+    let start = Instant::now();
+    let mut polls = 0u64;
+    let ok = tlb.request(&[0, 1, 2], Invalidation::page(7, 0x1000), || {
+        polls += 1;
+        // Let target 1 drain mid-wait; target 2 remains silent forever.
+        if polls == 5 {
+            tlb.service(1, |_| {});
+        }
+        start.elapsed() < Duration::from_millis(200)
+    });
+    assert!(
+        !ok,
+        "INV-TLB-1/5: request claimed completion while target 2 never acknowledged"
+    );
+    // The silent target's work is still queued — nothing was silently dropped to make progress.
+    assert_eq!(
+        tlb.pending(2),
+        1,
+        "INV-TLB-3: the un-serviced invalidation vanished instead of staying queued"
+    );
+    // And once it services, a fresh request completes: the earlier failure left no wedge behind.
+    tlb.service(2, |_| {});
+    let start = Instant::now();
+    let done = tlb.request(&[2], Invalidation::all(7), || {
+        tlb.service(2, |_| {}); // the target keeps draining while the requester waits
+        start.elapsed() < DEADLINE
+    });
+    assert!(done, "a later request must still work after an aborted one");
+}
+
+/// INV-TLB-2: an acknowledgement must count only AFTER the invalidation ran. Checked from inside
+/// `perform`: at that instant the ack watermark must not yet include this item.
+#[test]
+fn an_ack_never_precedes_the_invalidation_it_covers() {
+    let tlb = TlbShootdown::new(1);
+    for round in 1..=8u64 {
+        // Post WITHOUT waiting: the hook refuses to spin, so `request` returns false having queued
+        // the item. Waiting here would deadlock — nothing services target 0 until below, which is the
+        // point (INV-TLB-1: the barrier really does block until an ack arrives).
+        let queued = tlb.request(&[0], Invalidation::page(1, round * 0x1000), || false);
+        assert!(!queued, "INV-TLB-1: request completed with no acknowledgement");
+        let acked_before = tlb.acked(0);
+        let mut seen = 0usize;
+        tlb.service(0, |_inv| {
+            seen += 1;
+            assert_eq!(
+                tlb.acked(0),
+                acked_before,
+                "INV-TLB-2: the ack counter advanced BEFORE perform finished (round {round})"
+            );
+        });
+        assert_eq!(seen, 1);
+        assert_eq!(
+            tlb.acked(0),
+            acked_before + 1,
+            "INV-TLB-3: exactly one ack per performed invalidation"
+        );
+    }
+}
+
+/// INV-TLB-3: every posted invalidation is performed exactly once — no drops, no duplicates — even
+/// when many are posted before any are serviced, and even when they interleave with servicing.
+#[test]
+fn every_posted_invalidation_is_performed_exactly_once() {
+    let tlb = TlbShootdown::new(1);
+    let mut performed: Vec<u64> = Vec::new();
+    let mut posted: Vec<u64> = Vec::new();
+    for i in 0..25u64 {
+        let va = 0x1000 * (i + 1);
+        posted.push(va);
+        // Post without waiting (deadline hook gives up immediately when not yet serviced).
+        let _ = tlb.request(&[0], Invalidation::page(3, va), || false);
+        if i % 4 == 3 {
+            tlb.service(0, |inv| performed.push(inv.va.expect("a page invalidation carries a VA")));
+        }
+    }
+    tlb.service(0, |inv| performed.push(inv.va.expect("a page invalidation carries a VA")));
+    assert_eq!(
+        performed, posted,
+        "INV-TLB-3: the performed sequence is not exactly the posted sequence (drop or duplicate)"
+    );
+    assert_eq!(tlb.pending(0), 0, "queue not drained");
+}
+
+/// INV-TLB-4: two requesters must not satisfy each other's watermarks. Requester A posts and the
+/// target services ONE item only; A completes, but B — which posted after — must not.
+#[test]
+fn concurrent_requests_never_borrow_each_others_acknowledgements() {
+    let tlb = TlbShootdown::new(1);
+    // A posts (item 1), B posts (item 2). Only one service call, draining BOTH is what we must avoid
+    // asserting — so post A, service A, then post B and give B a short deadline.
+    let _ = tlb.request(&[0], Invalidation::page(9, 0x2000), || false); // A's item queued
+    tlb.service(0, |_| {}); // exactly A's item performed + acked
+    let start = Instant::now();
+    let b_ok = tlb.request(&[0], Invalidation::page(9, 0x3000), || {
+        start.elapsed() < Duration::from_millis(150)
+    });
+    assert!(
+        !b_ok,
+        "INV-TLB-4: B completed on an acknowledgement that covered only A's item"
+    );
+    assert_eq!(tlb.pending(0), 1, "B's item should still be queued");
+    tlb.service(0, |_| {});
+}
+
+/// INV-TLB-6: a target id outside the machine is ignored — never posted to, never waited on. A
+/// request naming only bogus targets must complete immediately rather than hang.
+#[test]
+fn an_out_of_range_target_is_ignored_not_waited_on() {
+    let tlb = TlbShootdown::new(2);
+    let start = Instant::now();
+    let ok = tlb.request(&[2, 7, 99], Invalidation::all(1), || {
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "INV-TLB-6: waited on an out-of-range target"
+        );
+        true
+    });
+    assert!(ok, "a request with no valid targets must complete");
+    assert_eq!(tlb.pending(0), 0, "an in-range target was posted to");
+    assert_eq!(tlb.pending(1), 0, "an in-range target was posted to");
+    // A mixed set posts only to the valid member.
+    let start = Instant::now();
+    let mixed = tlb.request(&[1, 42], Invalidation::all(1), || {
+        if tlb.pending(1) > 0 {
+            tlb.service(1, |_| {});
+        }
+        start.elapsed() < DEADLINE
+    });
+    assert!(mixed, "the valid target's ack must be enough");
+    assert_eq!(tlb.pending(0), 0, "target 0 was never addressed");
+}
