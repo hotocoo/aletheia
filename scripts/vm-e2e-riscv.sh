@@ -24,10 +24,19 @@ cd "$KDIR" || { echo "FAIL: no kernel-riscv64 dir"; exit 3; }
 echo "==> building riscv64 kernel"
 cargo build || { echo "FAIL: build"; exit 3; }
 
-echo "==> booting in QEMU riscv64 'virt' + OpenSBI (120s watchdog, -smp 4 for the SMP suite)"
+# Attach a real virtio-blk device (REQ-DRV-004, ADR-036): a fresh 1 MiB raw backing image
+# (2048 sectors = 256 4 KiB blocks) so this FIRST-CLASS target drives a real transport, reads
+# capacity, and runs the journal + the filesystem namespace over emulated storage. Bare `cargo run`
+# omits this and skips the driver green.
+IMG="$KDIR/target/virtio-blk-test.img"
+dd if=/dev/zero of="$IMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create disk image"; exit 3; }
+
+echo "==> booting in QEMU riscv64 'virt' + OpenSBI (120s watchdog, virtio-blk attached, -smp 4 for the SMP suite)"
 OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
   qemu-system-riscv64 -machine virt -cpu rv64 -smp 4 -m 128M -nographic \
-  -bios default -kernel "$ELF")"
+  -bios default -kernel "$ELF" \
+  -global virtio-mmio.force-legacy=false \
+  -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0)"
 CODE=$?
 
 echo "----------------------------------------"
@@ -44,6 +53,8 @@ echo "$OUT" | grep -q "ALL 55 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: v
 echo "$OUT" | grep -q "ALL 22 USER-MODE BOUNDARY INVARIANTS HOLD" || { echo "FAIL: user-mode marker missing"; fail=1; }
 echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
 echo "$OUT" | grep -q "ALL 12 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
+# 5 driver invariants + the 12 filesystem behaviors, all over the REAL device (REQ-DRV-004).
+echo "$OUT" | grep -q "ALL 17 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then

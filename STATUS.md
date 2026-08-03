@@ -3,7 +3,7 @@
 **As of:** 2026-08-03
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..035`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..036`.
 
 ## What Aletheia is
 
@@ -15,7 +15,50 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — the storage stack gets a top: named objects, atomic by construction (2026-08-03, GAPS4 ALET-P2-018)
+## Latest wave — a driver belongs to its bus, not to a CPU (2026-08-03, GAPS4 ALET-P2-019, REQ-DRV-004)
+
+The wave below gave every target a filesystem, and the wave before that gave x86-64 its own address
+map. Both exposed the same inversion: the only target with a **real block device** was aarch64, which
+ADR-019 designates the *bootstrap/dev* backend. So every claim that touched real storage — the
+journal's crash consistency, and now the namespace's atomicity — was proved against hardware on the
+target that matters least, while the two **first-class** targets proved it against a RAM model.
+
+- **The driver moved to `kernel-core`, not into a second crate (ADR-036).** A split virtqueue, a
+  feature handshake and a descriptor chain are facts about **virtio**, not about an instruction set.
+  Copying the driver into `kernel-riscv64/` and changing a base address would have been two homes for
+  one ring-layout bug — the divergence gap-register Issue 1 exists to prevent, in a path that decides
+  what the device is allowed to write into.
+- **The seam is two functions.** `VirtioHal::alloc_frame` (a zeroed, *identity-mapped* frame, so the
+  address the driver writes through is the address the device DMAs to) and `VirtioHal::barrier`
+  (`dsb sy` on aarch64, `fence iorw, iorw` on RISC-V), plus an `MmioLayout` for where a platform puts
+  its transports (aarch64: 32 slots 0x200 apart at `0x0a00_0000`; RISC-V: 8 slots 0x1000 apart at
+  `0x1000_1000`, inside the device gigapage the identity map already covers). That is the entire list of
+  what differs per CPU.
+- **`init` returns facts instead of logging them.** An `InitReport` (version, device id, feature halves,
+  queue size, capacity) goes back to the caller, which prints it with its own `kprintln!` — a shared
+  driver cannot call a per-target macro, and a logging trait for four lines would be worse.
+- **RISC-V now proves the filesystem on real storage, first boot.** `device_suite` is shared too:
+  discovery → attached geometry → write/read-back round-trip → journal commit + recovery from device
+  bytes alone → **the entire 12-behavior namespace over that device** → capability-gated I/O through
+  `DeviceGuard`. Seventeen invariants, identical on both targets that have a disk
+  (`ALL 17 VIRTIO-BLK INVARIANTS HOLD`; boot fails `120 + i` on aarch64, `180 + i` on RISC-V).
+  `scripts/vm-e2e-riscv.sh` now attaches a 1 MiB disk and requires the marker.
+- **Geometry is asserted before any byte is trusted.** The suite refuses a device whose block count is
+  not the one the gate attached — invariant 2, before any I/O. `kernel-core/tests/virtioblk.rs` proves
+  that on the host, and pins the count (17), the dense 1-based numbering and the group order, so a
+  suite that quietly stops checking fails `cargo test` instead of passing three QEMU boots.
+- **ALET-P2-019 stays deferred, deliberately.** This is progress on the driver *model*, not its closure:
+  no hotplug, no interrupt-driven completion (the poll is synchronous, one request in flight), no
+  multi-queue, no restart/recovery, and **no DMA isolation** — the device is handed raw physical
+  addresses (ALET-P1-018; an IOMMU/SMMU is the real answer). x86-64 still has no block device because
+  its transport is virtio-**pci**, which needs PCI enumeration, not an MMIO window — a real bus
+  difference, tracked as its own slice rather than papered over.
+
+Gates after the wave: `build-all` PASS, `e2e-all` PASS (aarch64 / riscv64 / x86-64 in QEMU),
+`conformance` PASS (49 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (66
+requirements).
+
+## Previous wave — the storage stack gets a top: named objects, atomic by construction (2026-08-03, GAPS4 ALET-P2-018)
 
 Until this wave the storage stack was a correct middle with nothing above it. The journal (REQ-STOR-002)
 made a multi-block write all-or-nothing; the virtio-blk driver (REQ-DRV-003) made it real hardware; and

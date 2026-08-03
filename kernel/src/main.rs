@@ -157,7 +157,9 @@ pub extern "C" fn kmain() -> ! {
     // device — and on this target `virtio::selftest` above additionally proves them over the REAL
     // virtio-blk driver, which is what makes the crash-atomicity claim a hardware claim.
     kprintln!("");
-    kprintln!("--- filesystem selftests (named objects over the journal: atomic create/remove) ---");
+    kprintln!(
+        "--- filesystem selftests (named objects over the journal: atomic create/remove) ---"
+    );
     let mut disk = kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
     match kernel_core::fs::selftest_on(&mut disk, |n, passed, name| {
         if passed {

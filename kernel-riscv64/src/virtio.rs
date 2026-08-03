@@ -1,52 +1,55 @@
-//! virtio-blk backend for the aarch64 dev target (REQ-DRV-003, ADR-023 / ADR-036).
+//! virtio-blk backend for the RISC-V target (REQ-DRV-004, ADR-036).
 //!
-//! The driver itself moved to `kernel_core::virtioblk` when the RISC-V target needed the same one
-//! (ADR-036): a split virtqueue and a feature handshake are bus facts, not CPU facts. What is left
-//! here is exactly what is genuinely aarch64-specific, and nothing else:
+//! RISC-V is a **first-class** target (ADR-019) that until now had no real storage: the filesystem and
+//! the journal were proved only over a RAM disk here, while the aarch64 *dev* backend was the one
+//! talking to hardware. That is backwards, and it was an accident of where the driver happened to be
+//! written. The driver now lives in `kernel_core::virtioblk` (ADR-036), so this file is only the parts
+//! that are genuinely RISC-V:
 //!
-//! * **where QEMU `virt` puts the transports** — 32 slots, 0x200 apart, from `0x0a00_0000`, inside the
-//!   Device-mapped peripheral GiB `vm::build_identity` already covers;
-//! * **a DMA-able frame** — `frames::alloc_zeroed`, whose pages are identity-mapped (VA == PA);
-//! * **the barrier** — `dsb sy`, ordering Normal-memory ring writes before the Device-memory notify.
+//! * **where QEMU `virt` (RISC-V) puts the transports** — 8 slots, 0x1000 apart, from `0x1000_1000`,
+//!   inside the peripheral GiB that `vm::build_identity` already maps as ONE device gigapage;
+//! * **a DMA-able frame** — `frames::alloc_zeroed`, identity-mapped (VA == PA);
+//! * **the barrier** — `fence iorw, iorw`, which on RISC-V orders both normal and I/O accesses, so the
+//!   ring writes are visible before the `QueueNotify` store to device memory.
 //!
-//! **Graceful probe.** Under bare `cargo run` (no `-drive`) no block transport is present, so `probe`
-//! returns `None`, the kernel logs `[virtio] no device (skipped)` and boots green. The VM gate
-//! (`scripts/vm-e2e.sh`) attaches a 1 MiB disk and asserts the invariant marker.
+//! **Graceful probe.** With no `-drive` attached, `probe` returns `None`, the kernel logs
+//! `[virtio] no device (skipped)` and boots green; `scripts/vm-e2e-riscv.sh` attaches a 1 MiB disk and
+//! requires the invariant marker.
 use kernel_core::virtioblk::{self, InitReport, MmioLayout, VirtioHal};
 
 use crate::frames;
 
-/// QEMU `virt` (aarch64) virtio-mmio window: 32 transport slots, 0x200 apart.
+/// QEMU `virt` (RISC-V) virtio-mmio window: 8 transport slots, 0x1000 apart.
 const LAYOUT: MmioLayout = MmioLayout {
-    base: 0x0a00_0000,
-    stride: 0x200,
-    slots: 32,
+    base: 0x1000_1000,
+    stride: 0x1000,
+    slots: 8,
 };
 
-/// The blocks the VM gate's attached image holds (1 MiB = 2048 sectors = 256 4 KiB blocks). Asserted
-/// by the suite, so a wrong sector/block mapping fails before any data is trusted.
+/// The blocks the VM gate's attached image holds (1 MiB = 2048 sectors = 256 4 KiB blocks).
 const GATE_IMAGE_BLOCKS: usize = 256;
 
-/// The aarch64 seam: this target's frame allocator and barrier instruction.
-pub struct Aarch64Virtio;
+/// The RISC-V seam: this target's frame allocator and fence.
+pub struct RiscvVirtio;
 
-impl VirtioHal for Aarch64Virtio {
+impl VirtioHal for RiscvVirtio {
     fn alloc_frame() -> Option<usize> {
         frames::alloc_zeroed().map(|f| f.addr())
     }
 
     fn barrier() {
-        // SAFETY: `dsb sy` has no operands and only enforces memory ordering.
-        unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+        // SAFETY: `fence iorw, iorw` has no operands and only enforces memory ordering — over both
+        // normal memory (the rings) and I/O (the notify register), which is exactly the pairing here.
+        unsafe { core::arch::asm!("fence iorw, iorw", options(nostack, preserves_flags)) };
     }
 }
 
 /// This target's concrete block device.
-pub type VirtioBlk = virtioblk::VirtioBlk<Aarch64Virtio>;
+pub type VirtioBlk = virtioblk::VirtioBlk<RiscvVirtio>;
 
 /// Scan for a block transport. `None` = none attached (the graceful-skip path).
 pub fn probe() -> Option<usize> {
-    // SAFETY: every slot address is inside the Device-mapped peripheral GiB.
+    // SAFETY: every slot address is inside the device gigapage the identity map covers.
     unsafe { virtioblk::probe(&LAYOUT) }
 }
 
@@ -77,8 +80,7 @@ fn log_report(r: &InitReport) {
 }
 
 /// Prove the shared driver against this target's real emulated device. Skips green (`Ok(0)`) when no
-/// block device is attached, so bare `cargo run` still boots; the VM gate attaches a disk and asserts
-/// the invariant marker. Failure returns `(index, name)` → the caller exits `120 + index`.
+/// block device is attached. Failure returns `(index, name)` → the caller exits `180 + index`.
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     let base = match probe() {
         Some(b) => b,
@@ -89,7 +91,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     };
 
     // SAFETY: `base` came from `probe`, so it is a mapped virtio-mmio block transport, and
-    // `Aarch64Virtio::alloc_frame` hands out identity-mapped frames this kernel owns exclusively.
+    // `RiscvVirtio::alloc_frame` hands out identity-mapped frames this kernel owns exclusively.
     let (dev, report) = match unsafe { VirtioBlk::init(base) } {
         Ok(pair) => pair,
         Err(e) => {
