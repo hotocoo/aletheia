@@ -78,15 +78,16 @@ milestone work, carrying no false "done" claim).
 | ALET-P2-029 | P2 | open | continuous threat-model maintenance |
 | ALET-P2-030 | P2 | open | explicit security-boundary enumeration |
 | ALET-P2-031 | P2 | open | DoS ≠ unauthorized-access distinction in the threat model |
+| ALET-P2-032 | P2 | open | the kernel-image mapping refusal (`in_image_split`, REQ-MM-006) is duplicated per target in `kernel/src/vm.rs` and `kernel-riscv64/src/vm.rs`, unlike the ADR-029/030/031/032 rules that live once in `kernel-core`. x86-64 has no counterpart because it has no split — it will need one when ALET-P1-031 makes it build its own kernel map, which is the point at which the rule should move into `kernel-core` behind the existing seams rather than be written a third time |
 | ALET-P3-001 | P3 | open | centralized assembly/Rust boundary documentation |
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-03):** 68 findings (67 audited + ALET-P1-031, split out of ALET-P1-007) — 12
+**Rollup (2026-08-03):** 69 findings (67 audited + ALET-P1-031 and ALET-P2-032, both split out while closing ALET-P1-007) — 12
 resolved (every P0 closed; the memory cluster now has address admission ALET-P1-001, page-table
 reclamation ALET-P1-002, frame ownership ALET-P1-003, address-space destruction ALET-P1-004,
 erase-on-free ALET-P2-026, per-arch attribute validation ALET-P1-008 and **W^X as a global invariant
-ALET-P1-007**), 45 open, 11 deferred (milestone subsystems). A frame can no longer be aliased,
+ALET-P1-007**), 46 open, 11 deferred (milestone subsystems). A frame can no longer be aliased,
 double-freed, leaked by unmapping, leaked by dying, or read by its next owner; and on both QEMU
 targets NO descriptor in the address space the kernel builds — dynamic page or bootstrap block — is
 writable+executable, with kernel text mapped read-only at 4 KiB granularity. The one W^X hole left is
