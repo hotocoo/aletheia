@@ -17,6 +17,7 @@
 //! `[virtio] no device (skipped)` and boots green; `kernel-x86_64/scripts/smoke-test.sh` attaches a
 //! scratch disk and requires the invariant marker.
 use kernel_core::virtioblk::{self, InitReport, VirtioHal};
+use kernel_core::virtionet::{self, VirtioNet};
 
 use crate::frames;
 use crate::pci::{self, Bdf, PciTransport};
@@ -142,5 +143,31 @@ pub fn persistent_device() -> Option<VirtioBlk> {
         let transport = PciTransport::new(bdf).ok()?;
         let (dev, _report) = VirtioBlk::init(transport).ok()?;
         Some(dev)
+    }
+}
+
+/// This target's concrete network device (REQ-NET-001, ADR-041): the shared driver, over PCI.
+pub type Net = VirtioNet<X86Virtio, PciTransport>;
+
+/// Bring up a virtio-net function if one is attached. `None` = no NIC (the graceful-skip path).
+pub fn network_device() -> Option<Result<Net, virtionet::NetError>> {
+    // SAFETY: the BDF names a virtio network function; `PciTransport::new` resolves and MAPS its register
+    // regions (refusing RAM), and the frames handed to the device are identity-mapped and ours.
+    unsafe {
+        let bdf = pci::find_virtio_net_nth(0)?;
+        let transport = match PciTransport::new(bdf) {
+            Ok(t) => t,
+            Err(e) => {
+                kprintln!("[net] transport setup failed: {}", e);
+                return Some(Err(virtionet::NetError::Unsupported("transport")));
+            }
+        };
+        kprintln!(
+            "[net] virtio-net @ PCI {:02x}:{:02x}.{}",
+            bdf.bus,
+            bdf.device,
+            bdf.function
+        );
+        Some(VirtioNet::init(transport))
     }
 }

@@ -125,6 +125,14 @@ CONTRACT=(
   # all — the second was a real hole this wave found, since the boot identity maps covered page 0.
   "guard: the guard page has no leaf"
   "layout: VA 0 has NO translation in the live map (a kernel null dereference faults)"
+  # Networking (REQ-NET-001/002, ADR-041). The whole point is that something ANSWERS: a transmit-only
+  # driver is indistinguishable from a frame that vanished. Every target must resolve the gateway by ARP
+  # and get a verified ICMP echo reply back — "the network works" must not vary by CPU or by bus (two of
+  # the three run virtio-mmio, one runs virtio-pci).
+  "net: the device reported a unicast MAC address from its config space"
+  "net: an ARP request for the gateway is answered with its hardware address"
+  "net: an ICMP echo request is answered with a matching reply (both checksums verified)"
+  "net: a second echo is matched on its own sequence (replies are read, not assumed)"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

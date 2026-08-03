@@ -273,14 +273,23 @@ pub unsafe fn probe(layout: &MmioLayout) -> Option<usize> {
 /// # Safety
 /// Every address in `layout` must be mapped as device memory in the active address space.
 pub unsafe fn probe_nth(layout: &MmioLayout, nth: usize) -> Option<usize> {
+    probe_nth_kind(layout, VIRTIO_ID_BLOCK, nth)
+}
+
+/// Scan for the `nth` (0-based) transport of a given virtio DEVICE KIND — block (2), network (1), … A
+/// second device kind is a second `device_id`, not a second driver framework (ADR-041).
+///
+/// # Safety
+/// Every address in `layout` must be mapped as device memory in the active address space.
+pub unsafe fn probe_nth_kind(layout: &MmioLayout, device_id: u32, nth: usize) -> Option<usize> {
     let mut seen = 0usize;
     for i in 0..layout.slots {
         let base = layout.base + i * layout.stride;
         if r32(base, R_MAGIC) != VIRTIO_MAGIC {
             continue;
         }
-        // DeviceID 0 == a present-but-empty transport slot; keep scanning for block devices.
-        if r32(base, R_DEVICE_ID) == VIRTIO_ID_BLOCK {
+        // DeviceID 0 == a present-but-empty transport slot; keep scanning for the kind asked for.
+        if r32(base, R_DEVICE_ID) == device_id {
             if seen == nth {
                 return Some(base);
             }
@@ -305,6 +314,15 @@ impl MmioTransport {
     /// # Safety
     /// `base` must be mapped as device memory (typically a base returned by [`probe`]).
     pub unsafe fn new(base: usize) -> Result<Self, &'static str> {
+        Self::new_for(base, VIRTIO_ID_BLOCK)
+    }
+
+    /// Bind to the transport at `base`, requiring the given virtio device KIND — block (2), network (1), …
+    /// Checking the kind here is why no driver body has to re-check what it is talking to.
+    ///
+    /// # Safety
+    /// `base` must be mapped as device memory (typically from [`probe_nth_kind`]).
+    pub unsafe fn new_for(base: usize, want_device_id: u32) -> Result<Self, &'static str> {
         if r32(base, R_MAGIC) != VIRTIO_MAGIC {
             return Err("no virtio magic at this transport address");
         }
@@ -313,8 +331,8 @@ impl MmioTransport {
         if version != VIRTIO_VERSION_MODERN {
             return Err("legacy (v1) virtio-mmio not supported — fail closed");
         }
-        if device_id != VIRTIO_ID_BLOCK {
-            return Err("transport is not a block device — fail closed");
+        if device_id != want_device_id {
+            return Err("transport is not the requested device kind — fail closed");
         }
         Ok(MmioTransport {
             base,
