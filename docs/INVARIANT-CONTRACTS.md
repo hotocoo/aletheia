@@ -165,3 +165,17 @@ its property after **every** event rather than at the end.
 | INV-TASK-3 | At most ONE task is Running, and `current()` names exactly that task. | Two Running tasks on one core is a belief in something impossible; two disagreeing views resume the wrong context. | `at_most_one_task_is_running_after_every_event` |
 | INV-TASK-4 | `runnable_len` equals the rotation — Ready **plus** the Running task (which rotates to the tail) — and never counts Blocked or Finished. | A drifting count makes a scheduler spin believing it has work, or idle with work pending. | `the_runnable_count_never_drifts_from_the_dispatchable_set` |
 | INV-TASK-5 | An event naming a task that was never spawned changes **nothing** — no state appears for it, no real task is disturbed. | **This found a real defect:** `block`/`finish` used to INVENT a task in the state table from a stray id, and a scheduler that believes in a task it never created will try to resume a context that does not exist. | `an_event_for_an_unknown_task_changes_nothing` |
+
+---
+
+## INV-STORE-ERR — storage error semantics (REQ-STOR-004, ALET-P1-020)
+
+A storage stack's error behavior *is* its safety story: a swallowed device error becomes silent data loss,
+and an error that cannot be told apart from another one cannot be handled correctly.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-STORE-ERR-1 | The error kinds are **distinguishable** — wrong buffer size, block off the device, device failure, over-size transaction are four different values. | Collapsing them makes the only possible response to any error the same one. | `every_error_kind_is_distinguishable_at_its_own_boundary` |
+| INV-STORE-ERR-2 | A device error is **surfaced**, never swallowed — including a failed **flush**, which is the durability barrier, so swallowing it would report durability that does not exist. And a failed commit leaves the home block untouched. | The difference between a reported failure and silent loss. | `a_device_error_surfaces_through_the_journal_rather_than_being_swallowed` |
+| INV-STORE-ERR-3 | The filesystem **preserves** the device error (`FsError::Storage(Device)`) rather than flattening it, while its own refusals keep their own names. | A caller must be able to tell "your request was wrong" from "the hardware failed". | `the_filesystem_preserves_the_device_error_and_keeps_its_own_refusals_distinct` |
+| INV-STORE-ERR-4 | Every refusal is a **no-op**, proven by comparing the whole device image byte-for-byte before and after — the strongest available form of "nothing happened". | A refusal that wrote something is worse than an accepted operation, because nobody goes looking for its effects. | `every_refusal_leaves_the_device_image_byte_identical` |

@@ -34,7 +34,11 @@ test drives long sequences, checking its property after **every** event.
 - **And one invariant corrected the contract rather than the code:** `runnable_len` counts the rotation, so
   the first draft (Ready-only) was wrong about what the scheduler promises — worth recording, because a test
   written to the wrong definition is how a correct implementation gets "fixed" into a broken one.
-- **Register: 29 → 30 resolved, 33 → 32 open.**
+- **Register: 29 → 31 resolved, 33 → 31 open** — the same wave also closed ALET-P1-020 with
+  §INV-STORE-ERR: the error kinds are distinguishable, a device error is surfaced (including a failed
+  **flush**, the durability barrier — swallowing it would report durability that does not exist), the
+  filesystem preserves the cause rather than flattening it, and every refusal is proven a no-op by
+  comparing the whole device image byte-for-byte before and after.
 
 Gates after the wave: `build-all` PASS (22 host test binaries), `register` PASS, `traceability` PASS (79
 requirements).
