@@ -42,9 +42,18 @@ write primitive can rewrite the code that is running. It is now closed on both Q
   the leaf covering `__text_start` is a 4 KiB **page** (not a block) and identity-maps, kernel text is
   executable and read-only and never EL0/U-accessible, `.rodata` is neither writable nor executable,
   and kernel data plus the **running stack** are writable and never executable. Virtual-memory
-  invariants 49 → **53** on aarch64 and RISC-V; the audit walks 1087 live leaves on aarch64 and 576 on
-  RISC-V with 0/0 violations. Total per-target invariants: aarch64 134, RISC-V 129, x86-64 117 — all
+  invariants 49 → **55** on aarch64 and RISC-V; the audit walks 1087 live leaves on aarch64 and 576 on
+  RISC-V with 0/0 violations. Total per-target invariants: aarch64 136, RISC-V 131, x86-64 117 — all
   35 shared conformance behaviors still proved by every target.
+- **The split cuts both ways, and that hole is closed in the same wave.** What used to make kernel-image
+  VAs unmappable-over was not a rule but a side effect: the level above them was a BLOCK descriptor, and
+  `map_page`/`unmap_page` refuse to descend into a block. Replacing those blocks with real tables made
+  `map_page(root, __text_start, fresh_frame, NORMAL_PAGE)` **succeed** — a writable page over kernel
+  text, precisely the write-to-code path W^X exists to close — and `unmap_page` over kernel `.data`
+  reachable too. Neither `validate_map` (a legal 39-bit VA, a pool-owned PA) nor the attribute check (a
+  clean RW+NX descriptor) says no. Both APIs now refuse the whole block-aligned split span explicitly,
+  and two invariants per target prove it; run against the pre-fix code they fail at invariant 54
+  (`exit 114`), so they test the guard rather than restate it.
 - **Not added to the shared conformance contract, deliberately.** `conformance.sh` demands
   identically-worded behaviors from all three targets, and x86-64 *cannot* emit this one: its image is
   a PE the firmware loads and maps, not a map this kernel builds. Requiring it would either fail

@@ -152,6 +152,27 @@ pub fn image_split_blocks() -> usize {
     last + 1 - first
 }
 
+/// The megapage-aligned RAM span that the image split maps with 4 KiB pages.
+fn image_split_span() -> (usize, usize) {
+    let (text_start, _, rodata_end) = image_spans();
+    (
+        text_start & !(MEG_2M - 1),
+        (rodata_end + MEG_2M - 1) & !(MEG_2M - 1),
+    )
+}
+
+/// Is `va` inside the span the image split covers? The dynamic mapping API refuses those addresses
+/// (REQ-MM-006): before the split, a caller could not touch them because the level above was a
+/// megapage LEAF and `map_page`/`unmap_page` refuse to descend into a leaf — the split turned that
+/// level into a table, so the refusal has to become explicit or the API would let a caller map a
+/// fresh writable page over kernel text (exactly the write-to-code path W^X closes) or unmap kernel
+/// `.data` out from under the running kernel. The whole aligned span is refused, not just the image,
+/// because the same tables also map RAM that merely shares the image's megapages.
+fn in_image_split(va: usize) -> bool {
+    let (start, end) = image_split_span();
+    va >= start && va < end
+}
+
 #[inline]
 unsafe fn read_entry(table: usize, idx: usize) -> u64 {
     core::ptr::read_volatile((table + idx * 8) as *const u64)
@@ -395,7 +416,7 @@ fn attrs_of(root: usize, va: usize) -> Option<PageAttrs> {
 /// needed. Returns `false` on allocator exhaustion or if an intermediate level is already a leaf
 /// (this wave never splits a giga/megapage). Fences the TLB for `va`.
 pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
-    if addr_plan().validate_map(va, pa).is_err() {
+    if addr_plan().validate_map(va, pa).is_err() || in_image_split(va) {
         return false;
     }
     // W^X and attribute admission (REQ-MM-006, ADR-034): caller-supplied flags are untrusted input
@@ -443,7 +464,7 @@ pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
 /// Unmap the 4 KiB page at `va` (clear its level-0 entry) and fence its TLB entry. Returns `false`
 /// if the page was not present as a 4 KiB mapping.
 pub fn unmap_page(root: usize, va: usize) -> bool {
-    if addr_plan().validate_unmap(va).is_err() {
+    if addr_plan().validate_unmap(va).is_err() || in_image_split(va) {
         return false;
     }
     let (i2, i1, i0) = indices(va);
@@ -935,6 +956,21 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                 && attrs_of(root, &n as *const _ as usize)
                     .is_some_and(|a| a.write && !a.exec_kernel && !a.exec_user),
             "wx: kernel data and the running stack are writable and never executable"
+        );
+        // The split cuts both ways: it replaced the megapage leaves that made these VAs
+        // unmappable-over (the mapping API refuses to descend into a leaf) with real tables, so the
+        // API must refuse the image span explicitly. Otherwise a caller could map a fresh WRITABLE
+        // page over kernel text — the write-to-code path W^X exists to close — or unmap kernel .data
+        // from under the running kernel.
+        check!(
+            !map_page(root, text_start, frame.addr(), NORMAL_PAGE)
+                && translate(root, text_start) == Some(text_start),
+            "wx: mapping over the split kernel image is refused (text still maps to itself)"
+        );
+        check!(
+            !unmap_page(root, text_start)
+                && attrs_of(root, text_start).is_some_and(|a| a.exec_kernel && !a.write),
+            "wx: unmapping the split kernel image is refused (text still read-only + executable)"
         );
     }
 
