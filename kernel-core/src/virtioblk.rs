@@ -126,14 +126,34 @@ pub trait Transport {
     /// for the device-kind check the constructor already made.
     fn identity(&self) -> (u32, u32);
     /// Read the 32-bit half `sel` (0 = bits 0..31, 1 = bits 32..63) of the device feature bits.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn device_features(&self, sel: u32) -> u32;
     /// Write the 32-bit half `sel` of the driver (accepted) feature bits.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn set_driver_features(&self, sel: u32, value: u32);
     /// Read the device status byte.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn status(&self) -> u32;
     /// Write the device status byte.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn set_status(&self, value: u32);
     /// Select the queue subsequent queue calls refer to.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn select_queue(&self, queue: u16);
     /// Hook called ONCE, right after the driver selects the queue it will use, for a transport whose
     /// notify address depends on a per-queue register it must read while that queue is selected
@@ -144,16 +164,40 @@ pub trait Transport {
     /// A queue must be selected, and the transport's registers mapped.
     unsafe fn after_queue_select(&mut self) {}
     /// Largest queue size the selected queue supports (0 = the queue does not exist).
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn queue_num_max(&self) -> u32;
     /// Set the negotiated size of the selected queue.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn set_queue_num(&self, size: u32);
     /// Publish the selected queue's three ring addresses (physical).
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn set_queue_addrs(&self, desc: u64, avail: u64, used: u64);
     /// Mark the selected queue live.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn queue_ready(&self);
     /// Tell the device a queue has new buffers.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn notify(&self, queue: u16);
     /// Read 8 bytes of device-specific config space at `off` (blk capacity is at 0).
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently — the
+    /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn config_u64(&self, off: usize) -> u64;
 }
 
@@ -677,14 +721,14 @@ pub fn device_suite<D: BlockDevice, F: FnMut(usize, bool, &str)>(
     // With no offered capability the device was never touched; confirm via an authorized read.
     let mut after_deny = [0u8; BLOCK_SIZE];
     let read_ok = guard
-        .read_block(&engine, &[read_cap.clone()], capblk, &mut after_deny)
+        .read_block(&engine, &[read_cap], capblk, &mut after_deny)
         .is_ok();
     let unchanged = after_deny.iter().all(|&x| x != 0xEE);
     // With the write capability the bytes actually land and read back.
     let mut landed = [0u8; BLOCK_SIZE];
     landed.fill(0x7c);
     let wrote = guard
-        .write_block(&engine, &[read_cap.clone(), write_cap], capblk, &landed)
+        .write_block(&engine, &[read_cap, write_cap], capblk, &landed)
         .is_ok();
     let mut verify = [0u8; BLOCK_SIZE];
     let verified = guard

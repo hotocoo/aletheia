@@ -215,15 +215,13 @@ fn a_holder_is_never_weaker_than_anyone_waiting_on_it() {
             }
         };
 
-    s.acquire(&engine, eps[0], t(1), &[cap.clone()])
-        .expect("acquire");
-    s.acquire(&engine, eps[1], t(5), &[cap.clone()])
-        .expect("acquire");
+    s.acquire(&engine, eps[0], t(1), &[cap]).expect("acquire");
+    s.acquire(&engine, eps[1], t(5), &[cap]).expect("acquire");
     assert_no_inversion(&s, &waiting, "after acquires");
 
     // 2 (HIGH) and 4 (7) queue behind 1 (LOW); 3 (MED) queues behind 5 (3).
     for (ep, id) in [(eps[0], 2u64), (eps[0], 4), (eps[1], 3)] {
-        s.wait(&engine, ep, t(id), &[cap.clone()]).expect("wait");
+        s.wait(&engine, ep, t(id), &[cap]).expect("wait");
         waiting.push((ep, t(id)));
         assert_no_inversion(&s, &waiting, "after a wait");
     }
@@ -262,14 +260,12 @@ fn donation_follows_the_whole_chain_not_just_one_hop() {
     s.admit(t(3), LOW); // C
     let ep_b = Endpoint(1);
     let ep_c = Endpoint(2);
-    s.acquire(&engine, ep_b, t(2), &[cap.clone()])
+    s.acquire(&engine, ep_b, t(2), &[cap])
         .expect("B holds ep_b");
-    s.acquire(&engine, ep_c, t(3), &[cap.clone()])
+    s.acquire(&engine, ep_c, t(3), &[cap])
         .expect("C holds ep_c");
-    s.wait(&engine, ep_c, t(2), &[cap.clone()])
-        .expect("B waits on C");
-    s.wait(&engine, ep_b, t(1), &[cap.clone()])
-        .expect("A waits on B");
+    s.wait(&engine, ep_c, t(2), &[cap]).expect("B waits on C");
+    s.wait(&engine, ep_b, t(1), &[cap]).expect("A waits on B");
 
     assert_eq!(
         s.effective_priority(t(3)),
@@ -291,9 +287,8 @@ fn donation_stops_the_moment_the_endpoint_is_released() {
     s.admit(t(1), LOW);
     s.admit(t(2), HIGH);
     let ep = Endpoint(5);
-    s.acquire(&engine, ep, t(1), &[cap.clone()])
-        .expect("acquire");
-    s.wait(&engine, ep, t(2), &[cap.clone()]).expect("wait");
+    s.acquire(&engine, ep, t(1), &[cap]).expect("acquire");
+    s.wait(&engine, ep, t(2), &[cap]).expect("wait");
     assert_eq!(s.effective_priority(t(1)), HIGH, "donation did not apply");
     s.release(ep, t(1)).expect("release");
     assert_eq!(
@@ -318,13 +313,13 @@ fn donation_never_manufactures_priority_above_the_highest_base() {
     let max_base = bases.iter().map(|(_, p)| *p).max().expect("nonempty");
     // A dense tangle: every task holds one endpoint and waits on the next, round-robin.
     for i in 0..4u64 {
-        s.acquire(&engine, Endpoint(i), t(i + 1), &[cap.clone()])
+        s.acquire(&engine, Endpoint(i), t(i + 1), &[cap])
             .expect("acquire");
     }
     for i in 0..4u64 {
         let holder_of_next = (i + 1) % 4;
         // t(i+1) waits on the endpoint held by the next task.
-        let _ = s.wait(&engine, Endpoint(holder_of_next), t(i + 1), &[cap.clone()]);
+        let _ = s.wait(&engine, Endpoint(holder_of_next), t(i + 1), &[cap]);
     }
     for id in 1..=4u64 {
         assert!(
@@ -345,9 +340,8 @@ fn the_scheduler_never_runs_a_weaker_ready_task_over_a_stronger_one() {
     }
     // Block 3 (HIGH) on an endpoint held by 1 (LOW) — the classic inversion setup.
     let ep = Endpoint(9);
-    s.acquire(&engine, ep, t(1), &[cap.clone()])
-        .expect("acquire");
-    s.wait(&engine, ep, t(3), &[cap.clone()]).expect("wait");
+    s.acquire(&engine, ep, t(1), &[cap]).expect("acquire");
+    s.wait(&engine, ep, t(3), &[cap]).expect("wait");
 
     for round in 0..12 {
         let Some(next) = s.schedule_next() else { break };
@@ -379,15 +373,11 @@ fn a_donation_cycle_terminates_instead_of_recursing() {
     s.admit(t(2), HIGH);
     let ep1 = Endpoint(11);
     let ep2 = Endpoint(22);
-    s.acquire(&engine, ep1, t(1), &[cap.clone()])
-        .expect("1 holds ep1");
-    s.acquire(&engine, ep2, t(2), &[cap.clone()])
-        .expect("2 holds ep2");
+    s.acquire(&engine, ep1, t(1), &[cap]).expect("1 holds ep1");
+    s.acquire(&engine, ep2, t(2), &[cap]).expect("2 holds ep2");
     // Each waits on the other's endpoint: a cycle.
-    s.wait(&engine, ep2, t(1), &[cap.clone()])
-        .expect("1 waits on ep2");
-    s.wait(&engine, ep1, t(2), &[cap.clone()])
-        .expect("2 waits on ep1");
+    s.wait(&engine, ep2, t(1), &[cap]).expect("1 waits on ep2");
+    s.wait(&engine, ep1, t(2), &[cap]).expect("2 waits on ep1");
     // If donation recursed through the cycle this would never return (or overflow the stack).
     let p1 = s.effective_priority(t(1));
     let p2 = s.effective_priority(t(2));
@@ -424,8 +414,7 @@ fn an_unauthorized_acquire_or_wait_changes_no_scheduling_state() {
     );
 
     // Legitimate holder, then an unauthorized wait: no blocking, and NO donation.
-    s.acquire(&engine, ep, t(1), &[cap.clone()])
-        .expect("acquire");
+    s.acquire(&engine, ep, t(1), &[cap]).expect("acquire");
     assert_eq!(
         s.wait(&engine, ep, t(2), &[]),
         Err(SchedError::Unauthorized)
@@ -442,7 +431,7 @@ fn an_unauthorized_acquire_or_wait_changes_no_scheduling_state() {
     );
     // An unknown task is refused too, with the state of known tasks untouched.
     assert_eq!(
-        s.wait(&engine, ep, t(99), &[cap.clone()]),
+        s.wait(&engine, ep, t(99), &[cap]),
         Err(SchedError::UnknownTask)
     );
     assert_eq!(s.effective_priority(t(1)), LOW);

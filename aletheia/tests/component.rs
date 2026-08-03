@@ -135,20 +135,54 @@ fn spawner_wasm(child_id: &str, action: &str) -> Vec<u8> {
 fn component_spawns_a_child_with_attenuated_authority() {
     let (mut core, owner) = open();
     let child = core
-        .install_component(std::slice::from_ref(&owner), "human:owner", "child-writer", &writer_wasm("child-output-payload", "child-event"))
+        .install_component(
+            std::slice::from_ref(&owner),
+            "human:owner",
+            "child-writer",
+            &writer_wasm("child-output-payload", "child-event"),
+        )
         .unwrap();
-    let write_cap = grant(&mut core, &owner, "component:parent", "entity.write", Scope::All, Constraints::none());
+    let write_cap = grant(
+        &mut core,
+        &owner,
+        "component:parent",
+        "entity.write",
+        Scope::All,
+        Constraints::none(),
+    );
     let parent = spawner_wasm(&child.id, "entity.write");
 
-    let outcome = core.run_component(std::slice::from_ref(&owner), &[write_cap], "component:parent", &parent, 5_000_000).unwrap();
+    let outcome = core
+        .run_component(
+            std::slice::from_ref(&owner),
+            &[write_cap],
+            "component:parent",
+            &parent,
+            5_000_000,
+        )
+        .unwrap();
 
     assert_eq!(outcome.spawns.len(), 1, "the parent queued one spawn");
     assert_eq!(outcome.spawned.len(), 1, "the System Core ran the child");
     let child_out = &outcome.spawned[0];
-    assert!(child_out.allowed("write"), "child received a delegated write capability");
-    assert_eq!(child_out.wrote.len(), 1, "child wrote under its attenuated grant");
-    assert!(child_out.denied("emit"), "child got ONLY the delegated action, nothing else");
-    assert!(core.store().events().iter().any(|e| e.etype == "ComponentSpawned"));
+    assert!(
+        child_out.allowed("write"),
+        "child received a delegated write capability"
+    );
+    assert_eq!(
+        child_out.wrote.len(),
+        1,
+        "child wrote under its attenuated grant"
+    );
+    assert!(
+        child_out.denied("emit"),
+        "child got ONLY the delegated action, nothing else"
+    );
+    assert!(core
+        .store()
+        .events()
+        .iter()
+        .any(|e| e.etype == "ComponentSpawned"));
 }
 
 /// The invariant that makes composition safe: a spawned child can never exceed its parent's
@@ -158,17 +192,43 @@ fn component_spawns_a_child_with_attenuated_authority() {
 fn spawned_child_cannot_exceed_parent_authority() {
     let (mut core, owner) = open();
     let child = core
-        .install_component(std::slice::from_ref(&owner), "human:owner", "child-writer", &writer_wasm("should-not-write", "should-not-emit"))
+        .install_component(
+            std::slice::from_ref(&owner),
+            "human:owner",
+            "child-writer",
+            &writer_wasm("should-not-write", "should-not-emit"),
+        )
         .unwrap();
-    let read_cap = grant(&mut core, &owner, "component:parent", "entity.read", Scope::All, Constraints::none());
+    let read_cap = grant(
+        &mut core,
+        &owner,
+        "component:parent",
+        "entity.read",
+        Scope::All,
+        Constraints::none(),
+    );
     let parent = spawner_wasm(&child.id, "entity.write");
 
-    let outcome = core.run_component(std::slice::from_ref(&owner), &[read_cap], "component:parent", &parent, 5_000_000).unwrap();
+    let outcome = core
+        .run_component(
+            std::slice::from_ref(&owner),
+            &[read_cap],
+            "component:parent",
+            &parent,
+            5_000_000,
+        )
+        .unwrap();
 
     assert_eq!(outcome.spawned.len(), 1, "the child still runs");
     let child_out = &outcome.spawned[0];
-    assert!(child_out.denied("write"), "child cannot write — parent had no write authority to delegate");
-    assert!(child_out.wrote.is_empty(), "no effect: the callee cannot exceed the caller");
+    assert!(
+        child_out.denied("write"),
+        "child cannot write — parent had no write authority to delegate"
+    );
+    assert!(
+        child_out.wrote.is_empty(),
+        "no effect: the callee cannot exceed the caller"
+    );
 }
 
 /// A component that loops forever — used to prove fuel bounding.
@@ -184,12 +244,25 @@ fn spinner_wasm() -> Vec<u8> {
 }
 
 fn count_events(core: &SysCore, etype: &str) -> usize {
-    core.store().events().iter().filter(|e| e.etype == etype).count()
+    core.store()
+        .events()
+        .iter()
+        .filter(|e| e.etype == etype)
+        .count()
 }
 
 /// A delegated, attenuated capability for `action` over `scope`, granted from the owner root.
-fn grant(core: &mut SysCore, owner: &str, subject: &str, action: &str, scope: Scope, cons: Constraints) -> String {
-    core.grant_to(&[owner.to_string()], subject, action, scope, cons).expect("grant").token
+fn grant(
+    core: &mut SysCore,
+    owner: &str,
+    subject: &str,
+    action: &str,
+    scope: Scope,
+    cons: Constraints,
+) -> String {
+    core.grant_to(&[owner.to_string()], subject, action, scope, cons)
+        .expect("grant")
+        .token
 }
 
 /// Criterion 18 (no ambient authority): a component with an empty grant can do NOTHING. It runs to
@@ -199,12 +272,20 @@ fn component_with_no_capability_can_do_nothing() {
     let (mut core, owner) = open();
     let wasm = writer_wasm("component-output-payload", "component-event-payload");
 
-    let outcome = core.run_component(&[owner], &[], "component:untrusted", &wasm, 1_000_000).unwrap();
+    let outcome = core
+        .run_component(&[owner], &[], "component:untrusted", &wasm, 1_000_000)
+        .unwrap();
 
     assert!(outcome.ok, "guest itself ran fine: {:?}", outcome.error);
     assert_eq!(outcome.exit_code, 7);
-    assert!(outcome.denied("write"), "write must be denied with no capability");
-    assert!(outcome.denied("emit"), "emit must be denied with no capability");
+    assert!(
+        outcome.denied("write"),
+        "write must be denied with no capability"
+    );
+    assert!(
+        outcome.denied("emit"),
+        "emit must be denied with no capability"
+    );
     assert!(!outcome.allowed("write") && !outcome.allowed("emit"));
     assert!(outcome.wrote.is_empty(), "no entity may be created");
     assert_eq!(count_events(&core, "ComponentWroteEntity"), 0);
@@ -216,10 +297,19 @@ fn component_with_no_capability_can_do_nothing() {
 #[test]
 fn component_authority_is_exactly_its_grant() {
     let (mut core, owner) = open();
-    let write_cap = grant(&mut core, &owner, "component:writer", "entity.write", Scope::All, Constraints::none());
+    let write_cap = grant(
+        &mut core,
+        &owner,
+        "component:writer",
+        "entity.write",
+        Scope::All,
+        Constraints::none(),
+    );
     let wasm = writer_wasm("component-output-payload", "component-event-payload");
 
-    let outcome = core.run_component(&[owner], &[write_cap], "component:writer", &wasm, 1_000_000).unwrap();
+    let outcome = core
+        .run_component(&[owner], &[write_cap], "component:writer", &wasm, 1_000_000)
+        .unwrap();
 
     assert!(outcome.allowed("write"), "write is granted -> allowed");
     assert!(outcome.denied("emit"), "emit is NOT granted -> denied");
@@ -228,9 +318,15 @@ fn component_authority_is_exactly_its_grant() {
     assert_eq!(count_events(&core, "ComponentEmitted"), 0);
 
     // The write is a real, verifiable effect in the same store: the entity exists with our payload.
-    let e = core.store().get_entity(&outcome.wrote[0]).expect("written entity persisted");
+    let e = core
+        .store()
+        .get_entity(&outcome.wrote[0])
+        .expect("written entity persisted");
     assert_eq!(e.etype, EntityType::Output);
-    let blob = core.store().get_blob(e.content_ref.as_ref().unwrap()).expect("content stored");
+    let blob = core
+        .store()
+        .get_blob(e.content_ref.as_ref().unwrap())
+        .expect("content stored");
     assert_eq!(blob, b"component-output-payload");
 }
 
@@ -239,17 +335,34 @@ fn component_authority_is_exactly_its_grant() {
 #[test]
 fn component_effects_are_recorded_and_explainable() {
     let (mut core, owner) = open();
-    let write_cap = grant(&mut core, &owner, "component:writer", "entity.write", Scope::All, Constraints::none());
+    let write_cap = grant(
+        &mut core,
+        &owner,
+        "component:writer",
+        "entity.write",
+        Scope::All,
+        Constraints::none(),
+    );
     let wasm = writer_wasm("audited-output", "audited-event");
 
-    let outcome = core.run_component(&[owner], &[write_cap], "component:writer", &wasm, 1_000_000).unwrap();
+    let outcome = core
+        .run_component(&[owner], &[write_cap], "component:writer", &wasm, 1_000_000)
+        .unwrap();
 
     // The per-call audit is complete: both attempts recorded, each with an action + a decision.
     assert_eq!(outcome.calls.len(), 2);
-    assert!(outcome.calls.iter().all(|c| !c.action.is_empty() && !c.decision.is_empty()));
+    assert!(outcome
+        .calls
+        .iter()
+        .all(|c| !c.action.is_empty() && !c.decision.is_empty()));
 
     // The write landed in the one immutable log, attributed to the component subject.
-    let wrote_ev = core.store().events().iter().find(|e| e.etype == "ComponentWroteEntity").expect("write event");
+    let wrote_ev = core
+        .store()
+        .events()
+        .iter()
+        .find(|e| e.etype == "ComponentWroteEntity")
+        .expect("write event");
     assert_eq!(wrote_ev.actor, "component:writer");
     assert!(!wrote_ev.correlation_id.is_empty());
 
@@ -262,17 +375,43 @@ fn component_effects_are_recorded_and_explainable() {
 fn component_read_is_capability_gated() {
     let (mut core, owner) = open();
     let e = core
-        .create_entity(std::slice::from_ref(&owner), "human:owner", EntityType::Document, b"secret readable bytes", serde_json::json!({}))
+        .create_entity(
+            std::slice::from_ref(&owner),
+            "human:owner",
+            EntityType::Document,
+            b"secret readable bytes",
+            serde_json::json!({}),
+        )
         .unwrap();
     let wasm = reader_wasm(&e.id);
 
     // (a) granted a read capability scoped to exactly this entity -> allowed.
-    let read_cap = grant(&mut core, &owner, "component:reader", "entity.read", Scope::Entities(vec![e.id.clone()]), Constraints::none());
-    let ok = core.run_component(std::slice::from_ref(&owner), &[read_cap], "component:reader", &wasm, 1_000_000).unwrap();
-    assert!(ok.allowed("read"), "read allowed with scoped read capability");
+    let read_cap = grant(
+        &mut core,
+        &owner,
+        "component:reader",
+        "entity.read",
+        Scope::Entities(vec![e.id.clone()]),
+        Constraints::none(),
+    );
+    let ok = core
+        .run_component(
+            std::slice::from_ref(&owner),
+            &[read_cap],
+            "component:reader",
+            &wasm,
+            1_000_000,
+        )
+        .unwrap();
+    assert!(
+        ok.allowed("read"),
+        "read allowed with scoped read capability"
+    );
 
     // (b) no capability -> denied, fail closed.
-    let denied = core.run_component(&[owner], &[], "component:reader", &wasm, 1_000_000).unwrap();
+    let denied = core
+        .run_component(&[owner], &[], "component:reader", &wasm, 1_000_000)
+        .unwrap();
     assert!(denied.denied("read"), "read denied with no capability");
 }
 
@@ -283,10 +422,15 @@ fn runaway_component_is_bounded_by_fuel() {
     let (mut core, owner) = open();
     let wasm = spinner_wasm();
 
-    let outcome = core.run_component(&[owner], &[], "component:runaway", &wasm, 100_000).unwrap();
+    let outcome = core
+        .run_component(&[owner], &[], "component:runaway", &wasm, 100_000)
+        .unwrap();
 
     assert!(!outcome.ok, "a fuel-exhausted component does not complete");
-    assert!(outcome.fuel_exhausted, "the trap must be out-of-fuel, not something else");
+    assert!(
+        outcome.fuel_exhausted,
+        "the trap must be out-of-fuel, not something else"
+    );
     assert_eq!(count_events(&core, "ComponentWroteEntity"), 0);
     assert!(outcome.wrote.is_empty());
 }
@@ -297,15 +441,36 @@ fn runaway_component_is_bounded_by_fuel() {
 fn launching_a_component_requires_authority() {
     let (mut core, owner) = open();
     // A capability that does NOT cover component.run.
-    let unrelated = grant(&mut core, &owner, "component:x", "entity.read", Scope::All, Constraints::none());
+    let unrelated = grant(
+        &mut core,
+        &owner,
+        "component:x",
+        "entity.read",
+        Scope::All,
+        Constraints::none(),
+    );
     let wasm = writer_wasm("should-never-run", "should-never-emit");
 
     let err = core
-        .run_component(std::slice::from_ref(&unrelated), std::slice::from_ref(&unrelated), "component:x", &wasm, 1_000_000)
+        .run_component(
+            std::slice::from_ref(&unrelated),
+            std::slice::from_ref(&unrelated),
+            "component:x",
+            &wasm,
+            1_000_000,
+        )
         .unwrap_err();
     assert_eq!(err.category, aletheia::domain::ErrorCategory::Authorization);
-    assert_eq!(count_events(&core, "ComponentRan"), 0, "the component must never execute");
-    assert!(core.store().events().iter().any(|e| e.etype == "CapabilityDenied"));
+    assert_eq!(
+        count_events(&core, "ComponentRan"),
+        0,
+        "the component must never execute"
+    );
+    assert!(core
+        .store()
+        .events()
+        .iter()
+        .any(|e| e.etype == "CapabilityDenied"));
 }
 
 /// A component can be installed as a first-class Application entity and later run from the store.
@@ -314,12 +479,34 @@ fn installed_component_runs_from_the_store() {
     let (mut core, owner) = open();
     let wasm = writer_wasm("installed-output", "installed-event");
 
-    let app = core.install_component(std::slice::from_ref(&owner), "human:owner", "note-writer", &wasm).unwrap();
+    let app = core
+        .install_component(
+            std::slice::from_ref(&owner),
+            "human:owner",
+            "note-writer",
+            &wasm,
+        )
+        .unwrap();
     assert_eq!(app.etype, EntityType::Application);
     assert_eq!(count_events(&core, "ComponentInstalled"), 1);
 
-    let write_cap = grant(&mut core, &owner, "app:note-writer", "entity.write", Scope::All, Constraints::none());
-    let outcome = core.run_installed(&[owner], &[write_cap], "app:note-writer", &app.id, 1_000_000).unwrap();
+    let write_cap = grant(
+        &mut core,
+        &owner,
+        "app:note-writer",
+        "entity.write",
+        Scope::All,
+        Constraints::none(),
+    );
+    let outcome = core
+        .run_installed(
+            &[owner],
+            &[write_cap],
+            "app:note-writer",
+            &app.id,
+            1_000_000,
+        )
+        .unwrap();
 
     assert!(outcome.allowed("write"));
     assert_eq!(outcome.wrote.len(), 1);
@@ -331,14 +518,30 @@ fn installed_component_runs_from_the_store() {
 #[test]
 fn approval_required_capability_is_refused_at_component_boundary() {
     let (mut core, owner) = open();
-    let approve_cap = grant(&mut core, &owner, "component:w", "entity.write", Scope::All, Constraints::approval());
+    let approve_cap = grant(
+        &mut core,
+        &owner,
+        "component:w",
+        "entity.write",
+        Scope::All,
+        Constraints::approval(),
+    );
     let wasm = writer_wasm("approval-gated", "approval-event");
 
-    let outcome = core.run_component(&[owner], &[approve_cap], "component:w", &wasm, 1_000_000).unwrap();
+    let outcome = core
+        .run_component(&[owner], &[approve_cap], "component:w", &wasm, 1_000_000)
+        .unwrap();
 
-    let write_call = outcome.calls.iter().find(|c| c.func == "write").expect("write attempt recorded");
+    let write_call = outcome
+        .calls
+        .iter()
+        .find(|c| c.func == "write")
+        .expect("write attempt recorded");
     assert_eq!(write_call.decision, "REQUIRE_APPROVAL");
-    assert!(outcome.wrote.is_empty(), "an approval-required action does not execute inline");
+    assert!(
+        outcome.wrote.is_empty(),
+        "an approval-required action does not execute inline"
+    );
     assert_eq!(count_events(&core, "ComponentWroteEntity"), 0);
 }
 
@@ -349,13 +552,41 @@ fn approval_required_capability_is_refused_at_component_boundary() {
 fn component_reads_transforms_and_writes() {
     let (mut core, owner) = open();
     let source = core
-        .create_entity(std::slice::from_ref(&owner), "human:owner", EntityType::Document, b"hello component world", serde_json::json!({}))
+        .create_entity(
+            std::slice::from_ref(&owner),
+            "human:owner",
+            EntityType::Document,
+            b"hello component world",
+            serde_json::json!({}),
+        )
         .unwrap();
-    let read_cap = grant(&mut core, &owner, "component:xform", "entity.read", Scope::Entities(vec![source.id.clone()]), Constraints::none());
-    let write_cap = grant(&mut core, &owner, "component:xform", "entity.write", Scope::All, Constraints::none());
+    let read_cap = grant(
+        &mut core,
+        &owner,
+        "component:xform",
+        "entity.read",
+        Scope::Entities(vec![source.id.clone()]),
+        Constraints::none(),
+    );
+    let write_cap = grant(
+        &mut core,
+        &owner,
+        "component:xform",
+        "entity.write",
+        Scope::All,
+        Constraints::none(),
+    );
     let wasm = transform_wasm(&source.id);
 
-    let outcome = core.run_component(&[owner], &[read_cap, write_cap], "component:xform", &wasm, 5_000_000).unwrap();
+    let outcome = core
+        .run_component(
+            &[owner],
+            &[read_cap, write_cap],
+            "component:xform",
+            &wasm,
+            5_000_000,
+        )
+        .unwrap();
 
     assert!(outcome.ok, "program ran: {:?}", outcome.error);
     assert!(outcome.allowed("read") && outcome.allowed("write"));
@@ -363,8 +594,14 @@ fn component_reads_transforms_and_writes() {
 
     // The written entity holds the actual transform of the source content — the component consumed
     // the bytes the read delivered and computed on them.
-    let out = core.store().get_entity(&outcome.wrote[0]).expect("output persisted");
-    let bytes = core.store().get_blob(out.content_ref.as_ref().unwrap()).expect("output content");
+    let out = core
+        .store()
+        .get_entity(&outcome.wrote[0])
+        .expect("output persisted");
+    let bytes = core
+        .store()
+        .get_blob(out.content_ref.as_ref().unwrap())
+        .expect("output content");
     assert_eq!(bytes, b"HELLO COMPONENT WORLD");
 }
 
@@ -374,19 +611,41 @@ fn component_reads_transforms_and_writes() {
 #[test]
 fn committed_effect_survives_a_later_fuel_kill() {
     let (mut core, owner) = open();
-    let write_cap = grant(&mut core, &owner, "component:half", "entity.write", Scope::All, Constraints::none());
+    let write_cap = grant(
+        &mut core,
+        &owner,
+        "component:half",
+        "entity.write",
+        Scope::All,
+        Constraints::none(),
+    );
     let wasm = writer_then_spin_wasm("committed-before-trap");
 
-    let outcome = core.run_component(&[owner], &[write_cap], "component:half", &wasm, 2_000_000).unwrap();
+    let outcome = core
+        .run_component(&[owner], &[write_cap], "component:half", &wasm, 2_000_000)
+        .unwrap();
 
     assert!(!outcome.ok, "the component is killed mid-run");
-    assert!(outcome.fuel_exhausted, "killed by fuel exhaustion, after the write committed");
-    assert_eq!(outcome.wrote.len(), 1, "the pre-trap write committed exactly once");
+    assert!(
+        outcome.fuel_exhausted,
+        "killed by fuel exhaustion, after the write committed"
+    );
+    assert_eq!(
+        outcome.wrote.len(),
+        1,
+        "the pre-trap write committed exactly once"
+    );
     assert_eq!(count_events(&core, "ComponentWroteEntity"), 1);
 
-    let e = core.store().get_entity(&outcome.wrote[0]).expect("committed entity persisted through the trap");
+    let e = core
+        .store()
+        .get_entity(&outcome.wrote[0])
+        .expect("committed entity persisted through the trap");
     assert_eq!(e.provenance.actor, "component:half");
-    let bytes = core.store().get_blob(e.content_ref.as_ref().unwrap()).unwrap();
+    let bytes = core
+        .store()
+        .get_blob(e.content_ref.as_ref().unwrap())
+        .unwrap();
     assert_eq!(bytes, b"committed-before-trap");
 }
 

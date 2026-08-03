@@ -235,7 +235,6 @@ pub unsafe fn find_virtio_blk_nth(nth: usize) -> Option<Bdf> {
 /// The virtio-pci transport: the three register regions the protocol needs, already resolved from the
 /// device's BARs, plus the notify multiplier.
 pub struct PciTransport {
-    bdf: Bdf,
     common: CapRegion,
     notify: CapRegion,
     notify_off_multiplier: u32,
@@ -320,7 +319,6 @@ impl PciTransport {
         }
 
         Ok(PciTransport {
-            bdf,
             common,
             notify,
             notify_off_multiplier,
@@ -328,11 +326,6 @@ impl PciTransport {
             notify_off: 0,
             device_id: bdf.read16(CFG_VENDOR + 2) as u32,
         })
-    }
-
-    /// Where this device lives, for the caller's boot log.
-    pub fn bdf(&self) -> Bdf {
-        self.bdf
     }
 
     /// The resolved region addresses + notify multiplier, for the caller's boot log.

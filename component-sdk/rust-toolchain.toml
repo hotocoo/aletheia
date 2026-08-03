@@ -1,0 +1,9 @@
+# PINNED (GAPS4 ALET-P2-001, REQ-QUAL-002). Naming the channel is what makes the rustup SHIM select the
+# toolchain: without it, `cargo` resolves to whatever is first on PATH — on a macOS workstation often
+# Homebrew's, which ignores `rust-toolchain.toml` entirely and builds for the host triple. That has
+# produced real failures in this repo. The exact stable VERSION is deliberately not pinned here (see
+# docs/TOOLCHAIN.md): the bare-metal crates carry the dated pin that matters for reproducibility, and
+# forcing a specific stable release on every contributor buys little for a crate with no unstable features.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt"]

@@ -5,13 +5,34 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Verb {
-    Read { id: Id },
-    Derive { source: Id, into_type: EntityType, content: String },
-    Traverse { from: Id, edge: String },
-    Grant { subject: String, action: String, scope_entities: Vec<Id>, approval: bool },
-    RestoreVersion { chain: Id, version: u64 },
-    Delete { id: Id },
-    Raw { text: String },
+    Read {
+        id: Id,
+    },
+    Derive {
+        source: Id,
+        into_type: EntityType,
+        content: String,
+    },
+    Traverse {
+        from: Id,
+        edge: String,
+    },
+    Grant {
+        subject: String,
+        action: String,
+        scope_entities: Vec<Id>,
+        approval: bool,
+    },
+    RestoreVersion {
+        chain: Id,
+        version: u64,
+    },
+    Delete {
+        id: Id,
+    },
+    Raw {
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +97,8 @@ impl Trace {
 
 /// Parse untrusted raw model output into a typed Plan. Malformed output fails here (never executes).
 pub fn parse_plan(raw: &str) -> Result<Plan> {
-    serde_json::from_str::<Plan>(raw).map_err(|e| AlethError::validation(&format!("plan parse: {}", e)))
+    serde_json::from_str::<Plan>(raw)
+        .map_err(|e| AlethError::validation(&format!("plan parse: {}", e)))
 }
 
 /// Validate a parsed plan: non-empty, every op is a registered operation, args is an object.
@@ -86,10 +108,16 @@ pub fn validate_plan(plan: &Plan) -> Result<()> {
     }
     for step in &plan.steps {
         if crate::tools::lookup(&step.op).is_none() {
-            return Err(AlethError::validation(&format!("unknown operation: {}", step.op)));
+            return Err(AlethError::validation(&format!(
+                "unknown operation: {}",
+                step.op
+            )));
         }
         if !step.args.is_object() {
-            return Err(AlethError::validation(&format!("args must be an object for {}", step.op)));
+            return Err(AlethError::validation(&format!(
+                "args must be an object for {}",
+                step.op
+            )));
         }
     }
     Ok(())

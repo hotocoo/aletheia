@@ -41,7 +41,12 @@ pub struct ContextBudget {
 impl ContextBudget {
     /// Default profile for the hosted MiniCPM5-1B model — deliberately tight.
     pub fn small() -> Self {
-        ContextBudget { max_entities: 6, max_relationships: 8, max_memory: 5, max_chars: 2000 }
+        ContextBudget {
+            max_entities: 6,
+            max_relationships: 8,
+            max_memory: 5,
+            max_chars: 2000,
+        }
     }
 }
 impl Default for ContextBudget {
@@ -123,7 +128,10 @@ impl AiContext {
         if let Some(f) = &self.direct.focus {
             s.push_str(&format!("focus: {}\n", f));
         }
-        s.push_str(&format!("authority: {}\n", self.direct.authority.join(", ")));
+        s.push_str(&format!(
+            "authority: {}\n",
+            self.direct.authority.join(", ")
+        ));
         s.push_str("world:\n");
         for e in &self.world {
             s.push_str(&format!("  {} {:?} v{}\n", e.id, e.etype, e.version));
@@ -176,7 +184,11 @@ impl ContextEngine {
         authority.sort();
         authority.dedup();
 
-        let direct = DirectContext { subject: subject.to_string(), focus: focus.clone(), authority };
+        let direct = DirectContext {
+            subject: subject.to_string(),
+            focus: focus.clone(),
+            authority,
+        };
 
         // Structured world (priority 1) + relationship traversal (priority 2), capability-filtered.
         let mut world: Vec<EntityRef> = Vec::new();
@@ -188,7 +200,10 @@ impl ContextEngine {
             // when the neighbour is ALSO authorized — an edge reveals a neighbour id + relationship
             // type, itself protected state. This enforces capability-before-inclusion for EDGES, not
             // just entities (the prior version pushed the edge before the neighbour check).
-            let focus_authorized = store.get_entity(fid).map(|e| authorized_read(caps, offered, e)).unwrap_or(false);
+            let focus_authorized = store
+                .get_entity(fid)
+                .map(|e| authorized_read(caps, offered, e))
+                .unwrap_or(false);
             if focus_authorized {
                 if let Some(e) = store.get_entity(fid) {
                     world.push(entity_ref(e));
@@ -204,7 +219,11 @@ impl ContextEngine {
                             Some(ne) if authorized_read(caps, offered, ne) => ne,
                             _ => continue, // neighbour not authorized → do not reveal the edge
                         };
-                        relationships.push(EdgeRef { from: r.from.clone(), rtype: r.rtype.clone(), to: r.to.clone() });
+                        relationships.push(EdgeRef {
+                            from: r.from.clone(),
+                            rtype: r.rtype.clone(),
+                            to: r.to.clone(),
+                        });
                         if world.len() < budget.max_entities && !seen.contains(other) {
                             world.push(entity_ref(ne));
                             seen.push(ne.id.clone());
@@ -221,7 +240,11 @@ impl ContextEngine {
                 break;
             }
             if ev.actor == subject {
-                memory.push(MemoryRef { etype: ev.etype.clone(), actor: ev.actor.clone(), at: ev.at });
+                memory.push(MemoryRef {
+                    etype: ev.etype.clone(),
+                    actor: ev.actor.clone(),
+                    at: ev.at,
+                });
             }
         }
 
@@ -229,7 +252,12 @@ impl ContextEngine {
         // consulted here — the World Model resolves structured tasks without them (e.g. "the
         // recording I edited yesterday" is a relationship+time query, not a vector search).
 
-        AiContext { direct, world, relationships, memory }
+        AiContext {
+            direct,
+            world,
+            relationships,
+            memory,
+        }
     }
 }
 
@@ -243,12 +271,22 @@ fn focus_entity(intent: &Intent) -> Option<Id> {
 }
 
 fn entity_ref(e: &Entity) -> EntityRef {
-    EntityRef { id: e.id.clone(), etype: e.etype, version: e.version }
+    EntityRef {
+        id: e.id.clone(),
+        etype: e.etype,
+        version: e.version,
+    }
 }
 
 fn authorized_read(caps: &CapEngine, offered: &[String], e: &Entity) -> bool {
-    let target = Target { id: Some(e.id.clone()), etype: Some(e.etype) };
-    matches!(caps.evaluate("entity.read", &target, offered), Decision::Allow)
+    let target = Target {
+        id: Some(e.id.clone()),
+        etype: Some(e.etype),
+    };
+    matches!(
+        caps.evaluate("entity.read", &target, offered),
+        Decision::Allow
+    )
 }
 
 /// A capability-gated keyword-search hit over the World Model.
@@ -277,8 +315,11 @@ pub fn search_world(
     query: &str,
     limit: usize,
 ) -> Vec<SearchHit> {
-    let terms: Vec<String> =
-        query.split_whitespace().map(|t| t.to_lowercase()).filter(|t| !t.is_empty()).collect();
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
     if terms.is_empty() || limit == 0 {
         return Vec::new();
     }
@@ -300,7 +341,11 @@ pub fn search_world(
 
         let score = terms
             .iter()
-            .filter(|t| etype_s.contains(t.as_str()) || meta_s.contains(t.as_str()) || content_s.contains(t.as_str()))
+            .filter(|t| {
+                etype_s.contains(t.as_str())
+                    || meta_s.contains(t.as_str())
+                    || content_s.contains(t.as_str())
+            })
             .count() as u32;
         if score == 0 {
             continue;
@@ -309,7 +354,14 @@ pub fn search_world(
             id: e.id.clone(),
             etype: e.etype,
             score,
-            snippet: snippet_for(if content_s.is_empty() { &meta_s } else { &content_s }, &terms),
+            snippet: snippet_for(
+                if content_s.is_empty() {
+                    &meta_s
+                } else {
+                    &content_s
+                },
+                &terms,
+            ),
         });
     }
     // Most relevant first; id breaks ties so the result is deterministic (store iteration is not).
@@ -323,7 +375,10 @@ fn snippet_for(hay: &str, terms: &[String]) -> String {
     let pos = terms.iter().find_map(|t| hay.find(t.as_str())).unwrap_or(0);
     let start = pos.saturating_sub(24);
     let end = (start + 96).min(hay.len());
-    hay.char_indices().filter(|(i, _)| *i >= start && *i < end).map(|(_, c)| c).collect()
+    hay.char_indices()
+        .filter(|(i, _)| *i >= start && *i < end)
+        .map(|(_, c)| c)
+        .collect()
 }
 
 /// Back-compat convenience: a one-line situational brief (used by simple callers/tests). Prefer
@@ -344,7 +399,10 @@ mod tests {
     use crate::intent_action::{Intent, Verb};
 
     fn tmp() -> String {
-        std::env::temp_dir().join(format!("aletheia-ctx-{}", crate::domain::new_id())).to_string_lossy().into_owned()
+        std::env::temp_dir()
+            .join(format!("aletheia-ctx-{}", crate::domain::new_id()))
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]
@@ -352,22 +410,74 @@ mod tests {
         let mut store = Store::open(tmp()).unwrap();
         let mut caps = CapEngine::new();
         // Two documents; the subject is authorized to read only e1.
-        let root = caps.mint("human:owner", "*", Scope::All, Constraints::none(), "system");
+        let root = caps.mint(
+            "human:owner",
+            "*",
+            Scope::All,
+            Constraints::none(),
+            "system",
+        );
         let h = store.put_blob(b"a").unwrap();
-        let e1 = Entity { id: crate::domain::new_id(), etype: EntityType::Document, content_ref: Some(h.clone()), version: 1, version_chain: crate::domain::new_id(), metadata: serde_json::json!({}), provenance: crate::domain::Provenance::of("human:owner"), created_at: now(), updated_at: now(), deleted: false };
-        let e2 = Entity { id: crate::domain::new_id(), ..e1.clone() };
+        let e1 = Entity {
+            id: crate::domain::new_id(),
+            etype: EntityType::Document,
+            content_ref: Some(h.clone()),
+            version: 1,
+            version_chain: crate::domain::new_id(),
+            metadata: serde_json::json!({}),
+            provenance: crate::domain::Provenance::of("human:owner"),
+            created_at: now(),
+            updated_at: now(),
+            deleted: false,
+        };
+        let e2 = Entity {
+            id: crate::domain::new_id(),
+            ..e1.clone()
+        };
         store.put_entity(&e1).unwrap();
         store.put_entity(&e2).unwrap();
-        let read_e1 = caps.delegate(&root.token, "agent:a", "entity.read", Scope::Entities(vec![e1.id.clone()]), Constraints::none(), "human:owner").unwrap();
+        let read_e1 = caps
+            .delegate(
+                &root.token,
+                "agent:a",
+                "entity.read",
+                Scope::Entities(vec![e1.id.clone()]),
+                Constraints::none(),
+                "human:owner",
+            )
+            .unwrap();
 
         let eng = ContextEngine::new();
-        let intent = Intent { subject: "agent:a".into(), verb: Verb::Read { id: e1.id.clone() } };
-        let ctx = eng.build(&store, &caps, &[read_e1.token], "agent:a", &intent, ContextBudget::small());
-        assert!(ctx.world.iter().any(|e| e.id == e1.id), "authorized entity present");
-        assert!(!ctx.world.iter().any(|e| e.id == e2.id), "unauthorized entity must NOT enter context");
+        let intent = Intent {
+            subject: "agent:a".into(),
+            verb: Verb::Read { id: e1.id.clone() },
+        };
+        let ctx = eng.build(
+            &store,
+            &caps,
+            &[read_e1.token],
+            "agent:a",
+            &intent,
+            ContextBudget::small(),
+        );
+        assert!(
+            ctx.world.iter().any(|e| e.id == e1.id),
+            "authorized entity present"
+        );
+        assert!(
+            !ctx.world.iter().any(|e| e.id == e2.id),
+            "unauthorized entity must NOT enter context"
+        );
 
         // A subject offering no capability sees nothing structural (no ambient authority).
-        let empty = eng.build(&store, &caps, &[], "attacker", &intent, ContextBudget::small());
+        let empty = eng.build(
+            &store,
+            &caps,
+            &[],
+            "attacker",
+            &intent,
+            ContextBudget::small(),
+        );
         assert!(empty.world.is_empty(), "no capability -> no world context");
     }
 

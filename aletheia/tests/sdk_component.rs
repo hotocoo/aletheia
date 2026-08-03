@@ -33,19 +33,32 @@ fn open() -> (SysCore, String) {
 }
 
 fn grant(core: &mut SysCore, owner: &str, subject: &str, action: &str) -> String {
-    core.grant_to(&[owner.to_string()], subject, action, Scope::All, Constraints::none())
-        .expect("grant")
-        .token
+    core.grant_to(
+        &[owner.to_string()],
+        subject,
+        action,
+        Scope::All,
+        Constraints::none(),
+    )
+    .expect("grant")
+    .token
 }
 
 fn count_events(core: &SysCore, etype: &str) -> usize {
-    core.store().events().iter().filter(|e| e.etype == etype).count()
+    core.store()
+        .events()
+        .iter()
+        .filter(|e| e.etype == etype)
+        .count()
 }
 
 /// The fixture is a real, non-empty WASM module (guards against a stale/empty checkout).
 #[test]
 fn sdk_fixture_is_present() {
-    assert!(HELLO_WASM.len() > 8, "fixture missing — run scripts/build-example-component.sh");
+    assert!(
+        HELLO_WASM.len() > 8,
+        "fixture missing — run scripts/build-example-component.sh"
+    );
     assert_eq!(&HELLO_WASM[0..4], b"\0asm", "fixture is not a WASM module");
 }
 
@@ -55,11 +68,19 @@ fn sdk_fixture_is_present() {
 fn sdk_component_with_no_capability_can_do_nothing() {
     let (mut core, owner) = open();
 
-    let outcome = core.run_component(&[owner], &[], "component:sdk-hello", HELLO_WASM, 1_000_000).unwrap();
+    let outcome = core
+        .run_component(&[owner], &[], "component:sdk-hello", HELLO_WASM, 1_000_000)
+        .unwrap();
 
     assert!(outcome.ok, "guest itself ran fine: {:?}", outcome.error);
-    assert_eq!(outcome.exit_code, 1, "write_output returned Err -> guest returns 1");
-    assert!(outcome.denied("write"), "write must be denied with no capability");
+    assert_eq!(
+        outcome.exit_code, 1,
+        "write_output returned Err -> guest returns 1"
+    );
+    assert!(
+        outcome.denied("write"),
+        "write must be denied with no capability"
+    );
     assert!(outcome.wrote.is_empty(), "no entity may be created");
     assert_eq!(count_events(&core, "ComponentWroteEntity"), 0);
     assert_eq!(count_events(&core, "ComponentEmitted"), 0);
@@ -74,21 +95,39 @@ fn sdk_component_runs_with_full_grant() {
     let emit_cap = grant(&mut core, &owner, "component:sdk-hello", "event.emit");
 
     let outcome = core
-        .run_component(&[owner], &[write_cap, emit_cap], "component:sdk-hello", HELLO_WASM, 1_000_000)
+        .run_component(
+            &[owner],
+            &[write_cap, emit_cap],
+            "component:sdk-hello",
+            HELLO_WASM,
+            1_000_000,
+        )
         .unwrap();
 
     assert!(outcome.ok, "component ran: {:?}", outcome.error);
-    assert_eq!(outcome.exit_code, 0, "both host calls succeeded -> guest returns 0");
+    assert_eq!(
+        outcome.exit_code, 0,
+        "both host calls succeeded -> guest returns 0"
+    );
     assert!(outcome.allowed("write") && outcome.allowed("emit"));
     assert_eq!(outcome.wrote.len(), 1, "exactly one entity created");
     assert_eq!(count_events(&core, "ComponentWroteEntity"), 1);
     assert_eq!(count_events(&core, "ComponentEmitted"), 1);
 
     // The SDK's write path produced a real Output entity carrying exactly the bytes it wrote.
-    let e = core.store().get_entity(&outcome.wrote[0]).expect("written entity persisted");
+    let e = core
+        .store()
+        .get_entity(&outcome.wrote[0])
+        .expect("written entity persisted");
     assert_eq!(e.etype, EntityType::Output);
-    let blob = core.store().get_blob(e.content_ref.as_ref().unwrap()).expect("content stored");
-    assert_eq!(blob, EXPECTED_OUTPUT, "stored bytes match what the SDK wrote");
+    let blob = core
+        .store()
+        .get_blob(e.content_ref.as_ref().unwrap())
+        .expect("content stored");
+    assert_eq!(
+        blob, EXPECTED_OUTPUT,
+        "stored bytes match what the SDK wrote"
+    );
 }
 
 /// Authority is EXACTLY the grant: given only `entity.write`, the component writes, but its
@@ -100,13 +139,30 @@ fn sdk_component_authority_is_exactly_its_grant() {
     let write_cap = grant(&mut core, &owner, "component:sdk-hello", "entity.write");
 
     let outcome = core
-        .run_component(&[owner], &[write_cap], "component:sdk-hello", HELLO_WASM, 1_000_000)
+        .run_component(
+            &[owner],
+            &[write_cap],
+            "component:sdk-hello",
+            HELLO_WASM,
+            1_000_000,
+        )
         .unwrap();
 
-    assert_eq!(outcome.exit_code, 2, "write allowed, emit denied -> guest returns 2");
+    assert_eq!(
+        outcome.exit_code, 2,
+        "write allowed, emit denied -> guest returns 2"
+    );
     assert!(outcome.allowed("write"), "write is granted -> allowed");
     assert!(outcome.denied("emit"), "emit is NOT granted -> denied");
-    assert_eq!(outcome.wrote.len(), 1, "the one authorized write still happened");
+    assert_eq!(
+        outcome.wrote.len(),
+        1,
+        "the one authorized write still happened"
+    );
     assert_eq!(count_events(&core, "ComponentWroteEntity"), 1);
-    assert_eq!(count_events(&core, "ComponentEmitted"), 0, "no event without event.emit");
+    assert_eq!(
+        count_events(&core, "ComponentEmitted"),
+        0,
+        "no event without event.emit"
+    );
 }

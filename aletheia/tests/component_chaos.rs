@@ -26,13 +26,23 @@ fn open() -> (SysCore, String) {
 }
 
 fn grant(core: &mut SysCore, owner: &str, subject: &str, action: &str) -> String {
-    core.grant_to(&[owner.to_string()], subject, action, Scope::All, Constraints::none())
-        .expect("grant")
-        .token
+    core.grant_to(
+        &[owner.to_string()],
+        subject,
+        action,
+        Scope::All,
+        Constraints::none(),
+    )
+    .expect("grant")
+    .token
 }
 
 fn count_events(core: &SysCore, etype: &str) -> usize {
-    core.store().events().iter().filter(|e| e.etype == etype).count()
+    core.store()
+        .events()
+        .iter()
+        .filter(|e| e.etype == etype)
+        .count()
 }
 
 /// A component that calls `write` `w` times then `emit` `e` times and returns 0. Each `write` creates
@@ -140,14 +150,33 @@ fn authority_does_not_leak_between_runs() {
     let wasm = seq_wasm(1, 0);
 
     let privileged = core
-        .run_component(std::slice::from_ref(&owner), std::slice::from_ref(&wcap), "chaos:priv", &wasm, 5_000_000)
+        .run_component(
+            std::slice::from_ref(&owner),
+            std::slice::from_ref(&wcap),
+            "chaos:priv",
+            &wasm,
+            5_000_000,
+        )
         .unwrap();
-    assert_eq!(privileged.wrote.len(), 1, "privileged run writes under its grant");
+    assert_eq!(
+        privileged.wrote.len(),
+        1,
+        "privileged run writes under its grant"
+    );
 
     let unprivileged = core
-        .run_component(std::slice::from_ref(&owner), &[], "chaos:unpriv", &wasm, 5_000_000)
+        .run_component(
+            std::slice::from_ref(&owner),
+            &[],
+            "chaos:unpriv",
+            &wasm,
+            5_000_000,
+        )
         .unwrap();
-    assert!(unprivileged.wrote.is_empty(), "no leaked authority: the unprivileged run cannot write");
+    assert!(
+        unprivileged.wrote.is_empty(),
+        "no leaked authority: the unprivileged run cannot write"
+    );
     assert!(unprivileged.denied("write"));
 
     // Exactly one write event total — only the privileged run's.

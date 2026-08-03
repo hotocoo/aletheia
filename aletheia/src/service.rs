@@ -33,23 +33,54 @@ pub enum Request {
     /// Mint the root capability for a subject (hosted-dev root of trust; recorded + audited).
     BootstrapOwner { subject: String },
     /// world (command): create an entity.
-    CreateEntity { caps: Vec<String>, subject: String, etype: EntityType, content: String, metadata: Value },
+    CreateEntity {
+        caps: Vec<String>,
+        subject: String,
+        etype: EntityType,
+        content: String,
+        metadata: Value,
+    },
     /// intents (command/query): run one intent through the full pipeline (read/derive/traverse/... ).
-    SubmitIntent { caps: Vec<String>, intent: Intent, approve: bool },
+    SubmitIntent {
+        caps: Vec<String>,
+        intent: Intent,
+        approve: bool,
+    },
     /// capabilities (command): delegate a capability to a subject.
-    Grant { caps: Vec<String>, subject: String, action: String, scope_entities: Vec<String>, approval: bool },
+    Grant {
+        caps: Vec<String>,
+        subject: String,
+        action: String,
+        scope_entities: Vec<String>,
+        approval: bool,
+    },
     /// capabilities (command): revoke a capability (and its descendants). Capability-gated.
     Revoke { caps: Vec<String>, token: String },
     /// policy (query): list pending approvals awaiting a human decision. Capability-gated.
     ListApprovals { caps: Vec<String> },
     /// policy (command): a human grants or denies a pending approval (re-runs the bound intent).
-    ResolveApproval { caps: Vec<String>, approval_id: String, granted: bool },
+    ResolveApproval {
+        caps: Vec<String>,
+        approval_id: String,
+        granted: bool,
+    },
     /// audit (query): the tail of the immutable event log. Capability-gated (`audit.read`).
     QueryAudit { caps: Vec<String>, limit: usize },
     /// components (command): install untrusted WASM (hex-encoded bytes) as an Application entity.
-    InstallComponent { caps: Vec<String>, subject: String, name: String, wasm_hex: String },
+    InstallComponent {
+        caps: Vec<String>,
+        subject: String,
+        name: String,
+        wasm_hex: String,
+    },
     /// components (command): launch an installed component with an explicit capability grant.
-    RunComponent { launch_caps: Vec<String>, grant_caps: Vec<String>, subject: String, app_id: String, fuel: u64 },
+    RunComponent {
+        launch_caps: Vec<String>,
+        grant_caps: Vec<String>,
+        subject: String,
+        app_id: String,
+        fuel: u64,
+    },
 }
 
 /// A uniform response envelope (consistent success/data/error shape).
@@ -61,10 +92,18 @@ pub struct Response {
 }
 impl Response {
     fn ok(data: Value) -> Self {
-        Response { ok: true, data, error: None }
+        Response {
+            ok: true,
+            data,
+            error: None,
+        }
     }
     fn err(msg: impl Into<String>) -> Self {
-        Response { ok: false, data: Value::Null, error: Some(msg.into()) }
+        Response {
+            ok: false,
+            data: Value::Null,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -76,7 +115,9 @@ pub struct CoreService {
 
 impl CoreService {
     pub fn open(dir: impl AsRef<std::path::Path>) -> crate::domain::Result<Self> {
-        Ok(CoreService { core: SysCore::open_default(dir)? })
+        Ok(CoreService {
+            core: SysCore::open_default(dir)?,
+        })
     }
 
     /// Dispatch one request. Authorization happens inside the Core operations, not here.
@@ -86,22 +127,57 @@ impl CoreService {
                 Ok(cap) => Response::ok(json!({ "token": cap.token, "subject": subject })),
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::CreateEntity { caps, subject, etype, content, metadata } => {
-                match self.core.create_entity(&caps, &subject, etype, content.as_bytes(), metadata) {
-                    Ok(e) => Response::ok(json!({ "id": e.id, "type": e.etype, "version": e.version, "chain": e.version_chain })),
+            Request::CreateEntity {
+                caps,
+                subject,
+                etype,
+                content,
+                metadata,
+            } => {
+                match self
+                    .core
+                    .create_entity(&caps, &subject, etype, content.as_bytes(), metadata)
+                {
+                    Ok(e) => Response::ok(
+                        json!({ "id": e.id, "type": e.etype, "version": e.version, "chain": e.version_chain }),
+                    ),
                     Err(e) => Response::err(e.to_string()),
                 }
             }
-            Request::SubmitIntent { caps, intent, approve } => {
+            Request::SubmitIntent {
+                caps,
+                intent,
+                approve,
+            } => {
                 let trace = self.core.handle_intent(&caps, intent, approve);
-                Response { ok: trace.ok, data: serde_json::to_value(&trace).unwrap_or(Value::Null), error: trace.error.as_ref().map(|e| e.to_string()) }
+                Response {
+                    ok: trace.ok,
+                    data: serde_json::to_value(&trace).unwrap_or(Value::Null),
+                    error: trace.error.as_ref().map(|e| e.to_string()),
+                }
             }
-            Request::Grant { caps, subject, action, scope_entities, approval } => {
+            Request::Grant {
+                caps,
+                subject,
+                action,
+                scope_entities,
+                approval,
+            } => {
                 use crate::capabilities::{Constraints, Scope};
-                let scope = if scope_entities.is_empty() { Scope::All } else { Scope::Entities(scope_entities) };
-                let cons = if approval { Constraints::approval() } else { Constraints::none() };
+                let scope = if scope_entities.is_empty() {
+                    Scope::All
+                } else {
+                    Scope::Entities(scope_entities)
+                };
+                let cons = if approval {
+                    Constraints::approval()
+                } else {
+                    Constraints::none()
+                };
                 match self.core.grant_to(&caps, &subject, &action, scope, cons) {
-                    Ok(cap) => Response::ok(json!({ "token": cap.token, "subject": subject, "action": action })),
+                    Ok(cap) => Response::ok(
+                        json!({ "token": cap.token, "subject": subject, "action": action }),
+                    ),
                     Err(e) => Response::err(e.to_string()),
                 }
             }
@@ -113,26 +189,48 @@ impl CoreService {
                 Ok(pending) => Response::ok(serde_json::to_value(&pending).unwrap_or(Value::Null)),
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::ResolveApproval { caps, approval_id, granted } => {
-                match self.core.resolve_approval(&caps, &approval_id, granted) {
-                    Ok(trace) => Response { ok: trace.ok || !granted, data: serde_json::to_value(&trace).unwrap_or(Value::Null), error: None },
-                    Err(e) => Response::err(e.to_string()),
-                }
-            }
+            Request::ResolveApproval {
+                caps,
+                approval_id,
+                granted,
+            } => match self.core.resolve_approval(&caps, &approval_id, granted) {
+                Ok(trace) => Response {
+                    ok: trace.ok || !granted,
+                    data: serde_json::to_value(&trace).unwrap_or(Value::Null),
+                    error: None,
+                },
+                Err(e) => Response::err(e.to_string()),
+            },
             Request::QueryAudit { caps, limit } => match self.core.query_audit(&caps, limit) {
                 Ok(tail) => Response::ok(serde_json::to_value(&tail).unwrap_or(Value::Null)),
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::InstallComponent { caps, subject, name, wasm_hex } => match from_hex(&wasm_hex) {
+            Request::InstallComponent {
+                caps,
+                subject,
+                name,
+                wasm_hex,
+            } => match from_hex(&wasm_hex) {
                 Some(bytes) => match self.core.install_component(&caps, &subject, &name, &bytes) {
                     Ok(e) => Response::ok(json!({ "app": e.id, "name": name })),
                     Err(e) => Response::err(e.to_string()),
                 },
                 None => Response::err("invalid wasm_hex"),
             },
-            Request::RunComponent { launch_caps, grant_caps, subject, app_id, fuel } => {
-                match self.core.run_installed(&launch_caps, &grant_caps, &subject, &app_id, fuel) {
-                    Ok(out) => Response::ok(json!({ "ok": out.ok, "exit_code": out.exit_code, "wrote": out.wrote.len(), "host_calls": out.calls.len() })),
+            Request::RunComponent {
+                launch_caps,
+                grant_caps,
+                subject,
+                app_id,
+                fuel,
+            } => {
+                match self
+                    .core
+                    .run_installed(&launch_caps, &grant_caps, &subject, &app_id, fuel)
+                {
+                    Ok(out) => Response::ok(
+                        json!({ "ok": out.ok, "exit_code": out.exit_code, "wrote": out.wrote.len(), "host_calls": out.calls.len() }),
+                    ),
                     Err(e) => Response::err(e.to_string()),
                 }
             }
@@ -179,14 +277,18 @@ pub struct UnixClient {
 }
 impl UnixClient {
     pub fn connect(socket_path: &str) -> std::io::Result<Self> {
-        Ok(UnixClient { stream: UnixStream::connect(socket_path)? })
+        Ok(UnixClient {
+            stream: UnixStream::connect(socket_path)?,
+        })
     }
     pub fn call(&mut self, req: &Request) -> std::io::Result<Response> {
         let out = serde_json::to_vec(req).unwrap_or_default();
         write_frame(&mut self.stream, &out)?;
-        let bytes = read_frame(&mut self.stream)?
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "server closed"))?;
-        serde_json::from_slice(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+        let bytes = read_frame(&mut self.stream)?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "server closed")
+        })?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 }
 
@@ -224,7 +326,10 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 /// Hex-encode WASM bytes for the `InstallComponent` request (JSON-safe binary marshaling).

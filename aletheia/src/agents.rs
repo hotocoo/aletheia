@@ -11,6 +11,11 @@ pub struct Agent {
 }
 impl Agent {
     pub fn new(identity: &str) -> Self {
-        Agent { id: crate::domain::new_id(), identity: identity.to_string(), caps: vec![], goals: vec![] }
+        Agent {
+            id: crate::domain::new_id(),
+            identity: identity.to_string(),
+            caps: vec![],
+            goals: vec![],
+        }
     }
 }

@@ -85,13 +85,13 @@ fn a_create_is_all_or_nothing_at_every_crash_point() {
                     "rolled back to a DIFFERENT namespace (allow={allow})"
                 ),
                 2 => {
-                    let got = fs_after.read(&mut base, "torn").expect("torn readable");
+                    let got = fs_after.read(&base, "torn").expect("torn readable");
                     assert_eq!(got, payload, "committed a TORN body (allow={allow})");
                 }
                 n => panic!("crash left {n} entries (allow={allow})"),
             }
             assert_eq!(
-                fs_after.read(&mut base, "keep").expect("keep survives"),
+                fs_after.read(&base, "keep").expect("keep survives"),
                 body(7, 100),
                 "an unrelated object was collateral damage (allow={allow})"
             );
@@ -121,19 +121,19 @@ fn a_remove_is_all_or_nothing_at_every_crash_point() {
         if after.iter().any(|e| e.name == "doomed") {
             // Rolled back: the object is intact, bytes and all.
             assert_eq!(
-                fs_after.read(&mut base, "doomed").expect("doomed intact"),
+                fs_after.read(&base, "doomed").expect("doomed intact"),
                 doomed,
                 "rollback left a MUTILATED object (allow={allow})"
             );
         } else {
             assert_eq!(
-                fs_after.read(&mut base, "doomed"),
+                fs_after.read(&base, "doomed"),
                 Err(FsError::NotFound),
                 "half-removed (allow={allow})"
             );
         }
         assert_eq!(
-            fs_after.read(&mut base, "keep").expect("keep survives"),
+            fs_after.read(&base, "keep").expect("keep survives"),
             body(7, 100)
         );
     }
@@ -145,7 +145,7 @@ fn a_completed_remove_leaves_no_byte_of_the_object_behind() {
     let mut fs = Filesystem::mount(&mut dev).expect("mount");
     let secret = alloc::vec![0xC3u8; 3 * BLOCK_SIZE];
     fs.create(&mut dev, "secret", &secret).expect("create");
-    let e = fs.stat(&mut dev, "secret").expect("stat");
+    let e = fs.stat(&dev, "secret").expect("stat");
     fs.remove(&mut dev, "secret").expect("remove");
     for i in 0..e.blocks() {
         let mut blk = [0u8; BLOCK_SIZE];
@@ -204,11 +204,11 @@ fn the_directory_fills_up_and_refuses_rather_than_overwriting() {
         fs.create(&mut dev, &name, &body(i as u8, 1))
             .expect("create");
     }
-    assert_eq!(fs.list(&mut dev).expect("list").len(), MAX_FILES);
+    assert_eq!(fs.list(&dev).expect("list").len(), MAX_FILES);
     assert_eq!(fs.create(&mut dev, "one-more", b"x"), Err(FsError::NoSpace));
     for i in 0..MAX_FILES {
         let name = alloc::format!("f{i}");
-        assert_eq!(fs.read(&mut dev, &name).expect("read"), body(i as u8, 1));
+        assert_eq!(fs.read(&dev, &name).expect("read"), body(i as u8, 1));
     }
     assert_structurally_sound(&mut dev);
 }
@@ -265,7 +265,7 @@ fn a_deterministic_op_campaign_never_breaks_a_structural_invariant() {
                 Err(e) => panic!("step {step}: unexpected remove error {e:?}"),
             },
             _ => {
-                let got = fs.read(&mut dev, &name);
+                let got = fs.read(&dev, &name);
                 match model.iter().find(|(n, _)| *n == name) {
                     Some((_, want)) => assert_eq!(
                         got.as_deref(),
@@ -288,7 +288,7 @@ fn a_deterministic_op_campaign_never_breaks_a_structural_invariant() {
     // Everything the model still holds survives a final remount, byte for byte.
     let fs2 = Filesystem::mount(&mut dev).expect("final mount");
     for (name, want) in &model {
-        assert_eq!(fs2.read(&mut dev, name).expect("read"), *want);
+        assert_eq!(fs2.read(&dev, name).expect("read"), *want);
     }
 }
 
@@ -326,14 +326,14 @@ fn a_replace_is_all_or_nothing_at_every_crash_point_and_never_loses_the_name() {
                 "the name DISAPPEARED at allow={allow} ({old_len} -> {new_len}) — a replace must never lose it"
             );
             let fs_after = Filesystem::mount(&mut base).expect("mount after");
-            let got = fs_after.read(&mut base, "obj").expect("obj readable");
+            let got = fs_after.read(&base, "obj").expect("obj readable");
             assert!(
                 got == old || got == new,
                 "replace left a MIXTURE at allow={allow} ({old_len} -> {new_len}): {} bytes",
                 got.len()
             );
             assert_eq!(
-                fs_after.read(&mut base, "keep").expect("keep survives"),
+                fs_after.read(&base, "keep").expect("keep survives"),
                 body(7, 100)
             );
         }
@@ -355,7 +355,7 @@ fn a_replace_that_grows_beyond_one_transaction_is_refused_and_keeps_the_old_cont
         "old + new + 2 exceeds the journal bound and must be refused"
     );
     assert_eq!(
-        fs.read(&mut dev, "big").expect("still there"),
+        fs.read(&dev, "big").expect("still there"),
         big,
         "a refused replace must leave the old contents untouched"
     );
@@ -369,7 +369,7 @@ fn replacing_an_absent_name_creates_it() {
     let data = body(3, 200);
     fs.replace(&mut dev, "fresh", &data)
         .expect("replace creates");
-    assert_eq!(fs.read(&mut dev, "fresh").expect("read"), data);
+    assert_eq!(fs.read(&dev, "fresh").expect("read"), data);
     assert_structurally_sound(&mut dev);
 }
 
@@ -387,18 +387,18 @@ fn a_replace_whose_new_extent_overlaps_the_old_at_a_shifted_start_writes_each_bl
         .expect("filler");
     let obj = body(2, 4 * BLOCK_SIZE);
     fs.create(&mut dev, "obj", &obj).expect("obj");
-    let before = fs.stat(&mut dev, "obj").expect("stat").start;
+    let before = fs.stat(&dev, "obj").expect("stat").start;
     fs.remove(&mut dev, "filler").expect("remove filler");
 
     // Same size: first-fit now starts in the hole, so the new extent overlaps the old one shifted by 2.
     let next = body(3, 4 * BLOCK_SIZE);
     fs.replace(&mut dev, "obj", &next).expect("replace");
-    let after = fs.stat(&mut dev, "obj").expect("stat").start;
+    let after = fs.stat(&dev, "obj").expect("stat").start;
     assert!(
         after < before && after + 4 > before,
         "expected a SHIFTED, overlapping extent (old start {before}, new start {after})"
     );
-    assert_eq!(fs.read(&mut dev, "obj").expect("read"), next);
+    assert_eq!(fs.read(&dev, "obj").expect("read"), next);
     let entries = assert_structurally_sound(&mut dev);
     assert_eq!(entries.len(), 1);
 
@@ -418,7 +418,7 @@ fn a_replace_whose_new_extent_overlaps_the_old_at_a_shifted_start_writes_each_bl
             "name lost at allow={allow}"
         );
         let fs_after = Filesystem::mount(&mut dev).expect("mount after");
-        let got = fs_after.read(&mut dev, "obj").expect("readable");
+        let got = fs_after.read(&dev, "obj").expect("readable");
         assert!(got == next || got == again, "mixture at allow={allow}");
     }
 }

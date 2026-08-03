@@ -26,10 +26,18 @@ pub struct Constraints {
 }
 impl Constraints {
     pub fn none() -> Self {
-        Constraints { expires_at: None, max_count: None, approval_required: false, local_only: true }
+        Constraints {
+            expires_at: None,
+            max_count: None,
+            approval_required: false,
+            local_only: true,
+        }
     }
     pub fn approval() -> Self {
-        Constraints { approval_required: true, ..Self::none() }
+        Constraints {
+            approval_required: true,
+            ..Self::none()
+        }
     }
 }
 
@@ -78,7 +86,10 @@ impl CapEngine {
     /// Load a persisted capability during store replay.
     pub fn load(&mut self, cap: StoredCapability) {
         if let Some(p) = &cap.parent {
-            self.children.entry(p.clone()).or_default().push(cap.token.clone());
+            self.children
+                .entry(p.clone())
+                .or_default()
+                .push(cap.token.clone());
         }
         self.registry.insert(cap.token.clone(), cap);
     }
@@ -135,7 +146,9 @@ impl CapEngine {
             return Err(AlethError::authorization("delegation would amplify scope"));
         }
         if !constraints_not_looser(&parent.constraints, &constraints) {
-            return Err(AlethError::authorization("delegation would loosen constraints"));
+            return Err(AlethError::authorization(
+                "delegation would loosen constraints",
+            ));
         }
         let cap = StoredCapability {
             token: crate::crypto::random_token(),
@@ -146,7 +159,10 @@ impl CapEngine {
             parent: Some(parent_token.clone()),
             provenance: Provenance::of(actor),
         };
-        self.children.entry(parent_token.clone()).or_default().push(cap.token.clone());
+        self.children
+            .entry(parent_token.clone())
+            .or_default()
+            .push(cap.token.clone());
         self.registry.insert(cap.token.clone(), cap.clone());
         Ok(cap)
     }
@@ -167,15 +183,23 @@ impl CapEngine {
     pub fn evaluate(&self, action: &str, target: &Target, offered: &[CapToken]) -> Decision {
         let mut needs_approval = false;
         for token in offered {
-            if self.revoked.contains(token) { continue; }
+            if self.revoked.contains(token) {
+                continue;
+            }
             let cap = match self.registry.get(token) {
                 Some(c) => c,
                 None => continue, // forged/unknown handle — not authority
             };
-            if !action_covers(&cap.action, action) { continue; }
-            if !scope_covers(&cap.scope, target) { continue; }
+            if !action_covers(&cap.action, action) {
+                continue;
+            }
+            if !scope_covers(&cap.scope, target) {
+                continue;
+            }
             if let Some(exp) = cap.constraints.expires_at {
-                if (self.now_fn)() > exp { continue; }
+                if (self.now_fn)() > exp {
+                    continue;
+                }
             }
             if cap.constraints.approval_required {
                 needs_approval = true;
@@ -183,21 +207,35 @@ impl CapEngine {
             }
             return Decision::Allow;
         }
-        if needs_approval { Decision::RequireApproval } else { Decision::Deny("no capability".into()) }
+        if needs_approval {
+            Decision::RequireApproval
+        } else {
+            Decision::Deny("no capability".into())
+        }
     }
 
     pub fn get(&self, token: &str) -> Option<&StoredCapability> {
-        if self.revoked.contains(token) { None } else { self.registry.get(token) }
+        if self.revoked.contains(token) {
+            None
+        } else {
+            self.registry.get(token)
+        }
     }
-    pub fn is_revoked(&self, token: &str) -> bool { self.revoked.contains(token) }
+    pub fn is_revoked(&self, token: &str) -> bool {
+        self.revoked.contains(token)
+    }
 }
 
 impl Default for CapEngine {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn action_covers(pattern: &str, action: &str) -> bool {
-    if pattern == "*" { return true; }
+    if pattern == "*" {
+        return true;
+    }
     if let Some(prefix) = pattern.strip_suffix(".*") {
         return action == prefix || action.starts_with(&format!("{}.", prefix));
     }
@@ -209,7 +247,11 @@ fn scope_covers(scope: &Scope, target: &Target) -> bool {
         Scope::All => true,
         Scope::None => false,
         Scope::Type(t) => target.etype.map(|e| e == *t).unwrap_or(false),
-        Scope::Entities(set) => target.id.as_ref().map(|id| set.contains(id)).unwrap_or(false),
+        Scope::Entities(set) => target
+            .id
+            .as_ref()
+            .map(|id| set.contains(id))
+            .unwrap_or(false),
     }
 }
 

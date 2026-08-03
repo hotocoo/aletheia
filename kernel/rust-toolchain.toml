@@ -1,4 +1,13 @@
+# Toolchain policy: docs/TOOLCHAIN.md (GAPS4 ALET-P2-001, REQ-QUAL-002).
+#
+# `clippy` and `rustfmt` are requested explicitly so the quality gate cannot be skipped for lack of a
+# component — a missing component would otherwise look like a passing run on a host that has neither.
+#
+# The channel is still the FLOATING nightly. A dated pin (`nightly-<date>`) is the right answer and is
+# NOT claimed here: installing the dated toolchain failed on the workstation this was developed on
+# (rustup rolled the install back), so landing the pin would have meant claiming a compiler version the
+# gates had never actually been run against. docs/TOOLCHAIN.md records what remains.
 [toolchain]
 channel = "nightly"
-components = ["rust-src", "llvm-tools-preview"]
+components = ["rust-src", "llvm-tools-preview", "clippy", "rustfmt"]
 targets = ["aarch64-unknown-none-softfloat"]

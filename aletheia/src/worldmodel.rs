@@ -4,7 +4,10 @@ use crate::storage::Store;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dir { Outgoing, Incoming }
+pub enum Dir {
+    Outgoing,
+    Incoming,
+}
 
 /// Breadth-first traversal from `from` following edges of `rtype` in `dir` up to `depth`.
 /// Returns the reachable entity ids (excluding the origin), preserving discovery order.
@@ -17,7 +20,9 @@ pub fn traverse(store: &Store, from: &Id, rtype: &str, dir: Dir, depth: u32) -> 
         let mut next = Vec::new();
         for node in &frontier {
             for r in store.relationships() {
-                if r.rtype != rtype { continue; }
+                if r.rtype != rtype {
+                    continue;
+                }
                 let hit = match dir {
                     Dir::Outgoing if &r.from == node => Some(r.to.clone()),
                     Dir::Incoming if &r.to == node => Some(r.from.clone()),
@@ -31,7 +36,9 @@ pub fn traverse(store: &Store, from: &Id, rtype: &str, dir: Dir, depth: u32) -> 
                 }
             }
         }
-        if next.is_empty() { break; }
+        if next.is_empty() {
+            break;
+        }
         frontier = next;
     }
     out
