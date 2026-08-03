@@ -59,7 +59,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P2-010 | P2 | open | larger/more diverse property-test campaigns |
 | ALET-P2-011 | P2 | resolved | this register + `check-traceability.sh` prevent manual-metric drift |
 | ALET-P2-012 | P2 | open | machine-checked requirement traceability — evidence-exists (`check-traceability.sh`) and evidence-runs (`check-ci-parity.sh`) are gated; remaining: mechanically bind THIS register's rows to their evidence |
-| ALET-P2-013 | P2 | open | separate "implemented" vs "production-ready" in all status docs |
+| ALET-P2-013 | P2 | resolved | `docs/MATURITY.md` states the distinction once and grades every subsystem against it: **P**roved (a gate fails when it breaks), **I**mplemented (works on the paths exercised; failure modes/scale/adversarial surface not covered), **A**rchitecture (written down, no code claimed), **X** production-ready. Its headline is that **nothing is X** — with the seven things production would additionally require named (a task supervisor, since a `KillTask` verdict currently ends the boot; DMA isolation; interrupt-driven I/O; real hardware variety; soak/fault injection at scale; key lifecycle and forgery-resistant integrity; update/rollback) — plus a "how to read a claim in this repo" section pointing at the four places claims live and their relative strength |
 | ALET-P2-014 | P2 | deferred | complete production boot chain — milestone work |
 | ALET-P2-015 | P2 | deferred | secure boot — milestone work (ADR needed) |
 | ALET-P2-016 | P2 | deferred | update/rollback system — milestone work |
@@ -83,8 +83,11 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-03, seventh update):** 69 findings (67 audited + ALET-P1-031 and ALET-P2-032, both
-split out while closing ALET-P1-007) — **26 resolved**, 33 open, 10 deferred (milestone subsystems).
+**Rollup (2026-08-03, eighth update):** 69 findings (67 audited + ALET-P1-031 and ALET-P2-032, both
+split out while closing ALET-P1-007) — **27 resolved**, 32 open, 10 deferred (milestone subsystems).
+ALET-P2-013 (`docs/MATURITY.md`) is the newest: every gate here answers "does it behave as specified",
+none answers "is it ready for someone else's machine, data and adversaries", and conflating those is how a
+project claims more than it has. Nothing in Aletheia is production-ready, and that file says so.
 The newest two are the layout cluster (ALET-P1-006/012), and writing their check found a live hole
 nothing else had: VA 0 was mapped by every boot identity map.
 The newest three are the CI quality cluster (ALET-P2-003/004/005): the boot gates proved the OS behaves,

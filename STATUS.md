@@ -2,6 +2,8 @@
 
 **As of:** 2026-08-03
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
+**Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
+plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..040`.
 
