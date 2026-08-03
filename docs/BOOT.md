@@ -133,6 +133,23 @@ bash scripts/smoke-test.sh         # boots build/aletheia-x86_64.img, asserts ex
 `scripts/vm-e2e.sh` and `scripts/vm-e2e-riscv.sh`); it drops any stale `.efi`, drives
 `build-image-linux.sh`, then runs `smoke-test.sh` as its boot step.
 
+**What the serial log should show, in order (REQ-MM-006, ALET-P1-031).** The x86-64 kernel does not
+keep the address space OVMF hands it: after the virtual-memory invariants pass it builds its own
+identity map from the PE image's section table and points CR3 at it, so everything afterwards — the
+spine, SMP bring-up, the whole ring-3 suite — runs on the kernel's tree. Four lines say so, and the
+gate requires them:
+
+```text
+[uefi] loaded image: base=… size=… (PE section table = our W^X bounds)
+[mm] kernel map built @ 0x…: 4096 MiB identity, 2043 huge + 2560 page leaves, 5 image-split blocks, 11 table frames
+[mm] kernel map ACTIVE (CR3 = 0x…) — the firmware's tree is no longer translating
+[mm] live W^X audit: 4603 leaves, 0 violations
+```
+
+A boot that says `kernel map NOT built` still runs (on the firmware's tree) but has lost the W^X
+guarantee, and the gate fails it. A live audit that finds any violation exits **28** deliberately,
+rather than continuing with a writable+executable page somewhere in the live tree.
+
 Manual QEMU line (OVMF **must** be attached as `pflash`, not `-bios`):
 
 ```bash
