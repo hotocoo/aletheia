@@ -110,6 +110,7 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-QUAL-002 | Source quality gate: fmt + clippy -D warnings + advisory scan + license allow-list + SBOM, pinned toolchains, both pipelines | ADR-013 | scripts/quality-gate.sh; scripts/sbom.py; docs/TOOLCHAIN.md | scripts/quality-gate.sh | - | delivered |
 | REQ-BOOT-001 | Secure boot + chain of trust (firmware→bootloader→kernel measured chain, hardware root) | ADR-025 | aletheia/src/provenance.rs; aletheia/src/crypto.rs | aletheia/tests/component_signing.rs | - | partial |
 | REQ-BOOT-002 | Asymmetric component provenance (ed25519, public-key-only verifier, root→signing key hierarchy) | ADR-025 | aletheia/src/provenance.rs; aletheia/src/crypto.rs | aletheia/src/provenance.rs | - | delivered |
+| REQ-SCHED-002 | Task-lifecycle invariants (Finished terminal, one Running, rotation count exact, unknown-task events are no-ops) | ADR-020 | kernel-core/src/sched.rs | kernel-core/tests/sched.rs; docs/INVARIANT-CONTRACTS.md | - | delivered |
 | REQ-REL-002 | Task supervisor: a user fault terminates that task and the system continues (kernel faults still escalate) | ADR-042 | kernel-core/src/supervisor.rs; kernel-x86_64/src/usermode.rs | kernel-core/tests/supervisor.rs | scripts/vm-e2e-x86.sh | delivered |
 | REQ-REL-001 | Fault recovery / supervision | ADR-026 | - | - | - | deferred |
 
