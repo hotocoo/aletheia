@@ -116,6 +116,14 @@ jobs:
           name: sbom
           path: build/sbom/
 
+  register:
+    name: Gap register self-check (evidence exists, requirements tracked, rollup matches)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert the register's own claims hold
+        run: ./scripts/check-register.sh
+
   ci-parity:
     name: CI coverage (every architecture boot-gated, both pipelines agree, claimed gates run)
     runs-on: ubuntu-latest

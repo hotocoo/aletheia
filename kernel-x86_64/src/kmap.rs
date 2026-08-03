@@ -356,6 +356,17 @@ pub struct BuildReport {
 /// Fails — returning `None`, so the caller reports it rather than running on a half-built tree —
 /// when the image bounds were never captured, the PE section table does not parse, or the frame
 /// allocator runs dry mid-build. CR3 is NOT touched: the tree is inert until something activates it.
+/// How many pages the last `build` deliberately left with NO leaf (ALET-P2-034). Recorded so the boot
+/// suite can assert the builder really skipped them: the guard page's ABSENCE is proved by walking the live
+/// tree, but without this a refactor that stopped skipping — while something else happened to leave the
+/// leaf absent — would still pass.
+static LAST_GUARD_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Guard pages recorded by the last `build`.
+pub fn guard_pages() -> usize {
+    LAST_GUARD_PAGES.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn build(map: &MemoryMapOwned) -> Option<(u64, BuildReport)> {
     let (img_start, img_end) = image_span();
     let (secs, count) = sections();
@@ -426,6 +437,7 @@ pub fn build(map: &MemoryMapOwned) -> Option<(u64, BuildReport)> {
 
     report.tables = free_before - frames::free_count();
     KERNEL_ROOT.store(pml4 as u64, Ordering::Relaxed);
+    LAST_GUARD_PAGES.store(report.guard_pages, core::sync::atomic::Ordering::Relaxed);
     Some((pml4 as u64, report))
 }
 
