@@ -79,12 +79,17 @@ milestone work, carrying no false "done" claim).
 | ALET-P2-030 | P2 | open | explicit security-boundary enumeration |
 | ALET-P2-031 | P2 | open | DoS ≠ unauthorized-access distinction in the threat model |
 | ALET-P2-032 | P2 | resolved | the kernel-image mapping refusal lives ONCE, in `kernel-core/src/vmaddr.rs`: `AddrPlan::with_protected` + `MapFault::ProtectedVirt` (REQ-MM-006, ADR-034 addendum). Closed at exactly the moment the row predicted — ALET-P1-031 gave x86-64 a split and would have made `in_image_split` a third copy — so instead the two existing copies were deleted and all three targets now declare only WHERE their image is (`image_split_span()` on aarch64/RISC-V, `kmap::protected_span()` on x86-64), while the refusal itself is one implementation applied by both `validate_map` and `validate_unmap`. Host-proved page by page across the span in `kernel-core/tests/vmaddr.rs`: both APIs refuse every page, the boundaries are half-open, a malformed protected address still reports the malformation first, and an undeclared span protects nothing. The two refusal behaviors joined the `conformance.sh` core contract (37 named behaviors) now that all three targets emit them in identical words |
+| ALET-P2-033 | P2 | open | derived per-process address spaces do NOT inherit the guard page or the dead null page (REQ-MM-007/008, ADR-040 follow-on). Found empirically while writing the guard invariant: asserting against `active_root()` failed at x86-64 invariant 59 because CR3 held a space an earlier test had built by COPYING the live tree, and that space mapped the guard region as a 2 MiB huge page. So a user space can reach an address the kernel's own map deliberately cannot. The invariants were pointed at `kmap::root()` — correct for the claim they make — which leaves this as the real remaining hole: `build_space` must reproduce both properties, and each derived space should be audited for them |
+| ALET-P2-034 | P2 | open | `kmap`'s `BuildReport::guard_pages` counter is incremented but never asserted by the x86-64 boot gate. The guard page's ABSENCE is proved by walking the live tree, but nothing checks that the builder deliberately skipped exactly one page — so a future refactor that stops skipping (while something else happens to leave the leaf absent) would pass. Cheap: fold the count into an existing `kmap:` invariant |
 | ALET-P3-001 | P3 | open | centralized assembly/Rust boundary documentation |
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-03, eighth update):** 69 findings (67 audited + ALET-P1-031 and ALET-P2-032, both
-split out while closing ALET-P1-007) — **27 resolved**, 32 open, 10 deferred (milestone subsystems).
+**Rollup (2026-08-03, ninth update):** 71 findings (67 audited + ALET-P1-031, ALET-P2-032, and
+ALET-P2-033/034 — the last two split out from ADR-040's own findings) — **27 resolved**, 34 open, 10
+deferred (milestone subsystems). The two new rows are follow-ons this session's work CREATED and would
+otherwise have lived only in prose: derived address spaces do not inherit the guard page or the dead null
+page, and the guard-page count the x86-64 builder records is never asserted.
 ALET-P2-013 (`docs/MATURITY.md`) is the newest: every gate here answers "does it behave as specified",
 none answers "is it ready for someone else's machine, data and adversaries", and conflating those is how a
 project claims more than it has. Nothing in Aletheia is production-ready, and that file says so.
