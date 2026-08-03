@@ -104,13 +104,22 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     };
     log_report(base, &report);
 
-    match virtioblk::device_suite(dev, GATE_IMAGE_BLOCKS, |n, passed, name| {
-        if passed {
-            kprintln!("  [pass {:>2}] {}", n, name);
-        } else {
-            kprintln!("  [FAIL {:>2}] {}", n, name);
-        }
-    }) {
+    // The device's own answer about its DMA gate: the suite asserts what the DRIVER can vouch for, never a
+    // default (REQ-DRV-006, ADR-043).
+    let dma_gate_ok = dev.dma_gate_refuses_unregistered() && dev.dma_regions() == 2;
+    let mut dev = dev;
+    match virtioblk::device_suite_gated(
+        &mut dev,
+        GATE_IMAGE_BLOCKS,
+        dma_gate_ok,
+        &mut |n, passed, name| {
+            if passed {
+                kprintln!("  [pass {:>2}] {}", n, name);
+            } else {
+                kprintln!("  [FAIL {:>2}] {}", n, name);
+            }
+        },
+    ) {
         Ok(n) => Ok(n as u32),
         Err((idx, name)) => Err((idx as u32, name)),
     }

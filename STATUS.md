@@ -46,10 +46,14 @@ a number becomes a descriptor.
   escape. virtio-net registers its receive and transmit buffers, and a new invariant on all three targets
   proves the gate **denies by default**: an address far from any buffer is refused, and so is one that
   overruns a registered buffer (network invariants 4 → 5, conformance 72 → **73**).
-- **ALET-P1-018 stays open, deliberately.** It constrains what the *kernel* tells a device — where every
-  wrong address in this codebase would come from — and cannot constrain a device that invents its own
-  addresses; that needs an IOMMU/SMMU. And `virtioblk`'s single-queue path (its fixed ring predates `virtq`)
-  still publishes descriptors ungated. Both limits are in the row and in ADR-043 rather than implied.
+- **`virtioblk` is gated too.** It predates `virtq` and keeps its own fixed ring, so it would have been the
+  one path still naming unregistered addresses: its ring and data frames are registered at init, and
+  `request` checks the header, status byte and data buffer **before** any becomes a descriptor. Its suite
+  takes the gate's answer from the **driver** rather than assuming it — like the geometry check — so a device
+  whose gate stopped working fails instead of the suite passing on a default (virtio-blk invariants 20 → 21,
+  conformance 73 → **74**).
+- **ALET-P1-018 stays open for the part software cannot do:** nothing stops a device that *invents* its own
+  addresses. That needs an IOMMU/SMMU, and the row says so rather than implying coverage.
 
 Gates after the wave: `quality-gate` PASS, `build-all` PASS, `e2e-all` PASS, `conformance` PASS (72 × 3),
 `register` PASS, `ci-parity` PASS, `traceability` PASS (78 requirements).
