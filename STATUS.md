@@ -15,7 +15,50 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — the OS remembers, and the gate proves it by rebooting (2026-08-03, REQ-STOR-003)
+## Latest wave — what must never happen, written down (2026-08-03, GAPS4 ALET-P1-005 / P1-016 / P1-017 / P1-025)
+
+Four subsystems were delivered as *code that works* with no written statement of **what must never
+happen**: cross-core TLB shootdown, priority inheritance, IPC cancellation, capability revocation. A
+passing test tells you the case it runs; a contract tells you the cases that must never pass. This wave
+writes the contracts and then attacks them.
+
+- **`docs/INVARIANT-CONTRACTS.md` — 25 numbered invariants** across the four clusters. Each is stated as
+  something that must hold (not as a description of the code), carries the reason it is load-bearing, and
+  names the host test that adversarially attempts to violate it. An id without a proof is a documented bug.
+- **INV-TLB (6).** The requester is about to reclaim the frame the stale mappings point at, so: `request`
+  completes only if EVERY addressed target acknowledged; an ack never precedes the invalidation it covers
+  (checked from *inside* `perform` — the counter must not have moved yet); exactly-once performance, no
+  drops or duplicates; no borrowing another requester's acks; an aborted wait is `false` and never a
+  partial success; a bogus target id is ignored rather than waited on.
+- **INV-PRIO (7).** A holder is never weaker than anyone blocked on an endpoint it holds — re-checked
+  after **every** operation against a tracked waiter model rather than once at the end; donation is
+  transitive along a whole A→B→C chain; donation **ends** at release; donation never manufactures priority
+  above the highest base, over a dense tangle of holds and waits; the scheduler never dispatches a Blocked
+  task nor a weaker Ready one over a stronger one; a donation **cycle** (deadlock) terminates instead of
+  recursing; an unauthorized `acquire`/`wait` changes nothing — otherwise any task could force a donation.
+- **INV-IPC-CANCEL (6).** A cancelled message is never delivered by any later receive; cancelling
+  something already gone returns `false` and changes nothing (a `true` return is the sender's evidence it
+  won the race, so a lie there is worse than a refusal); exactly the named message is removed and order
+  preserved; every message reaches **exactly one** terminal trace event; a cancelled slot frees one unit
+  of bounded capacity without lifting the bound; a deadline and a cancel never both claim one message.
+- **INV-CAP-REVOKE (6).** After `revoke` returns, 50 further attempts all deny and no effect runs;
+  revocation is permanent — a revoked parent cannot be delegated from, a fresh mint never reuses the id,
+  and offering a revoked token beside a live one reports the **live** one as authorizing (no laundering);
+  revoke is idempotent and a forged handle is a no-op; a parent's revocation kills child and grandchild
+  transitively (each proven to have worked first, so the test cannot pass vacuously); an interleaved
+  revoke swept over **every** position inside a six-step commit body yields a complete effect or a
+  denial, never a partial; and revoking one sibling disturbs neither its siblings nor its parent.
+- **Two of the new tests failed first, and both were the test's fault** — a hollow assertion
+  (`hp >= min(wp, hp)`, trivially true) and a stale waiter model. Both are recorded here because a
+  trivially-true assertion is worse than no assertion: it reports coverage it does not have.
+- **Register: 15 → 19 resolved, 44 → 40 open.** ALET-P3-003 ("every architectural invariant in one
+  place") stays open on purpose — memory, W^X, the namespace and durability carry their contracts in their
+  ADRs and in `conformance.sh`, and merging all of it is a bigger job than these four clusters.
+
+Gates after the wave: `build-all` PASS (19 host test binaries green), `e2e-all` PASS, `conformance` PASS
+(62 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (68 requirements).
+
+## Previous wave — the OS remembers, and the gate proves it by rebooting (2026-08-03, REQ-STOR-003)
 
 Three waves built storage: an atomic multi-block write, a named namespace, real devices on all three
 CPUs. And the **capability-secure spine itself was still rebuilt in RAM at every boot** — not one

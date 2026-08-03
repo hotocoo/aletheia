@@ -6,6 +6,7 @@
 //! release — all fail-closed.
 
 use kernel_core::priosched::{Endpoint, Priority, PriorityScheduler, SchedError};
+use std::vec as alloc_vec;
 use kernel_core::sched::{TaskId, TaskState};
 use kernel_core::spine::{CapEngine, Constraints, Scope};
 
@@ -161,4 +162,254 @@ fn unknown_task_cannot_acquire() {
         s.acquire(&e, Endpoint(1), t(42), &[cap]),
         Err(SchedError::UnknownTask)
     );
+}
+
+// ---------------------------------------------------------------------------
+// INV-PRIO contract (docs/INVARIANT-CONTRACTS.md) — adversarial cases, ALET-P1-016.
+//
+// The tests above prove donation happens. These attempt to break the PROPERTY: a holder weaker than
+// its waiter, a chain that donates only one hop, donation outliving the release, priority conjured
+// from nowhere, a dispatch that inverts anyway, a deadlock cycle, an unauthorized state change.
+// ---------------------------------------------------------------------------
+
+/// INV-PRIO-1: over a whole sequence of acquires and waits, a holder's effective priority is NEVER
+/// below the effective priority of anyone blocked on an endpoint it holds. The waiter set is tracked
+/// in the test (the scheduler exposes holders, not waiter lists), and the property is re-checked after
+/// EVERY operation rather than once at the end.
+#[test]
+fn a_holder_is_never_weaker_than_anyone_waiting_on_it() {
+    let (engine, cap) = engine();
+    let mut s = PriorityScheduler::new(ACQ);
+    // Ids deliberately inverted against priorities, so id order cannot accidentally satisfy this.
+    for (id, p) in [(1u64, LOW), (2, HIGH), (3, MED), (4, Priority(7)), (5, Priority(3))] {
+        s.admit(t(id), p);
+    }
+    let eps = [Endpoint(100), Endpoint(200)];
+    // model: (endpoint, waiter) pairs this test has created.
+    let mut waiting: alloc_vec::Vec<(Endpoint, TaskId)> = alloc_vec::Vec::new();
+
+    let assert_no_inversion = |s: &PriorityScheduler, waiting: &[(Endpoint, TaskId)], step: &str| {
+        for (ep, waiter) in waiting {
+            if s.state(*waiter) != Some(TaskState::Blocked) {
+                continue; // no longer waiting: handed the endpoint, or finished
+            }
+            if let Some(h) = s.holder_of(*ep) {
+                if h == *waiter {
+                    continue; // this waiter has since been handed the endpoint
+                }
+                let hp = s.effective_priority(h);
+                let wp = s.effective_priority(*waiter);
+                assert!(
+                    hp >= wp,
+                    "{step}: INV-PRIO-1 violated — holder {h:?} at {hp:?} is weaker than \
+                     waiter {waiter:?} at {wp:?} on {ep:?}"
+                );
+            }
+        }
+    };
+
+    s.acquire(&engine, eps[0], t(1), &[cap.clone()]).expect("acquire");
+    s.acquire(&engine, eps[1], t(5), &[cap.clone()]).expect("acquire");
+    assert_no_inversion(&s, &waiting, "after acquires");
+
+    // 2 (HIGH) and 4 (7) queue behind 1 (LOW); 3 (MED) queues behind 5 (3).
+    for (ep, id) in [(eps[0], 2u64), (eps[0], 4), (eps[1], 3)] {
+        s.wait(&engine, ep, t(id), &[cap.clone()]).expect("wait");
+        waiting.push((ep, t(id)));
+        assert_no_inversion(&s, &waiting, "after a wait");
+    }
+    // The inversion the mechanism exists to prevent: a LOW holder with a HIGH waiter.
+    assert!(
+        s.effective_priority(t(1)) >= HIGH,
+        "INV-PRIO-1: the LOW holder did not inherit its HIGH waiter's priority"
+    );
+
+    // Releasing hands the endpoint to the STRONGEST waiter (2 = HIGH), not the first in line — and the
+    // property must still hold for whoever is left waiting.
+    let winner = s.release(eps[0], t(1)).expect("release");
+    assert_eq!(
+        winner,
+        Some(t(2)),
+        "INV-PRIO-5: the endpoint went to a weaker waiter than the strongest one"
+    );
+    assert_no_inversion(&s, &waiting, "after handoff");
+    let second = s.release(eps[0], t(2)).expect("release");
+    assert_eq!(second, Some(t(4)), "the remaining waiter must be handed the endpoint");
+    assert_no_inversion(&s, &waiting, "after second handoff");
+}
+
+/// INV-PRIO-2: donation must follow the WHOLE chain. A→B→C: C holds what B waits on, B holds what A
+/// waits on, so C must inherit A's priority — not merely B's.
+#[test]
+fn donation_follows_the_whole_chain_not_just_one_hop() {
+    let (engine, cap) = engine();
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit(t(1), HIGH); // A
+    s.admit(t(2), MED); // B
+    s.admit(t(3), LOW); // C
+    let ep_b = Endpoint(1);
+    let ep_c = Endpoint(2);
+    s.acquire(&engine, ep_b, t(2), &[cap.clone()]).expect("B holds ep_b");
+    s.acquire(&engine, ep_c, t(3), &[cap.clone()]).expect("C holds ep_c");
+    s.wait(&engine, ep_c, t(2), &[cap.clone()]).expect("B waits on C");
+    s.wait(&engine, ep_b, t(1), &[cap.clone()]).expect("A waits on B");
+
+    assert_eq!(
+        s.effective_priority(t(3)),
+        HIGH,
+        "INV-PRIO-2: C inherited only one hop — the chain A->B->C must donate A's priority to C"
+    );
+    assert_eq!(
+        s.effective_priority(t(2)),
+        HIGH,
+        "B holds what A waits on, so B must also carry A's priority"
+    );
+}
+
+/// INV-PRIO-3: donation ends at release — the ex-holder returns to exactly its base priority.
+#[test]
+fn donation_stops_the_moment_the_endpoint_is_released() {
+    let (engine, cap) = engine();
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit(t(1), LOW);
+    s.admit(t(2), HIGH);
+    let ep = Endpoint(5);
+    s.acquire(&engine, ep, t(1), &[cap.clone()]).expect("acquire");
+    s.wait(&engine, ep, t(2), &[cap.clone()]).expect("wait");
+    assert_eq!(s.effective_priority(t(1)), HIGH, "donation did not apply");
+    s.release(ep, t(1)).expect("release");
+    assert_eq!(
+        s.effective_priority(t(1)),
+        LOW,
+        "INV-PRIO-3: the ex-holder kept donated priority after releasing — scheduling escalation"
+    );
+    // And the new holder carries only its own base (nobody waits on it now).
+    assert_eq!(s.effective_priority(t(2)), HIGH);
+}
+
+/// INV-PRIO-4: donation lends, it never manufactures. No task's effective priority may exceed the
+/// highest BASE priority admitted, in any configuration of holds and waits.
+#[test]
+fn donation_never_manufactures_priority_above_the_highest_base() {
+    let (engine, cap) = engine();
+    let mut s = PriorityScheduler::new(ACQ);
+    let bases = [(1u64, LOW), (2, MED), (3, Priority(7)), (4, LOW)];
+    for (id, p) in bases {
+        s.admit(t(id), p);
+    }
+    let max_base = bases.iter().map(|(_, p)| *p).max().expect("nonempty");
+    // A dense tangle: every task holds one endpoint and waits on the next, round-robin.
+    for i in 0..4u64 {
+        s.acquire(&engine, Endpoint(i), t(i + 1), &[cap.clone()])
+            .expect("acquire");
+    }
+    for i in 0..4u64 {
+        let holder_of_next = (i + 1) % 4;
+        // t(i+1) waits on the endpoint held by the next task.
+        let _ = s.wait(&engine, Endpoint(holder_of_next), t(i + 1), &[cap.clone()]);
+    }
+    for id in 1..=4u64 {
+        assert!(
+            s.effective_priority(t(id)) <= max_base,
+            "INV-PRIO-4: task {id} has effective priority above every base priority in the system"
+        );
+    }
+}
+
+/// INV-PRIO-5: the scheduler must never dispatch a Blocked task, and never dispatch a Ready task
+/// while a strictly stronger Ready task exists. Checked over many dispatches.
+#[test]
+fn the_scheduler_never_runs_a_weaker_ready_task_over_a_stronger_one() {
+    let (engine, cap) = engine();
+    let mut s = PriorityScheduler::new(ACQ);
+    for (id, p) in [(1u64, LOW), (2, MED), (3, HIGH), (4, Priority(2))] {
+        s.admit(t(id), p);
+    }
+    // Block 3 (HIGH) on an endpoint held by 1 (LOW) — the classic inversion setup.
+    let ep = Endpoint(9);
+    s.acquire(&engine, ep, t(1), &[cap.clone()]).expect("acquire");
+    s.wait(&engine, ep, t(3), &[cap.clone()]).expect("wait");
+
+    for round in 0..12 {
+        let Some(next) = s.schedule_next() else { break };
+        assert_ne!(
+            s.state(next),
+            Some(TaskState::Blocked),
+            "INV-PRIO-5: dispatched a BLOCKED task (round {round})"
+        );
+        let chosen = s.effective_priority(next);
+        for id in 1..=4u64 {
+            if s.state(t(id)) == Some(TaskState::Ready) {
+                assert!(
+                    s.effective_priority(t(id)) <= chosen,
+                    "INV-PRIO-5: ran {next:?} (prio {chosen:?}) while Ready task {id} was stronger"
+                );
+            }
+        }
+        s.finish(next);
+    }
+}
+
+/// INV-PRIO-6: a donation CYCLE (mutual blocking — a deadlock) must terminate the computation rather
+/// than recurse forever. The scheduler cannot fix the deadlock; it must not crash because of it.
+#[test]
+fn a_donation_cycle_terminates_instead_of_recursing() {
+    let (engine, cap) = engine();
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit(t(1), MED);
+    s.admit(t(2), HIGH);
+    let ep1 = Endpoint(11);
+    let ep2 = Endpoint(22);
+    s.acquire(&engine, ep1, t(1), &[cap.clone()]).expect("1 holds ep1");
+    s.acquire(&engine, ep2, t(2), &[cap.clone()]).expect("2 holds ep2");
+    // Each waits on the other's endpoint: a cycle.
+    s.wait(&engine, ep2, t(1), &[cap.clone()]).expect("1 waits on ep2");
+    s.wait(&engine, ep1, t(2), &[cap.clone()]).expect("2 waits on ep1");
+    // If donation recursed through the cycle this would never return (or overflow the stack).
+    let p1 = s.effective_priority(t(1));
+    let p2 = s.effective_priority(t(2));
+    assert!(p1 >= MED && p2 >= HIGH, "cycle handling lost base priority");
+    assert!(
+        p1 <= HIGH && p2 <= HIGH,
+        "INV-PRIO-4/6: a cycle manufactured priority"
+    );
+    // Both are blocked, so nothing is runnable — a deadlock is visible, not a crash.
+    assert_eq!(s.state(t(1)), Some(TaskState::Blocked));
+    assert_eq!(s.state(t(2)), Some(TaskState::Blocked));
+}
+
+/// INV-PRIO-7: an unauthorized acquire or wait changes NOTHING — no holder, no blocked state, no
+/// donation. Scheduling state is authority-relevant: an unauthorized `wait` would let any task force
+/// a donation onto a holder.
+#[test]
+fn an_unauthorized_acquire_or_wait_changes_no_scheduling_state() {
+    let (engine, cap) = engine();
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit(t(1), LOW);
+    s.admit(t(2), HIGH);
+    let ep = Endpoint(3);
+
+    // No capability offered: the acquire must be refused and leave the endpoint free.
+    assert_eq!(s.acquire(&engine, ep, t(1), &[]), Err(SchedError::Unauthorized));
+    assert_eq!(s.holder_of(ep), None, "INV-PRIO-7: an unauthorized acquire took the endpoint");
+
+    // Legitimate holder, then an unauthorized wait: no blocking, and NO donation.
+    s.acquire(&engine, ep, t(1), &[cap.clone()]).expect("acquire");
+    assert_eq!(s.wait(&engine, ep, t(2), &[]), Err(SchedError::Unauthorized));
+    assert_eq!(
+        s.state(t(2)),
+        Some(TaskState::Ready),
+        "INV-PRIO-7: an unauthorized wait blocked the caller anyway"
+    );
+    assert_eq!(
+        s.effective_priority(t(1)),
+        LOW,
+        "INV-PRIO-7: an unauthorized wait forced a donation onto the holder"
+    );
+    // An unknown task is refused too, with the state of known tasks untouched.
+    assert_eq!(
+        s.wait(&engine, ep, t(99), &[cap.clone()]),
+        Err(SchedError::UnknownTask)
+    );
+    assert_eq!(s.effective_priority(t(1)), LOW);
 }
