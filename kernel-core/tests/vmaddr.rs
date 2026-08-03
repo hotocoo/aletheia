@@ -255,3 +255,92 @@ fn candidate_addresses(plan: &AddrPlan) -> Vec<usize> {
     }
     out
 }
+
+/// The device rule is the RAM rule inverted — proved as a property, not by example (REQ-DRV-005,
+/// ADR-037). A driver must be able to map a PCI BAR (physical memory the allocator does not own), and
+/// the same API must be UNABLE to map RAM the allocator does own: that would give one frame a second
+/// mapping with different cacheability and side effects, invisible to the ownership model.
+#[test]
+fn no_page_is_mappable_as_both_ram_and_device() {
+    for (name, plan) in PLANS {
+        let ram_base = plan.ram_base();
+        let ram_len = plan.ram_len();
+        // Sweep the whole window plus a margin either side, in page steps.
+        let start = ram_base.saturating_sub(4 * PAGE_SIZE);
+        let end = ram_base + ram_len + 4 * PAGE_SIZE;
+        let mut pa = start;
+        let mut ram_ok = 0usize;
+        let mut dev_ok = 0usize;
+        while pa < end {
+            // Use a VA that is legal on every plan so only the PHYSICAL rule can differ.
+            let va = PAGE_SIZE * 4;
+            let as_ram = plan.validate_map(va, pa).is_ok();
+            let as_device = plan.validate_map_device(va, pa).is_ok();
+            assert!(
+                !(as_ram && as_device),
+                "{name}: {pa:#x} is mappable as BOTH ram and device — the rules overlap"
+            );
+            let in_window = pa >= ram_base && pa + PAGE_SIZE <= ram_base + ram_len;
+            assert_eq!(as_ram, in_window, "{name}: ram rule wrong at {pa:#x}");
+            assert_eq!(
+                as_device,
+                !(pa < ram_base + ram_len && pa + PAGE_SIZE > ram_base),
+                "{name}: device rule wrong at {pa:#x}"
+            );
+            if as_ram {
+                ram_ok += 1;
+            }
+            if as_device {
+                dev_ok += 1;
+            }
+            pa += PAGE_SIZE;
+        }
+        // The sweep really exercised both outcomes (a rule that always refuses would "pass" above).
+        assert!(ram_ok > 0 && dev_ok > 0, "{name}: sweep proved nothing");
+    }
+}
+
+#[test]
+fn a_device_mapping_still_obeys_every_virtual_address_rule() {
+    // The inversion is PHYSICAL only: a device mapping may not use a malformed VA either, and the
+    // reported fault is about the VA — the caller learns the real defect.
+    for (name, plan) in PLANS {
+        // Well outside any window, so the physical side is always acceptable.
+        let far_pa = 0xC000_0000_0000usize & !(PAGE_SIZE - 1);
+        assert_eq!(
+            plan.validate_map_device(PAGE_SIZE + 1, far_pa),
+            Err(MapFault::UnalignedVirt),
+            "{name}: an unaligned VA must be refused for a device mapping too"
+        );
+        assert_eq!(
+            plan.validate_map_device(0, far_pa),
+            Err(MapFault::NullVirt),
+            "{name}: the null page is never mappable, device or not"
+        );
+        // And an unaligned PHYSICAL address is still an unaligned physical address.
+        assert_eq!(
+            plan.validate_map_device(PAGE_SIZE * 4, far_pa + 1),
+            Err(MapFault::UnalignedPhys),
+            "{name}: an unaligned device PA must be refused"
+        );
+    }
+}
+
+#[test]
+fn the_kernel_image_span_is_refused_for_device_mappings_as_well() {
+    const START: usize = 0x4000_0000;
+    const END: usize = START + 0x20_0000;
+    let plan = AddrPlan::new(48, true, 0x8000_0000, 0x1000_0000).with_protected(START, END);
+    let far_pa = 0xC000_0000_0000usize;
+    let mut va = START;
+    while va < END {
+        assert_eq!(
+            plan.validate_map_device(va, far_pa),
+            Err(MapFault::ProtectedVirt),
+            "a device mapping over the kernel image must be refused at {va:#x}"
+        );
+        va += PAGE_SIZE;
+    }
+    // Just past the span is fine again (the span is half-open).
+    assert!(plan.validate_map_device(END, far_pa).is_ok());
+}

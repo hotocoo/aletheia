@@ -814,6 +814,33 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         frames::free(spare);
     }
 
+    // Device mapping (REQ-DRV-005, ADR-037). A driver must be able to map registers the boot map does
+    // not cover — a PCI BAR above 4 GiB — but the SAME API must never be usable to alias RAM as MMIO,
+    // which would give a task's frame a second mapping with different cacheability and side effects,
+    // invisible to the ownership model. The physical rule is therefore INVERTED, not dropped, and both
+    // directions are proved here: RAM is refused, and a plainly non-RAM address is accepted.
+    {
+        let plan = addr_plan();
+        let ram_page = match frames::alloc_zeroed() {
+            Some(f) => f,
+            None => return Err((n + 1, "device: no frame for the device-admission checks")),
+        };
+        let ram_pa = ram_page.addr();
+        check!(
+            plan.validate_map_device(ram_pa, ram_pa) == Err(vmaddr::MapFault::PhysIsRam),
+            "device: mapping RAM the allocator owns as device memory is refused (no MMIO alias of a frame)"
+        );
+        check!(
+            plan.validate_map(ram_pa, ram_pa).is_ok(),
+            "device: the same page is still a legal RAM mapping (the rule is inverted, not stricter)"
+        );
+        check!(
+            !map_device_range(ram_pa, 0x1000),
+            "device: the mapping API itself refuses a RAM range, not just the check"
+        );
+        frames::free(ram_page);
+    }
+
     Ok(n)
 }
 
@@ -1092,6 +1119,74 @@ pub fn map_kernel_frame(root: u64, va: u64, pa: u64) -> bool {
             Err(_) => false,
         }
     };
+    if wp_was_set {
+        // SAFETY: re-arm the write-protect bit exactly as found.
+        unsafe { Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT)) };
+    }
+    ok
+}
+
+/// Identity-map `[base, base+len)` as **device** memory (RW, never executable) in the ACTIVE root, so a
+/// driver can reach registers the kernel's boot-time map does not cover (REQ-DRV-005, ADR-037).
+///
+/// This exists because a PCI BAR is wherever the firmware put it — on q35, above 4 GiB, outside both
+/// the kernel's MMIO coverage and the frame-allocator window. Every page goes through
+/// `AddrPlan::validate_map_device`, which applies all the ordinary VA rules but **inverts** the
+/// physical rule: the address must NOT be RAM the allocator owns, so this API can never be used to
+/// alias a task's frame as MMIO. Pages already mapped are left alone (the boot map already covers
+/// sub-4 GiB MMIO); a refusal anywhere returns `false` having mapped nothing further.
+pub fn map_device_range(base: usize, len: usize) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let plan = addr_plan();
+    let first = base & !0xFFF;
+    let last = (base + len - 1) & !0xFFF;
+    // Device memory is writable, so W^X makes it non-executable — and `memattr` refuses an executable
+    // device mapping outright (AttrFault::ExecutableDevice).
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+    if !attrs_ok(flags) {
+        return false;
+    }
+    let parent =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let root = active_root();
+
+    let wp_was_set = Cr0::read().contains(Cr0Flags::WRITE_PROTECT);
+    if wp_was_set {
+        // SAFETY: clearing WP only relaxes ring-0 write protection; restored below. Single-core here.
+        unsafe { Cr0::update(|f| f.remove(Cr0Flags::WRITE_PROTECT)) };
+    }
+    let mut ok = true;
+    let mut pa = first;
+    while pa <= last {
+        if plan.validate_map_device(pa, pa).is_err() {
+            ok = false;
+            break;
+        }
+        if translate_in(root, pa as u64).is_none() {
+            // SAFETY: `root` is the live PML4; `pa` is device memory outside the allocator window
+            // (checked above); intermediate tables come from our own allocator.
+            let mapped = unsafe {
+                let mut mapper = mapper_for(root);
+                let page = Page::<Size4KiB>::containing_address(VirtAddr::new(pa as u64));
+                let frame = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(pa as u64));
+                let mut fa = frames::GlobalFrames;
+                match mapper.map_to_with_table_flags(page, frame, flags, parent, &mut fa) {
+                    Ok(flush) => {
+                        flush.flush();
+                        true
+                    }
+                    Err(_) => false,
+                }
+            };
+            if !mapped {
+                ok = false;
+                break;
+            }
+        }
+        pa += 0x1000;
+    }
     if wp_was_set {
         // SAFETY: re-arm the write-protect bit exactly as found.
         unsafe { Cr0::update(|f| f.insert(Cr0Flags::WRITE_PROTECT)) };

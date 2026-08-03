@@ -58,6 +58,12 @@ pub enum MapFault {
     /// fresh, writable page over kernel TEXT — exactly the write-to-code path W^X closes — and
     /// unmapping there would pull `.data` or the stack out from under the running kernel.
     ProtectedVirt,
+    /// `pa` lies INSIDE the frame-allocator window on a request to map **device** memory (REQ-DRV-005).
+    /// The device rule is the mirror image of [`MapFault::PhysOutOfRange`]: RAM must not be mapped as
+    /// MMIO. Doing so would give one physical page two mappings with different cacheability and side
+    /// effects, and would let a "device" mapping reach a frame some task owns — through a path the
+    /// ownership model (ADR-030) never sees.
+    PhysIsRam,
 }
 
 impl MapFault {
@@ -71,6 +77,7 @@ impl MapFault {
             MapFault::NullVirt => "va-null-page",
             MapFault::PhysOutOfRange => "pa-out-of-window",
             MapFault::ProtectedVirt => "va-kernel-image",
+            MapFault::PhysIsRam => "pa-is-ram",
         }
     }
 }
@@ -208,6 +215,36 @@ impl AddrPlan {
         };
         if pa < self.ram_base || end > window_end {
             return Err(MapFault::PhysOutOfRange);
+        }
+        Ok(())
+    }
+
+    /// Is `va -> pa` a legal mapping request for **device** memory (MMIO)? Every
+    /// [`validate_unmap`](Self::validate_unmap) rule applies to `va`, and `pa` must be page-aligned —
+    /// but where [`validate_map`](Self::validate_map) requires the physical page to be INSIDE the
+    /// frame-allocator window, this requires it to be OUTSIDE (REQ-DRV-005).
+    ///
+    /// That inversion is the whole point. A driver legitimately needs to reach physical addresses the
+    /// allocator does not own (a PCI BAR sits wherever the firmware put it, above 4 GiB on q35), so the
+    /// RAM rule cannot apply. What must NOT happen is the reverse: mapping RAM as MMIO, which would
+    /// alias a frame some task owns under different cacheability and side-effect rules, through a path
+    /// the ownership model never sees. Neither call can express the other's mistake.
+    pub fn validate_map_device(&self, va: usize, pa: usize) -> Result<(), MapFault> {
+        self.validate_unmap(va)?;
+        if !pa.is_multiple_of(PAGE_SIZE) {
+            return Err(MapFault::UnalignedPhys);
+        }
+        let end = match pa.checked_add(PAGE_SIZE) {
+            Some(e) => e,
+            None => return Err(MapFault::PhysOutOfRange),
+        };
+        let window_end = match self.ram_base.checked_add(self.ram_len) {
+            Some(e) => e,
+            None => return Err(MapFault::PhysOutOfRange),
+        };
+        // Any overlap with the allocator window at all — not merely containment — is a refusal.
+        if pa < window_end && end > self.ram_base {
+            return Err(MapFault::PhysIsRam);
         }
         Ok(())
     }
