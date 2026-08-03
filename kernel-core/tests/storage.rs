@@ -212,3 +212,174 @@ fn torn_journal_payload_is_rejected() {
         "corrupt journal payload ⇒ home unchanged"
     );
 }
+
+// ---------------------------------------------------------------------------
+// INV-STORE-ERR contract (docs/INVARIANT-CONTRACTS.md) — storage error semantics, ALET-P1-020.
+//
+// A storage stack's error behavior IS its safety story: a swallowed device error becomes silent data
+// loss, and an error that cannot be told apart from another one cannot be handled correctly.
+// ---------------------------------------------------------------------------
+
+use kernel_core::fs::{Filesystem, FsError, FILE_DATA_START};
+use kernel_core::storage::MemBlockDevice;
+
+/// A device that fails one specific operation, so a single error can be traced end to end.
+struct FailingDevice {
+    inner: MemBlockDevice,
+    fail_write_at: Option<usize>,
+    fail_flush: bool,
+}
+
+impl BlockDevice for FailingDevice {
+    fn num_blocks(&self) -> usize {
+        self.inner.num_blocks()
+    }
+    fn read_block(&self, idx: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+        self.inner.read_block(idx, buf)
+    }
+    fn write_block(&mut self, idx: usize, buf: &[u8]) -> Result<(), StorageError> {
+        if self.fail_write_at == Some(idx) {
+            return Err(StorageError::Device);
+        }
+        self.inner.write_block(idx, buf)
+    }
+    fn flush(&mut self) -> Result<(), StorageError> {
+        if self.fail_flush {
+            return Err(StorageError::Device);
+        }
+        self.inner.flush()
+    }
+}
+
+/// INV-STORE-ERR-1: the error KINDS are distinguishable — a caller can tell "you asked for the wrong
+/// size" from "that block does not exist" from "the device failed". Collapsing them would make the only
+/// possible response to any error the same one.
+#[test]
+fn every_error_kind_is_distinguishable_at_its_own_boundary() {
+    let dev = MemBlockDevice::new(8);
+    let mut buf = [0u8; 16]; // deliberately not BLOCK_SIZE
+    assert_eq!(
+        dev.read_block(0, &mut buf),
+        Err(StorageError::BadBlockSize),
+        "a wrong-sized buffer must be its own error"
+    );
+    let mut full = [0u8; BLOCK_SIZE];
+    assert_eq!(
+        dev.read_block(99, &mut full),
+        Err(StorageError::OutOfRange),
+        "a block past the device must be its own error"
+    );
+    // And the three are genuinely different values, not aliases.
+    assert_ne!(StorageError::BadBlockSize, StorageError::OutOfRange);
+    assert_ne!(StorageError::OutOfRange, StorageError::Device);
+    assert_ne!(StorageError::Device, StorageError::TooLarge);
+}
+
+/// INV-STORE-ERR-2: a device error is SURFACED, never swallowed. The journal reports it, and the caller
+/// therefore knows the transaction did not commit — the difference between a failure and silent loss.
+#[test]
+fn a_device_error_surfaces_through_the_journal_rather_than_being_swallowed() {
+    let mut dev = FailingDevice {
+        inner: MemBlockDevice::new(FILE_DATA_START + 32),
+        fail_write_at: Some(0), // the commit record itself
+        fail_flush: false,
+    };
+    let mut journal = Journal::new();
+    let mut block = [0u8; BLOCK_SIZE];
+    block.fill(0x5A);
+    let out = journal.commit(&mut dev, &[(DATA_START + 1, block)]);
+    assert_eq!(
+        out,
+        Err(StorageError::Device),
+        "INV-STORE-ERR-2: a failed commit-record write did not surface"
+    );
+    // And the home block was never written: a refused commit leaves the prior state.
+    let mut read = [0u8; BLOCK_SIZE];
+    dev.read_block(DATA_START + 1, &mut read).expect("read");
+    assert!(
+        read.iter().all(|&b| b == 0),
+        "INV-STORE-ERR-2: a failed commit still wrote its home block"
+    );
+
+    // A failing FLUSH is equally load-bearing: it is the durability barrier, so swallowing it would
+    // report durability that does not exist.
+    let mut dev2 = FailingDevice {
+        inner: MemBlockDevice::new(FILE_DATA_START + 32),
+        fail_write_at: None,
+        fail_flush: true,
+    };
+    assert_eq!(
+        Journal::new().commit(&mut dev2, &[(DATA_START + 1, block)]),
+        Err(StorageError::Device),
+        "INV-STORE-ERR-2: a failed flush was reported as success"
+    );
+}
+
+/// INV-STORE-ERR-3: the filesystem PRESERVES the device error rather than flattening it into a generic
+/// failure — `FsError::Storage(Device)` keeps the cause, while its own refusals keep their own names.
+#[test]
+fn the_filesystem_preserves_the_device_error_and_keeps_its_own_refusals_distinct() {
+    let mut dev = FailingDevice {
+        inner: MemBlockDevice::new(FILE_DATA_START + 32),
+        fail_write_at: None,
+        fail_flush: false,
+    };
+    Filesystem::format(&mut dev).expect("format");
+    let mut fs = Filesystem::mount(&mut dev).expect("mount");
+
+    // Its own refusals are its own names, not Storage(...).
+    assert_eq!(fs.create(&mut dev, "", b"x"), Err(FsError::BadName));
+    fs.create(&mut dev, "a", b"x").expect("create");
+    assert_eq!(fs.create(&mut dev, "a", b"y"), Err(FsError::Exists));
+    assert_eq!(fs.read(&dev, "missing"), Err(FsError::NotFound));
+
+    // A device failure keeps its cause all the way up.
+    dev.fail_flush = true;
+    assert_eq!(
+        fs.create(&mut dev, "b", b"z"),
+        Err(FsError::Storage(StorageError::Device)),
+        "INV-STORE-ERR-3: the device error was flattened"
+    );
+}
+
+/// INV-STORE-ERR-4: a refused operation is a NO-OP. Proven by comparing the whole device image before and
+/// after every refusal — the strongest form of "nothing happened".
+#[test]
+fn every_refusal_leaves_the_device_image_byte_identical() {
+    let mut dev = MemBlockDevice::new(FILE_DATA_START + 16);
+    Filesystem::format(&mut dev).expect("format");
+    let mut fs = Filesystem::mount(&mut dev).expect("mount");
+    fs.create(&mut dev, "keep", b"payload").expect("create");
+    let before = dev.snapshot();
+
+    let long = "y".repeat(64);
+    let refusals: [(&str, &[u8]); 4] = [
+        ("keep", b"other"),    // Exists
+        ("", b"x"),            // BadName
+        ("a/b", b"x"),         // BadName
+        (long.as_str(), b"x"), // BadName
+    ];
+    for (name, data) in refusals {
+        assert!(fs.create(&mut dev, name, data).is_err());
+        assert!(
+            dev.snapshot() == before,
+            "INV-STORE-ERR-4: a refused create changed the device image (name={name:?})"
+        );
+    }
+    assert!(fs.remove(&mut dev, "absent").is_err());
+    assert!(
+        dev.snapshot() == before,
+        "INV-STORE-ERR-4: a refused remove changed the device image"
+    );
+    // A journal transaction naming a reserved block is refused with nothing written.
+    let mut block = [0u8; BLOCK_SIZE];
+    block.fill(0xEE);
+    assert_eq!(
+        Journal::new().commit(&mut dev, &[(0, block)]),
+        Err(StorageError::TooLarge)
+    );
+    assert!(
+        dev.snapshot() == before,
+        "INV-STORE-ERR-4: a refused transaction wrote something"
+    );
+}
