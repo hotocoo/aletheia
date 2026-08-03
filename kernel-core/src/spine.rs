@@ -472,6 +472,37 @@ impl Store {
     pub fn event_count(&self) -> usize {
         self.events.len()
     }
+
+    /// Every live entity, in id order. Read-only iteration for the layer that makes the store durable
+    /// (REQ-STOR-003): persistence needs to see what is here without owning how it is stored.
+    pub fn entities(&self) -> impl Iterator<Item = &Entity> {
+        self.entities.values().filter(|e| !e.deleted)
+    }
+
+    /// The next id this store would mint. Persisted so ids stay unique across a reboot — a restored
+    /// store must not hand out an id a previous boot already used.
+    pub fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Rebuild a store from entities read back from durable storage, continuing the id sequence at
+    /// `next_id`. Deliberately narrow: it takes whole entities (each one's `content_hash` already
+    /// re-verified by the caller against its content) and mints nothing.
+    pub fn restore(entities: Vec<Entity>, next_id: u64) -> Self {
+        let mut map = BTreeMap::new();
+        let mut highest = next_id;
+        for e in entities {
+            if e.id >= highest {
+                highest = e.id + 1;
+            }
+            map.insert(e.id, e);
+        }
+        Store {
+            entities: map,
+            events: Vec::new(),
+            next_id: highest,
+        }
+    }
 }
 
 impl Default for Store {

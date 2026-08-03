@@ -49,9 +49,10 @@ echo "$OUT" | grep -q "ALL 55 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: v
 echo "$OUT" | grep -q "EL0-BOUNDARY INVARIANTS HOLD"  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "VIRTIO-BLK INVARIANTS HOLD"    || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
 echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
-echo "$OUT" | grep -q "ALL 12 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
+echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
 # The virtio leg proves the namespace over the REAL device too: 5 driver invariants + the 12 fs ones.
-echo "$OUT" | grep -q "ALL 17 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk count wrong (driver + filesystem over the real device)"; fail=1; }
+echo "$OUT" | grep -q "ALL 20 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk count wrong (driver + filesystem over the real device)"; fail=1; }
+echo "$OUT" | grep -q "ALL 9 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then

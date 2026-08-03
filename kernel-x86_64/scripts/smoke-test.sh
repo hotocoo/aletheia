@@ -76,8 +76,9 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'live W\^X audit: .* 0 violations' "$LOG" \
    && grep -q 'SMP INVARIANTS HOLD' "$LOG" \
    && grep -q 'RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 12 FILESYSTEM INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 17 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 15 FILESYSTEM INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 20 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 9 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
   echo "SMOKE TEST: PASS"
   rm -rf "$WORK"

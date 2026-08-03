@@ -98,6 +98,23 @@ CONTRACT=(
   "fs: the namespace survives a remount (all durable state is on the device)"
   "fs: a create that dies before its commit record leaves the namespace unchanged"
   "fs: a create that dies after its commit record is completed by the next mount"
+  # Atomic UPDATE (REQ-FS-001, ADR-035 + ADR-038's prerequisite). "remove then create" is two
+  # transactions, so a crash between them loses the NAME — the one outcome an update must never have.
+  "fs: replacing an object's contents updates it in one transaction"
+  "fs: a replace that dies before its commit record keeps the OLD contents (never nothing)"
+  "fs: a replace that dies after its commit record is completed by the next mount"
+  # The OS remembers (REQ-STOR-003, ADR-038). A store that reloads is not enough: loading must
+  # RE-VERIFY each entity's content address, so a damaged medium is a refusal rather than accepted
+  # state. Every target must agree, because "your data is wrong" must not depend on the CPU.
+  "persist: a blank medium yields an empty store, not a failure"
+  "persist: saving the store writes one object atomically"
+  "persist: a reloaded store holds the same entities, byte for byte"
+  "persist: the id sequence continues across a reload (no id is ever reissued)"
+  "persist: a single flipped content byte is REFUSED, not restored (content address re-verified)"
+  "persist: a flipped metadata byte is REFUSED (the whole record is checksummed)"
+  "persist: an unknown record format is refused"
+  "persist: a truncated record is refused"
+  "persist: the witness survives a remount and counts the boot"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

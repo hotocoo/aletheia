@@ -336,6 +336,85 @@ impl Filesystem {
         Ok(())
     }
 
+    /// Replace `name`'s contents, as ONE transaction. Creates the name if it does not exist yet.
+    ///
+    /// This exists because "remove then create" is TWO transactions, and a crash between them leaves
+    /// the name **gone** — data loss where the object had merely been updated. One transaction carries
+    /// the new data blocks, the old blocks zeroed (erase on delete, ADR-033), the bitmap and the
+    /// directory, so a crash leaves either the old contents or the new ones, never neither.
+    ///
+    /// Because the transaction must hold both extents, the bound is tighter than [`create`]'s: old
+    /// blocks + new blocks + 2 must fit [`MAX_ENTRIES`], and a request above that is refused with
+    /// [`FsError::TooLarge`] rather than split.
+    ///
+    /// [`create`]: Filesystem::create
+    pub fn replace<D: BlockDevice>(
+        &mut self,
+        dev: &mut D,
+        name: &str,
+        data: &[u8],
+    ) -> Result<(), FsError> {
+        if !valid_name(name) {
+            return Err(FsError::BadName);
+        }
+        let mut dir = self.dir(dev)?;
+        let slot = match Self::find_slot(&dir, name) {
+            Some(s) => s,
+            None => return self.create(dev, name, data), // nothing to replace
+        };
+        let old = Self::decode(&dir, slot).ok_or(FsError::Corrupt)?;
+        let old_blocks = old.blocks();
+        if old.start < FILE_DATA_START || old.start + old_blocks > dev.num_blocks() {
+            return Err(FsError::Corrupt);
+        }
+        let new_blocks = data.len().div_ceil(BLOCK_SIZE);
+        if new_blocks + old_blocks + 2 > MAX_ENTRIES {
+            return Err(FsError::TooLarge);
+        }
+
+        // Free the old extent in a WORKING copy of the bitmap first, so the new extent may reuse those
+        // very blocks — an in-place update of the same size is then the common, cheap case.
+        let mut bitmap = self.bitmap(dev)?;
+        let old_first = old.start - FILE_DATA_START;
+        for i in 0..old_blocks {
+            Self::set_bit(&mut bitmap, old_first + i, false);
+        }
+        let cap = Self::data_capacity(dev);
+        let first = match Self::find_extent(&bitmap, cap, new_blocks) {
+            Some(f) => f,
+            None => return Err(FsError::NoSpace), // nothing written: the bitmap copy is discarded
+        };
+
+        let mut updates: Vec<(usize, [u8; BLOCK_SIZE])> =
+            Vec::with_capacity(new_blocks + old_blocks + 2);
+        // Old blocks the new extent does NOT reuse are erased in this same transaction.
+        for i in 0..old_blocks {
+            let b = old_first + i;
+            if b < first || b >= first + new_blocks {
+                updates.push((FILE_DATA_START + b, [0u8; BLOCK_SIZE]));
+            }
+        }
+        for i in 0..new_blocks {
+            let mut blk = [0u8; BLOCK_SIZE];
+            let off = i * BLOCK_SIZE;
+            let end = core::cmp::min(off + BLOCK_SIZE, data.len());
+            blk[..end - off].copy_from_slice(&data[off..end]);
+            updates.push((FILE_DATA_START + first + i, blk));
+            Self::set_bit(&mut bitmap, first + i, true);
+        }
+        let off = slot * SLOT;
+        dir[off..off + SLOT].fill(0);
+        dir[off + E_NAME..off + E_NAME + name.len()].copy_from_slice(name.as_bytes());
+        put64(&mut dir, off + E_START, (FILE_DATA_START + first) as u64);
+        put64(&mut dir, off + E_LEN, data.len() as u64);
+        put64(&mut dir, off + E_FLAGS, F_USED);
+
+        updates.push((BITMAP_BLOCK, bitmap));
+        updates.push((DIR_BLOCK, dir));
+        self.journal.commit(dev, &updates)?;
+        Ok(())
+    }
+
     /// Read `name`'s contents. Refuses an entry whose extent does not lie on the device (`Corrupt`)
     /// rather than reading whatever is at that offset.
     pub fn read<D: BlockDevice>(&self, dev: &D, name: &str) -> Result<Vec<u8>, FsError> {
@@ -609,6 +688,64 @@ pub fn selftest_on<D: BlockDevice, F: FnMut(usize, bool, &str)>(
         replayed
     );
 
+    // 13. Replace is an UPDATE, not a delete plus a create: the name is continuously present.
+    let v1: Vec<u8> = (0..(BLOCK_SIZE + 3)).map(|i| (i % 89) as u8).collect();
+    let v2: Vec<u8> = (0..(2 * BLOCK_SIZE - 5)).map(|i| (i % 71) as u8).collect();
+    check!(
+        "fs: replacing an object's contents updates it in one transaction",
+        fs.create(dev, "mutable", &v1).is_ok()
+            && fs.read(dev, "mutable").as_deref() == Ok(&v1[..])
+            && fs.replace(dev, "mutable", &v2).is_ok()
+            && fs.read(dev, "mutable").as_deref() == Ok(&v2[..])
+            && fs
+                .list(dev)
+                .map(|l| l.iter().filter(|e| e.name == "mutable").count())
+                == Ok(1)
+    );
+
+    // 14/15. Where a replace's commit pivot falls depends on whether the new extent reuses the old
+    //     blocks, which depends on the live free map — so it is MEASURED, not predicted: one run over a
+    //     device that never faults reports the total mutation count, and `u` follows from the protocol
+    //     (u journal writes, flush, record, flush, u home writes, flush). `other` has the same length as
+    //     the current contents, so the free layout — and therefore `u` — is identical on every run.
+    let other: Vec<u8> = v2.iter().map(|b| b ^ 0xFF).collect();
+    let total = {
+        let mut counting = FaultDevice::new(dev, usize::MAX);
+        let _ = fs.replace(&mut counting, "mutable", &other);
+        counting.used()
+    };
+    let u = total.saturating_sub(3) / 2;
+    let _ = fs.replace(dev, "mutable", &v2); // back to the OLD contents
+
+    // 14. A replace that dies before its commit record keeps the OLD contents — not nothing. This is
+    //     the reason replace exists: "remove then create" would leave the name GONE at this crash point.
+    {
+        let mut faulty = FaultDevice::new(dev, u + 1);
+        let _ = fs.replace(&mut faulty, "mutable", &other);
+    }
+    let survived = match Filesystem::mount(dev) {
+        Ok(fs2) => fs2.read(dev, "mutable").as_deref() == Ok(&v2[..]),
+        Err(_) => false,
+    };
+    check!(
+        "fs: a replace that dies before its commit record keeps the OLD contents (never nothing)",
+        total > 3 && survived
+    );
+
+    // 15. A replace that dies after its commit record is completed by the next mount — the NEW contents.
+    {
+        let mut faulty = FaultDevice::new(dev, u + 3);
+        let _ = fs.replace(&mut faulty, "mutable", &other);
+    }
+    let finished = match Filesystem::mount(dev) {
+        Ok(fs2) => fs2.read(dev, "mutable").as_deref() == Ok(&other[..]),
+        Err(_) => false,
+    };
+    check!(
+        "fs: a replace that dies after its commit record is completed by the next mount",
+        finished
+    );
+
     Ok(n)
 }
 
@@ -621,6 +758,6 @@ mod tests {
     fn suite_holds_on_a_ram_disk() {
         let mut dev = MemBlockDevice::new(FILE_DATA_START + 256);
         let n = selftest_on(&mut dev, |_, _, _| {}).expect("every fs invariant holds");
-        assert_eq!(n, 12);
+        assert_eq!(n, 15);
     }
 }
