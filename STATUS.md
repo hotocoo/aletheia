@@ -3,7 +3,7 @@
 **As of:** 2026-08-03
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..039`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..040`.
 
 ## What Aletheia is
 
@@ -15,7 +15,48 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — the source itself gets a gate (2026-08-03, GAPS4 ALET-P2-003/004/005)
+## Latest wave — a layout you can check, and two addresses that must never translate (2026-08-03, GAPS4 ALET-P1-006/012)
+
+Each target knew its address-space layout as scattered literals — a RAM base in `frames`, a peripheral
+window in `vm`, a user VA in `usermode`, a stack in `linker.ld`. Nothing stated what the layout *was*, so
+nothing could check the properties a layout must have. Two of them were quietly false.
+
+- **Stacks had no guard.** Every kernel stack grows down into whatever the linker put below it — `.bss` on
+  the QEMU targets, neighbouring statics on x86-64. An overflow did not fault; it corrupted state silently
+  and surfaced later as impossible behavior. Now `linker.ld` reserves `__stack_guard` below
+  `__stack_bottom` (aarch64/RISC-V), and on x86-64 the guard is the first page of a page-aligned `KSTACK`
+  with `RSP0` moved above it. Each identity map **splits the containing block** — a 2 MiB block cannot have
+  a hole — and leaves that page with no descriptor at all.
+- **And VA 0 was mapped.** `vmaddr` has refused the null page at the mapping APIs since ADR-029, but every
+  target's *boot identity map* covered page 0 anyway: inside the peripheral device window on aarch64 and
+  RISC-V, as ordinary RAM on x86-64. A kernel null dereference therefore read — or **wrote** — a real MMIO
+  register or real memory instead of faulting. **Writing the layout check is what found it.** Punched out
+  on all three targets (RISC-V needs two levels of split, since a gigapage cannot have a hole either).
+- **`kernel_core::layout` — the layout is a declaration you can check.** A target declares named regions
+  with their privilege; `validate` refuses overlap, misalignment, a region containing the null page, and a
+  user region that merely **abuts** a kernel one (something that grows would cross the boundary without
+  ever being unmapped). Every boot suite runs the validation.
+- **Proved on the live tree.** Four `guard:` and three `layout:` invariants per target — no translation, no
+  leaf at any level, the stack's own pages still mapped (a guard that cost the kernel its stack would be
+  worse than none), the stack still W^X, VA 0 dead. Virtual-memory invariants 55 → 62 (aarch64/RISC-V) and
+  58 → 65 (x86-64); the guard-page and null-page behaviors joined `conformance.sh` (62 → **64** core
+  behaviors), because "a null dereference faults" must not depend on the CPU.
+- **The first version of the guard invariant was wrong, and the failure taught something.** It asserted
+  against `active_root()`, but by that point in the suite CR3 may hold a per-process space an earlier test
+  built — so it must assert against the **kernel's own** map (`kmap::root()`).
+- **KASLR: none, deliberately, with the reason recorded** rather than the absence implied. Every target
+  identity-maps, which is what keeps DMA auditable (a driver hands the device the address it writes
+  through), so randomizing the kernel base is a different memory model, not a flag — and KASLR defends
+  against reading a pointer and using it, whereas every effect here is capability-gated. What it would take
+  is written down: a higher-half split, an offset-mapped physical window, PIE images.
+- **Not claimed:** no guards around the heap or the SMP secondaries' stacks, and per-process spaces built
+  by copying the live tree get their own mappings — re-asserting both properties inside every derived space
+  is a named follow-on. **Register: 24 → 26 resolved, 35 → 33 open.**
+
+Gates after the wave: `quality-gate` PASS, `build-all` PASS, `e2e-all` PASS (each target booted twice),
+`conformance` PASS (64 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (73 requirements).
+
+## Previous wave — the source itself gets a gate (2026-08-03, GAPS4 ALET-P2-003/004/005)
 
 The boot gates prove the OS behaves. Nothing proved the **source** was in the state the project claims:
 formatting drifted, `clippy` was never run in CI, no advisory scan existed, no dependency's license had

@@ -128,3 +128,24 @@ corruption found much later. The answer is not "be careful": it is to make re-en
 | INV-REENTRY-3 | Every refusal is **counted**, so a caller that swallows one still leaves evidence. | A re-entry that happened once will happen again; the count is how a boot log says so. | `a_nested_entry_is_refused_and_leaves_evidence` |
 | INV-REENTRY-4 | Two CPUs entering at once (a missing lock, not a re-entry — same consequence) yields at most one inside. | The compare-exchange is what makes this the same mechanism rather than a second one. | `two_threads_entering_at_once_produce_exactly_one_winner` |
 | INV-REENTRY-5 | The section is never left active once the last token drops. | A leaked active state wedges fault handling permanently. | `the_section_is_never_left_active_after_the_last_token_drops` |
+
+---
+
+## INV-LAYOUT — address-space layout (REQ-MM-007 / REQ-MM-008, ADR-040)
+
+Each target knew its layout as scattered literals, so nothing could check the properties a layout must
+have. A layout you cannot check is a layout that drifts — and writing the check found a real hole.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-LAYOUT-1 | Declared regions never overlap, are page-aligned, and none contains the null page. | One address belonging to two things is a bug nobody can reason about. | `overlap_unaligned_null_and_missing_guards_are_all_refused` |
+| INV-LAYOUT-2 | A user-reachable region never merely ABUTS a kernel-only one: there is at least a guard page between them. | Something that grows (a stack, a heap) would cross the boundary without ever being unmapped. | `overlap_unaligned_null_and_missing_guards_are_all_refused` |
+| INV-LAYOUT-3 | The page below every kernel stack has **no translation**, and the stack's own pages still work. | A stack overflow must fault at the first byte past the stack rather than corrupt `.bss` silently — and a guard that cost the kernel its stack would be worse than none. | boot invariants `guard: …` on all three targets |
+| INV-LAYOUT-4 | **VA 0 has no translation in the live map.** | `vmaddr` refused mapping the null page through the mapping APIs, but every target's boot identity map COVERED page 0 — as device memory on aarch64/RISC-V and as RAM on x86-64 — so a kernel null dereference read or wrote real state instead of faulting. Found by writing INV-LAYOUT-1. | boot invariant `layout: VA 0 has NO translation …` on all three targets, and in the `conformance.sh` core contract |
+
+**KASLR posture (stated, not implied):** there is none, deliberately. Every target identity-maps, which is
+what keeps the DMA story auditable (a driver hands the device the address it writes through); randomizing
+the kernel's virtual base is therefore a different memory model, not a flag. And KASLR defends against an
+attacker who can read a pointer and use it, whereas Aletheia gates every effect on a capability, so a
+leaked kernel pointer is not itself authority. What it would take is recorded in `kernel-core/src/layout.rs`
+and ADR-040: a higher-half split, an offset-mapped physical window for DMA translation, and PIE images.

@@ -343,6 +343,8 @@ pub struct BuildReport {
     pub huge_leaves: usize,
     /// 4 KiB leaves (the image split).
     pub page_leaves: usize,
+    /// Pages deliberately left with NO leaf: the ring-0 stack guard (REQ-MM-007).
+    pub guard_pages: usize,
     /// 2 MiB regions split into 4 KiB pages because the image overlaps them.
     pub split_blocks: usize,
     /// Frames consumed by the tree itself.
@@ -372,10 +374,35 @@ pub fn build(map: &MemoryMapOwned) -> Option<(u64, BuildReport)> {
     while pa < ceiling {
         let pdpt = ensure_table(pml4, idx(0, pa))?;
         let pd = ensure_table(pdpt, idx(1, pa))?;
+        // The FIRST 2 MiB region is split into 4 KiB pages so VA 0 can be left with NO leaf (REQ-MM-008,
+        // ALET-P1-006): `vmaddr` already refuses mapping the null page through the mapping APIs, but this
+        // boot map covered it as ordinary RAM — so a kernel null dereference silently read or WROTE low
+        // memory instead of faulting. A huge page cannot have a hole, hence the split.
+        if pa == 0 {
+            let pt = ensure_table(pd, idx(2, pa))?;
+            for page in (PAGE..pa + BLOCK_2M).step_by(PAGE) {
+                let flags = image_page_flags(page, &secs, count);
+                // SAFETY: see `write_entry`; `page` is 4 KiB-aligned and non-zero.
+                unsafe { write_entry(pt, idx(3, page), page as u64 | flags) };
+                report.page_leaves += 1;
+            }
+            report.guard_pages += 1; // VA 0 is deliberately left with no leaf
+            report.split_blocks += 1;
+            pa += BLOCK_2M;
+            continue;
+        }
         // Does the image reach into this 2 MiB region? If so it cannot be one permission set.
         if pa < img_end && pa + BLOCK_2M > img_start {
             let pt = ensure_table(pd, idx(2, pa))?;
+            let guard = crate::gdt::kernel_stack_guard();
             for page in (pa..pa + BLOCK_2M).step_by(PAGE) {
+                if page == guard {
+                    // The ring-0 stack's guard page gets NO leaf at all (REQ-MM-007): a stack overflow
+                    // must fault here rather than continue into the `.bss` below it. This is the one
+                    // address in the image the kernel deliberately cannot reach.
+                    report.guard_pages += 1;
+                    continue;
+                }
                 let flags = image_page_flags(page, &secs, count);
                 // SAFETY: see `write_entry`; `page` is 4 KiB-aligned.
                 unsafe { write_entry(pt, idx(3, page), page as u64 | flags) };
