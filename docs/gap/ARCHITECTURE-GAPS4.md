@@ -625,6 +625,16 @@ The design should include:
 
 ## ALET-P1-007 — W^X Policy Is Not Yet a Complete Global Invariant
 
+> Progress note (2026-08-03): **resolved on both QEMU targets.** Validation at every dynamic mapping
+> API landed 2026-08-02 (ADR-034, REQ-MM-006); the bootstrap identity map is now split at 4 KiB
+> granularity from the linker's section symbols, so aarch64 and RISC-V require ZERO W^X descriptors of
+> either class (dynamic pages AND bootstrap blocks) and prove text is read-only + executable,
+> `.rodata` read-only + non-executable, data/stack writable + non-executable — plus that the mapping
+> API refuses to remap or unmap the image span. Virtual-memory invariants 49 → 55 per QEMU target.
+> Component memory (WASM) is bounded by the runtime, not by page tables; JIT/dynamically generated
+> code does not exist yet and would need its own W^X-with-flip policy. What remains is x86-64's
+> inherited OVMF tree (~524 795 W^X leaves), split out as **ALET-P1-031**.
+
 ### Severity
 
 **P1**

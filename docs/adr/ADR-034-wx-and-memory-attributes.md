@@ -1,6 +1,8 @@
 # ADR-034 — W^X and memory attributes: permissions are validated, not assumed
 
-**Status:** Accepted (2026-08-02) — **partially delivered by design; see Scope**
+**Status:** Accepted (2026-08-02) — **delivered on both QEMU targets (2026-08-03 addendum: the
+bootstrap map is split at page granularity, ALET-P1-007 resolved); x86-64's inherited firmware tree
+remains, tracked as ALET-P1-031 — see Scope**
 **Context:** GAPS4 ALET-P1-007 (W^X as a global invariant + a checker) and ALET-P1-008 (per-arch
 memory-attribute validation) · REQ-MM-006 · builds on ADR-029 (address admission) and ADR-030..033
 (the frame lifetime model)
@@ -87,7 +89,14 @@ RAM) rather than hiding it. That exception is now closed on both QEMU targets:
   split is real rather than assumed — the leaf covering `__text_start` is a 4 KiB *page* (not a block)
   and identity-maps, text is executable and read-only, `.rodata` is neither writable nor executable,
   and kernel data plus the running stack are writable and never executable. Virtual-memory invariants
-  49 → **53** on aarch64 and RISC-V (1087 and 576 live leaves audited, 0/0 violations).
+  49 → **55** on aarch64 and RISC-V (1087 and 576 live leaves audited, 0/0 violations).
+* **The split removed an implicit guard, so the guard became explicit.** Kernel-image VAs used to be
+  unmappable-over only as a side effect: the level above them was a block/megapage leaf, and
+  `map_page`/`unmap_page` refuse to descend into one. With real tables there, mapping a fresh WRITABLE
+  page over kernel text succeeded — the exact write-to-code path this ADR exists to close — and neither
+  the address plan (a legal VA, an owned PA) nor the attribute decode (a clean RW+NX page) refuses it.
+  Both APIs now reject the block-aligned split span at their entry, next to the ADR-029 admission check,
+  and two invariants per QEMU target assert the refusal *and* that text still maps to itself read-only.
 * **Not a shared conformance behavior, deliberately.** `conformance.sh` requires identically-worded
   behaviors from *all* targets, and x86-64 cannot emit this one: its image is a PE loaded and mapped
   by UEFI, not by a map this kernel builds. Adding it would either fail x86-64 for an architectural
