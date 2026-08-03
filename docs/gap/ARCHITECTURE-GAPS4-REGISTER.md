@@ -22,7 +22,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P1-004 | P1 | resolved | `kernel-core/src/teardown.rs` (REQ-MM-004, ADR-032): a dying space returns every page/table/root it owns and nothing else, behind two independent guards (per-target privacy predicate + the ownership model); destroying the ACTIVE space is refused everywhere. Host-proved against an in-memory model + VM-gated on live hierarchies (aarch64/RISC-V 42 vm invariants, x86-64 33) with the frame count returning EXACTLY to its pre-space value + five teardown behaviors in the conformance core contract |
 | ALET-P1-005 | P1 | open | SMP TLB shootdown formal contract (REQ-SMP-004 delivered; needs written invariant contract + adversarial test) |
 | ALET-P1-006 | P1 | open | kernel/user virtual address layout hardening (guard pages, layout constants, KASLR posture) |
-| ALET-P1-007 | P1 | open | **checker + dynamic paths landed** (REQ-MM-006, ADR-034): `kernel-core/src/memattr.rs` validates permissions at every dynamic mapping API on all three targets and audits live trees; user code is RX, kernel dynamic pages NX, x86-64 enables NX+SMEP; gates require ZERO violations among kernel-created mappings. Still open — and why this row is not resolved: the bootstrap identity map spans kernel text+data in 2 MiB blocks (64 W^X descriptors per QEMU target, PINNED by each gate). Needs a page-granular kernel-image split via linker symbols |
+| ALET-P1-007 | P1 | resolved | W^X is a GLOBAL invariant of the kernel-built address space on both QEMU targets (REQ-MM-006, ADR-034 + its 2026-08-03 addendum). `kernel-core/src/memattr.rs` validates permissions at every dynamic mapping API on all three targets; on top of that, `linker.ld` now exports `__text_start`/`__text_end`/`__rodata_end` and `build_identity` builds every RAM block overlapping the image as 4 KiB pages — text RO+X, `.rodata` RO+NX, data/bss/stack/heap RW+NX, RAM outside the image RW+NX blocks. Both QEMU gates require `dynamic_violations == 0` **and** `bootstrap_violations == 0` (was `== 64`), plus four invariants that assert the split is real: the leaf over `__text_start` is a 4 KiB page, text is executable and read-only, `.rodata` is neither, data+stack are RW+NX. Virtual-memory invariants 49 → 53 on aarch64 and RISC-V (1087 / 576 live leaves audited, 0/0 violations). The x86-64 firmware-inherited tree is tracked separately as ALET-P1-031 |
 | ALET-P1-008 | P1 | resolved | permissions decoded and validated per-arch at every mapping API (REQ-MM-006, ADR-034): aarch64 AP/UXN/PXN/AttrIndx, RISC-V R/W/X/U, x86-64 WRITABLE/NO_EXECUTE/USER_ACCESSIBLE with EFER.NXE + CR4.SMEP enabled after a CPUID check and reported at boot. Cacheability is enforced where the ISA expresses it (aarch64 AttrIndx ⇒ device memory is never executable) and explicitly modelled as Normal where it does not (RISC-V PMAs, x86-64 PAT/MTRRs) rather than silently assumed. Four attribute behaviors in the conformance core contract |
 | ALET-P1-009 | P1 | open | x86-64 trap-frame layout hardening (manual ABI — add static asserts + fuzz) |
 | ALET-P1-010 | P1 | open | shared mutable trap state reentrancy guarantees |
@@ -46,6 +46,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P1-028 | P1 | open | key management (encryption-at-rest ≠ key lifecycle) |
 | ALET-P1-029 | P1 | open | nonce/IV lifecycle proven per encrypted object |
 | ALET-P1-030 | P1 | open | encrypted content-addressing identity semantics |
+| ALET-P1-031 | P1 | open | x86-64 adopts the OVMF page-table tree at `ExitBootServices`, and that tree holds ~524 795 W^X leaves out of ~524 799 — the firmware's map, not this kernel's, reported informationally at every boot and PINNED by the x86-64 gate. Split out of ALET-P1-007 when the QEMU targets closed (2026-08-03): the fix is not attribute validation (delivered) but the backend building its OWN kernel map from the PE image bounds (`LoadedImageProtocol`, captured before ExitBootServices) instead of inheriting one |
 | ALET-P2-001 | P2 | open | pin Rust toolchains (dated nightly) across all crates |
 | ALET-P2-002 | P2 | resolved | `--locked` enforced in `build-all.sh` + existing CI `--locked`; each crate carries `Cargo.lock` |
 | ALET-P2-003 | P2 | open | complete CI quality gate set (fmt, clippy -Dwarnings, audit, deny) |
@@ -81,11 +82,12 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-02):** 67 findings — 11 resolved (every P0 closed; the memory cluster now has address
-admission ALET-P1-001, page-table reclamation ALET-P1-002, frame ownership ALET-P1-003, address-space
-destruction ALET-P1-004, erase-on-free ALET-P2-026 and per-arch attribute validation ALET-P1-008),
-45 open, 11 deferred (milestone subsystems). A frame can no longer be aliased, double-freed, leaked by
-unmapping, leaked by dying, or read by its next owner, and no mapping the kernel creates is
-writable+executable. ALET-P1-007 remains open ON PURPOSE: its checker and dynamic-path enforcement
-landed, but W^X is not yet a COMPLETE global invariant while the bootstrap identity map spans kernel
-text and data in single 2 MiB blocks (64 pinned exceptions per QEMU target).
+**Rollup (2026-08-03):** 68 findings (67 audited + ALET-P1-031, split out of ALET-P1-007) — 12
+resolved (every P0 closed; the memory cluster now has address admission ALET-P1-001, page-table
+reclamation ALET-P1-002, frame ownership ALET-P1-003, address-space destruction ALET-P1-004,
+erase-on-free ALET-P2-026, per-arch attribute validation ALET-P1-008 and **W^X as a global invariant
+ALET-P1-007**), 45 open, 11 deferred (milestone subsystems). A frame can no longer be aliased,
+double-freed, leaked by unmapping, leaked by dying, or read by its next owner; and on both QEMU
+targets NO descriptor in the address space the kernel builds — dynamic page or bootstrap block — is
+writable+executable, with kernel text mapped read-only at 4 KiB granularity. The one W^X hole left is
+x86-64's inherited OVMF tree, now its own row (ALET-P1-031) so the note describes live work.
