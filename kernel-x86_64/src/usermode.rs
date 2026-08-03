@@ -425,6 +425,21 @@ struct Trial {
 
 static mut CURRENT: Option<Trial> = None;
 
+/// The task supervisor (REQ-REL-002, ADR-042). An UNEXPECTED ring-3 fault used to end the boot; now it
+/// terminates that task and the system continues, which is what a supervisor is for.
+static mut SUPERVISOR: kernel_core::supervisor::Supervisor =
+    kernel_core::supervisor::Supervisor::new();
+/// The id the supervisor knows the running excursion by. One excursion runs at a time here, so a counter
+/// is enough — a real scheduler would carry the id in the TCB.
+static mut CURRENT_TASK: u64 = 0;
+
+/// Read-only view of the supervisor, for the boot invariants.
+///
+/// SAFETY: single-threaded, IF=0 for the whole user-mode suite; no concurrent access exists.
+pub fn supervisor() -> &'static kernel_core::supervisor::Supervisor {
+    unsafe { &*addr_of!(SUPERVISOR) }
+}
+
 /// SAFETY: single-threaded; `CURRENT` is set immediately before an excursion and mutated only by
 /// the dispatcher that excursion drives. No concurrent access exists.
 #[inline]
@@ -581,8 +596,55 @@ pub extern "sysv64" fn x86_page_fault(fault_va: u64) {
             t.armed = false;
         }
         _ => {
-            kprintln!("[usermode] UNEXPECTED ring-3 #PF at {:#x}", fault_va);
-            usermode_fatal(104);
+            // An UNEXPECTED fault from ring 3. This used to end the boot; now it goes to the supervisor
+            // (REQ-REL-002, ADR-042). `isr_pf_entry` reaches here only from ring 3 (a ring-0 trap takes
+            // `from_ring0_fatal`), so the fault is a user fault by construction — and the classifier says
+            // what KIND, which is what the log needs and what the policy consumes. Returning from here
+            // jumps to `resume_return`: the task is abandoned and the scheduler continues. That is the
+            // kill-and-continue path, and the suite proves it by taking one on purpose.
+            use kernel_core::faultclass::{classify, kind_name, verdict, Fault};
+            use kernel_core::sched::TaskId;
+            use kernel_core::supervisor::SupervisorAction;
+            let f = Fault {
+                present: false,
+                write: false,
+                user: true,
+                exec: false,
+                reserved_bit: false,
+                from_kernel: false,
+                unrecognized: None,
+            };
+            let kind = classify(&f);
+            // SAFETY: single-threaded, IF=0; only this dispatcher mutates the supervisor.
+            let (action, id) = unsafe {
+                let id = TaskId(*addr_of!(CURRENT_TASK));
+                (
+                    (*addr_of_mut!(SUPERVISOR)).on_fault(Some(id), kind, verdict(kind)),
+                    id,
+                )
+            };
+            match action {
+                SupervisorAction::TaskTerminated(reason) => {
+                    kprintln!(
+                        "[usermode] ring-3 #PF at {:#x} -> {} : task {} TERMINATED ({:?}); system continues",
+                        fault_va,
+                        kind_name(kind),
+                        id.0,
+                        reason
+                    );
+                    if let Some(t) = current() {
+                        t.fault_va = fault_va;
+                    }
+                }
+                SupervisorAction::Escalate(k) => {
+                    kprintln!(
+                        "[usermode] ring-3 #PF at {:#x} ESCALATED ({})",
+                        fault_va,
+                        kind_name(k)
+                    );
+                    usermode_fatal(104);
+                }
+            }
         }
     }
 }
@@ -714,6 +776,51 @@ fn run_syscall(grant: bool) -> (bool, usize) {
 
 /// Prove hardware isolation: a ring-3 read of a supervisor-only page faults and is contained (not
 /// fatal). Returns `(isolation_held, fault_va)`.
+/// Run a ring-3 task that reads a supervisor-only page it never declared — an UNEXPECTED fault
+/// (REQ-REL-002, ADR-042). Nothing is armed, so the supervisor's kill-and-continue path is what handles
+/// it. Returns the task id the supervisor should have terminated.
+fn run_unexpected_fault() -> u64 {
+    let root_main = vm::active_root();
+    let root = match vm::build_space() {
+        Some(r) => r,
+        None => return 0,
+    };
+    let code = vm::map_stub_frame(
+        root,
+        USER_CODE_VA,
+        stub_bytes!(stub_read_start, stub_read_end),
+    );
+    let stack = vm::map_user(root, USER_STACK_VA, true);
+    let sup = vm::map_supervisor(root, VA_SUP);
+    if code.is_none() || stack.is_none() || sup.is_none() {
+        free_leaf(root, VA_SUP, sup);
+        free_leaf(root, USER_STACK_VA, stack);
+        free_leaf(root, USER_CODE_VA, code);
+        return 0;
+    }
+
+    // armed = false: the fault is NOT declared, so `x86_page_fault` must go to the supervisor.
+    let t = run_in_space(
+        root,
+        root_main,
+        VA_SUP,
+        0,
+        CapEngine::new(0xBEEF, 1000),
+        Vec::new(),
+        false,
+        0,
+    );
+    let _ = t;
+    // SAFETY: single-threaded; the id the excursion just used.
+    let id = unsafe { *addr_of!(CURRENT_TASK) };
+
+    free_leaf(root, VA_SUP, sup);
+    free_leaf(root, USER_STACK_VA, stack);
+    free_leaf(root, USER_CODE_VA, code);
+    vm::destroy_space(root);
+    id
+}
+
 fn run_isolation() -> (bool, u64) {
     let root_main = vm::active_root();
     let root = match vm::build_space() {
@@ -787,6 +894,9 @@ fn run_in_space(
         isolation_held: false,
         fault_va: 0,
     });
+    // A distinct id per excursion, so the supervisor's records name the task that actually faulted.
+    // SAFETY: single-threaded; IF=0 for the suite.
+    unsafe { *addr_of_mut!(CURRENT_TASK) += 1 };
     let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
     f.regs[RAX] = rax;
     f.regs[RDI] = rdi;
@@ -890,6 +1000,9 @@ fn run_endpoint_excursion(
         isolation_held: false,
         fault_va: 0,
     });
+    // A distinct id per excursion, so the supervisor's records name the task that actually faulted.
+    // SAFETY: single-threaded; IF=0 for the suite.
+    unsafe { *addr_of_mut!(CURRENT_TASK) += 1 };
     let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
     f.regs[RAX] = rax;
     f.regs[RDI] = rdi;
@@ -1664,6 +1777,36 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         high_received,
         "ring3: HIGH resumes as highest-priority and receives the body across address spaces"
     );
+
+    // Kill the task, keep the system (REQ-REL-002, ADR-042). A ring-3 task faults at an address it never
+    // declared: the supervisor must terminate THAT task, the boot must continue past it, and a later task
+    // must still run — which is the difference between detecting a bad access and surviving one.
+    {
+        let before = supervisor().terminated();
+        let dead = run_unexpected_fault();
+        check!(
+            dead != 0 && supervisor().terminated() == before + 1,
+            "supervisor: an undeclared ring-3 fault terminates exactly one task (the boot continues past it)"
+        );
+        check!(
+            !supervisor().may_run(kernel_core::sched::TaskId(dead))
+                && matches!(
+                    supervisor().reason(kernel_core::sched::TaskId(dead)),
+                    Some(kernel_core::supervisor::TerminationReason::Fault(_))
+                ),
+            "supervisor: the dead task may never run again, and the recorded reason is the fault"
+        );
+        check!(
+            supervisor().escalations() == 0,
+            "supervisor: a USER fault was contained, not escalated (kernel bugs stay fatal)"
+        );
+        // And the system really is still usable: another ring-3 excursion runs to completion afterwards.
+        let (held, _va) = run_isolation();
+        check!(
+            held,
+            "supervisor: a later ring-3 task still runs and proves its own invariant after the kill"
+        );
+    }
 
     Ok(n)
 }
