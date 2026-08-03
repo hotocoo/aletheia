@@ -101,6 +101,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 20 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 9 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 4 NETWORK INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 9 DMA-BOUNDARY INVARIANTS HOLD' "$LOG" \
    && grep -q 'PERSISTENT MEDIUM: boot #1, 0 entities verified' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
   # ---- SECOND BOOT against the SAME persistent disk: the OS must REMEMBER (REQ-STOR-003) ----

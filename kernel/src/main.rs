@@ -96,6 +96,27 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // What a device is allowed to touch (REQ-DRV-006, ADR-043). Every driver here hands a device a RAW
+    // physical address; since bus-master was enabled (ADR-037) a wrong address is a device writing wherever
+    // the number points. This is the software boundary the kernel can enforce without an IOMMU: a frame is
+    // registered before any descriptor may name it, the kernel image is never a legal target, and an
+    // address nobody registered is refused.
+    kprintln!("");
+    kprintln!("--- DMA-boundary selftests (what a device may be told about) ---");
+    match kernel_core::dma::selftest(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[dma] ALL {} DMA-BOUNDARY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[dma] FAILED at DMA invariant {}: {}", idx, name);
+            semihosting::exit(240 + idx as i32);
+        }
+    }
+
     // Virtual memory: build page tables, enable the MMU, prove dynamic map/unmap (aarch64 only).
     kprintln!("");
     kprintln!("--- virtual-memory selftests (MMU: identity map + dynamic map/unmap) ---");

@@ -462,6 +462,27 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         None => kprintln!("[persist] no persistent medium attached (skipped)"),
     }
 
+    // What a device is allowed to touch (REQ-DRV-006, ADR-043). Every driver here hands a device a RAW
+    // physical address; since bus-master was enabled (ADR-037) a wrong address is a device writing wherever
+    // the number points. This is the software boundary the kernel can enforce without an IOMMU: a frame is
+    // registered before any descriptor may name it, the kernel image is never a legal target, and an
+    // address nobody registered is refused.
+    kprintln!("");
+    kprintln!("--- DMA-boundary selftests (what a device may be told about) ---");
+    match kernel_core::dma::selftest(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[dma] ALL {} DMA-BOUNDARY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[dma] FAILED at DMA invariant {}: {}", idx, name);
+            ActiveHal::exit(240 + idx as i32);
+        }
+    }
+
     // Networking (REQ-NET-001/002, ADR-041) — same shared driver and stack as the other targets, over the
     // PCI transport. ARP the gateway, then ping it: a transmit-only driver would prove nothing.
     kprintln!("");

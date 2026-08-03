@@ -137,6 +137,11 @@ CONTRACT=(
   # unexpected-user-fault path through it. The end-to-end kill-and-continue proof (take an undeclared fault,
   # then run another task) is an x86-64 arch extension for now; this is the part that must not vary.
   "supervisor: the policy is live in this kernel"
+  # The DMA boundary (REQ-DRV-006, ADR-043). What the KERNEL may tell a device about is policy, not a
+  # hardware property, so it must be identical everywhere — and "deny by default" is the rule that matters.
+  "dma: an address nobody registered is never device-visible (deny by default)"
+  "dma: a range overlapping the kernel image is refused"
+  "dma: revoking ends visibility, and revoking twice is refused"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )
