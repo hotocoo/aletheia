@@ -52,8 +52,18 @@ whether or not the driver is ready and a queue with no buffer simply drops it.
   answer away". **ALET-P2-020 moves from `deferred` to `open`** — real gated code exists, and what remains
   is named in its row.
 
-Gates after the wave: `build-all` PASS, `e2e-all` PASS (each target booted twice, now with a NIC attached),
-`conformance` PASS (68 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (75 requirements).
+- **And the register now checks itself** (`scripts/check-register.sh`, a `register` job in both pipelines,
+  ALET-P2-012): a `resolved` row citing a file that no longer exists fails CI, so does a row citing a `REQ-`
+  id the matrix does not track — and so does **the rollup arithmetic disagreeing with the rows**, which is
+  the one drift that would quietly invalidate every count this project reports. Wiring it found a real
+  defect immediately: one row cited a generic `.cargo/config.toml` that exists per crate but not at that
+  path. With `check-traceability.sh` and `check-ci-parity.sh`, all three claim surfaces are machine-checked.
+  x86-64 also now asserts the map builder recorded exactly two deliberately-unmapped pages (ALET-P2-034),
+  closing the other half of the guard proof: absence was proved by walking the tree, intent was not.
+
+Gates after the wave: `quality-gate` PASS, `build-all` PASS, `e2e-all` PASS (each target booted twice, now
+with a NIC attached), `conformance` PASS (68 core behaviors × 3 targets), `register` PASS, `ci-parity` PASS,
+`traceability` PASS (75 requirements).
 
 ## Previous wave — a layout you can check, and two addresses that must never translate (2026-08-03, GAPS4 ALET-P1-006/012)
 

@@ -78,6 +78,12 @@ quality:
       - build/sbom/
     expire_in: 1 week
 
+register:
+  stage: test
+  image: rust:latest
+  script:
+    - ./scripts/check-register.sh
+
 ci-parity:
   stage: test
   image: rust:latest

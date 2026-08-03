@@ -921,6 +921,10 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                 && crate::gdt::kernel_stack_top() as usize - low <= 16 * 1024,
             "guard: RSP0 points above the guard, into the usable stack only"
         );
+        check!(
+            crate::kmap::guard_pages() == 2,
+            "guard: the map builder recorded exactly two deliberately-unmapped pages (stack guard + VA 0)"
+        );
     }
 
     // The declared layout (REQ-MM-008, ALET-P1-006).
