@@ -140,6 +140,7 @@ CONTRACT=(
   "supervisor: the policy is live in this kernel"
   # The DMA boundary (REQ-DRV-006, ADR-043). What the KERNEL may tell a device about is policy, not a
   # hardware property, so it must be identical everywhere — and "deny by default" is the rule that matters.
+  "virtio-blk: the DMA gate denies an unregistered descriptor address (ring and data are registered)"
   "dma: an address nobody registered is never device-visible (deny by default)"
   "dma: a range overlapping the kernel image is refused"
   "dma: revoking ends visibility, and revoking twice is refused"

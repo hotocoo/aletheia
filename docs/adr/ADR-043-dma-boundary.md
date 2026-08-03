@@ -56,9 +56,17 @@ virtio-net driver registers its receive and transmit buffers before posting them
 three targets proves the gate **denies by default**: an address far from any buffer is refused, and so is one
 that overruns a registered buffer (network invariants 4 → 5, conformance 72 → 73).
 
-Still not claimed: `virtioblk`'s single-queue path (its own fixed ring, predating `virtq`) publishes
-descriptors without the gate, and no device is constrained from inventing its own addresses. ALET-P1-018
-remains open on both counts.
+`virtioblk` now carries its own registry too — it predates `virtq` and keeps a fixed ring, so it would
+otherwise have been the one path in the kernel still naming unregistered addresses. Its ring and data frames
+are registered at init, and `request` checks the header, status byte and data buffer **before** any of them
+becomes a descriptor. Its suite asserts the gate denies by default, and — like the geometry check — takes the
+answer from the DRIVER rather than assuming it, so a device whose gate stopped working fails instead of the
+suite passing on a default (virtio-blk invariants 20 → 21, conformance 73 → 74).
+
+Still not claimed: nothing constrains a device that **invents its own addresses** — that needs an
+IOMMU/SMMU, and **ALET-P1-018 remains open** for it. A blanket `impl BlockDevice for &mut D` was added so a
+suite can keep using a device after lending it to something that takes ownership; without it the choice
+between the two would have been made by the type system rather than by what the test needs to prove.
 
 ## Alternatives considered
 

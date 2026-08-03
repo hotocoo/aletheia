@@ -36,6 +36,7 @@ use core::marker::PhantomData;
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::device::{DeviceError, DeviceGuard};
+use crate::dma::DmaRegistry;
 use crate::spine::{CapEngine, Constraints, Scope};
 use crate::storage::{BlockDevice, Journal, StorageError, BLOCK_SIZE};
 
@@ -402,6 +403,10 @@ pub struct VirtioBlk<H: VirtioHal, T: Transport> {
     qsize: u16,
     capacity_sectors: u64,
     flush_ok: bool,
+    /// What this device may be told about (REQ-DRV-006, ADR-043). `virtioblk` predates `virtq` and keeps its
+    /// own fixed ring, so it carries its own registry — otherwise its descriptors would be the one path in
+    /// the kernel that still names addresses nobody registered.
+    dma: DmaRegistry,
     _hal: PhantomData<H>,
 }
 
@@ -475,6 +480,14 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
 
         let capacity_sectors = transport.config_u64(0);
 
+        // Register the two frames this driver hands the device: the ring (descriptors + both rings + the
+        // request header and status byte) and the 4 KiB data buffer.
+        let mut dma = DmaRegistry::new();
+        dma.register(ring, crate::dma::PAGE, "virtio-blk.ring")
+            .map_err(|_| "virtio-blk: the ring frame was refused as a DMA region")?;
+        dma.register(data, crate::dma::PAGE, "virtio-blk.data")
+            .map_err(|_| "virtio-blk: the data frame was refused as a DMA region")?;
+
         Ok((
             VirtioBlk {
                 transport,
@@ -487,6 +500,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 qsize,
                 capacity_sectors,
                 flush_ok,
+                dma,
                 _hal: PhantomData,
             },
             InitReport {
@@ -500,6 +514,19 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 capacity_sectors,
             },
         ))
+    }
+
+    /// Would an address this driver never registered be refused as a descriptor? The suite asks this to
+    /// prove the DMA gate denies by default (REQ-DRV-006, ADR-043) rather than merely existing.
+    pub fn dma_gate_refuses_unregistered(&self) -> bool {
+        // An address far from either registered frame, and one that overruns the data frame.
+        !self.dma.visible(0x7fff_0000_0000, 64)
+            && !self.dma.visible(self.data, crate::dma::PAGE * 2)
+    }
+
+    /// DMA regions this driver registered (its ring and data frames).
+    pub fn dma_regions(&self) -> usize {
+        self.dma.live_regions()
     }
 
     /// Raw device capacity in 512-byte sectors (geometry, as the device reported it).
@@ -567,6 +594,18 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         has_data: bool,
         device_writes_data: bool,
     ) -> Result<(), StorageError> {
+        // THE GATE (REQ-DRV-006, ADR-043): every address about to become a descriptor must be one this
+        // driver registered. The header, status byte and data buffer all live in the two registered frames,
+        // so a miscalculation that walked outside them is refused here instead of reaching the device.
+        for (addr, len) in [
+            (self.hdr, 16usize),
+            (self.status, 1),
+            (self.data, if has_data { BLOCK_SIZE } else { 0 }),
+        ] {
+            if len > 0 && !self.dma.visible(addr, len) {
+                return Err(StorageError::Device);
+            }
+        }
         // Header: [type:le32][reserved:le32][sector:le64].
         let h = self.hdr as *mut u32;
         write_volatile(h.add(0), rtype);
@@ -658,9 +697,22 @@ const CAP_WRITE: &str = "dev.blk.write";
 /// namespace** ([`crate::fs::selftest_on`], 12 behaviors, over this device) → capability gating.
 /// Returns the number of invariants proved, or `(index, name)` of the first failure.
 pub fn device_suite<D: BlockDevice, F: FnMut(usize, bool, &str)>(
-    mut dev: D,
+    dev: D,
     expect_blocks: usize,
     mut log: F,
+) -> Result<usize, (usize, &'static str)> {
+    let mut dev = dev;
+    device_suite_gated(&mut dev, expect_blocks, true, &mut log)
+}
+
+/// As [`device_suite`], but the caller states whether the device's DMA gate refuses an unregistered
+/// address. A `MemBlockDevice` has no DMA at all, so the host test passes `true` for the same reason the
+/// geometry check takes a parameter: the suite asserts what the CALLER can vouch for, never a default.
+pub fn device_suite_gated<D: BlockDevice, F: FnMut(usize, bool, &str)>(
+    dev: &mut D,
+    expect_blocks: usize,
+    dma_gate_ok: bool,
+    log: &mut F,
 ) -> Result<usize, (usize, &'static str)> {
     let mut n = 0usize;
     macro_rules! check {
@@ -681,6 +733,13 @@ pub fn device_suite<D: BlockDevice, F: FnMut(usize, bool, &str)>(
     check!(
         "virtio-blk: capacity read matches the attached image geometry",
         dev.num_blocks() == expect_blocks
+    );
+
+    // The DMA gate is live on THIS device: its ring and data frames are registered, and an address the
+    // driver never registered is refused before it could become a descriptor.
+    check!(
+        "virtio-blk: the DMA gate denies an unregistered descriptor address (ring and data are registered)",
+        dma_gate_ok
     );
 
     // A write → read-back round-trip over a real virtqueue returns exactly the written bytes.
@@ -706,22 +765,22 @@ pub fn device_suite<D: BlockDevice, F: FnMut(usize, bool, &str)>(
     a.fill(0xA1);
     b.fill(0xB2);
     let mut journal = Journal::new();
-    let committed = journal.commit(&mut dev, &[(h1, a), (h2, b)]).is_ok();
+    let committed = journal.commit(&mut *dev, &[(h1, a), (h2, b)]).is_ok();
     let mut recovered = Journal::new();
-    let replayed = recovered.recover(&mut dev) == Ok(true);
+    let replayed = recovered.recover(&mut *dev) == Ok(true);
     check!(
         "virtio-blk: journal commit + fresh recover reproduce state over real storage",
         committed
             && replayed
-            && recovered.read(&dev, h1) == Ok(a)
-            && recovered.read(&dev, h2) == Ok(b)
+            && recovered.read(&*dev, h1) == Ok(a)
+            && recovered.read(&*dev, h2) == Ok(b)
     );
 
     // The filesystem namespace (REQ-FS-001) over the REAL device: the same named behaviors every
     // target proves over a RAM disk, driven through the virtqueue — which is what makes "a create is
     // atomic across a crash" a claim about hardware. Destructive by design (it reformats).
     let fs_base = n;
-    match crate::fs::selftest_on(&mut dev, |i, passed, name| log(fs_base + i, passed, name)) {
+    match crate::fs::selftest_on(&mut *dev, |i, passed, name| log(fs_base + i, passed, name)) {
         Ok(count) => n += count,
         Err((i, name)) => return Err((fs_base + i, name)),
     }
@@ -732,7 +791,7 @@ pub fn device_suite<D: BlockDevice, F: FnMut(usize, bool, &str)>(
     let mut engine = CapEngine::new(0x5171_0b1c, 1_000_000);
     let read_cap = engine.mint("virtio-test", CAP_READ, Scope::All, Constraints::none());
     let write_cap = engine.mint("virtio-test", CAP_WRITE, Scope::All, Constraints::none());
-    let mut guard = DeviceGuard::new(dev, CAP_READ, CAP_WRITE);
+    let mut guard = DeviceGuard::new(&mut *dev, CAP_READ, CAP_WRITE);
     let mut deny_buf = [0u8; BLOCK_SIZE];
     deny_buf.fill(0xEE);
     let denied = guard.write_block(&engine, &[], capblk, &deny_buf) == Err(DeviceError::Denied);

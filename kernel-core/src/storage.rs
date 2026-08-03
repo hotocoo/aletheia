@@ -77,6 +77,24 @@ pub trait BlockDevice {
     fn flush(&mut self) -> Result<(), StorageError>;
 }
 
+/// A `&mut D` is as good a device as a `D`. Without this, a suite that wants to keep using a device after
+/// handing it to something that takes ownership (a `DeviceGuard`) has to choose between the two — and the
+/// choice would be made by the type system rather than by what the test needs to prove.
+impl<D: BlockDevice + ?Sized> BlockDevice for &mut D {
+    fn num_blocks(&self) -> usize {
+        (**self).num_blocks()
+    }
+    fn read_block(&self, idx: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+        (**self).read_block(idx, buf)
+    }
+    fn write_block(&mut self, idx: usize, buf: &[u8]) -> Result<(), StorageError> {
+        (**self).write_block(idx, buf)
+    }
+    fn flush(&mut self) -> Result<(), StorageError> {
+        (**self).flush()
+    }
+}
+
 /// FNV-1a over a byte stream — a small dependency-free integrity check. Sufficient to detect the
 /// bit-level tearing a crash causes in the hosted proof; a production build would use CRC32C/SHA.
 fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
