@@ -33,11 +33,13 @@ mod hal;
 mod heap;
 mod idt;
 mod kmap;
+mod pci;
 mod pic;
 mod pit;
 mod serial;
 mod smp;
 mod usermode;
+mod virtio;
 mod vm;
 
 // Shared, arch-independent Aletheia spine + invariant suite — now a real `kernel-core` dependency
@@ -371,12 +373,32 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // virtio-blk over PCI: the LAST first-class target to get real storage (REQ-DRV-005, ADR-037).
+    // q35 has no virtio-mmio window, so `pci.rs` implements the shared driver's `Transport` seam over
+    // the device's capability-described BAR regions. Skips green when no disk is attached; the boot
+    // gate attaches a scratch disk and requires the marker. The suite ends by proving the whole
+    // filesystem namespace over the real device.
+    kprintln!("");
+    kprintln!(
+        "--- virtio-blk selftests (real PCI driver: discovery + virtqueue I/O + journal + filesystem) ---"
+    );
+    match virtio::selftest() {
+        Ok(0) => {} // no device attached — graceful skip, already logged
+        Ok(n) => kprintln!("[virtio] ALL {} VIRTIO-BLK INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[virtio] FAILED at virtio invariant {}: {}", idx, name);
+            ActiveHal::exit(180 + idx as i32);
+        }
+    }
+
     // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
     // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk
     // device (this target has no block driver yet — that is REQ-DRV-001 on x86-64, not a namespace
     // difference).
     kprintln!("");
-    kprintln!("--- filesystem selftests (named objects over the journal: atomic create/remove) ---");
+    kprintln!(
+        "--- filesystem selftests (named objects over the journal: atomic create/remove) ---"
+    );
     let mut disk = kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
     match kernel_core::fs::selftest_on(&mut disk, |n, passed, name| {
         if passed {

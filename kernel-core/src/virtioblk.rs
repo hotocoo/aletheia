@@ -1,4 +1,4 @@
-//! virtio-blk over virtio-mmio (modern / v2) — the driver itself, defined ONCE (REQ-DRV-001, ADR-036).
+//! virtio-blk — the driver itself, defined ONCE, over any transport (REQ-DRV-001, ADR-036/ADR-037).
 //!
 //! The first real driver landed inside the aarch64 target crate (REQ-DRV-003). That was the right
 //! shape for one target and the wrong shape for three: a split virtqueue, a feature handshake and a
@@ -6,16 +6,18 @@
 //! *first-class* targets (AMD64, RISC-V) either had no real storage or had a second implementation of
 //! the same protocol — which is exactly the duplication gap-register Issue 1 exists to prevent.
 //!
-//! What genuinely differs per target is small and explicit, and lives behind [`VirtioHal`]:
+//! Two seams keep it one driver:
 //!
-//! * **where the transport is** — an [`MmioLayout`] (QEMU `virt` puts 32 slots 0x200 apart at
-//!   `0x0a00_0000` on aarch64, and 8 slots 0x1000 apart at `0x1000_1000` on RISC-V);
-//! * **how to get a DMA-able frame** — each target's own frame allocator, whose pages are
-//!   identity-mapped, so the address handed to the device is both the VA we write and the PA it reads;
-//! * **the barrier instruction** — `dsb sy` vs `fence rw, rw`.
+//! * [`VirtioHal`] — what a **CPU backend** provides: a DMA-able identity-mapped frame (each target's
+//!   own frame allocator) and a barrier instruction (`dsb sy` on aarch64, `fence iorw, iorw` on
+//!   RISC-V, `mfence` on x86-64).
+//! * [`Transport`] — how the **bus** exposes the device's registers. [`MmioTransport`] is virtio-mmio
+//!   (modern/v2), used by both QEMU `virt` machines; x86-64's q35 has no MMIO window at all and speaks
+//!   virtio-**pci**, whose registers live in capability-described BAR regions — so that target
+//!   implements this trait instead of getting its own driver (ADR-037).
 //!
 //! Everything else — reset, negotiation, queue setup, descriptor chains, the bounded poll, the
-//! `BlockDevice` impl — is this module.
+//! `BlockDevice` impl — is this module, and is proved identically on every target that has a disk.
 //!
 //! **No ambient authority (ADR-023).** The driver holds only the frames it allocated for its ring and
 //! data buffer; a block op is authorized by the same [`crate::spine::CapEngine`] when the device is
@@ -113,7 +115,49 @@ const OFF_STATUS: usize = 1040; // 1-byte status
 /// flight and it is polled to completion.
 const QSIZE_WANT: u16 = 8;
 
-/// The per-target seam. Everything a virtio-mmio driver needs from a CPU backend, and nothing else.
+/// How a bus exposes one virtio device's registers. Implemented by [`MmioTransport`] here, and by a
+/// target that must reach the device over a different bus (x86-64's virtio-pci, ADR-037).
+///
+/// Every method is `unsafe` because each one touches device registers: the implementor promises the
+/// addresses it was built from are mapped, aligned, and belong to a virtio device of the right kind.
+/// The driver calls them in the order VIRTIO 1.1 §3.1.1 requires and never concurrently.
+pub trait Transport {
+    /// `(transport version as this bus reports it, virtio device id)` — for the caller's boot log and
+    /// for the device-kind check the constructor already made.
+    fn identity(&self) -> (u32, u32);
+    /// Read the 32-bit half `sel` (0 = bits 0..31, 1 = bits 32..63) of the device feature bits.
+    unsafe fn device_features(&self, sel: u32) -> u32;
+    /// Write the 32-bit half `sel` of the driver (accepted) feature bits.
+    unsafe fn set_driver_features(&self, sel: u32, value: u32);
+    /// Read the device status byte.
+    unsafe fn status(&self) -> u32;
+    /// Write the device status byte.
+    unsafe fn set_status(&self, value: u32);
+    /// Select the queue subsequent queue calls refer to.
+    unsafe fn select_queue(&self, queue: u16);
+    /// Hook called ONCE, right after the driver selects the queue it will use, for a transport whose
+    /// notify address depends on a per-queue register it must read while that queue is selected
+    /// (virtio-pci's `queue_notify_off`). Latching it here is what lets [`Transport::notify`] take
+    /// `&self` and never disturb `queue_select` with a request in flight. Default: nothing to do.
+    ///
+    /// # Safety
+    /// A queue must be selected, and the transport's registers mapped.
+    unsafe fn after_queue_select(&mut self) {}
+    /// Largest queue size the selected queue supports (0 = the queue does not exist).
+    unsafe fn queue_num_max(&self) -> u32;
+    /// Set the negotiated size of the selected queue.
+    unsafe fn set_queue_num(&self, size: u32);
+    /// Publish the selected queue's three ring addresses (physical).
+    unsafe fn set_queue_addrs(&self, desc: u64, avail: u64, used: u64);
+    /// Mark the selected queue live.
+    unsafe fn queue_ready(&self);
+    /// Tell the device a queue has new buffers.
+    unsafe fn notify(&self, queue: u16);
+    /// Read 8 bytes of device-specific config space at `off` (blk capacity is at 0).
+    unsafe fn config_u64(&self, off: usize) -> u64;
+}
+
+/// The per-target CPU seam. Everything a virtio driver needs from a CPU backend, and nothing else.
 pub trait VirtioHal {
     /// A zeroed 4 KiB frame the device may DMA to/from. MUST be identity-mapped (VA == PA), because
     /// the returned address is both what the driver writes through and what it hands the device.
@@ -139,7 +183,6 @@ pub struct MmioLayout {
 /// logging them is what lets one driver serve targets whose `kprintln!` are different macros.
 #[derive(Clone, Copy, Debug)]
 pub struct InitReport {
-    pub base: usize,
     pub version: u32,
     pub device_id: u32,
     pub features_lo: u32,
@@ -188,11 +231,91 @@ pub unsafe fn probe(layout: &MmioLayout) -> Option<usize> {
     None
 }
 
-/// A live virtio-blk device: the MMIO base, the identity-mapped addresses of its single virtqueue's
+/// The virtio-mmio (modern / v2) transport: one register window, the layout VIRTIO 1.1 §4.2.2 fixes.
+pub struct MmioTransport {
+    base: usize,
+    version: u32,
+    device_id: u32,
+}
+
+impl MmioTransport {
+    /// Bind to the transport at `base`, refusing anything that is not a modern virtio **block**
+    /// device: a wrong magic, a legacy (v1) transport, or another device kind. Failing here is why the
+    /// driver body never has to re-check what it is talking to.
+    ///
+    /// # Safety
+    /// `base` must be mapped as device memory (typically a base returned by [`probe`]).
+    pub unsafe fn new(base: usize) -> Result<Self, &'static str> {
+        if r32(base, R_MAGIC) != VIRTIO_MAGIC {
+            return Err("no virtio magic at this transport address");
+        }
+        let version = r32(base, R_VERSION);
+        let device_id = r32(base, R_DEVICE_ID);
+        if version != VIRTIO_VERSION_MODERN {
+            return Err("legacy (v1) virtio-mmio not supported — fail closed");
+        }
+        if device_id != VIRTIO_ID_BLOCK {
+            return Err("transport is not a block device — fail closed");
+        }
+        Ok(MmioTransport {
+            base,
+            version,
+            device_id,
+        })
+    }
+}
+
+impl Transport for MmioTransport {
+    fn identity(&self) -> (u32, u32) {
+        (self.version, self.device_id)
+    }
+    unsafe fn device_features(&self, sel: u32) -> u32 {
+        w32(self.base, R_DEVICE_FEATURES_SEL, sel);
+        r32(self.base, R_DEVICE_FEATURES)
+    }
+    unsafe fn set_driver_features(&self, sel: u32, value: u32) {
+        w32(self.base, R_DRIVER_FEATURES_SEL, sel);
+        w32(self.base, R_DRIVER_FEATURES, value);
+    }
+    unsafe fn status(&self) -> u32 {
+        r32(self.base, R_STATUS)
+    }
+    unsafe fn set_status(&self, value: u32) {
+        w32(self.base, R_STATUS, value);
+    }
+    unsafe fn select_queue(&self, queue: u16) {
+        w32(self.base, R_QUEUE_SEL, queue as u32);
+    }
+    unsafe fn queue_num_max(&self) -> u32 {
+        r32(self.base, R_QUEUE_NUM_MAX)
+    }
+    unsafe fn set_queue_num(&self, size: u32) {
+        w32(self.base, R_QUEUE_NUM, size);
+    }
+    unsafe fn set_queue_addrs(&self, desc: u64, avail: u64, used: u64) {
+        w32(self.base, R_QUEUE_DESC_LOW, desc as u32);
+        w32(self.base, R_QUEUE_DESC_HIGH, (desc >> 32) as u32);
+        w32(self.base, R_QUEUE_DRIVER_LOW, avail as u32);
+        w32(self.base, R_QUEUE_DRIVER_HIGH, (avail >> 32) as u32);
+        w32(self.base, R_QUEUE_DEVICE_LOW, used as u32);
+        w32(self.base, R_QUEUE_DEVICE_HIGH, (used >> 32) as u32);
+    }
+    unsafe fn queue_ready(&self) {
+        w32(self.base, R_QUEUE_READY, 1);
+    }
+    unsafe fn notify(&self, queue: u16) {
+        w32(self.base, R_QUEUE_NOTIFY, queue as u32);
+    }
+    unsafe fn config_u64(&self, off: usize) -> u64 {
+        r64_config(self.base, off)
+    }
+}
+
+/// A live virtio-blk device: its transport, the identity-mapped addresses of its single virtqueue's
 /// rings and request buffers (the DMA targets handed to the device), its capacity, and whether FLUSH
 /// was negotiated.
-pub struct VirtioBlk<H: VirtioHal> {
-    base: usize,
+pub struct VirtioBlk<H: VirtioHal, T: Transport> {
+    transport: T,
     desc: usize,
     avail: usize,
     used: usize,
@@ -205,34 +328,28 @@ pub struct VirtioBlk<H: VirtioHal> {
     _hal: PhantomData<H>,
 }
 
-impl<H: VirtioHal> VirtioBlk<H> {
+impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
     /// Bring the device up: reset → feature negotiation → queue 0 setup → DRIVER_OK. Returns the
     /// device plus an [`InitReport`] for the caller to log. Fails closed on anything unexpected.
     ///
     /// # Safety
-    /// `base` must be a mapped virtio-mmio block transport (as returned by [`probe`]), and
-    /// `H::alloc_frame` must return identity-mapped frames the caller owns exclusively.
-    pub unsafe fn init(base: usize) -> Result<(Self, InitReport), &'static str> {
-        let version = r32(base, R_VERSION);
-        let device_id = r32(base, R_DEVICE_ID);
-        if version != VIRTIO_VERSION_MODERN {
-            return Err("legacy (v1) virtio-mmio not supported — fail closed");
-        }
+    /// `transport` must be bound to a live virtio block device, and `H::alloc_frame` must return
+    /// identity-mapped frames the caller owns exclusively.
+    pub unsafe fn init(mut transport: T) -> Result<(Self, InitReport), &'static str> {
+        let (version, device_id) = transport.identity();
 
         // 1 — reset, then ACKNOWLEDGE + DRIVER (VIRTIO 1.1 §3.1.1).
-        w32(base, R_STATUS, 0);
+        transport.set_status(0);
         let mut status = S_ACKNOWLEDGE;
-        w32(base, R_STATUS, status);
+        transport.set_status(status);
         status |= S_DRIVER;
-        w32(base, R_STATUS, status);
+        transport.set_status(status);
 
         // 2 — feature negotiation. Accept only VIRTIO_F_VERSION_1 (mandatory for modern) plus
         //     VIRTIO_BLK_F_FLUSH when offered (a real durability barrier). Everything else is cleared:
         //     we implement nothing that needs it.
-        w32(base, R_DEVICE_FEATURES_SEL, 0);
-        let features_lo = r32(base, R_DEVICE_FEATURES);
-        w32(base, R_DEVICE_FEATURES_SEL, 1);
-        let features_hi = r32(base, R_DEVICE_FEATURES);
+        let features_lo = transport.device_features(0);
+        let features_hi = transport.device_features(1);
 
         let version1 = (features_hi & (1 << F_VERSION_1_BIT)) != 0;
         let flush_ok = (features_lo & (1 << F_BLK_FLUSH_BIT)) != 0;
@@ -241,22 +358,21 @@ impl<H: VirtioHal> VirtioBlk<H> {
         }
         let drv_lo = if flush_ok { 1 << F_BLK_FLUSH_BIT } else { 0 };
         let drv_hi = 1 << F_VERSION_1_BIT;
-        w32(base, R_DRIVER_FEATURES_SEL, 0);
-        w32(base, R_DRIVER_FEATURES, drv_lo);
-        w32(base, R_DRIVER_FEATURES_SEL, 1);
-        w32(base, R_DRIVER_FEATURES, drv_hi);
+        transport.set_driver_features(0, drv_lo);
+        transport.set_driver_features(1, drv_hi);
 
         // 3 — FEATURES_OK, then read it back: if the device clears it, our set is unacceptable.
         status |= S_FEATURES_OK;
-        w32(base, R_STATUS, status);
-        if r32(base, R_STATUS) & S_FEATURES_OK == 0 {
-            w32(base, R_STATUS, status | S_FAILED);
+        transport.set_status(status);
+        if transport.status() & S_FEATURES_OK == 0 {
+            transport.set_status(status | S_FAILED);
             return Err("device rejected negotiated features (FEATURES_OK cleared)");
         }
 
         // 4 — queue 0 setup: one frame for the rings + request buffers, one for the 4 KiB data buffer.
-        w32(base, R_QUEUE_SEL, 0);
-        let queue_num_max = r32(base, R_QUEUE_NUM_MAX);
+        transport.select_queue(0);
+        transport.after_queue_select();
+        let queue_num_max = transport.queue_num_max();
         if queue_num_max == 0 {
             return Err("queue 0 unavailable (QueueNumMax == 0)");
         }
@@ -271,25 +387,20 @@ impl<H: VirtioHal> VirtioBlk<H> {
         let hdr = ring + OFF_HDR;
         let status_buf = ring + OFF_STATUS;
 
-        w32(base, R_QUEUE_NUM, qsize as u32);
-        w32(base, R_QUEUE_DESC_LOW, desc as u32);
-        w32(base, R_QUEUE_DESC_HIGH, (desc as u64 >> 32) as u32);
-        w32(base, R_QUEUE_DRIVER_LOW, avail as u32);
-        w32(base, R_QUEUE_DRIVER_HIGH, (avail as u64 >> 32) as u32);
-        w32(base, R_QUEUE_DEVICE_LOW, used as u32);
-        w32(base, R_QUEUE_DEVICE_HIGH, (used as u64 >> 32) as u32);
+        transport.set_queue_num(qsize as u32);
+        transport.set_queue_addrs(desc as u64, avail as u64, used as u64);
         H::barrier();
-        w32(base, R_QUEUE_READY, 1);
+        transport.queue_ready();
 
         // 5 — DRIVER_OK: the device is live.
         status |= S_DRIVER_OK;
-        w32(base, R_STATUS, status);
+        transport.set_status(status);
 
-        let capacity_sectors = r64_config(base, 0);
+        let capacity_sectors = transport.config_u64(0);
 
         Ok((
             VirtioBlk {
-                base,
+                transport,
                 desc,
                 avail,
                 used,
@@ -302,7 +413,6 @@ impl<H: VirtioHal> VirtioBlk<H> {
                 _hal: PhantomData,
             },
             InitReport {
-                base,
                 version,
                 device_id,
                 features_lo,
@@ -353,7 +463,7 @@ impl<H: VirtioHal> VirtioBlk<H> {
         write_volatile(avail_idx_ptr, cur.wrapping_add(1));
         H::barrier(); // idx visible before we notify
 
-        w32(self.base, R_QUEUE_NOTIFY, 0);
+        self.transport.notify(0);
 
         // The bound is generous (millions of iterations), so a healthy device always finishes well
         // within it; only a broken ring layout exhausts it.
@@ -421,7 +531,7 @@ impl<H: VirtioHal> VirtioBlk<H> {
     }
 }
 
-impl<H: VirtioHal> BlockDevice for VirtioBlk<H> {
+impl<H: VirtioHal, T: Transport> BlockDevice for VirtioBlk<H, T> {
     fn num_blocks(&self) -> usize {
         (self.capacity_sectors / SECTORS_PER_BLOCK) as usize
     }

@@ -3,7 +3,7 @@
 **As of:** 2026-08-03
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..036`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..037`.
 
 ## What Aletheia is
 
@@ -15,7 +15,47 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — a driver belongs to its bus, not to a CPU (2026-08-03, GAPS4 ALET-P2-019, REQ-DRV-004)
+## Latest wave — every target now proves the filesystem on REAL storage (2026-08-03, GAPS4 ALET-P2-019, REQ-DRV-005)
+
+The wave below made the driver shared and gave RISC-V a real disk. x86-64 — the *other* first-class
+target — still had none, for a reason no CPU seam could fix: q35 has no virtio-mmio window at all. Its
+virtio devices are **PCI functions**, and the registers the protocol needs live inside BAR regions that
+a capability list in configuration space points at.
+
+- **The bus became a second seam (ADR-037).** `Transport` names what a bus must provide (feature halves,
+  status, queue select/size/addresses/ready, notify, device config). `MmioTransport` serves both QEMU
+  `virt` machines; `kernel-x86_64/src/pci.rs` serves virtio-pci. The queue logic, descriptor chains,
+  bounded poll and `BlockDevice` impl are untouched: **one protocol, two buses, three CPUs.**
+- **One hook, for one real constraint.** virtio-pci's notify address depends on `queue_notify_off`, a
+  register *of the selected queue* — reading it inside `notify` would touch `queue_select` with a
+  request in flight. `Transport::after_queue_select` (a default no-op the MMIO transport ignores) lets
+  the PCI transport latch it once, during setup.
+- **The first attempt failed usefully.** QEMU puts the BAR at `0xc000000000`, above 4 GiB, which the
+  kernel's own map (ALET-P1-031) deliberately does not cover. Rather than mapping all of physical space
+  — trading a precise map for a vague one — **the driver maps its own registers**, and the admission
+  check's physical rule is **inverted**: `validate_map` requires the page to be INSIDE the
+  frame-allocator window, `validate_map_device` requires it to be OUTSIDE.
+- **That inversion is the security content.** A BAR is by definition memory the allocator does not own;
+  what must never happen is the reverse — mapping RAM as MMIO would give a task's frame a second mapping
+  with different cacheability and side effects, invisible to the ownership model (ADR-030).
+  `MapFault::PhysIsRam` names the refusal. The host sweep in `kernel-core/tests/vmaddr.rs` walks the
+  whole window plus a margin on all three plans and proves **no page is ever mappable as both**, that
+  each rule matches its window exactly, and that the sweep produced both outcomes; x86-64 boot
+  invariants 53–55 prove the live API refuses a RAM range while the same page stays a legal RAM mapping.
+- **The gate attaches a second disk**, so the boot medium is never written: the scratch disk arrives on
+  the virtio-pci bus and the shared 17-invariant suite runs over it. Virtual-memory invariants 52 → 55.
+- **Result: all three targets prove the namespace on hardware paths.** aarch64 and RISC-V over
+  virtio-mmio, x86-64 over virtio-pci — `ALL 17 VIRTIO-BLK INVARIANTS HOLD` on each. Crash atomicity is
+  now a hardware claim on every CPU Aletheia targets, not just the dev backend.
+- **Still not claimed:** no DMA isolation (bus-master is now *enabled*, which makes ALET-P1-018 more
+  concrete, not less), no interrupts, no multi-queue, no hotplug, no PCI bridge recursion, and no BAR
+  assignment — the firmware's placement is used as found.
+
+Gates after the wave: `build-all` PASS, `e2e-all` PASS (aarch64 / riscv64 / x86-64 in QEMU),
+`conformance` PASS (49 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (67
+requirements).
+
+## Previous wave — a driver belongs to its bus, not to a CPU (2026-08-03, GAPS4 ALET-P2-019, REQ-DRV-004)
 
 The wave below gave every target a filesystem, and the wave before that gave x86-64 its own address
 map. Both exposed the same inversion: the only target with a **real block device** was aarch64, which

@@ -15,7 +15,7 @@
 //! **Graceful probe.** With no `-drive` attached, `probe` returns `None`, the kernel logs
 //! `[virtio] no device (skipped)` and boots green; `scripts/vm-e2e-riscv.sh` attaches a 1 MiB disk and
 //! requires the invariant marker.
-use kernel_core::virtioblk::{self, InitReport, MmioLayout, VirtioHal};
+use kernel_core::virtioblk::{self, InitReport, MmioLayout, MmioTransport, VirtioHal};
 
 use crate::frames;
 
@@ -44,8 +44,8 @@ impl VirtioHal for RiscvVirtio {
     }
 }
 
-/// This target's concrete block device.
-pub type VirtioBlk = virtioblk::VirtioBlk<RiscvVirtio>;
+/// This target's concrete block device: the shared driver, on the shared virtio-mmio transport.
+pub type VirtioBlk = virtioblk::VirtioBlk<RiscvVirtio, MmioTransport>;
 
 /// Scan for a block transport. `None` = none attached (the graceful-skip path).
 pub fn probe() -> Option<usize> {
@@ -53,10 +53,10 @@ pub fn probe() -> Option<usize> {
     unsafe { virtioblk::probe(&LAYOUT) }
 }
 
-fn log_report(r: &InitReport) {
+fn log_report(base: usize, r: &InitReport) {
     kprintln!(
         "[virtio] block device @ {:#x} (version {}, id {})",
-        r.base,
+        base,
         r.version,
         r.device_id
     );
@@ -90,16 +90,18 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         }
     };
 
-    // SAFETY: `base` came from `probe`, so it is a mapped virtio-mmio block transport, and
-    // `RiscvVirtio::alloc_frame` hands out identity-mapped frames this kernel owns exclusively.
-    let (dev, report) = match unsafe { VirtioBlk::init(base) } {
+    // SAFETY: `base` came from `probe`, so it is a mapped virtio-mmio transport; `MmioTransport::new`
+    // refuses anything that is not a modern block device, and `RiscvVirtio::alloc_frame` hands out
+    // identity-mapped frames this kernel owns exclusively.
+    let init = unsafe { MmioTransport::new(base).and_then(|t| VirtioBlk::init(t)) };
+    let (dev, report) = match init {
         Ok(pair) => pair,
         Err(e) => {
             kprintln!("[virtio] init failed: {}", e);
             return Err((0, "virtio-blk device initialization"));
         }
     };
-    log_report(&report);
+    log_report(base, &report);
 
     match virtioblk::device_suite(dev, GATE_IMAGE_BLOCKS, |n, passed, name| {
         if passed {

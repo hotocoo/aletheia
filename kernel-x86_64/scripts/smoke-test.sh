@@ -41,11 +41,20 @@ LOG="$WORK/serial.log"
 cp "$VARSSRC" "$VARS"
 : > "$LOG"
 
+# A SECOND, scratch disk on the virtio-pci bus (REQ-DRV-005, ADR-037): 1 MiB = 2048 sectors = 256
+# 4 KiB blocks, so the shared driver suite runs the journal + the whole filesystem namespace over a
+# real device on this target too. The boot disk above stays untouched — the kernel never writes to the
+# medium it booted from.
+SCRATCH="$WORK/virtio-blk-test.img"
+dd if=/dev/zero of="$SCRATCH" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create scratch disk"; exit 1; }
+
 qemu-system-x86_64 -machine q35 -m 256 -smp 4 \
   -cpu qemu64,+smep \
   -drive if=pflash,format=raw,unit=0,file="$CODE",readonly=on \
   -drive if=pflash,format=raw,unit=1,file="$VARS" \
   -drive format=raw,file="$IMG" \
+  -drive if=none,format=raw,file="$SCRATCH",id=blk0 \
+  -device virtio-blk-pci,drive=blk0 \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
   -serial file:"$LOG" -display none -no-reboot &
 QPID=$!
@@ -61,13 +70,14 @@ echo "QEMU exit code: $RC (expect 33)"
 
 if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 22 MEMORY INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 52 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 55 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
    && grep -q 'kernel map built @' "$LOG" \
    && grep -q 'kernel map ACTIVE' "$LOG" \
    && grep -q 'live W\^X audit: .* 0 violations' "$LOG" \
    && grep -q 'SMP INVARIANTS HOLD' "$LOG" \
    && grep -q 'RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 12 FILESYSTEM INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 17 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
   echo "SMOKE TEST: PASS"
   rm -rf "$WORK"
