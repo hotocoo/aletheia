@@ -152,11 +152,32 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
+    // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk
+    // device — and on this target `virtio::selftest` above additionally proves them over the REAL
+    // virtio-blk driver, which is what makes the crash-atomicity claim a hardware claim.
+    kprintln!("");
+    kprintln!("--- filesystem selftests (named objects over the journal: atomic create/remove) ---");
+    let mut disk = kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
+    match kernel_core::fs::selftest_on(&mut disk, |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[fs] ALL {} FILESYSTEM INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[fs] FAILED at filesystem invariant {}: {}", idx, name);
+            semihosting::exit(160 + idx as i32);
+        }
+    }
+
     bench::run();
 
     kprintln!("");
     kprintln!(
-        "[e2e] PASS — boot + spine + {} invariants + memory-management + virtual-memory + user-mode + benchmark complete",
+        "[e2e] PASS — boot + spine + {} invariants + memory-management + virtual-memory + user-mode + filesystem + benchmark complete",
         11
     );
     semihosting::exit(0);

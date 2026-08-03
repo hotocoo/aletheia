@@ -166,9 +166,29 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
+    // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk
+    // device; aarch64 additionally proves them over the real virtio-blk driver.
+    kprintln!("");
+    kprintln!("--- filesystem selftests (named objects over the journal: atomic create/remove) ---");
+    let mut disk = kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
+    match kernel_core::fs::selftest_on(&mut disk, |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[fs] ALL {} FILESYSTEM INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[fs] FAILED at filesystem invariant {}: {}", idx, name);
+            ActiveHal::exit(160 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!(
-        "[e2e] PASS — RISC-V S-mode boot + SBI + rdtime + 11 spine + memory + virtual-memory + user-mode invariants"
+        "[e2e] PASS — RISC-V S-mode boot + SBI + rdtime + 11 spine + memory + virtual-memory + user-mode + filesystem invariants"
     );
     kprintln!("[e2e] Aletheia re-proved its invariants on its second first-class target. Halting.");
     ActiveHal::exit(0)
