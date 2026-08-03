@@ -43,7 +43,8 @@ OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
   -bios default -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
-  -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1)"
+  -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
+  -netdev user,id=n0 -device virtio-net-device,netdev=n0)"
 CODE=$?
 
 echo "----------------------------------------"
@@ -62,6 +63,7 @@ echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invar
 echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
 # 5 driver invariants + the 12 filesystem behaviors, all over the REAL device (REQ-DRV-004).
 echo "$OUT" | grep -q "ALL 20 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
+echo "$OUT" | grep -q "ALL 4 NETWORK INVARIANTS HOLD" || { echo "FAIL: network invariants marker missing (REQ-NET-001; NIC attached, suite must run)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
@@ -73,7 +75,8 @@ OUT2="$(perl -e 'alarm 120; exec @ARGV or die' \
   -bios default -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
-  -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1)"
+  -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
+  -netdev user,id=n0 -device virtio-net-device,netdev=n0)"
 CODE2=$?
 echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
 echo "second boot exit code: $CODE2"

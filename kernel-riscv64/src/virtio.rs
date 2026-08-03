@@ -16,6 +16,7 @@
 //! `[virtio] no device (skipped)` and boots green; `scripts/vm-e2e-riscv.sh` attaches a 1 MiB disk and
 //! requires the invariant marker.
 use kernel_core::virtioblk::{self, InitReport, MmioLayout, MmioTransport, VirtioHal};
+use kernel_core::virtionet::{self, VirtioNet, VIRTIO_ID_NET};
 
 use crate::frames;
 
@@ -130,5 +131,27 @@ pub fn persistent_device() -> Option<VirtioBlk> {
             .and_then(|t| VirtioBlk::init(t))
             .ok()?;
         Some(dev)
+    }
+}
+
+/// This target's concrete network device (REQ-NET-001, ADR-041): the shared driver, same transport.
+pub type Net = VirtioNet<RiscvVirtio, MmioTransport>;
+
+/// Bring up a virtio-net device if one is attached. `None` = no NIC (the graceful-skip path), so a boot
+/// without `-netdev` still passes; the VM gate attaches one and requires the marker.
+pub fn network_device() -> Option<Result<Net, virtionet::NetError>> {
+    // SAFETY: the slot addresses are mapped device memory; `new_for` refuses anything that is not a modern
+    // network device, and the frames handed to the device are identity-mapped and exclusively ours.
+    unsafe {
+        let base = virtioblk::probe_nth_kind(&LAYOUT, VIRTIO_ID_NET, 0)?;
+        let transport = match MmioTransport::new_for(base, VIRTIO_ID_NET) {
+            Ok(t) => t,
+            Err(e) => {
+                kprintln!("[net] transport setup failed: {}", e);
+                return Some(Err(virtionet::NetError::Unsupported("transport")));
+            }
+        };
+        kprintln!("[net] virtio-net @ {:#x}", base);
+        Some(VirtioNet::init(transport))
     }
 }

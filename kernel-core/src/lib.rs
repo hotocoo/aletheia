@@ -45,6 +45,8 @@ pub mod storage;
 pub mod sync;
 pub mod teardown;
 pub mod virtioblk;
+pub mod virtionet;
+pub mod virtq;
 pub mod vmaddr;
 
 /// The arch-independent hardware primitives the Aletheia kernel needs from a target backend. Every

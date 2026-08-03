@@ -255,6 +255,33 @@ pub extern "C" fn kmain() -> ! {
         None => kprintln!("[persist] no persistent medium attached (skipped)"),
     }
 
+    // Networking (REQ-NET-001/002, ADR-041): the first real slice — a virtio-net device, and enough
+    // protocol to prove the path against something that ANSWERS. A transmit-only driver proves nothing, so
+    // the suite ARPs QEMU's gateway and pings it: the reply must carry the address asked about, and the
+    // echo must come back with matching id, sequence and payload, its checksums verified.
+    kprintln!("");
+    kprintln!("--- network selftests (virtio-net: ARP + ICMP echo against the gateway) ---");
+    match virtio::network_device() {
+        None => kprintln!("[net] no network device attached (skipped)"),
+        Some(Err(e)) => {
+            kprintln!("[net] device init FAILED: {:?}", e);
+            ActiveHal::exit(220);
+        }
+        Some(Ok(net)) => match kernel_core::virtionet::net_suite(net, |n, passed, name| {
+            if passed {
+                kprintln!("  [pass {:>2}] {}", n, name);
+            } else {
+                kprintln!("  [FAIL {:>2}] {}", n, name);
+            }
+        }) {
+            Ok(n) => kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n),
+            Err((idx, name)) => {
+                kprintln!("[net] FAILED at network invariant {}: {}", idx, name);
+                ActiveHal::exit(220 + idx as i32);
+            }
+        },
+    }
+
     kprintln!("");
     kprintln!(
         "[e2e] PASS — RISC-V S-mode boot + SBI + rdtime + 11 spine + memory + virtual-memory + user-mode + filesystem invariants"

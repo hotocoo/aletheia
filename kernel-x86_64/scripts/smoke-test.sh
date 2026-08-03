@@ -70,6 +70,7 @@ boot_once() {
     -device virtio-blk-pci,drive=blk0 \
     -drive if=none,format=raw,file="$PERSIST",id=blk1 \
     -device virtio-blk-pci,drive=blk1 \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -serial file:"$log" -display none -no-reboot &
   local qpid=$!
@@ -98,6 +99,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 15 FILESYSTEM INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 20 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 9 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 4 NETWORK INVARIANTS HOLD' "$LOG" \
    && grep -q 'PERSISTENT MEDIUM: boot #1, 0 entities verified' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
   # ---- SECOND BOOT against the SAME persistent disk: the OS must REMEMBER (REQ-STOR-003) ----

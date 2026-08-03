@@ -462,6 +462,33 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         None => kprintln!("[persist] no persistent medium attached (skipped)"),
     }
 
+    // Networking (REQ-NET-001/002, ADR-041) — same shared driver and stack as the other targets, over the
+    // PCI transport. ARP the gateway, then ping it: a transmit-only driver would prove nothing.
+    kprintln!("");
+    kprintln!(
+        "--- network selftests (virtio-net over PCI: ARP + ICMP echo against the gateway) ---"
+    );
+    match virtio::network_device() {
+        None => kprintln!("[net] no network device attached (skipped)"),
+        Some(Err(e)) => {
+            kprintln!("[net] device init FAILED: {:?}", e);
+            ActiveHal::exit(220);
+        }
+        Some(Ok(net)) => match kernel_core::virtionet::net_suite(net, |n, passed, name| {
+            if passed {
+                kprintln!("  [pass {:>2}] {}", n, name);
+            } else {
+                kprintln!("  [FAIL {:>2}] {}", n, name);
+            }
+        }) {
+            Ok(n) => kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n),
+            Err((idx, name)) => {
+                kprintln!("[net] FAILED at network invariant {}: {}", idx, name);
+                ActiveHal::exit(220 + idx as i32);
+            }
+        },
+    }
+
     kprintln!("");
     kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants + SMP + ring-3 user-mode + filesystem");
     kprintln!("[e2e] Aletheia booted as its own OS on AMD64. Halting.");

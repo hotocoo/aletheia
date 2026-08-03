@@ -55,6 +55,10 @@ const CMD_BUS_MASTER: u32 = 1 << 2;
 const VENDOR_VIRTIO: u16 = 0x1AF4;
 const DEVICE_BLK_MODERN: u16 = 0x1042;
 const DEVICE_BLK_TRANSITIONAL: u16 = 0x1001;
+/// virtio-net's PCI ids: modern (0x1041) and transitional (0x1000). A second device KIND is two more ids,
+/// not a second driver framework (ADR-041).
+const DEVICE_NET_MODERN: u16 = 0x1041;
+const DEVICE_NET_TRANSITIONAL: u16 = 0x1000;
 
 /// PCI capability ids and the virtio capability's `cfg_type` values (VIRTIO 1.1 §4.1.4).
 const CAP_ID_VENDOR: u8 = 0x09;
@@ -197,6 +201,22 @@ pub unsafe fn find_virtio_blk() -> Option<Bdf> {
 /// # Safety
 /// Touches the PCI configuration ports.
 pub unsafe fn find_virtio_blk_nth(nth: usize) -> Option<Bdf> {
+    find_virtio_nth(&[DEVICE_BLK_MODERN, DEVICE_BLK_TRANSITIONAL], nth)
+}
+
+/// Scan bus 0 for the `nth` virtio NETWORK function.
+///
+/// # Safety
+/// Touches the PCI configuration ports.
+pub unsafe fn find_virtio_net_nth(nth: usize) -> Option<Bdf> {
+    find_virtio_nth(&[DEVICE_NET_MODERN, DEVICE_NET_TRANSITIONAL], nth)
+}
+
+/// Scan bus 0 for the `nth` virtio function whose device id is one of `ids`.
+///
+/// # Safety
+/// Touches the PCI configuration ports.
+pub unsafe fn find_virtio_nth(ids: &[u16], nth: usize) -> Option<Bdf> {
     let mut seen = 0usize;
     for device in 0..32u8 {
         // Function 0 decides whether the slot is populated and whether it is multi-function.
@@ -221,7 +241,7 @@ pub unsafe fn find_virtio_blk_nth(nth: usize) -> Option<Bdf> {
             if vendor != VENDOR_VIRTIO {
                 continue;
             }
-            if dev_id == DEVICE_BLK_MODERN || dev_id == DEVICE_BLK_TRANSITIONAL {
+            if ids.contains(&dev_id) {
                 if seen == nth {
                     return Some(bdf);
                 }
@@ -382,9 +402,16 @@ impl PciTransport {
 
 impl Transport for PciTransport {
     fn identity(&self) -> (u32, u32) {
-        // A modern virtio-pci function IS the v2 transport; report it as such so the shared driver's
-        // report reads the same on every target.
-        (2, self.device_id)
+        // Report the VIRTIO device kind, not the PCI device id — `identity` must mean the same thing on
+        // both buses, or a driver that checks "am I talking to a network device?" reads 0x1041 and refuses.
+        // Modern virtio-pci ids are 0x1040 + kind; the transitional ids are a fixed short list.
+        let kind = match self.device_id as u16 {
+            0x1000 => 1, // transitional net
+            0x1001 => 2, // transitional blk
+            id if id >= 0x1040 => (id - 0x1040) as u32,
+            other => other as u32,
+        };
+        (2, kind)
     }
 
     unsafe fn device_features(&self, sel: u32) -> u32 {

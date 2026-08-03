@@ -5,7 +5,7 @@
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..040`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..041`.
 
 ## What Aletheia is
 
@@ -17,7 +17,45 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — a layout you can check, and two addresses that must never translate (2026-08-03, GAPS4 ALET-P1-006/012)
+## Latest wave — the network answers back (2026-08-03, GAPS4 ALET-P2-020, REQ-NET-001/002)
+
+Networking was the largest remaining "an operating system does this" hole: architecture text and nothing
+else. It could not reuse the block driver, for a precise reason — a block device has ONE queue with one
+request in flight, and `virtioblk` encodes exactly that in a fixed layout. A NIC needs two queues, and its
+receive queue must have buffers **posted before the device is allowed to run**, because a packet arrives
+whether or not the driver is ready and a queue with no buffer simply drops it.
+
+- **`kernel_core::virtq` — the ring mechanics, reusable.** A `Virtqueue` per queue index over the existing
+  CPU and bus seams: `add` / `kick` / `poll_used`. `virtioblk` keeps its own proven single-queue path
+  untouched. `last_used` lives in the queue, because a driver that forgets how far it consumed the used ring
+  handles one packet twice — or reuses a transmit buffer still in flight.
+- **`kernel_core::virtionet` — the driver, and the smallest honest stack.** Feature negotiation takes only
+  MAC (so the address comes from the device rather than being invented) plus `VERSION_1`; every offload is
+  declined, which is what keeps the header all-zero. Receive buffers are posted before `DRIVER_OK` and
+  re-posted before each frame is returned — both orderings load-bearing.
+- **The proof is that something ANSWERS.** A transmit-only driver is indistinguishable from a frame that
+  vanished. So the suite talks to QEMU's gateway: **ARP** must answer "who has 10.0.2.2?" with that address
+  and a MAC; then an **ICMP echo** with two correct checksums (the IP header's and the message's) must come
+  back with matching identifier, sequence and payload — a wrong checksum is dropped by the peer in silence,
+  so the reply arriving proves the packet was well *formed*, not merely well intentioned. A **second** echo
+  must match on its own sequence, proving the driver reads the reply instead of assuming the next frame is it.
+- **All three targets, both buses, first boot on two of them.** aarch64 and RISC-V over virtio-mmio, x86-64
+  over virtio-pci: `ALL 4 NETWORK INVARIANTS HOLD`, boot failing `220 + i`. The four behaviors joined the
+  conformance contract (64 → **68**), so "the network works" cannot vary by CPU — or by bus.
+- **x86-64 failed first, and it was a real seam bug**, not a wiring slip: `PciTransport::identity()`
+  returned the *PCI* device id (`0x1041`) where the shared driver expects the *virtio* device kind, so a
+  perfectly good NIC was refused. A seam whose meaning differs per bus is not a seam.
+- **Not claimed, and it is a lot:** no TCP, UDP, DHCP, routing, fragmentation, ARP cache or socket layer;
+  the address is the fixed `10.0.2.15` QEMU expects and every reply is matched synchronously by the code
+  that sent the request. Frames that are not the answer are **counted** (`dropped()`), not queued, so a
+  failing wait beside a nonzero count distinguishes "the peer said nothing" from "the driver threw the
+  answer away". **ALET-P2-020 moves from `deferred` to `open`** — real gated code exists, and what remains
+  is named in its row.
+
+Gates after the wave: `build-all` PASS, `e2e-all` PASS (each target booted twice, now with a NIC attached),
+`conformance` PASS (68 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (75 requirements).
+
+## Previous wave — a layout you can check, and two addresses that must never translate (2026-08-03, GAPS4 ALET-P1-006/012)
 
 Each target knew its address-space layout as scattered literals — a RAM base in `frames`, a peripheral
 window in `vm`, a user VA in `usermode`, a stack in `linker.ld`. Nothing stated what the layout *was*, so
