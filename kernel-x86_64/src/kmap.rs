@@ -440,6 +440,12 @@ pub fn data_probe() -> Option<usize> {
 
 /// First address inside a read-only, non-executable section (`.rdata`), or `None` if the image has
 /// no such section.
+///
+/// Unlike [`text_probe`] and [`data_probe`], whose `None` is a gate FAILURE, this one is genuinely
+/// optional and the gate skips its invariant instead: an image with no read-only section is unusual
+/// but not broken, and failing a boot over a section the linker was free not to emit would assert
+/// something about the toolchain rather than about the map. Text and data are different — an image
+/// claiming neither executable nor writable memory is not this kernel, so those hard-fail.
 pub fn rodata_probe() -> Option<usize> {
     let (secs, count) = sections();
     secs.iter()
