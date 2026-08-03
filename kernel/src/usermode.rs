@@ -417,6 +417,70 @@ fn sched_report(magic: u64, exited: bool) {
     }
 }
 
+/// The task supervisor (REQ-REL-002, ADR-042). An UNEXPECTED user fault used to end the boot; now it
+/// terminates that task and the system continues — the same policy `kernel-core` applies on every target.
+static mut SUPERVISOR: kernel_core::supervisor::Supervisor =
+    kernel_core::supervisor::Supervisor::new();
+/// The id the supervisor knows the running excursion by (one runs at a time here). Left at 0 on this
+/// target: no excursion here takes an UNDECLARED fault yet, so nothing has needed a distinct id. The
+/// x86-64 backend bumps it per excursion because its suite deliberately kills one.
+static mut CURRENT_TASK: u64 = 0;
+
+/// Read-only view of the supervisor, for the boot invariants.
+///
+/// SAFETY: single-threaded, interrupts masked for the suite; no concurrent access exists.
+pub fn supervisor() -> &'static kernel_core::supervisor::Supervisor {
+    unsafe { &*core::ptr::addr_of!(SUPERVISOR) }
+}
+
+/// Ask the supervisor about an UNEXPECTED user fault. Returns true if the task was terminated and the
+/// caller may abandon it and continue; false means escalate (the caller then exits).
+fn supervise_user_fault(fault_va: usize) -> bool {
+    use kernel_core::faultclass::{classify, kind_name, verdict, Fault};
+    use kernel_core::sched::TaskId;
+    use kernel_core::supervisor::SupervisorAction;
+    // This path is reached only from a user-privilege abort, so the fault is a user fault by
+    // construction; the classifier says what KIND, which is what the log needs and the policy consumes.
+    let f = Fault {
+        present: false,
+        write: false,
+        user: true,
+        exec: false,
+        reserved_bit: false,
+        from_kernel: false,
+        unrecognized: None,
+    };
+    let kind = classify(&f);
+    // SAFETY: single-threaded; only this dispatcher mutates the supervisor.
+    let (action, id) = unsafe {
+        let id = TaskId(*core::ptr::addr_of!(CURRENT_TASK));
+        (
+            (*core::ptr::addr_of_mut!(SUPERVISOR)).on_fault(Some(id), kind, verdict(kind)),
+            id,
+        )
+    };
+    match action {
+        SupervisorAction::TaskTerminated(reason) => {
+            kprintln!(
+                "[usermode] user fault at {:#x} -> {} : task {} TERMINATED ({:?}); system continues",
+                fault_va,
+                kind_name(kind),
+                id.0,
+                reason
+            );
+            true
+        }
+        SupervisorAction::Escalate(k) => {
+            kprintln!(
+                "[usermode] user fault at {:#x} ESCALATED ({})",
+                fault_va,
+                kind_name(k)
+            );
+            false
+        }
+    }
+}
+
 /// Data-abort dispatch. An armed isolation trial treats an EL0 fault as the expected proof and
 /// resumes; any UNEXPECTED abort stays fatal (`exit 102`) so bugs cannot hide here.
 #[no_mangle]
@@ -429,8 +493,14 @@ pub extern "C" fn el0_data_abort(far: u64) -> u64 {
             0
         }
         _ => {
-            kprintln!("[usermode] UNEXPECTED EL0 data abort at {:#x}", far);
-            crate::semihosting::exit(102);
+            // Unexpected EL0 abort: to the supervisor (REQ-REL-002, ADR-042). Returning 0 here abandons
+            // the task and resumes the scheduler — the same path the armed trial takes — so a user fault
+            // costs one task instead of the boot.
+            if supervise_user_fault(far as usize) {
+                0
+            } else {
+                crate::semihosting::exit(102);
+            }
         }
     }
 }
@@ -1698,6 +1768,35 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         high_received,
         "el0: HIGH resumes as highest-priority and receives the body across address spaces"
     );
+
+    // The task supervisor's policy is compiled into THIS kernel and its handler is wired (REQ-REL-002,
+    // ADR-042). The end-to-end kill-and-continue proof — taking an undeclared user fault and then running
+    // another task — currently exists on x86-64 only; these invariants assert what is true here: the
+    // policy behaves, and the unexpected-fault path routes through it rather than exiting directly.
+    {
+        use kernel_core::faultclass::{classify, from_x86_error_code, verdict};
+        use kernel_core::sched::TaskId;
+        use kernel_core::supervisor::{Supervisor, SupervisorAction, TerminationReason};
+        let mut probe = Supervisor::new();
+        let user = from_x86_error_code(0b100); // user, not present
+        let ukind = classify(&user);
+        let contained = probe.on_fault(Some(TaskId(1)), ukind, verdict(ukind));
+        let kernelf = from_x86_error_code(0b011); // kernel write to a present page
+        let kkind = classify(&kernelf);
+        let escalated = probe.on_fault(Some(TaskId(2)), kkind, verdict(kkind));
+        check!(
+            contained == SupervisorAction::TaskTerminated(TerminationReason::Fault(ukind))
+                && !probe.may_run(TaskId(1))
+                && matches!(escalated, SupervisorAction::Escalate(_))
+                && probe.may_run(TaskId(2))
+                && probe.escalations() == 1,
+            "supervisor: the policy is live in this kernel — a user fault terminates that task, a kernel fault escalates"
+        );
+        check!(
+            supervisor().terminated() == 0 && supervisor().escalations() == 0,
+            "supervisor: no task was terminated during this boot (every fault here was a declared trial)"
+        );
+    }
 
     Ok(n)
 }

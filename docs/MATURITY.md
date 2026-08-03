@@ -43,8 +43,9 @@ target, host property tests with crash sweeps at every prefix — and none of th
 1. **A supervisor — partially built (REQ-REL-002, ADR-042).** A user fault now terminates that task and the
    boot continues, proved live on x86-64 by faulting a ring-3 task on purpose and then running another one.
    What remains: reaping the dead task's address space in the fault path, restart policy / supervision trees
-   (REQ-REL-001, still architecture only), quotas and rate limits, and the same three lines wired into the
-   aarch64 and RISC-V handlers, which still treat an unexpected user fault as fatal.
+   (REQ-REL-001, still architecture only), quotas and rate limits, and an end-to-end kill-and-continue
+   excursion on aarch64 and RISC-V (their handlers now route through the supervisor and assert its policy,
+   but only x86-64 takes an undeclared fault on purpose and then runs another task).
 2. **DMA isolation.** Devices receive raw physical addresses; an IOMMU/SMMU model is the answer (P1-018).
 3. **Interrupt-driven I/O.** Every driver polls. That is provable and slow, and it does not survive real
    device latencies.
