@@ -6,9 +6,9 @@
 //! release — all fail-closed.
 
 use kernel_core::priosched::{Endpoint, Priority, PriorityScheduler, SchedError};
-use std::vec as alloc_vec;
 use kernel_core::sched::{TaskId, TaskState};
 use kernel_core::spine::{CapEngine, Constraints, Scope};
+use std::vec as alloc_vec;
 
 const ACQ: &str = "endpoint.acquire";
 const HIGH: Priority = Priority(10);
@@ -181,35 +181,44 @@ fn a_holder_is_never_weaker_than_anyone_waiting_on_it() {
     let (engine, cap) = engine();
     let mut s = PriorityScheduler::new(ACQ);
     // Ids deliberately inverted against priorities, so id order cannot accidentally satisfy this.
-    for (id, p) in [(1u64, LOW), (2, HIGH), (3, MED), (4, Priority(7)), (5, Priority(3))] {
+    for (id, p) in [
+        (1u64, LOW),
+        (2, HIGH),
+        (3, MED),
+        (4, Priority(7)),
+        (5, Priority(3)),
+    ] {
         s.admit(t(id), p);
     }
     let eps = [Endpoint(100), Endpoint(200)];
     // model: (endpoint, waiter) pairs this test has created.
     let mut waiting: alloc_vec::Vec<(Endpoint, TaskId)> = alloc_vec::Vec::new();
 
-    let assert_no_inversion = |s: &PriorityScheduler, waiting: &[(Endpoint, TaskId)], step: &str| {
-        for (ep, waiter) in waiting {
-            if s.state(*waiter) != Some(TaskState::Blocked) {
-                continue; // no longer waiting: handed the endpoint, or finished
-            }
-            if let Some(h) = s.holder_of(*ep) {
-                if h == *waiter {
-                    continue; // this waiter has since been handed the endpoint
+    let assert_no_inversion =
+        |s: &PriorityScheduler, waiting: &[(Endpoint, TaskId)], step: &str| {
+            for (ep, waiter) in waiting {
+                if s.state(*waiter) != Some(TaskState::Blocked) {
+                    continue; // no longer waiting: handed the endpoint, or finished
                 }
-                let hp = s.effective_priority(h);
-                let wp = s.effective_priority(*waiter);
-                assert!(
-                    hp >= wp,
-                    "{step}: INV-PRIO-1 violated — holder {h:?} at {hp:?} is weaker than \
+                if let Some(h) = s.holder_of(*ep) {
+                    if h == *waiter {
+                        continue; // this waiter has since been handed the endpoint
+                    }
+                    let hp = s.effective_priority(h);
+                    let wp = s.effective_priority(*waiter);
+                    assert!(
+                        hp >= wp,
+                        "{step}: INV-PRIO-1 violated — holder {h:?} at {hp:?} is weaker than \
                      waiter {waiter:?} at {wp:?} on {ep:?}"
-                );
+                    );
+                }
             }
-        }
-    };
+        };
 
-    s.acquire(&engine, eps[0], t(1), &[cap.clone()]).expect("acquire");
-    s.acquire(&engine, eps[1], t(5), &[cap.clone()]).expect("acquire");
+    s.acquire(&engine, eps[0], t(1), &[cap.clone()])
+        .expect("acquire");
+    s.acquire(&engine, eps[1], t(5), &[cap.clone()])
+        .expect("acquire");
     assert_no_inversion(&s, &waiting, "after acquires");
 
     // 2 (HIGH) and 4 (7) queue behind 1 (LOW); 3 (MED) queues behind 5 (3).
@@ -234,7 +243,11 @@ fn a_holder_is_never_weaker_than_anyone_waiting_on_it() {
     );
     assert_no_inversion(&s, &waiting, "after handoff");
     let second = s.release(eps[0], t(2)).expect("release");
-    assert_eq!(second, Some(t(4)), "the remaining waiter must be handed the endpoint");
+    assert_eq!(
+        second,
+        Some(t(4)),
+        "the remaining waiter must be handed the endpoint"
+    );
     assert_no_inversion(&s, &waiting, "after second handoff");
 }
 
@@ -249,10 +262,14 @@ fn donation_follows_the_whole_chain_not_just_one_hop() {
     s.admit(t(3), LOW); // C
     let ep_b = Endpoint(1);
     let ep_c = Endpoint(2);
-    s.acquire(&engine, ep_b, t(2), &[cap.clone()]).expect("B holds ep_b");
-    s.acquire(&engine, ep_c, t(3), &[cap.clone()]).expect("C holds ep_c");
-    s.wait(&engine, ep_c, t(2), &[cap.clone()]).expect("B waits on C");
-    s.wait(&engine, ep_b, t(1), &[cap.clone()]).expect("A waits on B");
+    s.acquire(&engine, ep_b, t(2), &[cap.clone()])
+        .expect("B holds ep_b");
+    s.acquire(&engine, ep_c, t(3), &[cap.clone()])
+        .expect("C holds ep_c");
+    s.wait(&engine, ep_c, t(2), &[cap.clone()])
+        .expect("B waits on C");
+    s.wait(&engine, ep_b, t(1), &[cap.clone()])
+        .expect("A waits on B");
 
     assert_eq!(
         s.effective_priority(t(3)),
@@ -274,7 +291,8 @@ fn donation_stops_the_moment_the_endpoint_is_released() {
     s.admit(t(1), LOW);
     s.admit(t(2), HIGH);
     let ep = Endpoint(5);
-    s.acquire(&engine, ep, t(1), &[cap.clone()]).expect("acquire");
+    s.acquire(&engine, ep, t(1), &[cap.clone()])
+        .expect("acquire");
     s.wait(&engine, ep, t(2), &[cap.clone()]).expect("wait");
     assert_eq!(s.effective_priority(t(1)), HIGH, "donation did not apply");
     s.release(ep, t(1)).expect("release");
@@ -327,7 +345,8 @@ fn the_scheduler_never_runs_a_weaker_ready_task_over_a_stronger_one() {
     }
     // Block 3 (HIGH) on an endpoint held by 1 (LOW) — the classic inversion setup.
     let ep = Endpoint(9);
-    s.acquire(&engine, ep, t(1), &[cap.clone()]).expect("acquire");
+    s.acquire(&engine, ep, t(1), &[cap.clone()])
+        .expect("acquire");
     s.wait(&engine, ep, t(3), &[cap.clone()]).expect("wait");
 
     for round in 0..12 {
@@ -360,11 +379,15 @@ fn a_donation_cycle_terminates_instead_of_recursing() {
     s.admit(t(2), HIGH);
     let ep1 = Endpoint(11);
     let ep2 = Endpoint(22);
-    s.acquire(&engine, ep1, t(1), &[cap.clone()]).expect("1 holds ep1");
-    s.acquire(&engine, ep2, t(2), &[cap.clone()]).expect("2 holds ep2");
+    s.acquire(&engine, ep1, t(1), &[cap.clone()])
+        .expect("1 holds ep1");
+    s.acquire(&engine, ep2, t(2), &[cap.clone()])
+        .expect("2 holds ep2");
     // Each waits on the other's endpoint: a cycle.
-    s.wait(&engine, ep2, t(1), &[cap.clone()]).expect("1 waits on ep2");
-    s.wait(&engine, ep1, t(2), &[cap.clone()]).expect("2 waits on ep1");
+    s.wait(&engine, ep2, t(1), &[cap.clone()])
+        .expect("1 waits on ep2");
+    s.wait(&engine, ep1, t(2), &[cap.clone()])
+        .expect("2 waits on ep1");
     // If donation recursed through the cycle this would never return (or overflow the stack).
     let p1 = s.effective_priority(t(1));
     let p2 = s.effective_priority(t(2));
@@ -390,12 +413,23 @@ fn an_unauthorized_acquire_or_wait_changes_no_scheduling_state() {
     let ep = Endpoint(3);
 
     // No capability offered: the acquire must be refused and leave the endpoint free.
-    assert_eq!(s.acquire(&engine, ep, t(1), &[]), Err(SchedError::Unauthorized));
-    assert_eq!(s.holder_of(ep), None, "INV-PRIO-7: an unauthorized acquire took the endpoint");
+    assert_eq!(
+        s.acquire(&engine, ep, t(1), &[]),
+        Err(SchedError::Unauthorized)
+    );
+    assert_eq!(
+        s.holder_of(ep),
+        None,
+        "INV-PRIO-7: an unauthorized acquire took the endpoint"
+    );
 
     // Legitimate holder, then an unauthorized wait: no blocking, and NO donation.
-    s.acquire(&engine, ep, t(1), &[cap.clone()]).expect("acquire");
-    assert_eq!(s.wait(&engine, ep, t(2), &[]), Err(SchedError::Unauthorized));
+    s.acquire(&engine, ep, t(1), &[cap.clone()])
+        .expect("acquire");
+    assert_eq!(
+        s.wait(&engine, ep, t(2), &[]),
+        Err(SchedError::Unauthorized)
+    );
     assert_eq!(
         s.state(t(2)),
         Some(TaskState::Ready),

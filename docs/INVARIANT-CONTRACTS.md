@@ -88,3 +88,43 @@ invariants extend that to the revocation side: what a revoker is entitled to con
 **Not claimed:** these are proved on the host, deterministically, by interleaving operations at every
 step — not by racing real threads (`kernel-core` is `no_std` and its tests are single-threaded). The SMP
 suites prove the same primitive on real cores.
+
+---
+
+## INV-FAULT — page-fault classification (REQ-FAULT-001, ADR-039)
+
+A handler's first job is to decide **what just happened**, and the decision is security-relevant: "a
+user task touched a page it may not touch" is routine, while "a translation structure contains a bit the
+architecture reserves" means the page tables are corrupt and nothing the kernel believes about memory is
+trustworthy. Before this, each target printed the raw architectural code and exited — honest, but not a
+model: there was nowhere to state that a reserved-bit fault must never be resumed.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-FAULT-1 | Classification is **total**: every input any decoder can produce maps to exactly one kind, and every kind to exactly one verdict. | A fault the model cannot name is a fault nobody decided about. | `classification_is_total_over_every_input_the_architectures_can_present` |
+| INV-FAULT-2 | A reserved-bit fault is `CorruptTranslation` and **never** survivable, whatever else was reported. | The page tables are the thing being doubted, so the other bits are not interpretable. | `a_reserved_bit_fault_is_never_survivable_whatever_else_is_set` |
+| INV-FAULT-3 | A fault from **kernel** privilege is never survivable. | "Kill the task" is meaningless when the kernel made the bad access. | `a_kernel_fault_is_never_survivable` |
+| INV-FAULT-4 | An **unrecognized** report is `Unknown` and fatal — never classified from the bits that happen to be understood. | This is what makes the model safe to extend: a new architectural bit degrades to fatal, not to "routine". | `an_unrecognized_report_is_never_classified_by_the_bits_it_happens_to_understand` |
+| INV-FAULT-5 | Each decoder maps architectural fields to the **facts** they mean, including where the architectures disagree in shape (an aarch64 instruction abort is never a "write"; RISC-V's `present` is the caller's fact because `scause` cannot report it). | A decoder that invents a field the ISA does not report makes the classification a guess. | `each_decoder_maps_its_architectural_fields_to_the_facts_they_mean` |
+| INV-FAULT-6 | The model's **default** value is the strict one: an unfilled `Fault` is a kernel fault. | A decoder that forgets a field must not thereby make a fault look routine. | `the_default_fault_is_the_strict_one` |
+
+**Wired live on x86-64** (`kernel-x86_64/src/idt.rs` classifies before reporting; boot invariants 56–58
+prove the model is compiled into the kernel and behaves there). The aarch64 and RISC-V decoders are
+host-proved but **not yet wired** — those handlers still print the raw `ESR` / `scause`. Stated, not
+implied.
+
+---
+
+## INV-REENTRY — shared trap state (REQ-FAULT-002, ADR-039)
+
+A trap handler runs on top of whatever it interrupted. If both touch one structure, the handler can
+observe it **half-updated** — and the failure is not a crash at the moment of re-entry but silent
+corruption found much later. The answer is not "be careful": it is to make re-entry detectable and fatal.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-REENTRY-1 | A nested entry is **refused**, never granted. | A granted nested entry is exactly the half-updated read. | `a_nested_entry_is_refused_and_leaves_evidence` |
+| INV-REENTRY-2 | Leaving reopens the section — the guard is not a one-shot latch. | Otherwise the first trap disables fault handling for the rest of the boot. | `leaving_reopens_the_section_exactly_once_per_entry` |
+| INV-REENTRY-3 | Every refusal is **counted**, so a caller that swallows one still leaves evidence. | A re-entry that happened once will happen again; the count is how a boot log says so. | `a_nested_entry_is_refused_and_leaves_evidence` |
+| INV-REENTRY-4 | Two CPUs entering at once (a missing lock, not a re-entry — same consequence) yields at most one inside. | The compare-exchange is what makes this the same mechanism rather than a second one. | `two_threads_entering_at_once_produce_exactly_one_winner` |
+| INV-REENTRY-5 | The section is never left active once the last token drops. | A leaked active state wedges fault handling permanently. | `the_section_is_never_left_active_after_the_last_token_drops` |

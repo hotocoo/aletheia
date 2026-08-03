@@ -383,7 +383,8 @@ fn a_replace_whose_new_extent_overlaps_the_old_at_a_shifted_start_writes_each_bl
     let mut dev = fresh(24);
     let mut fs = Filesystem::mount(&mut dev).expect("mount");
     // Lay out: [hole (2 blk)][obj (4 blk)] by creating and removing a 2-block filler first.
-    fs.create(&mut dev, "filler", &body(1, 2 * BLOCK_SIZE)).expect("filler");
+    fs.create(&mut dev, "filler", &body(1, 2 * BLOCK_SIZE))
+        .expect("filler");
     let obj = body(2, 4 * BLOCK_SIZE);
     fs.create(&mut dev, "obj", &obj).expect("obj");
     let before = fs.stat(&mut dev, "obj").expect("stat").start;
@@ -412,7 +413,10 @@ fn a_replace_whose_new_extent_overlaps_the_old_at_a_shifted_start_writes_each_bl
             let _ = fs_run.replace(&mut faulty, "obj", &again);
         }
         let entries = assert_structurally_sound(&mut dev);
-        assert!(entries.iter().any(|e| e.name == "obj"), "name lost at allow={allow}");
+        assert!(
+            entries.iter().any(|e| e.name == "obj"),
+            "name lost at allow={allow}"
+        );
         let fs_after = Filesystem::mount(&mut dev).expect("mount after");
         let got = fs_after.read(&mut dev, "obj").expect("readable");
         assert!(got == next || got == again, "mixture at allow={allow}");

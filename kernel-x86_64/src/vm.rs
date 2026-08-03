@@ -841,6 +841,42 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         frames::free(ram_page);
     }
 
+    // Fault classification + re-entrancy (REQ-FAULT-001/002, ADR-039). The model lives in kernel-core
+    // and is proved exhaustively on the host; these three invariants prove it is COMPILED INTO this
+    // kernel and behaves here — a classification that only holds in `cargo test` protects nothing.
+    {
+        use kernel_core::faultclass::{
+            classify, from_x86_error_code, verdict, FaultKind, FaultVerdict,
+        };
+        use kernel_core::reentry::ReentryGuard;
+
+        // A user write to a present page: routine, and the only class of fault a supervisor could
+        // survive by killing the task.
+        let user_write = from_x86_error_code(0b111);
+        check!(
+            classify(&user_write) == FaultKind::UserPermission
+                && verdict(classify(&user_write)) == FaultVerdict::KillTask,
+            "fault: a user write to a present page classifies as a user permission fault (kill-task)"
+        );
+        // A reserved bit set anywhere in the walk means the page tables are corrupt: never survivable,
+        // whatever the other bits say.
+        let corrupt = from_x86_error_code(0b1111);
+        check!(
+            classify(&corrupt) == FaultKind::CorruptTranslation
+                && verdict(classify(&corrupt)) == FaultVerdict::Panic,
+            "fault: a reserved-bit fault classifies as corrupt translation and is never survivable"
+        );
+        // The guard the fault-reporting path uses really refuses a nested entry on this CPU.
+        let guard = ReentryGuard::new();
+        let token = guard.enter();
+        let nested_refused = token.is_some() && guard.enter().is_none() && guard.refusals() == 1;
+        drop(token);
+        check!(
+            nested_refused && !guard.active(),
+            "fault: the re-entrancy guard refuses a nested entry and reopens after leaving"
+        );
+    }
+
     Ok(n)
 }
 

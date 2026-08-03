@@ -323,13 +323,28 @@ struct TrapFrame {
     ss: u64,         // 152
 }
 
+// The assembly above addresses this frame with LITERAL byte offsets (`[rdi + 152]` …), which no
+// compiler checks — the manual-ABI hazard ALET-P1-009 names. These asserts are the check: every offset
+// the asm uses appears here, so changing a field's type or order fails the BUILD rather than corrupting
+// a register file at the next trap. Kept exhaustive on purpose, including the register slots, because a
+// partial assert set is what makes the remaining literals look verified when they are not.
 const _: () = {
     assert!(core::mem::size_of::<TrapFrame>() == 160);
+    assert!(core::mem::align_of::<TrapFrame>() == 8);
+    // The register array must start at 0 and be 15 contiguous 8-byte slots: the asm's `[rdi + 0]`
+    // through `[rdi + 112]`.
+    assert!(core::mem::offset_of!(TrapFrame, regs) == 0);
+    assert!(core::mem::size_of::<[u64; 15]>() == 120);
+    // The named register indices the Rust side uses must agree with those slots.
+    assert!(RAX == 0 && RBX == 1 && RCX == 2 && RDI == 5);
+    // Every literal the asm uses for the iretq frame.
     assert!(core::mem::offset_of!(TrapFrame, rip) == 120);
     assert!(core::mem::offset_of!(TrapFrame, cs) == 128);
     assert!(core::mem::offset_of!(TrapFrame, rflags) == 136);
     assert!(core::mem::offset_of!(TrapFrame, rsp) == 144);
     assert!(core::mem::offset_of!(TrapFrame, ss) == 152);
+    // …and nothing hides past the last one: the frame is exactly the fields the asm knows about.
+    assert!(core::mem::offset_of!(TrapFrame, ss) + 8 == core::mem::size_of::<TrapFrame>());
 };
 
 /// RFLAGS bit 1 is reserved and must read 1. IF (bit 9) gates interrupt delivery in ring 3.

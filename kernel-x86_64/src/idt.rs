@@ -7,6 +7,8 @@
 //! compiler emits the correct interrupt prologue/epilogue + `iretq`).
 
 use crate::cell::Racy;
+use kernel_core::faultclass::{kind_name, x86_verdict, FaultVerdict};
+use kernel_core::reentry::ReentryGuard;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::{PrivilegeLevel, VirtAddr};
 
@@ -18,6 +20,33 @@ pub const TIMER_VECTOR: u8 = 0x20;
 pub const SYSCALL_VECTOR: u8 = 0x80;
 
 static IDT: Racy<InterruptDescriptorTable> = Racy::new(InterruptDescriptorTable::new());
+
+/// The fault-reporting path is shared with whatever it interrupted (the console, and — once the
+/// user-mode suite is running — the saved register context). Re-entering it means a fault took a fault,
+/// so the diagnostic itself is what is broken: report the re-entry and stop, rather than recursing until
+/// the stack runs out and the machine triple-faults (REQ-FAULT-002, ADR-039).
+static FAULT_REPORT: ReentryGuard = ReentryGuard::new();
+
+/// Report a fatal exception and exit. A nested call — a fault inside fault reporting — exits with a
+/// distinct code instead of recursing.
+fn fatal(label: &str, code: i32, rip: u64, detail: Option<(&str, u64)>) -> ! {
+    match FAULT_REPORT.enter() {
+        Some(_guard) => {
+            match detail {
+                Some((what, value)) => {
+                    kprintln!("[cpu] {} {}={:#x} at {:#x}", label, what, value, rip)
+                }
+                None => kprintln!("[cpu] {} at {:#x}", label, rip),
+            }
+            crate::exit::exit(code)
+        }
+        None => {
+            // Do not touch the console beyond one line: it is the state most likely to be mid-update.
+            kprintln!("[cpu] NESTED FAULT during fault reporting — refusing to recurse");
+            crate::exit::exit(106)
+        }
+    }
+}
 
 pub fn init() {
     // SAFETY: single-core, init-once, before `sti`.
@@ -39,29 +68,59 @@ extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
 }
 
 extern "x86-interrupt" fn invalid_opcode(frame: InterruptStackFrame) {
-    kprintln!(
-        "[cpu] #UD (invalid opcode) at {:#x}",
-        frame.instruction_pointer.as_u64()
+    fatal(
+        "#UD (invalid opcode)",
+        105,
+        frame.instruction_pointer.as_u64(),
+        None,
     );
-    crate::exit::exit(105);
 }
 
 extern "x86-interrupt" fn general_protection(frame: InterruptStackFrame, err: u64) {
-    kprintln!(
-        "[cpu] #GP err={:#x} at {:#x}",
-        err,
-        frame.instruction_pointer.as_u64()
+    fatal(
+        "#GP",
+        103,
+        frame.instruction_pointer.as_u64(),
+        Some(("err", err)),
     );
-    crate::exit::exit(103);
 }
 
 extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, err: PageFaultErrorCode) {
-    kprintln!(
-        "[cpu] #PF {:?} at {:#x}",
-        err,
-        frame.instruction_pointer.as_u64()
-    );
-    crate::exit::exit(104);
+    // Classify before reporting (REQ-FAULT-001, ADR-039): the shared model decides what this MEANS —
+    // a routine user fault, a kernel bug, or corrupt translation structures — and the verdict decides
+    // what the kernel is allowed to do about it. Nothing here is resumable yet, so both verdicts exit;
+    // the classification is what makes the log actionable and the policy explicit rather than implied.
+    let raw = err.bits();
+    let (fault, kind, verdict) = x86_verdict(raw);
+    let rip = frame.instruction_pointer.as_u64();
+    match FAULT_REPORT.enter() {
+        Some(_guard) => {
+            kprintln!(
+                "[cpu] #PF err={:#x} -> {} (present={} write={} user={} exec={} rsvd={}) at {:#x}",
+                raw,
+                kind_name(kind),
+                fault.present,
+                fault.write,
+                fault.user,
+                fault.exec,
+                fault.reserved_bit,
+                rip
+            );
+            match verdict {
+                FaultVerdict::KillTask => kprintln!(
+                    "[cpu] verdict: kill-task (a user fault; no task supervisor yet, so the boot ends)"
+                ),
+                FaultVerdict::Panic => {
+                    kprintln!("[cpu] verdict: PANIC (not survivable — the kernel or its page tables)")
+                }
+            }
+            crate::exit::exit(104)
+        }
+        None => {
+            kprintln!("[cpu] NESTED #PF during fault reporting — refusing to recurse");
+            crate::exit::exit(106)
+        }
+    }
 }
 
 extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, _err: u64) -> ! {
