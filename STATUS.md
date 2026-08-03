@@ -1,6 +1,6 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-02
+**As of:** 2026-08-03
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..034`.
@@ -15,7 +15,49 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — W^X: permissions are validated, not assumed (2026-08-02, GAPS4 ALET-P1-007 / ALET-P1-008)
+## Latest wave — W^X becomes global: the kernel image is mapped page by page (2026-08-03, GAPS4 ALET-P1-007)
+
+The previous wave made every *dynamic* mapping prove its permissions, and said plainly what it could
+not close: the bootstrap identity map covered the whole kernel image — text, rodata, data, stack, heap
+— in single 2 MiB block descriptors, and one descriptor carries one permission set. So 64 descriptors
+per QEMU target (all of RAM) were writable **and** kernel-executable, pinned by the gates rather than
+hidden. That is the exception that matters most: a writable alias of kernel `.text` means any kernel
+write primitive can rewrite the code that is running. It is now closed on both QEMU targets.
+
+- **The linker states the boundaries; the map obeys them (REQ-MM-006, ADR-034 addendum).** Both
+  `kernel/linker.ld` and `kernel-riscv64/linker.ld` export `__text_start` / `__text_end` /
+  `__rodata_end`. `build_identity` builds every RAM block overlapping `[__text_start, __rodata_end)`
+  as a table of 512 4 KiB leaves, each carrying the permissions its **section** deserves: text is
+  read-only + kernel-executable, `.rodata` is read-only + execute-never, and everything else (data,
+  bss, stack, heap, and RAM merely sharing the block) is writable + execute-never. RAM outside the
+  image keeps a single block descriptor — now writable + execute-never at *both* levels. No descriptor
+  in the tree is W+X any more, at any granularity.
+- **Derived from the image, not restated as a constant.** `image_split_blocks()` computes the affected
+  block count from the linker symbols, so a kernel that grows past a block boundary changes the map
+  instead of quietly invalidating an assumption. `.rodata` and `.data` both carry `ALIGN(0x1000)`, so
+  rounding a section end up to a page can never merge a text page with a rodata page.
+- **Both violation classes must now be ZERO, where only one had to be.** Each QEMU gate requires
+  `dynamic_violations == 0` **and** `bootstrap_violations == 0` (was `== 64`) from the audit that
+  walks the live hierarchy — plus four invariants that prove the split is real rather than assumed:
+  the leaf covering `__text_start` is a 4 KiB **page** (not a block) and identity-maps, kernel text is
+  executable and read-only and never EL0/U-accessible, `.rodata` is neither writable nor executable,
+  and kernel data plus the **running stack** are writable and never executable. Virtual-memory
+  invariants 49 → **53** on aarch64 and RISC-V; the audit walks 1087 live leaves on aarch64 and 576 on
+  RISC-V with 0/0 violations. Total per-target invariants: aarch64 134, RISC-V 129, x86-64 117 — all
+  35 shared conformance behaviors still proved by every target.
+- **Not added to the shared conformance contract, deliberately.** `conformance.sh` demands
+  identically-worded behaviors from all three targets, and x86-64 *cannot* emit this one: its image is
+  a PE the firmware loads and maps, not a map this kernel builds. Requiring it would either fail
+  x86-64 for an architectural reason or force a marker that proves nothing — the same reasoning that
+  omits the ret2usr rule on RISC-V's single execute bit.
+- **What is left, split out honestly.** x86-64 adopts the OVMF tree at `ExitBootServices`, and that
+  tree holds ~524 795 W^X leaves of ~524 799 — the firmware's map. It is reported informationally at
+  every boot and stays pinned by the x86-64 gate. ALET-P1-007 is **resolved**; the x86-64 case is now
+  its own row, **ALET-P1-031**, whose fix is the backend building its own kernel map from the PE image
+  bounds rather than inheriting one. A note that describes work nobody is doing is the drift
+  ALET-P2-011 exists to prevent.
+
+## Previous wave — W^X: permissions are validated, not assumed (2026-08-02, GAPS4 ALET-P1-007 / ALET-P1-008)
 
 The memory model so far answered which memory a mapping may name and who owns it. It said nothing
 about what a mapping is allowed to DO — and all three permission mistakes were live in the tree.
@@ -46,12 +88,14 @@ execution.
   so a USER page with NX clear is ring-0-fetchable by paging alone; `CR4.SMEP` is what forbids it,
   and the decode says so.
 - **Delivered as `partial`, deliberately.** ALET-P1-008 (attribute validation) is **resolved**.
-  ALET-P1-007 (W^X as a COMPLETE global invariant) stays **open**: aarch64 and RISC-V identity-map
-  the kernel image in 2 MiB blocks spanning text, rodata, data, stack and heap together, so **64 W^X
-  block descriptors remain on each — a number the gates now PIN**, so the exception cannot grow
-  unnoticed. On x86-64 the inherited OVMF tree holds ~524 795 W^X violations across ~524 799 leaves;
-  it is the firmware's map, reported informationally at every boot. Closing this needs a
-  page-granular kernel-image split via linker symbols — its own wave, not a footnote in this one.
+  ALET-P1-007 (W^X as a COMPLETE global invariant) stayed **open** at the time of this wave: aarch64
+  and RISC-V identity-mapped the kernel image in 2 MiB blocks spanning text, rodata, data, stack and
+  heap together, so **64 W^X block descriptors remained on each — a number the gates PINNED**, so the
+  exception could not grow unnoticed. On x86-64 the inherited OVMF tree holds ~524 795 W^X violations
+  across ~524 799 leaves; it is the firmware's map, reported informationally at every boot. Closing
+  this needed a page-granular kernel-image split via linker symbols — **done by the 2026-08-03 wave
+  above**, which took both QEMU targets to zero bootstrap violations and left only the x86-64
+  firmware tree (ALET-P1-031).
 
 ## Previous wave — Memory safety: a freed frame carries nothing (2026-08-02, GAPS4 ALET-P2-026)
 

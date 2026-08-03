@@ -11,15 +11,18 @@ SECTIONS
 {
     . = RAM_START;
 
+    __text_start = .;
     .text : ALIGN(0x1000) {
         KEEP(*(.text.boot))
         *(.text*)
     }
 
+    __text_end = .;
     .rodata : ALIGN(0x1000) {
         *(.rodata*)
     }
 
+    __rodata_end = .;
     .data : ALIGN(0x1000) {
         *(.data*)
     }

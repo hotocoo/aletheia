@@ -58,8 +58,15 @@ const PPN_MASK: u64 = (1 << 44) - 1;
 // --- Leaf attribute sets -------------------------------------------------------------------
 /// Device MMIO leaf (peripheral GiB): RW, no execute, no user. A/D set.
 const DEV_LEAF: u64 = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
-/// Kernel RAM leaf: RWX (holds kernel code + data + stack + heap). A/D set.
-const RAM_LEAF: u64 = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+/// Kernel RAM megapage OUTSIDE the kernel image: R/W, NOT executable. A/D set. Megapages that
+/// overlap the image are built as 4 KiB pages instead (W^X, REQ-MM-006, ADR-034), because one
+/// megapage cannot be read-only+executable for text and writable for data at the same time.
+const RAM_LEAF: u64 = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+/// Kernel text page: read + execute, NEVER writable, S-mode only (no `PTE_U`). `PTE_D` is left
+/// clear because the page is not writable — a dirty bit on a read-only leaf is meaningless.
+const TEXT_PAGE: u64 = PTE_V | PTE_R | PTE_X | PTE_A;
+/// Kernel `.rodata` page: read only — not writable, not executable.
+const RODATA_PAGE: u64 = PTE_V | PTE_R | PTE_A;
 /// Normal-memory 4 KiB kernel page (dynamic mappings): RW. A/D set.
 pub const NORMAL_PAGE: u64 = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
 /// U-mode executable code page: user R+X, NOT writable. Read-only by W^X (REQ-MM-006, ADR-034) —
@@ -88,6 +95,61 @@ const fn pte_pa(entry: u64) -> usize {
 #[inline]
 const fn is_leaf(entry: u64) -> bool {
     entry & PTE_RWX != 0
+}
+
+// --- Kernel-image bounds, for the page-granular W^X split (REQ-MM-006, ADR-034) -------------
+// A 2 MiB megapage carries ONE permission set, and the megapages holding the kernel image hold text
+// (executable, read-only) and data/stack/heap (writable, never executable) together — so while RAM
+// was mapped by megapages throughout, every megapage over the image had to be RWX. `linker.ld`
+// exports the section boundaries and `build_identity` splits each overlapping megapage into 4 KiB
+// pages, which is what makes W^X a GLOBAL property of the address space (ALET-P1-007).
+extern "C" {
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_end: u8;
+}
+
+#[inline]
+fn page_up(a: usize) -> usize {
+    (a + 0xFFF) & !0xFFF
+}
+
+/// `(text_start, text_end, rodata_end)` of the running image, the last two rounded UP to a page.
+/// `.rodata` and `.data` both carry `ALIGN(0x1000)` in `linker.ld`, so rounding can never merge a
+/// text page with a rodata page or a rodata page with a data page.
+fn image_spans() -> (usize, usize, usize) {
+    // Only the ADDRESSES of these linker-defined symbols are taken; their contents are never read,
+    // which is why no `unsafe` is needed here (`addr_of!` does not create a reference).
+    (
+        core::ptr::addr_of!(__text_start) as usize,
+        page_up(core::ptr::addr_of!(__text_end) as usize),
+        page_up(core::ptr::addr_of!(__rodata_end) as usize),
+    )
+}
+
+/// PTE flags for the 4 KiB identity page at `pa` inside a split megapage: kernel text is
+/// read-only + executable, `.rodata` is read-only, and everything else (data, bss, stack, heap, and
+/// any RAM sharing the megapage) is R/W and never executable. No page is ever both writable and
+/// executable, and none carries `PTE_U`.
+fn image_page_flags(pa: usize) -> u64 {
+    let (text_start, text_end, rodata_end) = image_spans();
+    if pa >= text_start && pa < text_end {
+        TEXT_PAGE
+    } else if pa >= text_end && pa < rodata_end {
+        RODATA_PAGE
+    } else {
+        NORMAL_PAGE
+    }
+}
+
+/// How many 2 MiB RAM megapages the image's text+rodata span touches — the megapages
+/// `build_identity` builds as page tables instead. Derived from the linker symbols, so it tracks the
+/// image rather than restating a number that can go stale.
+pub fn image_split_blocks() -> usize {
+    let (text_start, _, rodata_end) = image_spans();
+    let first = (text_start - RAM_BASE) / MEG_2M;
+    let last = (rodata_end - 1 - RAM_BASE) / MEG_2M;
+    last + 1 - first
 }
 
 #[inline]
@@ -220,10 +282,26 @@ pub fn build_identity() -> Option<usize> {
     // level-1 index 0.
     let l1 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
     let ram_megs = (frames::RAM_END - RAM_BASE) / MEG_2M;
+    let (text_start, _, rodata_end) = image_spans();
     for i in 0..ram_megs {
         let pa = RAM_BASE + i * MEG_2M;
-        // SAFETY: `l1` fresh in-RAM frame; `i` < ram_megs (== 64) < 512.
-        unsafe { write_entry(l1, i, pte(pa, RAM_LEAF)) };
+        if pa < rodata_end && pa + MEG_2M > text_start {
+            // This megapage spans kernel text and/or rodata, so it becomes a level-0 table of 4 KiB
+            // pages: one leaf cannot be read-only+executable for text and writable for data at the
+            // same time, and being both is exactly the W^X violation (REQ-MM-006, ADR-034).
+            let l0 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+            for j in 0..512 {
+                let page = pa + j * vmaddr::PAGE_SIZE;
+                // SAFETY: `l0` is a fresh, in-RAM, identity-accessible frame; `j` < 512 entries.
+                unsafe { write_entry(l0, j, pte(page, image_page_flags(page))) };
+            }
+            // SAFETY: `l1` fresh in-RAM frame; `i` < ram_megs (== 64) < 512. A pointer PTE (only V).
+            unsafe { write_entry(l1, i, pte(l0, PTE_V)) };
+        } else {
+            // SAFETY: as above; RAM outside the image keeps its single writable, non-executable
+            // megapage.
+            unsafe { write_entry(l1, i, pte(pa, RAM_LEAF)) };
+        }
     }
     // SAFETY: RAM_BASE is in level-2 index 2; `l1` is a pointer PTE (only V set -> next level).
     unsafe { write_entry(root, (RAM_BASE >> 30) & 0x1ff, pte(l1, PTE_V)) };
@@ -276,6 +354,41 @@ pub fn translate(root: usize, va: usize) -> Option<usize> {
         }
         Some(pte_pa(e0) | (va & 0xFFF))
     }
+}
+
+/// The leaf PTE that maps `va` in `root`, with the level it was found at (1 = 1 GiB gigapage,
+/// 2 = 2 MiB megapage, 3 = 4 KiB page), or `None` if `va` is unmapped. `translate` answers *where* a
+/// VA points; this answers *how* it is mapped, so a gate can assert the kernel image's GRANULARITY as
+/// well as its permissions — a page-granular W^X split is only real if the leaves really are pages.
+pub fn leaf_of(root: usize, va: usize) -> Option<(u64, usize)> {
+    let (i2, i1, i0) = indices(va);
+    // SAFETY: all reads are of 8-byte-aligned entries inside identity-accessible RAM tables.
+    unsafe {
+        let e2 = read_entry(root, i2);
+        if e2 & PTE_V == 0 {
+            return None;
+        }
+        if is_leaf(e2) {
+            return Some((e2, 1));
+        }
+        let e1 = read_entry(pte_pa(e2), i1);
+        if e1 & PTE_V == 0 {
+            return None;
+        }
+        if is_leaf(e1) {
+            return Some((e1, 2));
+        }
+        let e0 = read_entry(pte_pa(e1), i0);
+        if e0 & PTE_V == 0 {
+            return None;
+        }
+        Some((e0, 3))
+    }
+}
+
+/// Permissions of the leaf that maps `va`, decoded into the arch-neutral model (REQ-MM-006).
+fn attrs_of(root: usize, va: usize) -> Option<PageAttrs> {
+    leaf_of(root, va).map(|(entry, level)| Tables.decode(entry, level))
 }
 
 /// Map a single 4 KiB `va -> pa` with `flags`, creating intermediate tables from fresh frames as
@@ -736,10 +849,11 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     //      both writable and executable turns any memory-corruption bug into code execution. The
     //      mapping API refuses such a request outright, and the audit then walks the LIVE tree so
     //      the property is checked against what is actually mapped, not against what the API was
-    //      asked for. The bootstrap identity map is the honest exception: it covers kernel text,
-    //      rodata, data, stack and heap in single 2 MiB blocks, so those blocks are writable AND
-    //      kernel-executable until the image is split at page granularity. The audit counts that
-    //      class separately and the gate PINS it, so it is measured, not hidden.
+    //      asked for. The bootstrap identity map used to be the honest exception — it covered kernel
+    //      text, rodata, data, stack and heap in single 2 MiB megapages, which have one permission
+    //      set and so had to be RWX. Those megapages are now built as 4 KiB pages from the linker's
+    //      section symbols (ALET-P1-007), so BOTH violation classes must be zero: W^X is a property
+    //      of the whole live address space, not of the dynamic paths only.
     {
         check!(
             !map_page(
@@ -792,8 +906,35 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             "wx: NO dynamically mapped page in the live tree is writable+executable"
         );
         check!(
-            report.bootstrap_violations == 64,
-            "wx: the bootstrap identity blocks are the only W^X exception, and their count is pinned"
+            report.bootstrap_violations == 0,
+            "wx: NO block descriptor in the bootstrap identity map is writable+executable either"
+        );
+        // The image split itself, asserted from the linker symbols rather than from a constant: the
+        // permissions above are only trustworthy if the leaves covering the image really are pages.
+        let (text_start, text_end, rodata_end) = image_spans();
+        check!(
+            image_split_blocks() >= 1
+                && matches!(leaf_of(root, text_start), Some((_, 3)))
+                && translate(root, text_start) == Some(text_start),
+            "wx: the kernel image is identity-mapped at 4 KiB granularity, not by 2 MiB megapages"
+        );
+        check!(
+            attrs_of(root, text_start)
+                .is_some_and(|a| a.exec_kernel && !a.write && !a.exec_user && !a.user),
+            "wx: kernel text is S-mode-executable and READ-ONLY (never writable, never U-mode)"
+        );
+        check!(
+            text_end < rodata_end
+                && attrs_of(root, rodata_end - 1)
+                    .is_some_and(|a| !a.write && !a.exec_kernel && !a.exec_user),
+            "wx: .rodata is mapped read-only and never executable"
+        );
+        check!(
+            attrs_of(root, &TABLES_RECLAIMED as *const _ as usize)
+                .is_some_and(|a| a.write && !a.exec_kernel && !a.exec_user)
+                && attrs_of(root, &n as *const _ as usize)
+                    .is_some_and(|a| a.write && !a.exec_kernel && !a.exec_user),
+            "wx: kernel data and the running stack are writable and never executable"
         );
     }
 

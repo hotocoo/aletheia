@@ -62,15 +62,43 @@ audit the live tree.**
 dynamic pages NX; NX+SMEP enabled on x86-64; an audit that proves zero violations among the mappings
 each kernel created; four shared conformance behaviors.
 
-**Not delivered (REQ-MM-006 is `partial`; ALET-P1-007 stays `open`):** the *bootstrap* map.
-aarch64 and RISC-V identity-map the kernel image in 2 MiB block / megapage descriptors that span
-text, rodata, data, stack and heap together, so those blocks are necessarily writable **and**
-kernel-executable — **64 such descriptors on each target, a number the gate now PINS**, so the
-exception cannot grow unnoticed and shrinking it is a visible change. Closing it means splitting the
-image at page granularity using linker symbols, which is its own wave. On x86-64 the inherited OVMF
-tree contains ~524 795 W^X violations across ~524 799 leaves; that tree is the firmware's, is
-reported informationally at every boot, and is not something this kernel created or can fix without
-building its own kernel map.
+### Addendum (2026-08-03) — the bootstrap map, split at page granularity (ALET-P1-007 resolved)
+
+The first landing of this ADR left the *bootstrap* identity map as a disclosed exception: aarch64 and
+RISC-V mapped the kernel image in 2 MiB block / megapage descriptors spanning text, rodata, data,
+stack and heap together, and one descriptor carries one permission set — so each such descriptor had
+to be writable **and** kernel-executable. The gate pinned the count (64 per QEMU target, i.e. all of
+RAM) rather than hiding it. That exception is now closed on both QEMU targets:
+
+* **The linker states the boundaries; the kernel maps to them.** `linker.ld` exports
+  `__text_start` / `__text_end` / `__rodata_end` on both targets. `build_identity` builds every RAM
+  block overlapping `[__text_start, __rodata_end)` as a table of 512 4 KiB leaves and gives each page
+  the permissions its *section* deserves: text is read-only + kernel-executable, `.rodata` is
+  read-only + execute-never, and everything else (data, bss, stack, heap, and RAM merely sharing the
+  block) is writable + execute-never. RAM outside the image keeps one block descriptor, now writable
+  + execute-never at both privilege levels — so no descriptor anywhere in the tree is W+X.
+* **Derived, not restated.** `image_split_blocks()` computes the affected block count from the linker
+  symbols, so an image that grows past a block boundary changes the map instead of silently breaking
+  a hard-coded assumption. `.rodata` and `.data` both carry `ALIGN(0x1000)`, so rounding a section end
+  up to a page can never merge a text page with a rodata page.
+* **Both violation classes are now required to be zero,** where before only the dynamic class was:
+  the audit walks the live hierarchy through the same `TableOps` seam and each QEMU gate asserts
+  `dynamic_violations == 0` **and** `bootstrap_violations == 0`. Four further invariants assert the
+  split is real rather than assumed — the leaf covering `__text_start` is a 4 KiB *page* (not a block)
+  and identity-maps, text is executable and read-only, `.rodata` is neither writable nor executable,
+  and kernel data plus the running stack are writable and never executable. Virtual-memory invariants
+  49 → **53** on aarch64 and RISC-V (1087 and 576 live leaves audited, 0/0 violations).
+* **Not a shared conformance behavior, deliberately.** `conformance.sh` requires identically-worded
+  behaviors from *all* targets, and x86-64 cannot emit this one: its image is a PE loaded and mapped
+  by UEFI, not by a map this kernel builds. Adding it would either fail x86-64 for an architectural
+  reason or force a marker that proves nothing. The precedent is the RISC-V single-execute-bit
+  omission above.
+
+**Still not delivered (x86-64 only; tracked as ALET-P1-031):** the inherited OVMF tree contains
+~524 795 W^X violations across ~524 799 leaves. That tree is the firmware's, is reported
+informationally at every boot, and cannot be closed by validating mappings — it needs the x86-64
+backend to build its own kernel map from its own PE image bounds instead of adopting the firmware's.
+The x86-64 gate therefore still pins its bootstrap count rather than requiring zero.
 
 ## Consequences
 
@@ -79,10 +107,11 @@ building its own kernel map.
 * **What it buys.** A memory-corruption bug in Aletheia no longer has a writable page to execute
   from among the mappings the kernel makes, and the property is checked against the live tree rather
   than trusted from the API.
-* **What it does not buy.** It is not CFI, not ASLR (ALET-P1-006 covers layout hardening, still
-  open), and it cannot help while the bootstrap blocks remain W+X — an attacker who can already
-  write to kernel .data can write to kernel .text through those blocks. That is precisely why the
-  count is pinned rather than described as "some".
+* **What it does not buy.** It is not CFI and not ASLR (ALET-P1-006 covers layout hardening, still
+  open). On the QEMU targets the write-to-.text-through-a-block path the first landing disclosed is
+  now gone: kernel text is mapped read-only by 4 KiB pages, so a kernel write primitive has no
+  writable alias of the code to aim at inside this map. On x86-64 that path remains open through the
+  firmware's tree (ALET-P1-031), which is why its count stays pinned rather than described as "some".
 
 ## Alternatives considered
 
