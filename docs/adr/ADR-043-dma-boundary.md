@@ -44,10 +44,21 @@ device is policy, not a hardware property, so it must not vary by CPU.
 * **Explicitly NOT claimed, and this is the important part.** This is a *software* boundary: it constrains
   what the **kernel** tells a device, which is where every wrong address in this codebase would come from. It
   cannot constrain a device that invents its own addresses — a malicious or broken device still needs an
-  IOMMU, and **ALET-P1-018 stays open** for that. The existing drivers are not yet rewritten to route their
-  ring and buffer frames through the registry (their frames come straight from the frame allocator), so today
-  the boundary is a checked policy with a suite rather than an enforced gate on every descriptor. Wiring
-  `virtq`/`virtioblk`/`virtionet` through it is the next slice, named here rather than implied.
+  IOMMU, and **ALET-P1-018 stays open** for that. **The gate is live in `virtq`** (addendum below); `virtioblk`'s own
+  single-queue path still publishes descriptors directly and is the remaining wiring.
+
+## Addendum (2026-08-03) — the boundary became a gate
+
+`Virtqueue` now owns a `DmaRegistry`: its ring frame is registered at setup, a caller must
+`register_buffer` before naming an address, and **`add` refuses an address that is not visible** — so the
+check sits exactly where a number becomes a descriptor, which is the only place a wrong one could escape. The
+virtio-net driver registers its receive and transmit buffers before posting them, and a new invariant on all
+three targets proves the gate **denies by default**: an address far from any buffer is refused, and so is one
+that overruns a registered buffer (network invariants 4 → 5, conformance 72 → 73).
+
+Still not claimed: `virtioblk`'s single-queue path (its own fixed ring, predating `virtq`) publishes
+descriptors without the gate, and no device is constrained from inventing its own addresses. ALET-P1-018
+remains open on both counts.
 
 ## Alternatives considered
 

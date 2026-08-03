@@ -130,6 +130,7 @@ CONTRACT=(
   # and get a verified ICMP echo reply back — "the network works" must not vary by CPU or by bus (two of
   # the three run virtio-mmio, one runs virtio-pci).
   "net: the device reported a unicast MAC address from its config space"
+  "net: the DMA gate denies an unregistered descriptor address (rings and buffers are registered)"
   "net: an ARP request for the gateway is answered with its hardware address"
   "net: an ICMP echo request is answered with a matching reply (both checksums verified)"
   "net: a second echo is matched on its own sequence (replies are read, not assumed)"

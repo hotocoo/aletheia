@@ -25,6 +25,7 @@
 use core::cell::Cell;
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::dma::{DmaFault, DmaRegistry};
 use crate::virtioblk::{Transport, VirtioHal};
 
 /// Descriptor-table entry (VIRTIO 1.1 §2.6.5): 16 bytes.
@@ -58,6 +59,9 @@ pub struct Virtqueue {
     qsize: u16,
     /// How far this driver has consumed the used ring. See the module docs.
     last_used: Cell<u16>,
+    /// What this queue may tell the device about (REQ-DRV-006, ADR-043). Owned per queue, so the check
+    /// sits exactly where an address becomes a descriptor — the only place a wrong one could escape.
+    dma: DmaRegistry,
 }
 
 impl Virtqueue {
@@ -88,6 +92,11 @@ impl Virtqueue {
         H::barrier();
         transport.queue_ready();
 
+        let mut dma = DmaRegistry::new();
+        // The ring frame itself is device-visible: the device reads the descriptor table and the avail
+        // ring, and writes the used ring.
+        dma.register(frame, crate::dma::PAGE, "virtq.ring")
+            .map_err(|_| "virtqueue: the ring frame was refused as a DMA region")?;
         Ok(Virtqueue {
             index,
             desc,
@@ -95,6 +104,7 @@ impl Virtqueue {
             used,
             qsize,
             last_used: Cell::new(0),
+            dma,
         })
     }
 
@@ -120,7 +130,19 @@ impl Virtqueue {
     /// # Safety
     /// `slot` must be `< len()`, `addr` must be an identity-mapped physical address the caller owns for as
     /// long as the buffer is in flight, and `len` must not exceed that buffer.
-    pub unsafe fn add<H: VirtioHal>(&self, slot: u16, addr: u64, len: u32, device_writable: bool) {
+    pub unsafe fn add<H: VirtioHal>(
+        &self,
+        slot: u16,
+        addr: u64,
+        len: u32,
+        device_writable: bool,
+    ) -> Result<(), DmaFault> {
+        // THE GATE (REQ-DRV-006, ADR-043): a device is only ever told about memory a driver registered for
+        // it. An address that was never registered — a miscalculation, a stale pointer, a corrupted field —
+        // is refused HERE, before it becomes a descriptor the device will act on.
+        if !self.dma.visible(addr as usize, len as usize) {
+            return Err(DmaFault::Malformed);
+        }
         let d = (self.desc + slot as usize * core::mem::size_of::<Desc>()) as *mut Desc;
         write_volatile(
             d,
@@ -138,6 +160,29 @@ impl Virtqueue {
         write_volatile(ring.add((cur % self.qsize) as usize), slot);
         H::barrier(); // the ring entry is visible before the index that publishes it
         write_volatile(idx_ptr, cur.wrapping_add(1));
+        Ok(())
+    }
+
+    /// Register a buffer this queue will hand to the device. Must be called before [`Virtqueue::add`]
+    /// names that address, which is what makes the gate above meaningful rather than decorative.
+    pub fn register_buffer(
+        &mut self,
+        addr: usize,
+        len: usize,
+        owner: &'static str,
+    ) -> Result<(), DmaFault> {
+        self.dma.register(addr, len, owner).map(|_| ())
+    }
+
+    /// Would this address be refused as a descriptor right now? Used by the invariant suites to prove the
+    /// gate denies by default rather than merely existing.
+    pub fn would_refuse(&self, addr: u64, len: u32) -> bool {
+        !self.dma.visible(addr as usize, len as usize)
+    }
+
+    /// DMA regions this queue has registered, and refusals it has counted.
+    pub fn dma_regions(&self) -> usize {
+        self.dma.live_regions()
     }
 
     /// Tell the device this queue has new buffers.
