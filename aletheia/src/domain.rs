@@ -4,7 +4,9 @@ use ulid::Ulid;
 
 pub type Id = String;
 
-pub fn new_id() -> Id { Ulid::new().to_string() }
+pub fn new_id() -> Id {
+    Ulid::new().to_string()
+}
 
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -15,8 +17,18 @@ pub fn now() -> u64 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntityType {
-    Document, Project, Task, Person, Device, Event,
-    Agent, Capability, Application, Session, Output, Memory,
+    Document,
+    Project,
+    Task,
+    Person,
+    Device,
+    Event,
+    Agent,
+    Capability,
+    Application,
+    Session,
+    Output,
+    Memory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +40,12 @@ pub struct Provenance {
 }
 impl Provenance {
     pub fn of(actor: &str) -> Self {
-        Provenance { actor: actor.to_string(), action_id: None, source_entities: vec![], at: now() }
+        Provenance {
+            actor: actor.to_string(),
+            action_id: None,
+            source_entities: vec![],
+            at: now(),
+        }
     }
 }
 
@@ -72,8 +89,15 @@ pub struct EventRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCategory {
-    Validation, Authorization, NotFound, Conflict,
-    Timeout, Resource, Model, Persistence, Internal,
+    Validation,
+    Authorization,
+    NotFound,
+    Conflict,
+    Timeout,
+    Resource,
+    Model,
+    Persistence,
+    Internal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,15 +109,34 @@ pub struct AlethError {
 }
 impl AlethError {
     fn new(code: &str, msg: &str, cat: ErrorCategory, retryable: bool) -> Self {
-        AlethError { code: code.to_string(), message: msg.to_string(), category: cat, retryable }
+        AlethError {
+            code: code.to_string(),
+            message: msg.to_string(),
+            category: cat,
+            retryable,
+        }
     }
-    pub fn validation(m: &str) -> Self { Self::new("VALIDATION", m, ErrorCategory::Validation, false) }
-    pub fn authorization(m: &str) -> Self { Self::new("AUTHORIZATION", m, ErrorCategory::Authorization, false) }
-    pub fn not_found(m: &str) -> Self { Self::new("NOT_FOUND", m, ErrorCategory::NotFound, false) }
-    pub fn conflict(m: &str) -> Self { Self::new("CONFLICT", m, ErrorCategory::Conflict, false) }
-    pub fn model(m: &str) -> Self { Self::new("MODEL", m, ErrorCategory::Model, true) }
-    pub fn persistence(m: &str) -> Self { Self::new("PERSISTENCE", m, ErrorCategory::Persistence, false) }
-    pub fn internal(m: &str) -> Self { Self::new("INTERNAL", m, ErrorCategory::Internal, false) }
+    pub fn validation(m: &str) -> Self {
+        Self::new("VALIDATION", m, ErrorCategory::Validation, false)
+    }
+    pub fn authorization(m: &str) -> Self {
+        Self::new("AUTHORIZATION", m, ErrorCategory::Authorization, false)
+    }
+    pub fn not_found(m: &str) -> Self {
+        Self::new("NOT_FOUND", m, ErrorCategory::NotFound, false)
+    }
+    pub fn conflict(m: &str) -> Self {
+        Self::new("CONFLICT", m, ErrorCategory::Conflict, false)
+    }
+    pub fn model(m: &str) -> Self {
+        Self::new("MODEL", m, ErrorCategory::Model, true)
+    }
+    pub fn persistence(m: &str) -> Self {
+        Self::new("PERSISTENCE", m, ErrorCategory::Persistence, false)
+    }
+    pub fn internal(m: &str) -> Self {
+        Self::new("INTERNAL", m, ErrorCategory::Internal, false)
+    }
 }
 impl std::fmt::Display for AlethError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

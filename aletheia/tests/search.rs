@@ -27,22 +27,46 @@ fn search_is_capability_gated_ranked_and_fail_closed() {
 
     // Owner creates two documents. e1 matches two query terms, e2 matches one.
     let e1 = core
-        .create_entity(std::slice::from_ref(&owner), "human:owner", EntityType::Document, b"quarterly revenue report alpha", serde_json::json!({}))
+        .create_entity(
+            std::slice::from_ref(&owner),
+            "human:owner",
+            EntityType::Document,
+            b"quarterly revenue report alpha",
+            serde_json::json!({}),
+        )
         .unwrap();
     let e2 = core
-        .create_entity(std::slice::from_ref(&owner), "human:owner", EntityType::Document, b"revenue only", serde_json::json!({}))
+        .create_entity(
+            std::slice::from_ref(&owner),
+            "human:owner",
+            EntityType::Document,
+            b"revenue only",
+            serde_json::json!({}),
+        )
         .unwrap();
 
     // Full authority: both match "revenue"; only e1 also matches "alpha" -> e1 ranks first.
     let hits = core.search(std::slice::from_ref(&owner), "revenue alpha", 10);
-    assert!(hits.iter().any(|h| h.id == e1.id && h.score == 2), "e1 matches both terms");
-    assert!(hits.iter().any(|h| h.id == e2.id && h.score == 1), "e2 matches one term");
+    assert!(
+        hits.iter().any(|h| h.id == e1.id && h.score == 2),
+        "e1 matches both terms"
+    );
+    assert!(
+        hits.iter().any(|h| h.id == e2.id && h.score == 1),
+        "e2 matches one term"
+    );
     assert_eq!(hits[0].id, e1.id, "most relevant first");
     assert!(!hits[0].snippet.is_empty(), "a hit carries a match excerpt");
 
     // A reader authorized ONLY for e2 never sees e1, even though e1 matches the query.
     let read_e2 = core
-        .grant_to(std::slice::from_ref(&owner), "agent:reader", "entity.read", Scope::Entities(vec![e2.id.clone()]), Constraints::none())
+        .grant_to(
+            std::slice::from_ref(&owner),
+            "agent:reader",
+            "entity.read",
+            Scope::Entities(vec![e2.id.clone()]),
+            Constraints::none(),
+        )
         .unwrap()
         .token;
     let scoped = core.search(&[read_e2], "revenue", 10);
@@ -50,7 +74,10 @@ fn search_is_capability_gated_ranked_and_fail_closed() {
     assert_eq!(scoped[0].id, e2.id);
 
     // No capability -> nothing (fail closed; no ambient authority).
-    assert!(core.search(&[], "revenue", 10).is_empty(), "no read authority => no results");
+    assert!(
+        core.search(&[], "revenue", 10).is_empty(),
+        "no read authority => no results"
+    );
 
     // A query that matches nothing returns nothing.
     assert!(core.search(&[owner], "nonexistentterm", 10).is_empty());

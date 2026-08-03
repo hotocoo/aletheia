@@ -15,7 +15,45 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — a fault handler must know what happened, and must not re-enter itself (2026-08-03, GAPS4 ALET-P1-009/010/011/013)
+## Latest wave — the source itself gets a gate (2026-08-03, GAPS4 ALET-P2-003/004/005)
+
+The boot gates prove the OS behaves. Nothing proved the **source** was in the state the project claims:
+formatting drifted, `clippy` was never run in CI, no advisory scan existed, no dependency's license had
+ever been checked, and the bare-metal crates rode an **unpinned `nightly`** — a compiler that changes
+under the build without a commit.
+
+- **`scripts/quality-gate.sh`** — one script, run by BOTH pipelines (a new job `quality` in
+  `.github/workflows/ci.yml` and `.gitlab-ci.yml`, which `check-ci-parity.sh` requires to match): `cargo
+  fmt --check` and `clippy -D warnings` for every crate, `cargo audit` against the committed lockfiles,
+  a license allow-list, and an SBOM.
+- **Skips are LOUD.** A check whose tool is missing prints an explicit `SKIP` line and is named again in
+  the summary, so a green run means "everything that could run, ran" — the same doctrine the VM gates use
+  for an absent disk. CI installs `cargo-audit`, so the advisory step runs there rather than skipping.
+- **`scripts/sbom.py`** writes `build/sbom/<crate>.json`: every dependency's name, version, source and
+  license, sorted, **with no timestamp** — a timestamp would make every run a diff and hide the real ones.
+  Both pipelines publish it as an artifact. 117 packages inventoried.
+- **The dated toolchain pin was attempted and deliberately NOT claimed.** It was written, then reverted:
+  installing `nightly-2026-07-20` failed on this workstation (rustup rolled the install back), so every
+  gate would have run against a different compiler than the files named — an unverified claim, which is
+  what the register exists to prevent. **ALET-P2-001 stays open**, with the reason in its row and the
+  finishing steps in `docs/TOOLCHAIN.md`. What did land and is verified: every toolchain file now requests
+  `clippy`/`rustfmt` explicitly (so the gate cannot skip for a missing component), and the host crates name
+  `stable` — the fix for a failure this repo has actually had, since without a named channel `cargo`
+  resolves to whatever is first on PATH, and on macOS that is often Homebrew's, which ignores
+  `rust-toolchain.toml` and builds for the host triple.
+- **Writing the gate found four real defects in this session's own code**: dead code in the new
+  `pci.rs` (a `bdf` field and accessor nothing read), `.clone()` on a `Copy` capability token, mutable
+  borrows where a shared one was enough, and two crates whose formatting had drifted. All fixed. A lint
+  gate that finds nothing on first run is usually a lint gate that is not running.
+- **The parity gate caught the wave itself**: `check-ci-parity.sh` failed because CI executed
+  `scripts/quality-gate.sh` while STATUS.md did not mention it — exactly the drift it exists to prevent.
+- **Register: 21 → 24 resolved, 38 → 35 open** (three rows closed; ALET-P2-001 left open on purpose).
+
+Gates after the wave: `quality-gate` PASS (advisories SKIP on this workstation, run in CI), `build-all`
+PASS, `e2e-all` PASS, `conformance` PASS (62 core behaviors × 3 targets), `ci-parity` PASS,
+`traceability` PASS (71 requirements).
+
+## Previous wave — a fault handler must know what happened, and must not re-enter itself (2026-08-03, GAPS4 ALET-P1-009/010/011/013)
 
 Three gaps sat on the trap-entry path with the same shape: the code worked, and there was no *model*
 behind it. Handlers printed the raw architectural code and exited — nowhere to state that a fault

@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 /// Default Hugging Face hub cache root (`~/.cache/huggingface/hub`).
 pub fn default_hf_hub() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    Path::new(&home).join(".cache").join("huggingface").join("hub")
+    Path::new(&home)
+        .join(".cache")
+        .join("huggingface")
+        .join("hub")
 }
 
 /// HF cache directory name for a repo id: `org/name` → `models--org--name`.
@@ -23,7 +26,9 @@ pub fn ref_to_cache_dirname(model_ref: &str) -> String {
 /// Find the GGUF for `model_ref` under `cache_root`, choosing the largest `.gguf` across snapshots
 /// (the highest-fidelity available quant). Returns None if the model isn't cached.
 pub fn resolve_in_cache(cache_root: &Path, model_ref: &str) -> Option<PathBuf> {
-    let snaps = cache_root.join(ref_to_cache_dirname(model_ref)).join("snapshots");
+    let snaps = cache_root
+        .join(ref_to_cache_dirname(model_ref))
+        .join("snapshots");
     let mut best: Option<(u64, PathBuf)> = None;
     for snap in std::fs::read_dir(&snaps).ok()?.flatten() {
         let entries = match std::fs::read_dir(snap.path()) {
@@ -59,8 +64,12 @@ pub fn resolve_model_path(cfg: &AiConfig) -> Option<PathBuf> {
 /// Matches the model card's recommended invocation (chat template is embedded in the GGUF, so no
 /// `--jinja`/`--chat-template` is needed): `llama-server -m <gguf> -c <ctx> --port <port>`.
 pub fn spawn_llama_server(cfg: &AiConfig, ctx: u32) -> std::io::Result<std::process::Child> {
-    let path = resolve_model_path(cfg)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "model GGUF not found in cache"))?;
+    let path = resolve_model_path(cfg).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "model GGUF not found in cache",
+        )
+    })?;
     let (_, port) = endpoint_host_port(&cfg.endpoint);
     std::process::Command::new("llama-server")
         .arg("-m")
@@ -87,7 +96,12 @@ pub fn ensure_model(cfg: &AiConfig) -> Result<PathBuf, String> {
     let file = super::config::DEFAULT_MODEL_FILE;
     // Preferred: the HF CLI places the file in the standard cache and verifies its checksum.
     for tool in ["huggingface-cli", "hf"] {
-        match std::process::Command::new(tool).arg("download").arg(&cfg.model_ref).arg(file).output() {
+        match std::process::Command::new(tool)
+            .arg("download")
+            .arg(&cfg.model_ref)
+            .arg(file)
+            .output()
+        {
             Ok(o) if o.status.success() => {
                 if let Some(p) = resolve_model_path(cfg) {
                     return Ok(p);
@@ -101,10 +115,16 @@ pub fn ensure_model(cfg: &AiConfig) -> Result<PathBuf, String> {
         }
     }
     // Fallback: curl the resolve URL into a manual snapshot dir the cache resolver will find.
-    let dest_dir = default_hf_hub().join(ref_to_cache_dirname(&cfg.model_ref)).join("snapshots").join("manual");
+    let dest_dir = default_hf_hub()
+        .join(ref_to_cache_dirname(&cfg.model_ref))
+        .join("snapshots")
+        .join("manual");
     std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     let dest = dest_dir.join(file);
-    let url = format!("https://huggingface.co/{}/resolve/main/{}", cfg.model_ref, file);
+    let url = format!(
+        "https://huggingface.co/{}/resolve/main/{}",
+        cfg.model_ref, file
+    );
     let status = std::process::Command::new("curl")
         .args(["-fL", "--retry", "3", "-o"])
         .arg(&dest)
@@ -114,7 +134,10 @@ pub fn ensure_model(cfg: &AiConfig) -> Result<PathBuf, String> {
     if status.success() && dest.exists() {
         return Ok(dest);
     }
-    Err(format!("could not provision model {}; run: huggingface-cli download {} {}", cfg.model_ref, cfg.model_ref, file))
+    Err(format!(
+        "could not provision model {}; run: huggingface-cli download {} {}",
+        cfg.model_ref, cfg.model_ref, file
+    ))
 }
 
 #[cfg(test)]

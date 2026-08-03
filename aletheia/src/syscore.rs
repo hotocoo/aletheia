@@ -56,7 +56,10 @@ impl SysCore {
             caps.mark_revoked(t);
         }
         // A root capability (action "*", no parent) already present means the owner is bootstrapped.
-        let root_minted = store.loaded_caps().iter().any(|c| c.action == "*" && c.parent.is_none());
+        let root_minted = store
+            .loaded_caps()
+            .iter()
+            .any(|c| c.action == "*" && c.parent.is_none());
         let mut core = SysCore {
             store,
             caps,
@@ -78,10 +81,15 @@ impl SysCore {
     /// model is the primary interpreter, with the deterministic interpreter as fallback whenever the
     /// model is unavailable (INT-004). The OS is fully functional with no resident model.
     pub fn open_default(dir: impl AsRef<std::path::Path>) -> Result<Self> {
-        Self::open(dir, crate::ai::select_provider(&crate::ai::config::AiConfig::from_env()))
+        Self::open(
+            dir,
+            crate::ai::select_provider(&crate::ai::config::AiConfig::from_env()),
+        )
     }
 
-    pub fn store(&self) -> &Store { &self.store }
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
 
     /// Capability-gated keyword search over the World Model (ADR-018 search seam; no embeddings
     /// required). `offered` are the caller's capability tokens; only entities they are authorized to
@@ -95,12 +103,22 @@ impl SysCore {
     ) -> Vec<crate::ai::context::SearchHit> {
         crate::ai::context::search_world(&self.store, &self.caps, offered, query, limit)
     }
-    pub fn caps(&self) -> &CapEngine { &self.caps }
-    pub fn caps_mut(&mut self) -> &mut CapEngine { &mut self.caps }
-    pub fn interpreter_name(&self) -> String {
-        if self.model.healthy() { self.model.name().into() } else { self.fallback.name().into() }
+    pub fn caps(&self) -> &CapEngine {
+        &self.caps
     }
-    pub fn task_state(&self, id: &Id) -> Option<TaskState> { self.tasks.get(id).copied() }
+    pub fn caps_mut(&mut self) -> &mut CapEngine {
+        &mut self.caps
+    }
+    pub fn interpreter_name(&self) -> String {
+        if self.model.healthy() {
+            self.model.name().into()
+        } else {
+            self.fallback.name().into()
+        }
+    }
+    pub fn task_state(&self, id: &Id) -> Option<TaskState> {
+        self.tasks.get(id).copied()
+    }
 
     fn emit(&mut self, etype: &str, corr: &Id, actor: &str, payload: Value) {
         let ev = EventRecord {
@@ -123,10 +141,17 @@ impl SysCore {
         if self.root_minted {
             return Err(AlethError::conflict("owner already bootstrapped"));
         }
-        let cap = self.caps.mint(subject, "*", Scope::All, Constraints::none(), "system");
+        let cap = self
+            .caps
+            .mint(subject, "*", Scope::All, Constraints::none(), "system");
         self.store.put_capability(&cap)?;
         self.root_minted = true;
-        self.emit("CapabilityGranted", &new_id(), "system", json!({"subject": subject, "action": "*"}));
+        self.emit(
+            "CapabilityGranted",
+            &new_id(),
+            "system",
+            json!({"subject": subject, "action": "*"}),
+        );
         Ok(cap)
     }
 
@@ -138,10 +163,15 @@ impl SysCore {
         content: &[u8],
         metadata: Value,
     ) -> Result<Entity> {
-        let target = Target { id: None, etype: Some(etype) };
+        let target = Target {
+            id: None,
+            etype: Some(etype),
+        };
         match self.caps.evaluate("entity.write", &target, offered) {
             Decision::Allow => {}
-            Decision::RequireApproval => return Err(AlethError::authorization("approval required")),
+            Decision::RequireApproval => {
+                return Err(AlethError::authorization("approval required"))
+            }
             Decision::Deny(r) => return Err(AlethError::authorization(&format!("denied: {}", r))),
         }
         let hash = self.store.put_blob(content)?;
@@ -161,17 +191,37 @@ impl SysCore {
             deleted: false,
         };
         self.store.put_entity(&e)?;
-        self.emit("EntityCreated", &new_id(), subject, json!({"entity": e.id, "type": e.etype}));
+        self.emit(
+            "EntityCreated",
+            &new_id(),
+            subject,
+            json!({"entity": e.id, "type": e.etype}),
+        );
         Ok(e)
     }
 
     /// Create a new version of an entity chain (criterion 2). Prior version is retained/recoverable.
-    pub fn update_entity(&mut self, offered: &[String], subject: &str, chain: &Id, content: &[u8]) -> Result<Entity> {
-        let latest = self.store.latest_of_chain(chain).cloned().ok_or_else(|| AlethError::not_found("chain not found"))?;
-        let target = Target { id: Some(latest.id.clone()), etype: Some(latest.etype) };
+    pub fn update_entity(
+        &mut self,
+        offered: &[String],
+        subject: &str,
+        chain: &Id,
+        content: &[u8],
+    ) -> Result<Entity> {
+        let latest = self
+            .store
+            .latest_of_chain(chain)
+            .cloned()
+            .ok_or_else(|| AlethError::not_found("chain not found"))?;
+        let target = Target {
+            id: Some(latest.id.clone()),
+            etype: Some(latest.etype),
+        };
         match self.caps.evaluate("entity.write", &target, offered) {
             Decision::Allow => {}
-            Decision::RequireApproval => return Err(AlethError::authorization("approval required")),
+            Decision::RequireApproval => {
+                return Err(AlethError::authorization("approval required"))
+            }
             Decision::Deny(r) => return Err(AlethError::authorization(&format!("denied: {}", r))),
         }
         let hash = self.store.put_blob(content)?;
@@ -188,14 +238,24 @@ impl SysCore {
             deleted: false,
         };
         self.store.put_entity(&e)?;
-        self.emit("EntityVersioned", &new_id(), subject, json!({"chain": chain, "version": e.version}));
+        self.emit(
+            "EntityVersioned",
+            &new_id(),
+            subject,
+            json!({"chain": chain, "version": e.version}),
+        );
         Ok(e)
     }
 
     pub fn revoke(&mut self, token: &str) -> Result<()> {
         self.caps.revoke(token);
         self.store.put_revoke(token)?;
-        self.emit("CapabilityRevoked", &new_id(), "system", json!({"token": token}));
+        self.emit(
+            "CapabilityRevoked",
+            &new_id(),
+            "system",
+            json!({"token": token}),
+        );
         Ok(())
     }
 
@@ -209,25 +269,48 @@ impl SysCore {
         scope: Scope,
         constraints: Constraints,
     ) -> Result<StoredCapability> {
-        if !matches!(self.caps.evaluate("capability.grant", &Target::default(), offered), Decision::Allow) {
+        if !matches!(
+            self.caps
+                .evaluate("capability.grant", &Target::default(), offered),
+            Decision::Allow
+        ) {
             return Err(AlethError::authorization("not permitted to grant"));
         }
         for token in offered {
             if self.caps.get(token).is_some() {
-                if let Ok(cap) = self.caps.delegate(token, subject, action, scope.clone(), constraints.clone(), subject) {
+                if let Ok(cap) = self.caps.delegate(
+                    token,
+                    subject,
+                    action,
+                    scope.clone(),
+                    constraints.clone(),
+                    subject,
+                ) {
                     self.store.put_capability(&cap)?;
                     // Never log the token (bearer secret) — only the authority granted.
-                    self.emit("CapabilityGranted", &new_id(), subject, json!({"subject": subject, "action": action}));
+                    self.emit(
+                        "CapabilityGranted",
+                        &new_id(),
+                        subject,
+                        json!({"subject": subject, "action": action}),
+                    );
                     return Ok(cap);
                 }
             }
         }
-        Err(AlethError::authorization("no suitable parent capability to delegate from"))
+        Err(AlethError::authorization(
+            "no suitable parent capability to delegate from",
+        ))
     }
 
     pub fn create_agent(&mut self, identity: &str) -> Agent {
         let agent = Agent::new(identity);
-        self.emit("AgentCreated", &new_id(), "system", json!({"agent": agent.id, "identity": identity}));
+        self.emit(
+            "AgentCreated",
+            &new_id(),
+            "system",
+            json!({"agent": agent.id, "identity": identity}),
+        );
         agent
     }
 
@@ -236,11 +319,30 @@ impl SysCore {
     /// Install an untrusted WASM component as a first-class `Application` entity: its code is stored
     /// as an encrypted content-addressed blob, and installing at all requires the `component.install`
     /// capability. The install is itself a recorded, authorized action.
-    pub fn install_component(&mut self, offered: &[String], subject: &str, name: &str, wasm: &[u8]) -> Result<Entity> {
-        let target = Target { id: None, etype: Some(EntityType::Application) };
-        if !matches!(self.caps.evaluate("component.install", &target, offered), Decision::Allow) {
-            self.emit("CapabilityDenied", &new_id(), subject, json!({"action": "component.install"}));
-            return Err(AlethError::authorization("not permitted to install components"));
+    pub fn install_component(
+        &mut self,
+        offered: &[String],
+        subject: &str,
+        name: &str,
+        wasm: &[u8],
+    ) -> Result<Entity> {
+        let target = Target {
+            id: None,
+            etype: Some(EntityType::Application),
+        };
+        if !matches!(
+            self.caps.evaluate("component.install", &target, offered),
+            Decision::Allow
+        ) {
+            self.emit(
+                "CapabilityDenied",
+                &new_id(),
+                subject,
+                json!({"action": "component.install"}),
+            );
+            return Err(AlethError::authorization(
+                "not permitted to install components",
+            ));
         }
         let hash = self.store.put_blob(wasm)?;
         let e = Entity {
@@ -256,7 +358,12 @@ impl SysCore {
             deleted: false,
         };
         self.store.put_entity(&e)?;
-        self.emit("ComponentInstalled", &new_id(), subject, json!({"app": e.id, "name": name, "bytes": wasm.len()}));
+        self.emit(
+            "ComponentInstalled",
+            &new_id(),
+            subject,
+            json!({"app": e.id, "name": name, "bytes": wasm.len()}),
+        );
         Ok(e)
     }
 
@@ -278,7 +385,9 @@ impl SysCore {
     ) -> Result<crate::component::ComponentOutcome> {
         if self.require_signed_components {
             self.emit("ComponentSignatureRejected", &new_id(), subject, json!({"reason": "ad-hoc run refused under secure policy; install a signed component"}));
-            return Err(AlethError::authorization("ad-hoc component execution refused under secure policy"));
+            return Err(AlethError::authorization(
+                "ad-hoc component execution refused under secure policy",
+            ));
         }
         self.launch_component(launch_caps, grant_caps, subject, wasm, fuel)
     }
@@ -296,8 +405,17 @@ impl SysCore {
         wasm: &[u8],
         fuel: u64,
     ) -> Result<crate::component::ComponentOutcome> {
-        if !matches!(self.caps.evaluate("component.run", &Target::default(), launch_caps), Decision::Allow) {
-            self.emit("CapabilityDenied", &new_id(), subject, json!({"action": "component.run"}));
+        if !matches!(
+            self.caps
+                .evaluate("component.run", &Target::default(), launch_caps),
+            Decision::Allow
+        ) {
+            self.emit(
+                "CapabilityDenied",
+                &new_id(),
+                subject,
+                json!({"action": "component.run"}),
+            );
             return Err(AlethError::authorization("not permitted to run components"));
         }
         // Launch is authorized once at the top; this component and any children it spawns then run
@@ -309,9 +427,17 @@ impl SysCore {
     /// with a capability ATTENUATED from this component's grant — delegated through the cap engine,
     /// which rejects amplification — so no child can exceed its parent's authority. Spawn depth is
     /// bounded (`MAX_SPAWN_DEPTH`) so a spawn cycle cannot exhaust the system.
-    fn compose_run(&mut self, grant_caps: &[String], subject: &str, wasm: &[u8], fuel: u64, depth: usize) -> crate::component::ComponentOutcome {
+    fn compose_run(
+        &mut self,
+        grant_caps: &[String],
+        subject: &str,
+        wasm: &[u8],
+        fuel: u64,
+        depth: usize,
+    ) -> crate::component::ComponentOutcome {
         // Split borrow of self: `&self.caps` (read) + `&mut self.store` (effects) are disjoint fields.
-        let mut outcome = crate::component::run(&self.caps, &mut self.store, grant_caps, subject, wasm, fuel);
+        let mut outcome =
+            crate::component::run(&self.caps, &mut self.store, grant_caps, subject, wasm, fuel);
         self.emit(
             "ComponentRan",
             &new_id(),
@@ -327,21 +453,29 @@ impl SysCore {
         );
         if depth >= MAX_SPAWN_DEPTH {
             if !outcome.spawns.is_empty() {
-                self.emit("ComponentSpawnDenied", &new_id(), subject, json!({"reason": "max spawn depth", "depth": depth}));
+                self.emit(
+                    "ComponentSpawnDenied",
+                    &new_id(),
+                    subject,
+                    json!({"reason": "max spawn depth", "depth": depth}),
+                );
             }
             return outcome;
         }
         let requests = outcome.spawns.clone();
         let mut children = Vec::new();
         for req in requests {
-            if let Some((child_wasm, child_grant, child_subject)) = self.prepare_spawn(grant_caps, subject, &req) {
+            if let Some((child_wasm, child_grant, child_subject)) =
+                self.prepare_spawn(grant_caps, subject, &req)
+            {
                 self.emit(
                     "ComponentSpawned",
                     &new_id(),
                     subject,
                     json!({"app": req.app_id, "action": req.action, "child": child_subject, "granted": !child_grant.is_empty()}),
                 );
-                let child_outcome = self.compose_run(&child_grant, &child_subject, &child_wasm, fuel, depth + 1);
+                let child_outcome =
+                    self.compose_run(&child_grant, &child_subject, &child_wasm, fuel, depth + 1);
                 children.push(child_outcome);
             }
         }
@@ -353,7 +487,12 @@ impl SysCore {
     /// requested action from the parent's grant. Returns None if the app is unknown/not runnable.
     /// The child grant is empty when the parent holds nothing covering the requested action — the
     /// child then runs but can do nothing (it cannot exceed the parent).
-    fn prepare_spawn(&mut self, parent_caps: &[String], parent_subject: &str, req: &crate::component::SpawnRequest) -> Option<(Vec<u8>, Vec<String>, String)> {
+    fn prepare_spawn(
+        &mut self,
+        parent_caps: &[String],
+        parent_subject: &str,
+        req: &crate::component::SpawnRequest,
+    ) -> Option<(Vec<u8>, Vec<String>, String)> {
         let app = self.store.get_entity(&req.app_id).cloned()?;
         if app.etype != EntityType::Application {
             return None;
@@ -361,18 +500,32 @@ impl SysCore {
         let hash = app.content_ref.clone()?;
         let wasm = self.store.get_blob(&hash).cloned()?;
         let child_subject = format!("{}>{}", parent_subject, req.app_id);
-        let child_grant: Vec<String> = self.attenuate_for_child(parent_caps, &child_subject, &req.action).into_iter().collect();
+        let child_grant: Vec<String> = self
+            .attenuate_for_child(parent_caps, &child_subject, &req.action)
+            .into_iter()
+            .collect();
         Some((wasm, child_grant, child_subject))
     }
 
     /// Delegate a capability for `action` to `child_subject`, attenuated from whichever parent cap
     /// covers it (same scope + constraints — no amplification). Returns None if no parent cap covers
     /// the action; the cap engine's attenuation rule is what enforces "child <= parent".
-    fn attenuate_for_child(&mut self, parent_caps: &[String], child_subject: &str, action: &str) -> Option<String> {
+    fn attenuate_for_child(
+        &mut self,
+        parent_caps: &[String],
+        child_subject: &str,
+        action: &str,
+    ) -> Option<String> {
         for pt in parent_caps {
-            let attn = self.caps.get(pt).map(|p| (p.scope.clone(), p.constraints.clone()));
+            let attn = self
+                .caps
+                .get(pt)
+                .map(|p| (p.scope.clone(), p.constraints.clone()));
             if let Some((scope, cons)) = attn {
-                if let Ok(child) = self.caps.delegate(pt, child_subject, action, scope, cons, child_subject) {
+                if let Ok(child) =
+                    self.caps
+                        .delegate(pt, child_subject, action, scope, cons, child_subject)
+                {
                     let _ = self.store.put_capability(&child);
                     return Some(child.token);
                 }
@@ -390,11 +543,18 @@ impl SysCore {
         app_id: &Id,
         fuel: u64,
     ) -> Result<crate::component::ComponentOutcome> {
-        let app = self.store.get_entity(app_id).cloned().ok_or_else(|| AlethError::not_found("application not found"))?;
+        let app = self
+            .store
+            .get_entity(app_id)
+            .cloned()
+            .ok_or_else(|| AlethError::not_found("application not found"))?;
         if app.etype != EntityType::Application {
             return Err(AlethError::validation("entity is not an application"));
         }
-        let hash = app.content_ref.clone().ok_or_else(|| AlethError::validation("application has no code"))?;
+        let hash = app
+            .content_ref
+            .clone()
+            .ok_or_else(|| AlethError::validation("application has no code"))?;
         // Secure-launch provenance gate (ADR-025 Phase 1, gap Issue 7): under secure policy the app's
         // stored signature must verify over its content hash against the trust anchor. Missing or
         // invalid => refuse the launch (fail closed) and record the rejection. Default policy (off)
@@ -403,12 +563,27 @@ impl SysCore {
             let sig = app.metadata.get("signature").and_then(|v| v.as_str());
             let verified = sig.map(|s| self.trust.verify(&hash, s)).unwrap_or(false);
             if !verified {
-                let reason = if sig.is_none() { "unsigned" } else { "invalid signature" };
-                self.emit("ComponentSignatureRejected", &new_id(), subject, json!({"app": app.id, "reason": reason}));
-                return Err(AlethError::authorization("component signature not verified under secure policy"));
+                let reason = if sig.is_none() {
+                    "unsigned"
+                } else {
+                    "invalid signature"
+                };
+                self.emit(
+                    "ComponentSignatureRejected",
+                    &new_id(),
+                    subject,
+                    json!({"app": app.id, "reason": reason}),
+                );
+                return Err(AlethError::authorization(
+                    "component signature not verified under secure policy",
+                ));
             }
         }
-        let wasm = self.store.get_blob(&hash).cloned().ok_or_else(|| AlethError::not_found("application code missing"))?;
+        let wasm = self
+            .store
+            .get_blob(&hash)
+            .cloned()
+            .ok_or_else(|| AlethError::not_found("application code missing"))?;
         // Provenance is already settled above; launch via the internal path (not the public ad-hoc
         // `run_component`, which would refuse under secure policy).
         self.launch_component(launch_caps, grant_caps, subject, &wasm, fuel)
@@ -436,16 +611,43 @@ impl SysCore {
     /// or tampered artifact never enters the store as a trusted application. Requires `component.install`
     /// like the unsigned path; the verified signature is recorded in the entity metadata so a later
     /// `run_installed` under secure policy can re-verify it.
-    pub fn install_signed_component(&mut self, offered: &[String], subject: &str, name: &str, wasm: &[u8], signature: &str) -> Result<Entity> {
-        let target = Target { id: None, etype: Some(EntityType::Application) };
-        if !matches!(self.caps.evaluate("component.install", &target, offered), Decision::Allow) {
-            self.emit("CapabilityDenied", &new_id(), subject, json!({"action": "component.install"}));
-            return Err(AlethError::authorization("not permitted to install components"));
+    pub fn install_signed_component(
+        &mut self,
+        offered: &[String],
+        subject: &str,
+        name: &str,
+        wasm: &[u8],
+        signature: &str,
+    ) -> Result<Entity> {
+        let target = Target {
+            id: None,
+            etype: Some(EntityType::Application),
+        };
+        if !matches!(
+            self.caps.evaluate("component.install", &target, offered),
+            Decision::Allow
+        ) {
+            self.emit(
+                "CapabilityDenied",
+                &new_id(),
+                subject,
+                json!({"action": "component.install"}),
+            );
+            return Err(AlethError::authorization(
+                "not permitted to install components",
+            ));
         }
         let hash = crate::crypto::sha256_hex(wasm);
         if !self.trust.verify(&hash, signature) {
-            self.emit("ComponentSignatureRejected", &new_id(), subject, json!({"name": name, "reason": "untrusted or invalid signature at install"}));
-            return Err(AlethError::authorization("component signature is not trusted"));
+            self.emit(
+                "ComponentSignatureRejected",
+                &new_id(),
+                subject,
+                json!({"name": name, "reason": "untrusted or invalid signature at install"}),
+            );
+            return Err(AlethError::authorization(
+                "component signature is not trusted",
+            ));
         }
         let stored_hash = self.store.put_blob(wasm)?;
         let e = Entity {
@@ -461,7 +663,12 @@ impl SysCore {
             deleted: false,
         };
         self.store.put_entity(&e)?;
-        self.emit("ComponentInstalled", &new_id(), subject, json!({"app": e.id, "name": name, "bytes": wasm.len(), "signed": true}));
+        self.emit(
+            "ComponentInstalled",
+            &new_id(),
+            subject,
+            json!({"app": e.id, "name": name, "bytes": wasm.len(), "signed": true}),
+        );
         Ok(e)
     }
 
@@ -485,32 +692,69 @@ impl SysCore {
     fn record_pending_approval(&mut self, intent: &Intent, reason: &str) -> PendingApproval {
         let pa = PendingApproval::new(&intent.subject, intent.clone(), reason);
         self.approvals.insert(pa.clone());
-        self.emit("ApprovalRequested", &new_id(), &pa.subject, serde_json::to_value(&pa).unwrap_or(Value::Null));
+        self.emit(
+            "ApprovalRequested",
+            &new_id(),
+            &pa.subject,
+            serde_json::to_value(&pa).unwrap_or(Value::Null),
+        );
         pa
     }
 
     /// A human grants or denies a pending approval. Granting re-runs the EXACT bound intent with
     /// approval satisfied — approval confers no authority, so the offered capabilities are still
     /// re-evaluated and can independently deny. Denying records the decision and executes nothing.
-    pub fn resolve_approval(&mut self, offered: &[String], approval_id: &Id, granted: bool) -> Result<Trace> {
-        let pa = self.approvals.get(approval_id).cloned().ok_or_else(|| AlethError::not_found("approval not found"))?;
+    pub fn resolve_approval(
+        &mut self,
+        offered: &[String],
+        approval_id: &Id,
+        granted: bool,
+    ) -> Result<Trace> {
+        let pa = self
+            .approvals
+            .get(approval_id)
+            .cloned()
+            .ok_or_else(|| AlethError::not_found("approval not found"))?;
         if pa.state != ApprovalState::Pending {
             return Err(AlethError::conflict("approval already resolved"));
         }
         if pa.is_expired(now()) {
-            self.approvals.mark_state(approval_id, ApprovalState::Expired);
-            self.emit("ApprovalResolved", &new_id(), &pa.subject, json!({"approval": approval_id, "state": "Expired"}));
+            self.approvals
+                .mark_state(approval_id, ApprovalState::Expired);
+            self.emit(
+                "ApprovalResolved",
+                &new_id(),
+                &pa.subject,
+                json!({"approval": approval_id, "state": "Expired"}),
+            );
             return Err(AlethError::conflict("approval expired"));
         }
         // Authorization: only a principal who could perform the bound action may resolve its
         // approval — grant OR deny (INV-011). Approval is a second gate, never an escape from
         // capabilities, and a zero-capability caller must not be able to force-deny (DoS) either.
         let (action, target) = self.authz_of_intent(&pa.intent);
-        if matches!(self.caps.evaluate(action, &target, offered), Decision::Deny(_)) {
-            return Err(AlethError::authorization("not permitted to resolve this approval"));
+        if matches!(
+            self.caps.evaluate(action, &target, offered),
+            Decision::Deny(_)
+        ) {
+            return Err(AlethError::authorization(
+                "not permitted to resolve this approval",
+            ));
         }
-        self.approvals.mark_state(approval_id, if granted { ApprovalState::Granted } else { ApprovalState::Denied });
-        self.emit("ApprovalResolved", &new_id(), &pa.subject, json!({"approval": approval_id, "granted": granted}));
+        self.approvals.mark_state(
+            approval_id,
+            if granted {
+                ApprovalState::Granted
+            } else {
+                ApprovalState::Denied
+            },
+        );
+        self.emit(
+            "ApprovalResolved",
+            &new_id(),
+            &pa.subject,
+            json!({"approval": approval_id, "granted": granted}),
+        );
         if !granted {
             let mut trace = Trace::new(&pa.subject, new_id());
             trace.intent = format!("{:?}", pa.intent.verb);
@@ -526,7 +770,11 @@ impl SysCore {
     /// (`audit.read`): pending approvals reveal subjects + bound intents, so an unauthenticated
     /// caller is denied.
     pub fn list_pending_approvals(&self, offered: &[String]) -> Result<Vec<PendingApproval>> {
-        if matches!(self.caps.evaluate("audit.read", &Target::default(), offered), Decision::Deny(_)) {
+        if matches!(
+            self.caps
+                .evaluate("audit.read", &Target::default(), offered),
+            Decision::Deny(_)
+        ) {
             return Err(AlethError::authorization("not permitted to list approvals"));
         }
         Ok(self.approvals.list_pending(now()))
@@ -538,16 +786,31 @@ impl SysCore {
     /// Read the tail of the immutable audit log. Capability-gated (`audit.read`): the log carries
     /// provenance, not a public feed — a caller with no covering capability is denied (fail-closed).
     pub fn query_audit(&self, offered: &[String], limit: usize) -> Result<Vec<EventRecord>> {
-        if matches!(self.caps.evaluate("audit.read", &Target::default(), offered), Decision::Deny(_)) {
+        if matches!(
+            self.caps
+                .evaluate("audit.read", &Target::default(), offered),
+            Decision::Deny(_)
+        ) {
             return Err(AlethError::authorization("not permitted to read audit"));
         }
-        Ok(self.store.events().iter().rev().take(limit).cloned().collect())
+        Ok(self
+            .store
+            .events()
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect())
     }
 
     /// Revoke a capability through the boundary — capability-gated (requires `capability.grant`
     /// authority). Prevents an unauthenticated caller from revoking the root cap (owner lockout).
     pub fn revoke_capability(&mut self, offered: &[String], token: &str) -> Result<()> {
-        if matches!(self.caps.evaluate("capability.grant", &Target::default(), offered), Decision::Deny(_)) {
+        if matches!(
+            self.caps
+                .evaluate("capability.grant", &Target::default(), offered),
+            Decision::Deny(_)
+        ) {
             return Err(AlethError::authorization("not permitted to revoke"));
         }
         self.revoke(token)
@@ -558,10 +821,34 @@ impl SysCore {
     fn authz_of_intent(&self, intent: &Intent) -> (&'static str, Target) {
         use crate::intent_action::Verb;
         match &intent.verb {
-            Verb::Read { id } => ("entity.read", Target { id: Some(id.clone()), etype: self.store.get_entity(id).map(|e| e.etype) }),
-            Verb::Delete { id } => ("entity.delete", Target { id: Some(id.clone()), etype: self.store.get_entity(id).map(|e| e.etype) }),
-            Verb::Traverse { from, .. } => ("entity.read", Target { id: Some(from.clone()), etype: self.store.get_entity(from).map(|e| e.etype) }),
-            Verb::Derive { into_type, .. } => ("entity.derive", Target { id: None, etype: Some(*into_type) }),
+            Verb::Read { id } => (
+                "entity.read",
+                Target {
+                    id: Some(id.clone()),
+                    etype: self.store.get_entity(id).map(|e| e.etype),
+                },
+            ),
+            Verb::Delete { id } => (
+                "entity.delete",
+                Target {
+                    id: Some(id.clone()),
+                    etype: self.store.get_entity(id).map(|e| e.etype),
+                },
+            ),
+            Verb::Traverse { from, .. } => (
+                "entity.read",
+                Target {
+                    id: Some(from.clone()),
+                    etype: self.store.get_entity(from).map(|e| e.etype),
+                },
+            ),
+            Verb::Derive { into_type, .. } => (
+                "entity.derive",
+                Target {
+                    id: None,
+                    etype: Some(*into_type),
+                },
+            ),
             Verb::RestoreVersion { .. } => ("entity.write", Target::default()),
             Verb::Grant { .. } => ("capability.grant", Target::default()),
             Verb::Raw { .. } => ("entity.read", Target::default()),
@@ -582,7 +869,10 @@ impl SysCore {
                 }
                 "ApprovalResolved" => {
                     if let Some(id) = ev.payload.get("approval").and_then(|v| v.as_str()) {
-                        let state = match (ev.payload.get("granted").and_then(|v| v.as_bool()), ev.payload.get("state").and_then(|v| v.as_str())) {
+                        let state = match (
+                            ev.payload.get("granted").and_then(|v| v.as_bool()),
+                            ev.payload.get("state").and_then(|v| v.as_str()),
+                        ) {
                             (Some(true), _) => ApprovalState::Granted,
                             (Some(false), _) => ApprovalState::Denied,
                             (_, Some("Expired")) => ApprovalState::Expired,
@@ -604,7 +894,13 @@ impl SysCore {
     }
 
     /// The full deterministic pipeline (SAD §10). Always returns a Trace; `ok` reflects success.
-    pub fn run_intent(&mut self, task_id: &Id, offered: &[String], intent: Intent, approve: bool) -> Trace {
+    pub fn run_intent(
+        &mut self,
+        task_id: &Id,
+        offered: &[String],
+        intent: Intent,
+        approve: bool,
+    ) -> Trace {
         let mut trace = Trace::new(&intent.subject, task_id.clone());
         trace.intent = format!("{:?}", intent.verb);
         self.tasks.insert(task_id.clone(), TaskState::Running);
@@ -638,10 +934,18 @@ impl SysCore {
             match self.model.interpret_with_context(&intent, &ctx_brief) {
                 Ok(r) => r,
                 Err(e) => {
-                    trace.error = Some(AlethError::model(&format!("interpretation failed: {:?}", e)));
+                    trace.error = Some(AlethError::model(&format!(
+                        "interpretation failed: {:?}",
+                        e
+                    )));
                     trace.execution = "interpretation error — no state changed".into();
                     self.tasks.insert(task_id.clone(), TaskState::Failed);
-                    self.emit("AIActionFailed", task_id, &intent.subject, json!({"stage": "interpret"}));
+                    self.emit(
+                        "AIActionFailed",
+                        task_id,
+                        &intent.subject,
+                        json!({"stage": "interpret"}),
+                    );
                     return trace;
                 }
             }
@@ -652,7 +956,12 @@ impl SysCore {
                 Err(e) => {
                     trace.error = Some(AlethError::model(&format!("no valid plan: {:?}", e)));
                     self.tasks.insert(task_id.clone(), TaskState::Failed);
-                    self.emit("AIActionFailed", task_id, &intent.subject, json!({"stage": "interpret"}));
+                    self.emit(
+                        "AIActionFailed",
+                        task_id,
+                        &intent.subject,
+                        json!({"stage": "interpret"}),
+                    );
                     return trace;
                 }
             }
@@ -666,7 +975,12 @@ impl SysCore {
                 trace.validation = format!("parse failed: {}", e);
                 trace.error = Some(e);
                 self.tasks.insert(task_id.clone(), TaskState::Failed);
-                self.emit("AIActionFailed", task_id, &intent.subject, json!({"stage": "parse"}));
+                self.emit(
+                    "AIActionFailed",
+                    task_id,
+                    &intent.subject,
+                    json!({"stage": "parse"}),
+                );
                 return trace;
             }
         };
@@ -674,7 +988,12 @@ impl SysCore {
             trace.validation = format!("invalid: {}", e);
             trace.error = Some(e);
             self.tasks.insert(task_id.clone(), TaskState::Failed);
-            self.emit("AIActionFailed", task_id, &intent.subject, json!({"stage": "validate"}));
+            self.emit(
+                "AIActionFailed",
+                task_id,
+                &intent.subject,
+                json!({"stage": "validate"}),
+            );
             return trace;
         }
         trace.validation = "ok".into();
@@ -704,7 +1023,12 @@ impl SysCore {
                 trace.capability_decision = format!("DENY ({}) for {}", r, meta.action);
                 trace.error = Some(AlethError::authorization("capability denied"));
                 self.tasks.insert(task_id.clone(), TaskState::Failed);
-                self.emit("CapabilityDenied", task_id, &intent.subject, json!({"action": meta.action}));
+                self.emit(
+                    "CapabilityDenied",
+                    task_id,
+                    &intent.subject,
+                    json!({"action": meta.action}),
+                );
                 return trace;
             }
             // Authority axis (capability engine): what the held capabilities permit.
@@ -723,14 +1047,20 @@ impl SysCore {
                         // Durable approval provenance for the synchronous path — the audit log is the
                         // source of truth (ADR-015), so a policy-required action carries a record even
                         // when approved inline rather than via the pending-approval lifecycle.
-                        self.emit("ApprovalResolved", task_id, &intent.subject, json!({"approval": "inline", "granted": true, "reason": reason}));
+                        self.emit(
+                            "ApprovalResolved",
+                            task_id,
+                            &intent.subject,
+                            json!({"approval": "inline", "granted": true, "reason": reason}),
+                        );
                     } else {
                         // Record a durable pending approval bound to this exact intent; stop with no
                         // effect. A human later grants/denies it via `resolve_approval`.
                         let pa = self.record_pending_approval(&intent, &reason);
                         trace.approval = format!("pending [{}] — {}", pa.id, reason);
                         trace.approval_id = Some(pa.id.clone());
-                        self.tasks.insert(task_id.clone(), TaskState::AwaitingApproval);
+                        self.tasks
+                            .insert(task_id.clone(), TaskState::AwaitingApproval);
                         self.emit("AIActionProposed", task_id, &intent.subject, json!({"action": meta.action, "needs_approval": true, "approval": pa.id}));
                         return trace;
                     }
@@ -750,7 +1080,12 @@ impl SysCore {
                     trace.execution = format!("execution failed: {}", e);
                     trace.error = Some(e);
                     self.tasks.insert(task_id.clone(), TaskState::Failed);
-                    self.emit("AIActionFailed", task_id, &intent.subject, json!({"stage": "execute"}));
+                    self.emit(
+                        "AIActionFailed",
+                        task_id,
+                        &intent.subject,
+                        json!({"stage": "execute"}),
+                    );
                     return trace;
                 }
             }
@@ -764,7 +1099,12 @@ impl SysCore {
         // Audit records the FACT of execution, not the payload: trace.result can carry decrypted
         // content or capability tokens, which must never enter the immutable log (returned to the
         // authorized caller in the Trace instead).
-        self.emit("AIActionExecuted", task_id, &intent.subject, json!({"ok": true, "steps": plan.steps.len()}));
+        self.emit(
+            "AIActionExecuted",
+            task_id,
+            &intent.subject,
+            json!({"ok": true, "steps": plan.steps.len()}),
+        );
         trace
     }
 
@@ -774,40 +1114,67 @@ impl SysCore {
             "entity.read" | "entity.delete" => {
                 let id = arg_str(a, "id")?;
                 let et = self.store.get_entity(&id).map(|e| e.etype);
-                Ok(Target { id: Some(id), etype: et })
+                Ok(Target {
+                    id: Some(id),
+                    etype: et,
+                })
             }
             "entity.restore_version" => {
                 let chain = arg_str(a, "chain")?;
                 let l = self.store.latest_of_chain(&chain);
-                Ok(Target { id: l.map(|e| e.id.clone()), etype: l.map(|e| e.etype) })
+                Ok(Target {
+                    id: l.map(|e| e.id.clone()),
+                    etype: l.map(|e| e.etype),
+                })
             }
             "entity.derive" => {
-                let into: EntityType = serde_json::from_value(a.get("into_type").cloned().unwrap_or(Value::Null))
-                    .map_err(|_| AlethError::validation("into_type"))?;
-                Ok(Target { id: None, etype: Some(into) })
+                let into: EntityType =
+                    serde_json::from_value(a.get("into_type").cloned().unwrap_or(Value::Null))
+                        .map_err(|_| AlethError::validation("into_type"))?;
+                Ok(Target {
+                    id: None,
+                    etype: Some(into),
+                })
             }
             "world.traverse" => {
                 let from = arg_str(a, "from")?;
                 let et = self.store.get_entity(&from).map(|e| e.etype);
-                Ok(Target { id: Some(from), etype: et })
+                Ok(Target {
+                    id: Some(from),
+                    etype: et,
+                })
             }
             "capability.grant" => Ok(Target::default()),
             _ => Ok(Target::default()),
         }
     }
 
-    fn execute_step(&mut self, subject: &str, corr: &Id, step: &Step, offered: &[String]) -> Result<Value> {
+    fn execute_step(
+        &mut self,
+        subject: &str,
+        corr: &Id,
+        step: &Step,
+        offered: &[String],
+    ) -> Result<Value> {
         let a = &step.args;
         match step.op.as_str() {
             "entity.read" => {
                 let id = arg_str(a, "id")?;
-                let e = self.store.get_entity(&id).cloned().ok_or_else(|| AlethError::not_found("entity not found"))?;
+                let e = self
+                    .store
+                    .get_entity(&id)
+                    .cloned()
+                    .ok_or_else(|| AlethError::not_found("entity not found"))?;
                 if e.deleted {
                     return Err(AlethError::not_found("entity deleted"));
                 }
                 // Verify: re-read from store.
-                self.store.get_entity(&id).ok_or_else(|| AlethError::internal("verify: entity vanished"))?;
-                let content = e.content_ref.as_ref()
+                self.store
+                    .get_entity(&id)
+                    .ok_or_else(|| AlethError::internal("verify: entity vanished"))?;
+                let content = e
+                    .content_ref
+                    .as_ref()
                     .and_then(|h| self.store.get_blob(h))
                     .map(|b| String::from_utf8_lossy(b).to_string());
                 // NOTE: content is DATA. It is returned, never interpreted as instructions (SEC-003).
@@ -818,8 +1185,9 @@ impl SysCore {
                 if self.store.get_entity(&source).is_none() {
                     return Err(AlethError::not_found("source entity not found"));
                 }
-                let into: EntityType = serde_json::from_value(a.get("into_type").cloned().unwrap_or(Value::Null))
-                    .map_err(|_| AlethError::validation("into_type"))?;
+                let into: EntityType =
+                    serde_json::from_value(a.get("into_type").cloned().unwrap_or(Value::Null))
+                        .map_err(|_| AlethError::validation("into_type"))?;
                 let content = arg_str(a, "content")?;
                 let hash = self.store.put_blob(content.as_bytes())?;
                 let mut prov = Provenance::of(subject);
@@ -848,8 +1216,12 @@ impl SysCore {
                 };
                 self.store.put_relationship(&rel)?;
                 // Verify: derived entity + relationship exist.
-                self.store.get_entity(&e.id).ok_or_else(|| AlethError::internal("verify: derived missing"))?;
-                self.store.get_relationship(&rel.id).ok_or_else(|| AlethError::internal("verify: edge missing"))?;
+                self.store
+                    .get_entity(&e.id)
+                    .ok_or_else(|| AlethError::internal("verify: derived missing"))?;
+                self.store
+                    .get_relationship(&rel.id)
+                    .ok_or_else(|| AlethError::internal("verify: edge missing"))?;
                 Ok(json!({"derived_id": e.id, "relationship": rel.id, "source": source}))
             }
             "world.traverse" => {
@@ -857,7 +1229,9 @@ impl SysCore {
                 let edge = arg_str(a, "edge")?;
                 let ids = worldmodel::traverse(&self.store, &from, &edge, Dir::Incoming, 8);
                 for id in &ids {
-                    self.store.get_entity(id).ok_or_else(|| AlethError::internal("verify: traversal node missing"))?;
+                    self.store
+                        .get_entity(id)
+                        .ok_or_else(|| AlethError::internal("verify: traversal node missing"))?;
                 }
                 Ok(json!({"from": from, "edge": edge, "results": ids}))
             }
@@ -865,20 +1239,43 @@ impl SysCore {
                 let gsubject = arg_str(a, "subject")?;
                 let action = arg_str(a, "action")?;
                 let scope_entities: Vec<String> =
-                    serde_json::from_value(a.get("scope_entities").cloned().unwrap_or(json!([]))).unwrap_or_default();
+                    serde_json::from_value(a.get("scope_entities").cloned().unwrap_or(json!([])))
+                        .unwrap_or_default();
                 let approval = a.get("approval").and_then(|v| v.as_bool()).unwrap_or(false);
-                let scope = if scope_entities.is_empty() { Scope::All } else { Scope::Entities(scope_entities) };
-                let constraints = if approval { Constraints::approval() } else { Constraints::none() };
+                let scope = if scope_entities.is_empty() {
+                    Scope::All
+                } else {
+                    Scope::Entities(scope_entities)
+                };
+                let constraints = if approval {
+                    Constraints::approval()
+                } else {
+                    Constraints::none()
+                };
                 let cap = self.grant_to(offered, &gsubject, &action, scope, constraints)?;
-                self.caps.get(&cap.token).ok_or_else(|| AlethError::internal("verify: grant missing"))?;
+                self.caps
+                    .get(&cap.token)
+                    .ok_or_else(|| AlethError::internal("verify: grant missing"))?;
                 Ok(json!({"token": cap.token, "subject": gsubject, "action": action}))
             }
             "entity.restore_version" => {
                 let chain = arg_str(a, "chain")?;
-                let version = a.get("version").and_then(|v| v.as_u64()).ok_or_else(|| AlethError::validation("version"))?;
-                let target = self.store.versions_of_chain(&chain).into_iter().find(|e| e.version == version).cloned()
+                let version = a
+                    .get("version")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| AlethError::validation("version"))?;
+                let target = self
+                    .store
+                    .versions_of_chain(&chain)
+                    .into_iter()
+                    .find(|e| e.version == version)
+                    .cloned()
                     .ok_or_else(|| AlethError::not_found("version not found"))?;
-                let latest = self.store.latest_of_chain(&chain).cloned().ok_or_else(|| AlethError::not_found("chain not found"))?;
+                let latest = self
+                    .store
+                    .latest_of_chain(&chain)
+                    .cloned()
+                    .ok_or_else(|| AlethError::not_found("chain not found"))?;
                 let mut prov = Provenance::of(subject);
                 prov.source_entities = vec![target.id.clone()];
                 let e = Entity {
@@ -903,7 +1300,10 @@ impl SysCore {
                     created_at: now(),
                 };
                 self.store.put_relationship(&rel)?;
-                let l = self.store.latest_of_chain(&chain).ok_or_else(|| AlethError::internal("verify: chain missing"))?;
+                let l = self
+                    .store
+                    .latest_of_chain(&chain)
+                    .ok_or_else(|| AlethError::internal("verify: chain missing"))?;
                 if l.id != e.id {
                     return Err(AlethError::internal("verify: restore not latest"));
                 }
@@ -911,8 +1311,16 @@ impl SysCore {
             }
             "entity.delete" => {
                 let id = arg_str(a, "id")?;
-                let e = self.store.get_entity(&id).cloned().ok_or_else(|| AlethError::not_found("entity not found"))?;
-                let latest = self.store.latest_of_chain(&e.version_chain).cloned().unwrap_or_else(|| e.clone());
+                let e = self
+                    .store
+                    .get_entity(&id)
+                    .cloned()
+                    .ok_or_else(|| AlethError::not_found("entity not found"))?;
+                let latest = self
+                    .store
+                    .latest_of_chain(&e.version_chain)
+                    .cloned()
+                    .unwrap_or_else(|| e.clone());
                 let tomb = Entity {
                     id: new_id(),
                     etype: e.etype,
@@ -926,13 +1334,19 @@ impl SysCore {
                     deleted: true,
                 };
                 self.store.put_entity(&tomb)?;
-                let l = self.store.latest_of_chain(&e.version_chain).ok_or_else(|| AlethError::internal("verify: chain missing"))?;
+                let l = self
+                    .store
+                    .latest_of_chain(&e.version_chain)
+                    .ok_or_else(|| AlethError::internal("verify: chain missing"))?;
                 if !l.deleted {
                     return Err(AlethError::internal("verify: delete not applied"));
                 }
                 Ok(json!({"deleted": id}))
             }
-            other => Err(AlethError::validation(&format!("no executor for {}", other))),
+            other => Err(AlethError::validation(&format!(
+                "no executor for {}",
+                other
+            ))),
         }
     }
 }

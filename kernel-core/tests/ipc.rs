@@ -240,7 +240,7 @@ fn a_cancelled_message_is_never_delivered_afterwards() {
     let (e, cap, mut ch) = cancel_fixture();
     for body in 1..=5u64 {
         assert_eq!(
-            ch.send(&e, Message::new("A", "B", body), &[cap.clone()]),
+            ch.send(&e, Message::new("A", "B", body), &[cap]),
             Decision::Allow
         );
     }
@@ -268,8 +268,8 @@ fn a_cancelled_message_is_never_delivered_afterwards() {
 #[test]
 fn cancelling_something_already_gone_is_a_refusal_not_a_lie() {
     let (e, cap, mut ch) = cancel_fixture();
-    ch.send(&e, Message::new("A", "B", 1), &[cap.clone()]);
-    ch.send(&e, Message::new("A", "B", 2), &[cap.clone()]);
+    ch.send(&e, Message::new("A", "B", 1), &[cap]);
+    ch.send(&e, Message::new("A", "B", 2), &[cap]);
     let ids = ch.pending_ids();
 
     let first = ch.recv().expect("delivered").id;
@@ -299,7 +299,7 @@ fn cancelling_something_already_gone_is_a_refusal_not_a_lie() {
 fn cancellation_removes_exactly_the_named_message_and_keeps_the_order() {
     let (e, cap, mut ch) = cancel_fixture();
     for body in 10..20u64 {
-        ch.send(&e, Message::new("A", "B", body), &[cap.clone()]);
+        ch.send(&e, Message::new("A", "B", body), &[cap]);
     }
     let ids = ch.pending_ids();
     // Cancel every third, from the back so indices stay meaningful in the expectation below.
@@ -346,7 +346,7 @@ fn every_message_reaches_exactly_one_terminal_trace_event() {
         } else {
             Message::new("A", "B", body)
         };
-        ch.send(&e, msg, &[cap.clone()]);
+        ch.send(&e, msg, &[cap]);
     }
     let ids = ch.pending_ids();
     assert!(ch.cancel(ids[1]));
@@ -381,28 +381,28 @@ fn cancelling_frees_the_slot_for_a_later_send() {
     let cap = e.mint("sender", "ipc.send", Scope::All, Constraints::none());
     let mut ch = Channel::bounded("ipc.send", 2);
     assert_eq!(
-        ch.send(&e, Message::new("A", "B", 1), &[cap.clone()]),
+        ch.send(&e, Message::new("A", "B", 1), &[cap]),
         Decision::Allow
     );
     assert_eq!(
-        ch.send(&e, Message::new("A", "B", 2), &[cap.clone()]),
+        ch.send(&e, Message::new("A", "B", 2), &[cap]),
         Decision::Allow
     );
     // Full: refused fail-closed.
     assert!(matches!(
-        ch.send(&e, Message::new("A", "B", 3), &[cap.clone()]),
+        ch.send(&e, Message::new("A", "B", 3), &[cap]),
         Decision::Deny(_)
     ));
     let ids = ch.pending_ids();
     assert!(ch.cancel(ids[0]));
     // Exactly ONE slot came back — not the bound lifted.
     assert_eq!(
-        ch.send(&e, Message::new("A", "B", 4), &[cap.clone()]),
+        ch.send(&e, Message::new("A", "B", 4), &[cap]),
         Decision::Allow
     );
     assert!(
         matches!(
-            ch.send(&e, Message::new("A", "B", 5), &[cap.clone()]),
+            ch.send(&e, Message::new("A", "B", 5), &[cap]),
             Decision::Deny(_)
         ),
         "INV-IPC-CANCEL-5: cancellation lifted the capacity bound"
@@ -425,11 +425,7 @@ fn cancelling_frees_the_slot_for_a_later_send() {
 #[test]
 fn a_deadline_and_a_cancel_never_both_claim_the_same_message() {
     let (e, cap, mut ch) = cancel_fixture();
-    ch.send(
-        &e,
-        Message::new("A", "B", 1).with_deadline(3),
-        &[cap.clone()],
-    );
+    ch.send(&e, Message::new("A", "B", 1).with_deadline(3), &[cap]);
     let id = ch.pending_ids()[0];
     // Expire it by receiving past the deadline...
     assert!(matches!(ch.recv_at(10), RecvOutcome::Expired(1)));
@@ -451,11 +447,7 @@ fn a_deadline_and_a_cancel_never_both_claim_the_same_message() {
     );
 
     // The reverse order: cancelled first, then a deadline sweep must not also expire it.
-    ch.send(
-        &e,
-        Message::new("A", "B", 2).with_deadline(3),
-        &[cap.clone()],
-    );
+    ch.send(&e, Message::new("A", "B", 2).with_deadline(3), &[cap]);
     let id2 = ch.pending_ids()[0];
     assert!(ch.cancel(id2));
     assert!(matches!(ch.recv_at(10), RecvOutcome::Empty));

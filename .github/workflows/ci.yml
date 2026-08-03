@@ -96,6 +96,26 @@ jobs:
       - name: Assert every delivered/partial requirement maps to existing evidence
         run: ./scripts/check-traceability.sh
 
+  quality:
+    name: Source quality gate (fmt, clippy -D warnings, advisories, licenses, SBOM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchains + components the gate needs (see docs/TOOLCHAIN.md)
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src,clippy,rustfmt
+          rustup component add clippy rustfmt
+          rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly
+      - name: Install cargo-audit (so the advisory step RUNS rather than skipping)
+        run: cargo install cargo-audit --locked
+      - name: fmt + clippy + advisories + licenses + SBOM
+        run: ./scripts/quality-gate.sh
+      - name: Publish the SBOM as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: build/sbom/
+
   ci-parity:
     name: CI coverage (every architecture boot-gated, both pipelines agree, claimed gates run)
     runs-on: ubuntu-latest

@@ -39,7 +39,9 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     pub fn new() -> Self {
-        PolicyEngine { approve_destructive: true }
+        PolicyEngine {
+            approve_destructive: true,
+        }
     }
 
     /// Decide whether an authorized action needs human approval. Preserves BOTH historical
@@ -48,10 +50,14 @@ impl PolicyEngine {
     /// this function never overrides a `Deny` (callers stop before reaching policy on a deny).
     pub fn evaluate(&self, cap_decision: &Decision, risk: Risk) -> ApprovalVerdict {
         if self.approve_destructive && risk == Risk::Destructive {
-            return ApprovalVerdict::Required { reason: "destructive operation".into() };
+            return ApprovalVerdict::Required {
+                reason: "destructive operation".into(),
+            };
         }
         if matches!(cap_decision, Decision::RequireApproval) {
-            return ApprovalVerdict::Required { reason: "capability constrained: approval required".into() };
+            return ApprovalVerdict::Required {
+                reason: "capability constrained: approval required".into(),
+            };
         }
         ApprovalVerdict::NotRequired
     }
@@ -163,7 +169,9 @@ mod tests {
         // Authority says ALLOW, but policy still demands approval for a destructive op.
         assert_eq!(
             p.evaluate(&Decision::Allow, Risk::Destructive),
-            ApprovalVerdict::Required { reason: "destructive operation".into() }
+            ApprovalVerdict::Required {
+                reason: "destructive operation".into()
+            }
         );
     }
 
@@ -179,7 +187,10 @@ mod tests {
     #[test]
     fn safe_op_with_full_authority_needs_no_approval() {
         let p = PolicyEngine::new();
-        assert_eq!(p.evaluate(&Decision::Allow, Risk::Safe), ApprovalVerdict::NotRequired);
+        assert_eq!(
+            p.evaluate(&Decision::Allow, Risk::Safe),
+            ApprovalVerdict::NotRequired
+        );
     }
 
     #[test]
@@ -187,7 +198,10 @@ mod tests {
         let mut store = ApprovalStore::new();
         let pa = PendingApproval::new(
             "human:owner",
-            Intent { subject: "human:owner".into(), verb: Verb::Delete { id: "e1".into() } },
+            Intent {
+                subject: "human:owner".into(),
+                verb: Verb::Delete { id: "e1".into() },
+            },
             "destructive operation",
         );
         let id = pa.id.clone();

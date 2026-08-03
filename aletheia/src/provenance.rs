@@ -77,7 +77,9 @@ impl SigningIdentity {
     /// A deterministic identity from a 32-byte seed (reproducible in tests; NOT for production, where
     /// the seed must come from a CSPRNG or hardware key store).
     pub fn from_seed(seed: [u8; 32]) -> Self {
-        SigningIdentity { key: SigningKey::from_bytes(&seed) }
+        SigningIdentity {
+            key: SigningKey::from_bytes(&seed),
+        }
     }
 
     /// This identity's PUBLIC key (32 bytes) — the only material a verifier ever needs.
@@ -172,15 +174,24 @@ mod tests {
         let mut ts = TrustStore::new();
         ts.trust([7u8; 32]);
         let sig = ts.sign("deadbeef").expect("a trusted key can sign");
-        assert!(ts.verify("deadbeef", &sig), "a signature over the same hash verifies");
-        assert!(!ts.verify("cafef00d", &sig), "the signature does not verify over a different hash");
+        assert!(
+            ts.verify("deadbeef", &sig),
+            "a signature over the same hash verifies"
+        );
+        assert!(
+            !ts.verify("cafef00d", &sig),
+            "the signature does not verify over a different hash"
+        );
     }
 
     #[test]
     fn empty_trust_store_fails_closed() {
         let ts = TrustStore::new();
         assert!(ts.sign("deadbeef").is_none(), "no anchor => cannot sign");
-        assert!(!ts.verify("deadbeef", "0000"), "no anchor => nothing verifies");
+        assert!(
+            !ts.verify("deadbeef", "0000"),
+            "no anchor => nothing verifies"
+        );
     }
 
     #[test]
@@ -190,7 +201,10 @@ mod tests {
         let mut attacker = TrustStore::new();
         attacker.trust([2u8; 32]);
         let forged = attacker.sign("deadbeef").unwrap();
-        assert!(!trusted.verify("deadbeef", &forged), "a signature from an untrusted key is rejected");
+        assert!(
+            !trusted.verify("deadbeef", &forged),
+            "a signature from an untrusted key is rejected"
+        );
     }
 
     // --- Asymmetric provenance (REQ-BOOT-002) ---
@@ -203,7 +217,10 @@ mod tests {
         store.trust_root(signer.public_key());
 
         let sig = signer.sign("deadbeef");
-        assert!(store.verify_direct("deadbeef", &sig), "a signature over the same hash verifies");
+        assert!(
+            store.verify_direct("deadbeef", &sig),
+            "a signature over the same hash verifies"
+        );
         assert!(
             !store.verify_direct("cafef00d", &sig),
             "the signature does not verify over a different hash (tamper detected)"
@@ -226,7 +243,10 @@ mod tests {
             !store.verify_direct("deadbeef", &signer.sign("deadbeef")),
             "no trusted root => nothing verifies (fail closed)"
         );
-        assert!(!store.verify_direct("deadbeef", "not-hex"), "malformed signature fails closed");
+        assert!(
+            !store.verify_direct("deadbeef", "not-hex"),
+            "malformed signature fails closed"
+        );
     }
 
     #[test]
@@ -247,7 +267,12 @@ mod tests {
         // An UNENDORSED signing key is rejected even with a valid component signature.
         let rogue = SigningIdentity::from_seed([8u8; 32]);
         assert!(
-            !store.verify_chain("deadbeef", &rogue.public_key(), &endorsement, &rogue.sign("deadbeef")),
+            !store.verify_chain(
+                "deadbeef",
+                &rogue.public_key(),
+                &endorsement,
+                &rogue.sign("deadbeef")
+            ),
             "a signing key the root never endorsed is rejected"
         );
         // A valid endorsement but a TAMPERED component signature is rejected (both links required).

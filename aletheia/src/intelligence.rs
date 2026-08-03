@@ -23,7 +23,11 @@ pub trait ModelRuntime {
     /// context — the deterministic interpreter needs none — so existing providers are unaffected;
     /// model-backed providers override this to include the brief in the prompt. Output is still
     /// untrusted and flows through the identical downstream pipeline.
-    fn interpret_with_context(&self, intent: &Intent, _context: &str) -> Result<String, ModelError> {
+    fn interpret_with_context(
+        &self,
+        intent: &Intent,
+        _context: &str,
+    ) -> Result<String, ModelError> {
         self.interpret(intent)
     }
 }
@@ -33,22 +37,39 @@ pub trait ModelRuntime {
 pub struct DeterministicRuntime;
 
 impl ModelRuntime for DeterministicRuntime {
-    fn name(&self) -> &str { "deterministic" }
-    fn healthy(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "deterministic"
+    }
+    fn healthy(&self) -> bool {
+        true
+    }
     fn interpret(&self, intent: &Intent) -> Result<String, ModelError> {
         let plan = match &intent.verb {
             Verb::Read { id } => step("entity.read", json!({ "id": id })),
-            Verb::Derive { source, into_type, content } => {
-                step("entity.derive", json!({ "source": source, "into_type": into_type, "content": content }))
+            Verb::Derive {
+                source,
+                into_type,
+                content,
+            } => step(
+                "entity.derive",
+                json!({ "source": source, "into_type": into_type, "content": content }),
+            ),
+            Verb::Traverse { from, edge } => {
+                step("world.traverse", json!({ "from": from, "edge": edge }))
             }
-            Verb::Traverse { from, edge } => step("world.traverse", json!({ "from": from, "edge": edge })),
-            Verb::Grant { subject, action, scope_entities, approval } => step(
+            Verb::Grant {
+                subject,
+                action,
+                scope_entities,
+                approval,
+            } => step(
                 "capability.grant",
                 json!({ "subject": subject, "action": action, "scope_entities": scope_entities, "approval": approval }),
             ),
-            Verb::RestoreVersion { chain, version } => {
-                step("entity.restore_version", json!({ "chain": chain, "version": version }))
-            }
+            Verb::RestoreVersion { chain, version } => step(
+                "entity.restore_version",
+                json!({ "chain": chain, "version": version }),
+            ),
             Verb::Delete { id } => step("entity.delete", json!({ "id": id })),
             Verb::Raw { .. } => return Err(ModelError::InvalidOutput),
         };
@@ -57,7 +78,12 @@ impl ModelRuntime for DeterministicRuntime {
 }
 
 fn step(op: &str, args: serde_json::Value) -> Plan {
-    Plan { steps: vec![Step { op: op.to_string(), args }] }
+    Plan {
+        steps: vec![Step {
+            op: op.to_string(),
+            args,
+        }],
+    }
 }
 
 /// Adapter for a local inference server (OpenAI/llama.cpp-class). In M1 no server is assumed present,
@@ -66,10 +92,20 @@ pub struct LocalModelRuntime {
     pub endpoint: String,
 }
 impl LocalModelRuntime {
-    pub fn new(endpoint: &str) -> Self { LocalModelRuntime { endpoint: endpoint.to_string() } }
+    pub fn new(endpoint: &str) -> Self {
+        LocalModelRuntime {
+            endpoint: endpoint.to_string(),
+        }
+    }
 }
 impl ModelRuntime for LocalModelRuntime {
-    fn name(&self) -> &str { "local-model" }
-    fn healthy(&self) -> bool { false }
-    fn interpret(&self, _intent: &Intent) -> Result<String, ModelError> { Err(ModelError::NotLoaded) }
+    fn name(&self) -> &str {
+        "local-model"
+    }
+    fn healthy(&self) -> bool {
+        false
+    }
+    fn interpret(&self, _intent: &Intent) -> Result<String, ModelError> {
+        Err(ModelError::NotLoaded)
+    }
 }

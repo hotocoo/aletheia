@@ -27,13 +27,23 @@ fn open() -> (SysCore, String) {
 }
 
 fn grant(core: &mut SysCore, owner: &str, subject: &str, action: &str) -> String {
-    core.grant_to(&[owner.to_string()], subject, action, Scope::All, Constraints::none())
-        .expect("grant")
-        .token
+    core.grant_to(
+        &[owner.to_string()],
+        subject,
+        action,
+        Scope::All,
+        Constraints::none(),
+    )
+    .expect("grant")
+    .token
 }
 
 fn count_events(core: &SysCore, etype: &str) -> usize {
-    core.store().events().iter().filter(|e| e.etype == etype).count()
+    core.store()
+        .events()
+        .iter()
+        .filter(|e| e.etype == etype)
+        .count()
 }
 
 /// A signed component, installed under a trusted key, launches successfully under secure policy.
@@ -48,13 +58,21 @@ fn signed_component_launches_under_secure_policy() {
     let write_cap = grant(&mut core, &owner, "component:hello", "entity.write");
     let emit_cap = grant(&mut core, &owner, "component:hello", "event.emit");
 
-    let sig = core.sign_component(&sha256_hex(HELLO_WASM)).expect("trusted key can sign");
+    let sig = core
+        .sign_component(&sha256_hex(HELLO_WASM))
+        .expect("trusted key can sign");
     let app = core
         .install_signed_component(&[install_cap], "human:owner", "hello", HELLO_WASM, &sig)
         .expect("a validly-signed component installs");
 
     let outcome = core
-        .run_installed(&[run_cap], &[write_cap, emit_cap], "component:hello", &app.id, 1_000_000)
+        .run_installed(
+            &[run_cap],
+            &[write_cap, emit_cap],
+            "component:hello",
+            &app.id,
+            1_000_000,
+        )
         .expect("a signed component launches under secure policy");
     assert!(outcome.ok, "component ran: {:?}", outcome.error);
     assert_eq!(outcome.exit_code, 0, "full grant -> guest exits 0");
@@ -75,9 +93,20 @@ fn unsigned_component_refused_under_secure_policy() {
 
     core.set_require_signed_components(true);
     let result = core.run_installed(&[run_cap], &[], "component:hello", &app.id, 1_000_000);
-    assert!(result.is_err(), "an unsigned component cannot launch under secure policy");
-    assert_eq!(count_events(&core, "ComponentSignatureRejected"), 1, "the rejection is recorded");
-    assert_eq!(count_events(&core, "ComponentRan"), 0, "the component never ran");
+    assert!(
+        result.is_err(),
+        "an unsigned component cannot launch under secure policy"
+    );
+    assert_eq!(
+        count_events(&core, "ComponentSignatureRejected"),
+        1,
+        "the rejection is recorded"
+    );
+    assert_eq!(
+        count_events(&core, "ComponentRan"),
+        0,
+        "the component never ran"
+    );
 }
 
 /// A signature from an UNTRUSTED key is refused at install time — a tampered/untrusted artifact never
@@ -90,10 +119,18 @@ fn install_with_untrusted_signature_is_refused() {
 
     // An attacker signs with a DIFFERENT key; the trust anchor does not recognize it.
     let forged = hmac_sha256_hex(&[7u8; 32], sha256_hex(HELLO_WASM).as_bytes());
-    let result = core.install_signed_component(&[install_cap], "human:owner", "hello", HELLO_WASM, &forged);
-    assert!(result.is_err(), "an untrusted signature is refused at install");
+    let result =
+        core.install_signed_component(&[install_cap], "human:owner", "hello", HELLO_WASM, &forged);
+    assert!(
+        result.is_err(),
+        "an untrusted signature is refused at install"
+    );
     assert_eq!(count_events(&core, "ComponentSignatureRejected"), 1);
-    assert_eq!(count_events(&core, "ComponentInstalled"), 0, "nothing is installed");
+    assert_eq!(
+        count_events(&core, "ComponentInstalled"),
+        0,
+        "nothing is installed"
+    );
 }
 
 /// A signature valid for DIFFERENT bytes does not authorize this component (content binding).
@@ -104,9 +141,20 @@ fn signature_is_bound_to_the_content() {
     let install_cap = grant(&mut core, &owner, "human:owner", "component.install");
 
     // Sign a different payload's hash with the trusted key, then present it for HELLO_WASM.
-    let wrong_sig = core.sign_component(&sha256_hex(b"some other artifact")).unwrap();
-    let result = core.install_signed_component(&[install_cap], "human:owner", "hello", HELLO_WASM, &wrong_sig);
-    assert!(result.is_err(), "a signature over other content does not authorize this component");
+    let wrong_sig = core
+        .sign_component(&sha256_hex(b"some other artifact"))
+        .unwrap();
+    let result = core.install_signed_component(
+        &[install_cap],
+        "human:owner",
+        "hello",
+        HELLO_WASM,
+        &wrong_sig,
+    );
+    assert!(
+        result.is_err(),
+        "a signature over other content does not authorize this component"
+    );
 }
 
 /// Under secure policy, an AD-HOC raw-WASM `run_component` (no installed provenance) is refused
@@ -120,8 +168,15 @@ fn adhoc_run_component_refused_under_secure_policy() {
     let run_cap = grant(&mut core, &owner, "component:hello", "component.run");
 
     let result = core.run_component(&[run_cap], &[], "component:hello", HELLO_WASM, 1_000_000);
-    assert!(result.is_err(), "ad-hoc raw-WASM execution has no provenance and is refused under secure policy");
-    assert_eq!(count_events(&core, "ComponentRan"), 0, "the component never ran");
+    assert!(
+        result.is_err(),
+        "ad-hoc raw-WASM execution has no provenance and is refused under secure policy"
+    );
+    assert_eq!(
+        count_events(&core, "ComponentRan"),
+        0,
+        "the component never ran"
+    );
 }
 
 /// With the policy OFF (default), the existing unsigned install/run flow is unchanged (back-compat).
@@ -138,7 +193,13 @@ fn default_policy_runs_unsigned_component() {
         .expect("unsigned install");
     // No secure policy set -> unsigned component launches exactly as before.
     let outcome = core
-        .run_installed(&[run_cap], &[write_cap, emit_cap], "component:hello", &app.id, 1_000_000)
+        .run_installed(
+            &[run_cap],
+            &[write_cap, emit_cap],
+            "component:hello",
+            &app.id,
+            1_000_000,
+        )
         .expect("unsigned launch succeeds under default policy");
     assert!(outcome.ok && outcome.exit_code == 0);
 }

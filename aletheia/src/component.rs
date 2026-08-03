@@ -82,11 +82,15 @@ impl ComponentOutcome {
     }
     /// True iff the component made a host call to `func` that the capability engine ALLOWED.
     pub fn allowed(&self, func: &str) -> bool {
-        self.calls.iter().any(|c| c.func == func && c.decision == "ALLOW")
+        self.calls
+            .iter()
+            .any(|c| c.func == func && c.decision == "ALLOW")
     }
     /// True iff the component *attempted* `func` and was denied (fail-closed).
     pub fn denied(&self, func: &str) -> bool {
-        self.calls.iter().any(|c| c.func == func && c.decision == "DENY")
+        self.calls
+            .iter()
+            .any(|c| c.func == func && c.decision == "DENY")
     }
 }
 
@@ -127,9 +131,17 @@ fn guest_bytes(caller: &mut Caller<'_, HostState<'_>>, ptr: i32, len: i32) -> Op
 
 fn host_write(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> i64 {
     let st = caller.data_mut();
-    let target = Target { id: None, etype: Some(EntityType::Output) };
+    let target = Target {
+        id: None,
+        etype: Some(EntityType::Output),
+    };
     let decision = st.caps.evaluate(WRITE_ACTION, &target, &st.offered);
-    st.calls.push(HostCall { func: "write".into(), action: WRITE_ACTION.into(), decision: decision_str(&decision), target: None });
+    st.calls.push(HostCall {
+        func: "write".into(),
+        action: WRITE_ACTION.into(),
+        decision: decision_str(&decision),
+        target: None,
+    });
     match decision {
         Decision::Allow => {}
         Decision::RequireApproval => return APPROVAL,
@@ -172,7 +184,12 @@ fn host_write(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> i64 {
     OK_CODE
 }
 
-fn host_read(caller: &mut Caller<'_, HostState<'_>>, id_bytes: Vec<u8>, out_ptr: i32, out_cap: i32) -> i64 {
+fn host_read(
+    caller: &mut Caller<'_, HostState<'_>>,
+    id_bytes: Vec<u8>,
+    out_ptr: i32,
+    out_cap: i32,
+) -> i64 {
     let id = match String::from_utf8(id_bytes) {
         Ok(s) => s,
         Err(_) => return BAD,
@@ -185,16 +202,29 @@ fn host_read(caller: &mut Caller<'_, HostState<'_>>, id_bytes: Vec<u8>, out_ptr:
     let content: Vec<u8> = {
         let st = caller.data_mut();
         let etype = st.store.get_entity(&id).map(|e| e.etype);
-        let target = Target { id: Some(id.clone()), etype };
+        let target = Target {
+            id: Some(id.clone()),
+            etype,
+        };
         let decision = st.caps.evaluate(READ_ACTION, &target, &st.offered);
-        st.calls.push(HostCall { func: "read".into(), action: READ_ACTION.into(), decision: decision_str(&decision), target: Some(id.clone()) });
+        st.calls.push(HostCall {
+            func: "read".into(),
+            action: READ_ACTION.into(),
+            decision: decision_str(&decision),
+            target: Some(id.clone()),
+        });
         match decision {
             Decision::Allow => {}
             Decision::RequireApproval => return APPROVAL,
             Decision::Deny(_) => return DENIED,
         }
         match st.store.get_entity(&id) {
-            Some(e) if !e.deleted => e.content_ref.as_ref().and_then(|h| st.store.get_blob(h)).cloned().unwrap_or_default(),
+            Some(e) if !e.deleted => e
+                .content_ref
+                .as_ref()
+                .and_then(|h| st.store.get_blob(h))
+                .cloned()
+                .unwrap_or_default(),
             _ => return BAD,
         }
     };
@@ -205,7 +235,10 @@ fn host_read(caller: &mut Caller<'_, HostState<'_>>, id_bytes: Vec<u8>, out_ptr:
         None => return BAD,
     };
     let n = content.len().min(out_cap as usize);
-    if mem.write(&mut *caller, out_ptr as usize, &content[..n]).is_err() {
+    if mem
+        .write(&mut *caller, out_ptr as usize, &content[..n])
+        .is_err()
+    {
         return BAD;
     }
     // Return the FULL content length; the guest compares it to its capacity to detect truncation.
@@ -215,8 +248,15 @@ fn host_read(caller: &mut Caller<'_, HostState<'_>>, id_bytes: Vec<u8>, out_ptr:
 fn host_emit(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> i64 {
     let message = String::from_utf8_lossy(&bytes).to_string();
     let st = caller.data_mut();
-    let decision = st.caps.evaluate(EMIT_ACTION, &Target::default(), &st.offered);
-    st.calls.push(HostCall { func: "emit".into(), action: EMIT_ACTION.into(), decision: decision_str(&decision), target: None });
+    let decision = st
+        .caps
+        .evaluate(EMIT_ACTION, &Target::default(), &st.offered);
+    st.calls.push(HostCall {
+        func: "emit".into(),
+        action: EMIT_ACTION.into(),
+        decision: decision_str(&decision),
+        target: None,
+    });
     match decision {
         Decision::Allow => {}
         Decision::RequireApproval => return APPROVAL,
@@ -237,7 +277,11 @@ fn host_emit(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> i64 {
 /// Record a spawn request (multi-agent composition). The parent names a child application and the
 /// capability action it wants the child to have; the System Core fulfils it after this run, giving
 /// the child an ATTENUATED capability delegated from the parent (never more than the parent holds).
-fn host_spawn(caller: &mut Caller<'_, HostState<'_>>, app_bytes: Vec<u8>, action_bytes: Vec<u8>) -> i64 {
+fn host_spawn(
+    caller: &mut Caller<'_, HostState<'_>>,
+    app_bytes: Vec<u8>,
+    action_bytes: Vec<u8>,
+) -> i64 {
     let app_id = match String::from_utf8(app_bytes) {
         Ok(s) => s,
         Err(_) => return BAD,
@@ -247,7 +291,12 @@ fn host_spawn(caller: &mut Caller<'_, HostState<'_>>, app_bytes: Vec<u8>, action
         Err(_) => return BAD,
     };
     let st = caller.data_mut();
-    st.calls.push(HostCall { func: "spawn".into(), action: SPAWN_ACTION.into(), decision: "QUEUED".into(), target: Some(app_id.clone()) });
+    st.calls.push(HostCall {
+        func: "spawn".into(),
+        action: SPAWN_ACTION.into(),
+        decision: "QUEUED".into(),
+        target: Some(app_id.clone()),
+    });
     st.spawns.push(SpawnRequest { app_id, action });
     OK_CODE
 }
@@ -295,7 +344,12 @@ pub fn run(
         .func_wrap(
             "aletheia",
             "read",
-            |mut c: Caller<'_, HostState<'_>>, id_ptr: i32, id_len: i32, out_ptr: i32, out_cap: i32| -> i64 {
+            |mut c: Caller<'_, HostState<'_>>,
+             id_ptr: i32,
+             id_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i64 {
                 match guest_bytes(&mut c, id_ptr, id_len) {
                     Some(b) => host_read(&mut c, b, out_ptr, out_cap),
                     None => BAD,
@@ -304,27 +358,43 @@ pub fn run(
         )
         .expect("define read");
     linker
-        .func_wrap("aletheia", "write", |mut c: Caller<'_, HostState<'_>>, ptr: i32, len: i32| -> i64 {
-            match guest_bytes(&mut c, ptr, len) {
-                Some(b) => host_write(&mut c, b),
-                None => BAD,
-            }
-        })
+        .func_wrap(
+            "aletheia",
+            "write",
+            |mut c: Caller<'_, HostState<'_>>, ptr: i32, len: i32| -> i64 {
+                match guest_bytes(&mut c, ptr, len) {
+                    Some(b) => host_write(&mut c, b),
+                    None => BAD,
+                }
+            },
+        )
         .expect("define write");
     linker
-        .func_wrap("aletheia", "emit", |mut c: Caller<'_, HostState<'_>>, ptr: i32, len: i32| -> i64 {
-            match guest_bytes(&mut c, ptr, len) {
-                Some(b) => host_emit(&mut c, b),
-                None => BAD,
-            }
-        })
+        .func_wrap(
+            "aletheia",
+            "emit",
+            |mut c: Caller<'_, HostState<'_>>, ptr: i32, len: i32| -> i64 {
+                match guest_bytes(&mut c, ptr, len) {
+                    Some(b) => host_emit(&mut c, b),
+                    None => BAD,
+                }
+            },
+        )
         .expect("define emit");
     linker
         .func_wrap(
             "aletheia",
             "spawn",
-            |mut c: Caller<'_, HostState<'_>>, app_ptr: i32, app_len: i32, act_ptr: i32, act_len: i32| -> i64 {
-                match (guest_bytes(&mut c, app_ptr, app_len), guest_bytes(&mut c, act_ptr, act_len)) {
+            |mut c: Caller<'_, HostState<'_>>,
+             app_ptr: i32,
+             app_len: i32,
+             act_ptr: i32,
+             act_len: i32|
+             -> i64 {
+                match (
+                    guest_bytes(&mut c, app_ptr, app_len),
+                    guest_bytes(&mut c, act_ptr, act_len),
+                ) {
                     (Some(app), Some(act)) => host_spawn(&mut c, app, act),
                     _ => BAD,
                 }
@@ -336,12 +406,26 @@ pub fn run(
         Ok(i) => i,
         Err(e) => {
             let fuel_out = e.as_trap_code() == Some(TrapCode::OutOfFuel);
-            return finish(&wstore, false, 0, Some(format!("instantiate: {e}")), fuel_out);
+            return finish(
+                &wstore,
+                false,
+                0,
+                Some(format!("instantiate: {e}")),
+                fuel_out,
+            );
         }
     };
     let run_fn = match instance.get_typed_func::<(), i32>(&wstore, "run") {
         Ok(f) => f,
-        Err(_) => return finish(&wstore, false, 0, Some("component has no `run() -> i32` export".into()), false),
+        Err(_) => {
+            return finish(
+                &wstore,
+                false,
+                0,
+                Some("component has no `run() -> i32` export".into()),
+                false,
+            )
+        }
     };
 
     let (ok, code, err, fuel_out) = match run_fn.call(&mut wstore, ()) {
@@ -354,7 +438,13 @@ pub fn run(
     finish(&wstore, ok, code, err, fuel_out)
 }
 
-fn finish(wstore: &WStore<HostState<'_>>, ok: bool, exit_code: i32, error: Option<String>, fuel_exhausted: bool) -> ComponentOutcome {
+fn finish(
+    wstore: &WStore<HostState<'_>>,
+    ok: bool,
+    exit_code: i32,
+    error: Option<String>,
+    fuel_exhausted: bool,
+) -> ComponentOutcome {
     let st = wstore.data();
     ComponentOutcome {
         ok,

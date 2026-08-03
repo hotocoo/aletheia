@@ -1,0 +1,13 @@
+{
+  "crate": "kernel-core",
+  "format": "aletheia-sbom/1",
+  "package_count": 1,
+  "packages": [
+    {
+      "license": "",
+      "name": "kernel-core",
+      "source": "local",
+      "version": "0.1.0"
+    }
+  ]
+}

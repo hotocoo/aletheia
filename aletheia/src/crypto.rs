@@ -6,11 +6,15 @@ use sha2::{Digest, Sha256};
 
 pub fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes { s.push_str(&format!("{:02x}", b)); }
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
     s
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String { hex(&Sha256::digest(bytes)) }
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
 
 /// Decode a hex string to bytes. `None` on odd length or a non-hex digit — callers treat a decode
 /// failure as a verification failure (fail closed), so malformed input can never be mistaken for a
@@ -25,9 +29,13 @@ pub fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-pub fn random_token() -> String { hex(&rand::random::<[u8; 16]>()) }
+pub fn random_token() -> String {
+    hex(&rand::random::<[u8; 16]>())
+}
 
-pub fn random_key() -> [u8; 32] { rand::random::<[u8; 32]>() }
+pub fn random_key() -> [u8; 32] {
+    rand::random::<[u8; 32]>()
+}
 
 /// HMAC-SHA256 (RFC 2104), built on the already-present `sha2` — no extra dependency. Used for
 /// symmetric component-signature provenance (ADR-025 Phase 1); asymmetric keys + a key hierarchy are
@@ -82,7 +90,9 @@ pub struct Cipher {
 }
 impl Cipher {
     pub fn new(key: &[u8; 32]) -> Self {
-        Cipher { inner: ChaCha20Poly1305::new(Key::from_slice(key)) }
+        Cipher {
+            inner: ChaCha20Poly1305::new(Key::from_slice(key)),
+        }
     }
     pub fn seal(&self, plaintext: &[u8]) -> Vec<u8> {
         let nonce_bytes: [u8; 12] = rand::random();
@@ -96,7 +106,9 @@ impl Cipher {
         out
     }
     pub fn open(&self, data: &[u8]) -> Result<Vec<u8>> {
-        if data.len() < 12 { return Err(AlethError::persistence("ciphertext too short")); }
+        if data.len() < 12 {
+            return Err(AlethError::persistence("ciphertext too short"));
+        }
         let (nonce, ct) = data.split_at(12);
         self.inner
             .decrypt(Nonce::from_slice(nonce), ct)
@@ -113,7 +125,10 @@ mod tests {
         // RFC 4231 §4.2: key = 20 bytes of 0x0b, data = "Hi There".
         let key = [0x0bu8; 20];
         let got = hmac_sha256_hex(&key, b"Hi There");
-        assert_eq!(got, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        assert_eq!(
+            got,
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
     }
 
     #[test]

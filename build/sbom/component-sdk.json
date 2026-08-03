@@ -1,0 +1,13 @@
+{
+  "crate": "component-sdk",
+  "format": "aletheia-sbom/1",
+  "package_count": 1,
+  "packages": [
+    {
+      "license": "",
+      "name": "aletheia-component-sdk",
+      "source": "local",
+      "version": "0.1.0"
+    }
+  ]
+}
