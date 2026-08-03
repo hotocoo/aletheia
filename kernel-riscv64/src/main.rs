@@ -29,6 +29,7 @@ mod sbi;
 mod smp;
 mod trap;
 mod usermode;
+mod virtio;
 mod vm;
 
 // Shared, arch-independent Aletheia spine + invariant suite — the SAME source the aarch64 and
@@ -166,11 +167,31 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // virtio-blk: a REAL block device on a FIRST-CLASS target (REQ-DRV-004, ADR-036). The driver is
+    // the shared `kernel_core::virtioblk`; this target supplies only its MMIO window, its frame
+    // allocator and its fence. Skips green when no disk is attached (bare `cargo run`); the VM gate
+    // attaches one and requires the marker. The suite ends by proving the whole filesystem namespace
+    // over the real device, through the virtqueue.
+    kprintln!("");
+    kprintln!(
+        "--- virtio-blk selftests (real driver: discovery + virtqueue I/O + journal + filesystem) ---"
+    );
+    match virtio::selftest() {
+        Ok(0) => {} // no device attached — graceful skip, already logged
+        Ok(n) => kprintln!("[virtio] ALL {} VIRTIO-BLK INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[virtio] FAILED at virtio invariant {}: {}", idx, name);
+            ActiveHal::exit(180 + idx as i32);
+        }
+    }
+
     // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
     // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk
     // device; aarch64 additionally proves them over the real virtio-blk driver.
     kprintln!("");
-    kprintln!("--- filesystem selftests (named objects over the journal: atomic create/remove) ---");
+    kprintln!(
+        "--- filesystem selftests (named objects over the journal: atomic create/remove) ---"
+    );
     let mut disk = kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
     match kernel_core::fs::selftest_on(&mut disk, |n, passed, name| {
         if passed {
