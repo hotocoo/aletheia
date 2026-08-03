@@ -218,14 +218,29 @@ unsafe fn r64_config(base: usize, off: usize) -> u64 {
 /// # Safety
 /// Every address in `layout` must be mapped as device memory in the active address space.
 pub unsafe fn probe(layout: &MmioLayout) -> Option<usize> {
+    probe_nth(layout, 0)
+}
+
+/// Scan for the `nth` (0-based) block transport in `layout`. A target that attaches more than one disk
+/// — a scratch medium for the destructive suites and a PERSISTENT one the OS keeps its store on
+/// (REQ-STOR-003) — needs to address them separately, and by index is the only ordering the transport
+/// window gives. Returns `None` when there are fewer than `nth + 1` block devices.
+///
+/// # Safety
+/// Every address in `layout` must be mapped as device memory in the active address space.
+pub unsafe fn probe_nth(layout: &MmioLayout, nth: usize) -> Option<usize> {
+    let mut seen = 0usize;
     for i in 0..layout.slots {
         let base = layout.base + i * layout.stride;
         if r32(base, R_MAGIC) != VIRTIO_MAGIC {
             continue;
         }
-        // DeviceID 0 == a present-but-empty transport slot; keep scanning for the block device.
+        // DeviceID 0 == a present-but-empty transport slot; keep scanning for block devices.
         if r32(base, R_DEVICE_ID) == VIRTIO_ID_BLOCK {
-            return Some(base);
+            if seen == nth {
+                return Some(base);
+            }
+            seen += 1;
         }
     }
     None

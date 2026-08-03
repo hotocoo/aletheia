@@ -80,6 +80,27 @@ data is intact must not depend on the CPU.
   and thereby repairs a damaged home block. The corruption tests must therefore quiesce the journal
   first to exercise the verification path — the repair is correct behavior, and it masks the check.
 
+## Addendum (2026-08-03) — the gate proves it by rebooting
+
+A store that reloads within one boot proves the encoder, not the claim. So each target's boot gate now
+attaches a **second, persistent disk** and boots the same kernel **twice** against it:
+
+* **Two disks, different jobs.** Device 0 is scratch — the destructive suites reformat it. Device 1 is the
+  medium the OS keeps its store on and never wipes. Addressing them separately needed one small addition
+  per bus: `virtioblk::probe_nth` for virtio-mmio and `pci::find_virtio_blk_nth` for virtio-pci. The boot
+  medium itself is never written at all.
+* **Boot 1 must create, boot 2 must remember.** The gates require
+  `PERSISTENT MEDIUM: boot #1, 0 entities verified` from the first run and
+  `boot #2, 1 entities verified` from the second — the second having loaded and re-verified, through the
+  real virtio driver, exactly what the first wrote.
+* **On x86-64 the reboot is a reboot.** The OVMF NVRAM copy is per-boot (the firmware rewrites it), while
+  the disks are shared between runs, so the second run is the same machine restarting rather than a fresh
+  one.
+* **It is part of the cross-architecture contract.** `conformance.sh` requires the boot-1 line of all
+  three targets (62 core behaviors), because whether the OS remembers must not depend on the CPU.
+
+This is what closes the gap between "the OS can write" and "the OS remembers".
+
 ## Alternatives considered
 
 * **Keep "remove then create" and accept the window.** Rejected: it converts an update into possible

@@ -212,7 +212,9 @@ pub extern "C" fn kmain() -> ! {
     // re-verified against each entity's content address on load — a flipped bit is a refusal, not
     // silently-accepted state. Proved here over a RAM disk on every target.
     kprintln!("");
-    kprintln!("--- durable-store selftests (the spine survives: content-verified, atomically saved) ---");
+    kprintln!(
+        "--- durable-store selftests (the spine survives: content-verified, atomically saved) ---"
+    );
     let mut store_disk =
         kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
     match kernel_core::persist::selftest_on(&mut store_disk, |n, passed, name| {
@@ -224,9 +226,33 @@ pub extern "C" fn kmain() -> ! {
     }) {
         Ok(n) => kprintln!("[persist] ALL {} DURABLE-STORE INVARIANTS HOLD", n),
         Err((idx, name)) => {
-            kprintln!("[persist] FAILED at durable-store invariant {}: {}", idx, name);
+            kprintln!(
+                "[persist] FAILED at durable-store invariant {}: {}",
+                idx,
+                name
+            );
             ActiveHal::exit(200 + idx as i32);
         }
+    }
+
+    // The cross-reboot claim, on REAL hardware (REQ-STOR-003, ADR-038). The persistent medium is the
+    // SECOND disk: the scratch one above was reformatted by the destructive suites, this one is never
+    // wiped. The boot gate boots twice against the same image file, so the second boot must FIND and
+    // verify what the first wrote — the difference between "the OS can write" and "the OS remembers".
+    kprintln!("");
+    match virtio::persistent_device() {
+        Some(mut medium) => match kernel_core::persist::open_and_witness(&mut medium) {
+            Ok((boot, verified)) => kprintln!(
+                "[persist] PERSISTENT MEDIUM: boot #{}, {} entities verified from earlier boots",
+                boot,
+                verified
+            ),
+            Err(e) => {
+                kprintln!("[persist] PERSISTENT MEDIUM FAILED: {:?}", e);
+                ActiveHal::exit(210);
+            }
+        },
+        None => kprintln!("[persist] no persistent medium attached (skipped)"),
     }
 
     kprintln!("");

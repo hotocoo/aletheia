@@ -15,7 +15,7 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — the OS remembers, and every byte of what it remembers is verified (2026-08-03, REQ-STOR-003)
+## Latest wave — the OS remembers, and the gate proves it by rebooting (2026-08-03, REQ-STOR-003)
 
 Three waves built storage: an atomic multi-block write, a named namespace, real devices on all three
 CPUs. And the **capability-secure spine itself was still rebuilt in RAM at every boot** — not one
@@ -54,8 +54,17 @@ reset is a demo of an operating system. `kernel-core/src/persist.rs` closes that
   persistence, no schema migration beyond refusing an unknown version, and FNV-1a is integrity against
   rot and bugs — not a defence against forgery (that needs REQ-BOOT-002's signing hierarchy).
 
-Gates after the wave: `build-all` PASS, `e2e-all` PASS (aarch64 / riscv64 / x86-64 in QEMU),
-`conformance` PASS (61 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (68
+- **And the gates now prove it by REBOOTING.** Each target's boot gate attaches a **second, persistent
+  disk** — the scratch one is reformatted by the destructive suites, this one is created once and kept —
+  then boots the same kernel **twice** against it. Boot 1 must report
+  `PERSISTENT MEDIUM: boot #1, 0 entities verified`; boot 2 must report
+  `boot #2, 1 entities verified`, having loaded and re-verified what boot 1 wrote **through the real
+  virtio driver**. On x86-64 the NVRAM copy is per-boot while the disks are not, so the second run is a
+  reboot of the same machine rather than a fresh one. That line is now part of the conformance contract
+  (**62** core behaviors): "the OS remembers" must not be a property of one CPU.
+
+Gates after the wave: `build-all` PASS, `e2e-all` PASS (aarch64 / riscv64 / x86-64 in QEMU, each booted
+TWICE), `conformance` PASS (62 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (68
 requirements).
 
 ## Previous wave — every target now proves the filesystem on REAL storage (2026-08-03, GAPS4 ALET-P2-019, REQ-DRV-005)
