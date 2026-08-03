@@ -178,8 +178,8 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             return Err(NetError::Unsupported("device did not report a MAC address"));
         }
 
-        let rx = Virtqueue::new::<H, T>(&mut transport, RX_QUEUE).map_err(NetError::Queue)?;
-        let tx = Virtqueue::new::<H, T>(&mut transport, TX_QUEUE).map_err(NetError::Queue)?;
+        let mut rx = Virtqueue::new::<H, T>(&mut transport, RX_QUEUE).map_err(NetError::Queue)?;
+        let mut tx = Virtqueue::new::<H, T>(&mut transport, TX_QUEUE).map_err(NetError::Queue)?;
         if rx.len() < RX_BUFFERS || tx.is_empty() {
             return Err(NetError::Queue("queues are too short for this driver"));
         }
@@ -189,9 +189,15 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         for slot in 0..RX_BUFFERS {
             let buf = H::alloc_frame().ok_or(NetError::Queue("no frame for a receive buffer"))?;
             rx_bufs[slot as usize] = buf;
-            rx.add::<H>(slot, buf as u64, RX_BUF_LEN as u32, true);
+            // Register BEFORE publishing: the gate in `add` refuses an unregistered address (ADR-043).
+            rx.register_buffer(buf, crate::dma::PAGE, "virtio-net.rx")
+                .map_err(|_| NetError::Queue("a receive buffer was refused as a DMA region"))?;
+            rx.add::<H>(slot, buf as u64, RX_BUF_LEN as u32, true)
+                .map_err(|_| NetError::Queue("a receive buffer failed the DMA gate"))?;
         }
         let tx_buf = H::alloc_frame().ok_or(NetError::Queue("no frame for the transmit buffer"))?;
+        tx.register_buffer(tx_buf, crate::dma::PAGE, "virtio-net.tx")
+            .map_err(|_| NetError::Queue("the transmit buffer was refused as a DMA region"))?;
 
         // Buffers are published; NOW the device may run.
         status |= S_DRIVER_OK;
@@ -220,6 +226,21 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         self.dropped.get()
     }
 
+    /// Would an address this driver never registered be refused as a descriptor? The suite asks this to
+    /// prove the DMA gate denies by default (REQ-DRV-006, ADR-043) rather than merely existing.
+    pub fn dma_gate_refuses_unregistered(&self) -> bool {
+        // An address far from any registered buffer, and one that overruns a registered buffer.
+        self.tx.would_refuse(0x7fff_0000_0000, 64)
+            && self
+                .rx
+                .would_refuse(self.rx_bufs[0] as u64, (crate::dma::PAGE * 2) as u32)
+    }
+
+    /// DMA regions the two queues have registered (rings + buffers).
+    pub fn dma_regions(&self) -> usize {
+        self.rx.dma_regions() + self.tx.dma_regions()
+    }
+
     /// Send one Ethernet frame (without the virtio header, which this adds), waiting for the device to
     /// release the buffer so the caller may send again.
     ///
@@ -234,7 +255,8 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         buf[..NET_HDR_LEN].fill(0); // no offloads negotiated ⇒ an all-zero header is correct
         buf[NET_HDR_LEN..].copy_from_slice(frame);
         self.tx
-            .add::<H>(0, self.tx_buf as u64, buf.len() as u32, false);
+            .add::<H>(0, self.tx_buf as u64, buf.len() as u32, false)
+            .map_err(|_| NetError::Queue("the transmit buffer is not DMA-visible"))?;
         self.tx.kick::<H, T>(&self.transport);
         self.tx
             .poll_used_bounded::<H>(20_000_000)
@@ -258,8 +280,12 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
                 if idx >= self.rx_bufs.len() || (written as usize) < NET_HDR_LEN + ETH_HDR_LEN {
                     // Re-post and continue: a malformed completion must not wedge the queue.
                     if idx < self.rx_bufs.len() {
-                        self.rx
-                            .add::<H>(slot, self.rx_bufs[idx] as u64, RX_BUF_LEN as u32, true);
+                        let _ = self.rx.add::<H>(
+                            slot,
+                            self.rx_bufs[idx] as u64,
+                            RX_BUF_LEN as u32,
+                            true,
+                        );
                         self.rx.kick::<H, T>(&self.transport);
                     }
                     self.dropped.set(self.dropped.get() + 1);
@@ -273,7 +299,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
                 let taken = accept(frame);
                 // Re-post BEFORE returning: a queue that loses one buffer per received frame stops
                 // receiving after RX_BUFFERS frames.
-                self.rx.add::<H>(slot, base as u64, RX_BUF_LEN as u32, true);
+                let _ = self.rx.add::<H>(slot, base as u64, RX_BUF_LEN as u32, true);
                 self.rx.kick::<H, T>(&self.transport);
                 match taken {
                     Some(r) => return Ok(r),
@@ -431,7 +457,14 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
         mac != [0u8; 6] && mac[0] & 1 == 0
     );
 
-    // 2 — ARP: the request went out AND an answer came back. This is the receive path's first proof, and
+    // 2 — the DMA gate is live on this device: its rings and buffers are registered, and an address the
+    //     driver never registered is refused before it could become a descriptor.
+    check!(
+        "net: the DMA gate denies an unregistered descriptor address (rings and buffers are registered)",
+        dev.dma_gate_refuses_unregistered() && dev.dma_regions() >= 2
+    );
+
+    // 3 — ARP: the request went out AND an answer came back. This is the receive path's first proof, and
     //     it works only because the receive buffers were posted before DRIVER_OK.
     // SAFETY: the device is live and owned here.
     let gw = unsafe { dev.arp_resolve(GATEWAY_IP) };

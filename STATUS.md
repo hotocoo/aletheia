@@ -40,11 +40,16 @@ a number becomes a descriptor.
 - **Nine invariants on all three targets** (`ALL 9 DMA-BOUNDARY INVARIANTS HOLD`, boot failing `240 + i`),
   three of them in the conformance contract (69 → **72**): what the kernel may tell a device is policy, not
   a hardware property.
-- **ALET-P1-018 stays open, deliberately.** This constrains what the *kernel* tells a device — where every
+- **And it became a GATE, not just a policy.** `Virtqueue` owns a registry: its ring frame is registered at
+  setup, a buffer must be registered before it can be named, and **`add` refuses an address that is not
+  visible** — the check sits exactly where a number becomes a descriptor, the only place a wrong one could
+  escape. virtio-net registers its receive and transmit buffers, and a new invariant on all three targets
+  proves the gate **denies by default**: an address far from any buffer is refused, and so is one that
+  overruns a registered buffer (network invariants 4 → 5, conformance 72 → **73**).
+- **ALET-P1-018 stays open, deliberately.** It constrains what the *kernel* tells a device — where every
   wrong address in this codebase would come from — and cannot constrain a device that invents its own
-  addresses; that needs an IOMMU/SMMU. And the existing drivers' ring/buffer frames are not yet routed
-  through the registry, so today it is a checked policy with a suite rather than a gate on every descriptor.
-  Both limits are in the row and in ADR-043 rather than implied.
+  addresses; that needs an IOMMU/SMMU. And `virtioblk`'s single-queue path (its fixed ring predates `virtq`)
+  still publishes descriptors ungated. Both limits are in the row and in ADR-043 rather than implied.
 
 Gates after the wave: `quality-gate` PASS, `build-all` PASS, `e2e-all` PASS, `conformance` PASS (72 × 3),
 `register` PASS, `ci-parity` PASS, `traceability` PASS (78 requirements).
