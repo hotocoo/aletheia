@@ -782,6 +782,36 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             crate::kmap::leaf_for(kroot, 0x8000).is_some(),
             "kmap: low memory (the SMP trampoline's home) is identity-mapped by the kernel's map"
         );
+        // The split cuts both ways, exactly as on aarch64 and RISC-V: it replaces the huge-page
+        // descriptor that made these addresses undescendable with real page tables, so the mapping
+        // APIs must refuse the image span explicitly (REQ-MM-006, ALET-P2-032) — otherwise a caller
+        // could map a fresh WRITABLE page over kernel text, the write-to-code path W^X exists to
+        // close, or unmap `.data` from under the running kernel. The rule lives once in
+        // `kernel_core::vmaddr`; this target only declares WHERE its image is, and these two checks
+        // prove the declaration is wired into both APIs. Asserted against the LIVE root, whichever
+        // tree that is: the refusal must not depend on the map having been activated yet.
+        let text_va = match crate::kmap::text_probe() {
+            Some(v) => v,
+            None => return Err((n + 1, "kmap: the image declares no executable section")),
+        };
+        let (guard_start, guard_end) = crate::kmap::protected_span();
+        check!(
+            guard_end > guard_start && text_va >= guard_start && text_va < guard_end,
+            "kmap: the image's block-aligned span is declared to the address plan and covers text"
+        );
+        let spare = match frames::alloc_zeroed() {
+            Some(f) => f,
+            None => return Err((n + 1, "kmap: no frame for the image-refusal checks")),
+        };
+        check!(
+            !map_kernel_frame(root, text_va as u64, spare.addr() as u64),
+            "wx: mapping over the split kernel image is refused (text still maps to itself)"
+        );
+        check!(
+            !unmap_user(root, text_va as u64),
+            "wx: unmapping the split kernel image is refused (text still read-only + executable)"
+        );
+        frames::free(spare);
     }
 
     Ok(n)
@@ -898,12 +928,18 @@ pub fn build_space() -> Option<u64> {
 /// PANICS on a non-canonical address — so the check converts two crash/corruption paths into a
 /// fail-closed `false`. The physical window is read from the frame allocator itself.
 fn addr_plan() -> AddrPlan {
+    // The image split is the same rule the other two targets declare (REQ-MM-006, ALET-P2-032) — it
+    // matters here only once the kernel's own map is ACTIVE, because until then the level above the
+    // image is one of OVMF's descriptors, not a table this kernel split. Declaring it
+    // unconditionally is the fail-closed order: the refusal exists before the map that needs it.
+    let (protected_start, protected_end) = crate::kmap::protected_span();
     AddrPlan::new(
         48,
         true,
         frames::base(),
         frames::total_count() * vmaddr::PAGE_SIZE,
     )
+    .with_protected(protected_start, protected_end)
 }
 
 /// Software translate `va` in address space `root` (or `None` if unmapped). Used to assert the user

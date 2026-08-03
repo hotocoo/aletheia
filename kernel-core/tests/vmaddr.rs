@@ -196,6 +196,41 @@ fn each_target_accepts_only_its_own_canonical_form() {
     );
 }
 
+/// The kernel-image span is refused by BOTH mapping APIs, and the refusal is a span, not a point
+/// (REQ-MM-006, ALET-P2-032). This rule used to be written per target in `kernel/src/vm.rs` and
+/// `kernel-riscv64/src/vm.rs`; proving it here is what lets each target declare the span instead of
+/// re-implementing the check — and x86-64 gets it for free rather than as a third copy.
+#[test]
+fn the_kernel_image_span_is_refused_by_map_and_unmap() {
+    const START: usize = 0x4020_0000;
+    const END: usize = 0x4060_0000; // block-aligned, 4 MiB
+    let plan = AddrPlan::new(48, true, 0x4000_0000, 0x1000_0000).with_protected(START, END);
+
+    assert_eq!(plan.protected(), (START, END));
+    // Every page of the span, both APIs.
+    for va in (START..END).step_by(PAGE_SIZE) {
+        assert_eq!(plan.validate_unmap(va), Err(MapFault::ProtectedVirt));
+        assert_eq!(
+            plan.validate_map(va, 0x4000_0000),
+            Err(MapFault::ProtectedVirt)
+        );
+    }
+    // The boundaries are half-open: one page below is refused, `END` itself is not.
+    assert_eq!(
+        plan.validate_unmap(START - PAGE_SIZE),
+        Ok(()),
+        "the page below the span is ordinary memory"
+    );
+    assert_eq!(plan.validate_unmap(END), Ok(()), "the span excludes its end");
+    // Well-formedness still comes first: a protected address that is ALSO malformed reports the
+    // malformation, so a caller learns the real defect rather than a span it never intended to hit.
+    assert_eq!(plan.validate_unmap(START + 1), Err(MapFault::UnalignedVirt));
+    // A plan with no declared span protects nothing — the default every target had before.
+    let open = AddrPlan::new(48, true, 0x4000_0000, 0x1000_0000);
+    assert_eq!(open.protected(), (0, 0));
+    assert_eq!(open.validate_unmap(START), Ok(()));
+}
+
 /// Page-aligned candidates spanning the interesting region: every single-bit address, each one
 /// offset by a page, and the addresses straddling the decoded-width boundary.
 fn candidate_addresses(plan: &AddrPlan) -> Vec<usize> {

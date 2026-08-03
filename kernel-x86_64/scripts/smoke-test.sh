@@ -4,6 +4,8 @@
 # PASS criteria:
 #   - QEMU process exit code 33  (kernel isa-debug-exit encodes success 0 as value 0x10)
 #   - serial log contains "[e2e] PASS" + all four invariant-family markers (memory, vm, SMP, ring-3)
+#   - the kernel built its OWN address map, MADE IT LIVE (CR3), and the live tree has ZERO W^X
+#     violations (ALET-P1-031) — the whole suite after that point runs on the kernel's own tree
 # A 30s watchdog guards against a hang (triple fault / no exit). Exit 0 = PASS, 1 = FAIL.
 set -uo pipefail
 
@@ -59,8 +61,10 @@ echo "QEMU exit code: $RC (expect 33)"
 
 if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 22 MEMORY INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 49 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 52 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
    && grep -q 'kernel map built @' "$LOG" \
+   && grep -q 'kernel map ACTIVE' "$LOG" \
+   && grep -q 'live W\^X audit: .* 0 violations' "$LOG" \
    && grep -q 'SMP INVARIANTS HOLD' "$LOG" \
    && grep -q 'RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then

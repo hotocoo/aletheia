@@ -293,6 +293,29 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // --- take the machine's address space too (ALET-P1-031) ---
+    // The vm gate above proved the map is complete and W^X-correct. Only now does CR3 move: every
+    // check after this line — the spine invariants, SMP bring-up, the whole ring-3 suite — runs on
+    // the kernel's OWN tree, which is the only way to claim it is usable rather than merely built.
+    if kmap::activate() {
+        let live = vm::audit_all(vm::active_root());
+        kprintln!(
+            "[mm] kernel map ACTIVE (CR3 = {:#x}) — the firmware's tree is no longer translating",
+            vm::active_root()
+        );
+        kprintln!(
+            "[mm] live W^X audit: {} leaves, {} violations",
+            live.leaves,
+            live.dynamic_violations + live.bootstrap_violations
+        );
+        if live.dynamic_violations + live.bootstrap_violations != 0 {
+            kprintln!("[mm] FATAL: the live address space violates W^X");
+            ActiveHal::exit(28);
+        }
+    } else {
+        kprintln!("[mm] WARNING: kernel map not activated — still translating through OVMF's tree");
+    }
+
     kprintln!("");
     kprintln!("--- invariant selftests (M1 acceptance, re-proved in x86-64 kernel space) ---");
     match selftest::run(|n, passed, name| {
