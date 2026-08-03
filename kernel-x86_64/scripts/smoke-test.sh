@@ -59,7 +59,8 @@ echo "QEMU exit code: $RC (expect 33)"
 
 if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 22 MEMORY INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 40 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 49 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'kernel map built @' "$LOG" \
    && grep -q 'SMP INVARIANTS HOLD' "$LOG" \
    && grep -q 'RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then

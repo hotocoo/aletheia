@@ -261,6 +261,14 @@ pub fn audit_attrs(root: u64) -> memattr::AuditReport {
     memattr::audit(root as usize, &Tables)
 }
 
+/// The same audit with NO scoping — every leaf in the tree, not just the region a space privatized.
+/// Used for the inherited OVMF tree (informational) and for the map the kernel builds for ITSELF
+/// (`kmap`), where scoping would defeat the point: that whole tree is ours to answer for
+/// (ALET-P1-031, REQ-MM-006).
+pub fn audit_all(root: u64) -> memattr::AuditReport {
+    memattr::audit(root as usize, &UnscopedTables)
+}
+
 /// Refuse a leaf whose permissions break W^X or the attribute rules (REQ-MM-006, ADR-034). Called
 /// at the entry of every mapping API, because caller-supplied flags are untrusted input exactly
 /// like `va`/`pa`.
@@ -684,6 +692,96 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             );
         }
         frames::free(probe2);
+    }
+
+    // 11 — THE KERNEL'S OWN MAP (ALET-P1-031, REQ-MM-006, ADR-034). Everything above audits trees
+    //      this kernel MAPPED INTO; the tree it RUNS ON is still OVMF's, and the firmware's leaves
+    //      are writable+executable by the half-million. `kmap` builds the replacement from the PE
+    //      image's own section table — the x86-64 answer to the linker symbols the other two targets
+    //      read. These checks assert the built map is W^X-correct everywhere and that each class of
+    //      kernel address is mapped AS THE RIGHT THING, not merely that nothing was flagged.
+    //      HONEST SCOPE: the map is built and proved, NOT activated — CR3 still holds OVMF's root,
+    //      so the inherited violations remain live and are reported for comparison below.
+    {
+        let kroot = crate::kmap::root();
+        check!(
+            kroot != 0 && kroot != active_root(),
+            "kmap: the kernel built its OWN address map, distinct from the firmware's live root"
+        );
+        let ours = audit_all(kroot);
+        let firmware = audit_all(active_root());
+        kprintln!(
+            "  [info  ] kernel map: {} leaves, {} dynamic + {} block violations   |   inherited OVMF tree: {} leaves, {} violations",
+            ours.leaves,
+            ours.dynamic_violations,
+            ours.bootstrap_violations,
+            firmware.leaves,
+            firmware.dynamic_violations + firmware.bootstrap_violations
+        );
+        check!(
+            ours.leaves > 512,
+            "kmap: the audit walked a whole identity map, not a stub"
+        );
+        check!(
+            ours.dynamic_violations == 0 && ours.bootstrap_violations == 0,
+            "kmap: NO leaf of the kernel's own map is writable+executable — W^X, page AND block"
+        );
+        // Each class of kernel address, mapped as what it is. `leaf_for` returns `(entry, level)`;
+        // level 3 is a 4 KiB page (the image split), level 2 a 2 MiB huge page (bulk RAM/MMIO).
+        let text = match crate::kmap::text_probe().and_then(|va| crate::kmap::leaf_for(kroot, va)) {
+            Some(v) => v,
+            None => return Err((n + 1, "kmap: the image declares no executable section")),
+        };
+        check!(
+            text.1 == 3,
+            "kmap: kernel text is mapped at 4 KiB granularity (a 2 MiB block cannot be RO+X alone)"
+        );
+        check!(
+            text.0 & PageTableFlags::NO_EXECUTE.bits() == 0
+                && text.0 & PageTableFlags::WRITABLE.bits() == 0,
+            "kmap: kernel text is executable AND read-only"
+        );
+        let data = match crate::kmap::data_probe().and_then(|va| crate::kmap::leaf_for(kroot, va)) {
+            Some(v) => v,
+            None => return Err((n + 1, "kmap: the image declares no writable section")),
+        };
+        check!(
+            data.1 == 3
+                && data.0 & PageTableFlags::WRITABLE.bits() != 0
+                && data.0 & PageTableFlags::NO_EXECUTE.bits() != 0,
+            "kmap: kernel data is writable and NEVER executable"
+        );
+        if let Some((ro, level)) =
+            crate::kmap::rodata_probe().and_then(|va| crate::kmap::leaf_for(kroot, va))
+        {
+            check!(
+                level == 3
+                    && ro & PageTableFlags::WRITABLE.bits() == 0
+                    && ro & PageTableFlags::NO_EXECUTE.bits() != 0,
+                "kmap: kernel read-only data is neither writable nor executable"
+            );
+        }
+        // Bulk RAM: the frame pool's own base, far from the image, is a huge page — writable so the
+        // allocator works, never executable so no data page is a code page.
+        let pool = match crate::kmap::leaf_for(kroot, frames::base()) {
+            Some(v) => v,
+            None => {
+                return Err((
+                    n + 1,
+                    "kmap: the frame pool is not mapped by the kernel's map",
+                ))
+            }
+        };
+        check!(
+            pool.1 == 2
+                && pool.0 & PageTableFlags::WRITABLE.bits() != 0
+                && pool.0 & PageTableFlags::NO_EXECUTE.bits() != 0,
+            "kmap: RAM outside the image is a 2 MiB RW+NX block — writable, never executable"
+        );
+        check!(
+            crate::kmap::leaf_for(kroot, 0x8000).is_some(),
+            "kmap: low memory (the SMP trampoline's home) is identity-mapped by the kernel's map"
+        );
     }
 
     Ok(n)

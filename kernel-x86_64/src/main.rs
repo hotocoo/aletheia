@@ -29,6 +29,7 @@ mod gdt;
 mod hal;
 mod heap;
 mod idt;
+mod kmap;
 mod pic;
 mod pit;
 mod serial;
@@ -45,6 +46,7 @@ use uefi::boot;
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 use uefi::prelude::*;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
+use uefi::proto::loaded_image::LoadedImage;
 
 struct FbInfo {
     base: *mut u8,
@@ -75,6 +77,12 @@ fn efi_main() -> Status {
             }
         }
     });
+
+    // Where the firmware loaded us. A PE image has no `linker.ld` symbols, so this — plus the
+    // image's own section table — is how the kernel learns its text/rodata/data bounds and can
+    // build its OWN W^X-correct address map instead of inheriting OVMF's (ALET-P1-031, REQ-MM-006).
+    // Must happen while boot services live; the image memory itself survives ExitBootServices.
+    capture_image_bounds();
 
     kprintln!("[uefi] calling ExitBootServices — Aletheia takes ownership of the machine");
     // SAFETY: the only boot-services borrows (GOP ScopedProtocol + FrameBuffer) were dropped inside
@@ -131,6 +139,27 @@ fn capture_framebuffer() -> Option<FbInfo> {
         stride,
         bgr,
     })
+}
+
+/// Record the loaded image's base + size from `LoadedImage`, and log it. A failure here is not
+/// fatal — it makes `kmap::build` refuse, which the boot reports — because the kernel still runs
+/// (on the firmware's map) exactly as it did before this map existed.
+fn capture_image_bounds() {
+    match boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle()) {
+        Ok(image) => {
+            let (base, size) = image.info();
+            kmap::capture_image(base as usize, size as usize);
+            kprintln!(
+                "[uefi] loaded image: base={:#x} size={:#x} (PE section table = our W^X bounds)",
+                base as usize,
+                size
+            );
+        }
+        Err(e) => kprintln!(
+            "[uefi] WARNING: LoadedImage unavailable ({:?}) — the kernel cannot build its own map",
+            e.status()
+        ),
+    }
 }
 
 fn summarize_memory(map: &MemoryMapOwned) -> (usize, u64) {
@@ -232,6 +261,25 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             kprintln!("[mm] FAILED at memory invariant {}: {}", idx, name);
             ActiveHal::exit(30 + idx as i32);
         }
+    }
+
+    // --- the kernel's OWN address map (ALET-P1-031, REQ-MM-006, ADR-034) ---
+    // Built from the PE image bounds, audited below by the vm gate, and NOT activated in this
+    // commit: CR3 still points at OVMF's tree. Building before activating means a wrong map fails
+    // an invariant instead of triple-faulting the machine.
+    match kmap::build(memory_map) {
+        Some((root, r)) => kprintln!(
+            "[mm] kernel map built @ {:#x}: {} MiB identity, {} huge + {} page leaves, {} image-split blocks, {} table frames",
+            root,
+            r.covered / (1024 * 1024),
+            r.huge_leaves,
+            r.page_leaves,
+            r.split_blocks,
+            r.tables
+        ),
+        None => kprintln!(
+            "[mm] WARNING: kernel map NOT built (no image bounds / unparsable PE sections / no frames)"
+        ),
     }
 
     // --- virtual memory (P5): walk + edit the live UEFI page-table hierarchy we now own ---
