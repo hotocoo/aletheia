@@ -97,6 +97,13 @@ impl RoundRobin {
     /// Take a task off the rotation until it is unblocked. If it was the running task, the CPU is now
     /// idle (the backend should `schedule_next`).
     pub fn block(&mut self, id: TaskId) {
+        // An event for a task that was never spawned changes NOTHING (INV-TASK-5). Before this check, a
+        // stray id INVENTED a task in the state table — and a scheduler that believes in a task it never
+        // created will eventually try to resume a context that does not exist. Found by writing the
+        // lifecycle contract's tests, not by review.
+        if !self.state.contains_key(&id) {
+            return;
+        }
         if self.state.get(&id) == Some(&TaskState::Finished) {
             return;
         }
@@ -119,6 +126,10 @@ impl RoundRobin {
 
     /// Retire a task permanently; it leaves the rotation and never runs again.
     pub fn finish(&mut self, id: TaskId) {
+        // As in `block`: never conjure a task from an unknown id (INV-TASK-5).
+        if !self.state.contains_key(&id) {
+            return;
+        }
         self.set(id, TaskState::Finished);
         self.order.retain(|&t| t != id);
         if self.current == Some(id) {

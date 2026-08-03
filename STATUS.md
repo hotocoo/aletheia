@@ -17,7 +17,29 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — what a device is allowed to touch (2026-08-03, GAPS4 ALET-P1-018, REQ-DRV-006)
+## Latest wave — the task lifecycle, written down and attacked (2026-08-03, GAPS4 ALET-P1-015)
+
+Four task states, and nothing said which transitions are impossible. A lifecycle bug is usually a state
+that is only *briefly* wrong, so `docs/INVARIANT-CONTRACTS.md` §INV-TASK states five invariants and every
+test drives long sequences, checking its property after **every** event.
+
+- `Finished` is **terminal** under every following event (swept with all four states as interference); a
+  Blocked task is never dispatched and only `unblock` makes it eligible; at most **one** task is Running and
+  `current()` names exactly it, re-checked after each of 500 random events; `runnable_len` equals the
+  rotation — Ready **plus** the Running task, which rotates to the tail — and never counts Blocked or
+  Finished; and an event naming a task that was never spawned changes **nothing**.
+- **The last one found a real defect.** `block`/`finish` INVENTED a task in the state table from a stray id,
+  so the scheduler could believe in a task it never created and eventually try to resume a context that does
+  not exist. Fixed in `sched.rs` in the same commit.
+- **And one invariant corrected the contract rather than the code:** `runnable_len` counts the rotation, so
+  the first draft (Ready-only) was wrong about what the scheduler promises — worth recording, because a test
+  written to the wrong definition is how a correct implementation gets "fixed" into a broken one.
+- **Register: 29 → 30 resolved, 33 → 32 open.**
+
+Gates after the wave: `build-all` PASS (22 host test binaries), `register` PASS, `traceability` PASS (79
+requirements).
+
+## Previous wave — what a device is allowed to touch (2026-08-03, GAPS4 ALET-P1-018, REQ-DRV-006)
 
 Every driver here hands a device a **raw physical address** and trusts it to write only there, and nothing
 checked the address. Enabling PCI bus-master (ADR-037) made that concrete rather than theoretical: a

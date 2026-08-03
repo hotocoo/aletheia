@@ -149,3 +149,19 @@ the kernel's virtual base is therefore a different memory model, not a flag. And
 attacker who can read a pointer and use it, whereas Aletheia gates every effect on a capability, so a
 leaked kernel pointer is not itself authority. What it would take is recorded in `kernel-core/src/layout.rs`
 and ADR-040: a higher-half split, an offset-mapped physical window for DMA translation, and PIE images.
+
+---
+
+## INV-TASK — task lifecycle (REQ-SCHED-002, ALET-P1-015)
+
+Four states, and until this was written down nothing said which transitions are impossible. A lifecycle
+bug is usually a state that is only *briefly* wrong, so every test below drives long sequences and checks
+its property after **every** event rather than at the end.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-TASK-1 | `Finished` is **terminal**: no event returns a finished task to Ready, Running or Blocked, and it is never dispatched again. | A resurrected task resumes a context that has been torn down. | `finished_is_terminal_whatever_arrives_afterwards` |
+| INV-TASK-2 | A Blocked task is never dispatched, and only `unblock` makes it eligible — not the passage of rounds. | Dispatching a blocked task runs code waiting on something that has not happened. | `a_blocked_task_is_never_dispatched_until_it_is_unblocked` |
+| INV-TASK-3 | At most ONE task is Running, and `current()` names exactly that task. | Two Running tasks on one core is a belief in something impossible; two disagreeing views resume the wrong context. | `at_most_one_task_is_running_after_every_event` |
+| INV-TASK-4 | `runnable_len` equals the rotation — Ready **plus** the Running task (which rotates to the tail) — and never counts Blocked or Finished. | A drifting count makes a scheduler spin believing it has work, or idle with work pending. | `the_runnable_count_never_drifts_from_the_dispatchable_set` |
+| INV-TASK-5 | An event naming a task that was never spawned changes **nothing** — no state appears for it, no real task is disturbed. | **This found a real defect:** `block`/`finish` used to INVENT a task in the state table from a stray id, and a scheduler that believes in a task it never created will try to resume a context that does not exist. | `an_event_for_an_unknown_task_changes_nothing` |
