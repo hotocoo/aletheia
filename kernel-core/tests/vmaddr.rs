@@ -221,7 +221,11 @@ fn the_kernel_image_span_is_refused_by_map_and_unmap() {
         Ok(()),
         "the page below the span is ordinary memory"
     );
-    assert_eq!(plan.validate_unmap(END), Ok(()), "the span excludes its end");
+    assert_eq!(
+        plan.validate_unmap(END),
+        Ok(()),
+        "the span excludes its end"
+    );
     // Well-formedness still comes first: a protected address that is ALSO malformed reports the
     // malformation, so a caller learns the real defect rather than a span it never intended to hit.
     assert_eq!(plan.validate_unmap(START + 1), Err(MapFault::UnalignedVirt));

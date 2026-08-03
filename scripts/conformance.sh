@@ -82,6 +82,22 @@ CONTRACT=(
   # this pair is what proves each one declared its span rather than merely owning the code.
   "wx: mapping over the split kernel image is refused (text still maps to itself)"
   "wx: unmapping the split kernel image is refused (text still read-only + executable)"
+  # The filesystem namespace (REQ-FS-001, ADR-035). The namespace is arch-independent code, so a
+  # divergence here would mean a target's heap/alloc or storage path behaves differently — and the
+  # behaviors that matter are refusals and crash outcomes, which must not vary by CPU. On aarch64 the
+  # same twelve are additionally proved over the real virtio-blk device (an arch extension).
+  "fs: a formatted device mounts and is empty"
+  "fs: a created object reads back byte for byte"
+  "fs: creating a duplicate name is refused (names are unique)"
+  "fs: a malformed name is refused (empty, over-long, or reserved byte)"
+  "fs: reading an absent name is refused"
+  "fs: two objects never share a data block"
+  "fs: removing an object returns exactly its blocks to the free map"
+  "fs: a deleted object's blocks carry no bytes of it (erased on delete)"
+  "fs: an object too large for one transaction is refused"
+  "fs: the namespace survives a remount (all durable state is on the device)"
+  "fs: a create that dies before its commit record leaves the namespace unchanged"
+  "fs: a create that dies after its commit record is completed by the next mount"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

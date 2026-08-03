@@ -64,7 +64,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P2-015 | P2 | deferred | secure boot — milestone work (ADR needed) |
 | ALET-P2-016 | P2 | deferred | update/rollback system — milestone work |
 | ALET-P2-017 | P2 | deferred | recovery architecture — milestone work |
-| ALET-P2-018 | P2 | deferred | filesystem/persistent-storage architecture — milestone work |
+| ALET-P2-018 | P2 | resolved | the storage stack has a top: a named-object filesystem namespace over the journal (REQ-FS-001, ADR-035). `kernel-core/src/fs.rs` keeps a directory block + an allocation bitmap block as ordinary home blocks, and commits every mutation — the data blocks, the bitmap and the directory — as ONE journal transaction, so a name and its allocation can never disagree and there is no repair pass because there is no inconsistent state to repair. A removed object's blocks are zeroed inside the same transaction (erase on delete, the storage twin of ADR-033), and the transaction bound is refused (`TooLarge`), never truncated. Proved on the host by `kernel-core/tests/fs.rs` — a crash sweep over EVERY prefix of a create and of a remove (each outcome must be the whole object or none of it, with an unrelated object untouched), a 4 000-op campaign re-checking the structural invariants after every op, and every refusal asserted to be a no-op — and in-kernel by 12 named behaviors in all three VM gates, which `conformance.sh` now requires of every target (37 → 49 core behaviors). On aarch64 the SAME twelve also run over the real virtio-blk device through the virtqueue (virtio invariants 5 → 17), so crash atomicity is a claim about hardware. Not claimed: one flat namespace, one bitmap block, contiguous extents only, no rename/in-place update, no per-object integrity beyond the commit checksum, no encryption at rest (ALET-P1-028/029 remain open) |
 | ALET-P2-019 | P2 | deferred | complete driver model — milestone work (virtio-blk is the first driver) |
 | ALET-P2-020 | P2 | deferred | networking stack — milestone work |
 | ALET-P2-021 | P2 | deferred | graphics/compositor — milestone work |
@@ -83,8 +83,11 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-03, second update):** 69 findings (67 audited + ALET-P1-031 and ALET-P2-032, both
-split out while closing ALET-P1-007) — **14 resolved**, 44 open, 11 deferred (milestone subsystems).
+**Rollup (2026-08-03, third update):** 69 findings (67 audited + ALET-P1-031 and ALET-P2-032, both
+split out while closing ALET-P1-007) — **15 resolved**, 44 open, 10 deferred (milestone subsystems).
+The newest close is **ALET-P2-018**, the first of the deferred milestone subsystems to become code
+rather than architecture text: the filesystem namespace, gated on all three targets and — on aarch64 —
+over the real device.
 Every P0 is closed, and the memory cluster is now complete end to end: address admission
 ALET-P1-001, page-table reclamation ALET-P1-002, frame ownership ALET-P1-003, address-space
 destruction ALET-P1-004, erase-on-free ALET-P2-026, per-arch attribute validation ALET-P1-008, W^X as

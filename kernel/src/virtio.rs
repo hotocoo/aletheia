@@ -531,7 +531,25 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "virtio-blk: journal commit + fresh recover reproduce state over real storage"
     );
 
-    // 5 — capability-gated over the REAL device (REQ-DRV-002): no capability -> no bytes move; a
+    // 5 — the filesystem namespace (REQ-FS-001, ADR-035) over the REAL device: the same named
+    //     behaviors the arch-independent RAM-disk suite proves on every target, but driven through the
+    //     virtqueue — which is what makes "a create is atomic across a crash" a claim about hardware
+    //     rather than about a RAM model. The suite REFORMATS the device (destructive, by design); the
+    //     journal invariants above have already run.
+    let fs_base = n;
+    match kernel_core::fs::selftest_on(&mut dev, |i, passed, name| {
+        let idx = fs_base + i as u32 - 1;
+        if passed {
+            kprintln!("  [pass {:>2}] {}", idx, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", idx, name);
+        }
+    }) {
+        Ok(count) => n += count as u32,
+        Err((i, name)) => return Err((fs_base + i as u32 - 1, name)),
+    }
+
+    // 6 — capability-gated over the REAL device (REQ-DRV-002): no capability -> no bytes move; a
     //     write capability's bytes land. Same authority mechanism as every other Aletheia effect.
     let capblk = kernel_core::storage::DATA_START + 20;
     let mut engine = CapEngine::new(0x5171_0b1c, 1_000_000);

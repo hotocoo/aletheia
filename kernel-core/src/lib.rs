@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod device;
 pub mod frameown;
+pub mod fs;
 pub mod grant;
 pub mod ipc;
 pub mod memattr;

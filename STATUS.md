@@ -3,7 +3,7 @@
 **As of:** 2026-08-03
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..034`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..035`.
 
 ## What Aletheia is
 
@@ -15,7 +15,57 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — x86-64 stops inheriting the firmware's address space (2026-08-03, GAPS4 ALET-P1-031 / ALET-P2-032)
+## Latest wave — the storage stack gets a top: named objects, atomic by construction (2026-08-03, GAPS4 ALET-P2-018)
+
+Until this wave the storage stack was a correct middle with nothing above it. The journal (REQ-STOR-002)
+made a multi-block write all-or-nothing; the virtio-blk driver (REQ-DRV-003) made it real hardware; and
+every caller above them still addressed **raw block numbers**. Nothing in the system could *name* what
+it kept, so every future layer that wanted durable state — an installed component, a policy set, a
+content-addressed object — would have invented its own block bookkeeping, and each invention is another
+chance to leave the torn state the journal exists to prevent. `kernel-core/src/fs.rs` closes that
+(REQ-FS-001, ADR-035), and it is the first of the deferred milestone subsystems to become gated code
+rather than architecture text.
+
+- **A name is as atomic as a block.** The directory (one block of 64-byte slots) and the allocation
+  bitmap (one block, one bit per data block) are **ordinary home blocks**, so a create commits the data
+  blocks *and* the bitmap *and* the directory in ONE journal transaction — and a remove commits the
+  zeroed blocks, the cleared bits and the cleared slot together. The classic filesystem crash states
+  are therefore not unlikely, they are unrepresentable: no name can point at blocks the bitmap calls
+  free, and no allocated block can be owned by no name. **There is no repair pass because there is no
+  inconsistent state to repair.**
+- **Erase on delete.** A removed object's data blocks are written back as zeros inside the same
+  transaction — the storage twin of ADR-033. A block returned to the free map carries none of the bytes
+  of the object that used to live there.
+- **The bound is a refusal, not a truncation.** A transaction carries at most `MAX_ENTRIES` blocks and
+  two slots are always metadata, so an object is bounded at 62 blocks (253 952 B) and a larger one is
+  refused with `TooLarge`. Writing a prefix is the single outcome the design exists to exclude.
+- **A crash is expressed as a device fault, so the same proof runs on hardware.** `fs::FaultDevice`
+  fails every mutation after the first *n* — something the `BlockDevice` trait can already report.
+  Hence the atomicity invariants are not a host-only trick: on the host `kernel-core/tests/fs.rs`
+  sweeps **every** prefix of a create and of a remove (each outcome must be the whole object or none of
+  it, and an unrelated object is asserted to be untouched at every prefix), runs a 4 000-op campaign
+  that re-checks the whole-namespace structural invariants after **every single op** against a model,
+  and asserts every refusal is a no-op; in-kernel, the same behaviors run at boot.
+- **Twelve behaviors, every target, and one target against a real disk.** `fs::selftest_on` runs against
+  any `BlockDevice`: all three CPU gates run it over a RAM disk (`ALL 12 FILESYSTEM INVARIANTS HOLD`,
+  boot fails `160 + i`), and on aarch64 the identical twelve also run over the **real virtio-blk device
+  through the virtqueue** — virtio invariants 5 → 17. `scripts/conformance.sh` now requires all twelve
+  of every target: **37 → 49 core behaviors**, because "a create is atomic" must not vary by CPU.
+- **Authority is not duplicated.** There is deliberately no capability check inside the namespace; a
+  caller wraps the device in `device::DeviceGuard` (REQ-DRV-002) so the same `CapEngine::evaluate` that
+  authorizes an entity write authorizes the I/O beneath a name. Two authorization points is a boundary
+  that can disagree with itself.
+- **Not claimed** (ADR-035 states each): one flat namespace (`/` is refused in names *now* so today's
+  names survive a future hierarchy), one bitmap block, contiguous extents only (a create can be refused
+  `NoSpace` on fragmentation while the total free count would fit), no rename or in-place update, no
+  per-object integrity beyond the commit checksum (post-commit bit rot is still undetected on read —
+  the named ADR-024 follow-on), no encryption at rest, no timestamps and no permission bits.
+
+Gates after the wave: `build-all` PASS (5 legs), `e2e-all` PASS (aarch64 / riscv64 / x86-64),
+`conformance` PASS (49 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (65
+requirements).
+
+## Previous wave — x86-64 stops inheriting the firmware's address space (2026-08-03, GAPS4 ALET-P1-031 / ALET-P2-032)
 
 The wave below took both QEMU targets to zero W^X violations and named what it could not close: on
 x86-64 the tree the machine actually translated through was **OVMF's**, holding ~524 795

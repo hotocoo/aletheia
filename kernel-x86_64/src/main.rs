@@ -371,8 +371,29 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
+    // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk
+    // device (this target has no block driver yet — that is REQ-DRV-001 on x86-64, not a namespace
+    // difference).
     kprintln!("");
-    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants + SMP + ring-3 user-mode");
+    kprintln!("--- filesystem selftests (named objects over the journal: atomic create/remove) ---");
+    let mut disk = kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
+    match kernel_core::fs::selftest_on(&mut disk, |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[fs] ALL {} FILESYSTEM INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[fs] FAILED at filesystem invariant {}: {}", idx, name);
+            ActiveHal::exit(160 + idx as i32);
+        }
+    }
+
+    kprintln!("");
+    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants + SMP + ring-3 user-mode + filesystem");
     kprintln!("[e2e] Aletheia booted as its own OS on AMD64. Halting.");
     ActiveHal::exit(0)
 }
