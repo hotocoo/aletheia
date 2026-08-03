@@ -48,20 +48,39 @@ cp "$VARSSRC" "$VARS"
 SCRATCH="$WORK/virtio-blk-test.img"
 dd if=/dev/zero of="$SCRATCH" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create scratch disk"; exit 1; }
 
-qemu-system-x86_64 -machine q35 -m 256 -smp 4 \
-  -cpu qemu64,+smep \
-  -drive if=pflash,format=raw,unit=0,file="$CODE",readonly=on \
-  -drive if=pflash,format=raw,unit=1,file="$VARS" \
-  -drive format=raw,file="$IMG" \
-  -drive if=none,format=raw,file="$SCRATCH",id=blk0 \
-  -device virtio-blk-pci,drive=blk0 \
-  -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-  -serial file:"$LOG" -display none -no-reboot &
-QPID=$!
-( sleep 30; kill -9 "$QPID" 2>/dev/null ) &
-WPID=$!
-wait "$QPID"; RC=$?
-kill "$WPID" 2>/dev/null
+# A THIRD disk, PERSISTENT (REQ-STOR-003, ADR-038): created once and kept across the TWO boots below.
+# Boot 1 creates the durable store on it; boot 2 must FIND and verify what boot 1 wrote — the difference
+# between "the OS can write" and "the OS remembers". The scratch disk is reformatted by the suites; the
+# boot medium is never written at all.
+PERSIST="$WORK/virtio-blk-persistent.img"
+dd if=/dev/zero of="$PERSIST" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create persistent disk"; exit 1; }
+
+# One boot, into the log path given. The NVRAM copy is per-boot (OVMF rewrites it), the disks are not:
+# that is what makes the second boot a real reboot of the same machine rather than a fresh one.
+boot_once() {
+  local log="$1" vars="$2"
+  : > "$log"
+  cp "$VARSSRC" "$vars"
+  qemu-system-x86_64 -machine q35 -m 256 -smp 4 \
+    -cpu qemu64,+smep \
+    -drive if=pflash,format=raw,unit=0,file="$CODE",readonly=on \
+    -drive if=pflash,format=raw,unit=1,file="$vars" \
+    -drive format=raw,file="$IMG" \
+    -drive if=none,format=raw,file="$SCRATCH",id=blk0 \
+    -device virtio-blk-pci,drive=blk0 \
+    -drive if=none,format=raw,file="$PERSIST",id=blk1 \
+    -device virtio-blk-pci,drive=blk1 \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -serial file:"$log" -display none -no-reboot &
+  local qpid=$!
+  ( sleep 30; kill -9 "$qpid" 2>/dev/null ) &
+  local wpid=$!
+  wait "$qpid"; local rc=$?
+  kill "$wpid" 2>/dev/null
+  return $rc
+}
+
+boot_once "$LOG" "$VARS"; RC=$?
 
 echo "==== serial log ===="
 cat "$LOG"
@@ -79,10 +98,24 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 15 FILESYSTEM INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 20 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 9 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
+   && grep -q 'PERSISTENT MEDIUM: boot #1, 0 entities verified' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
-  echo "SMOKE TEST: PASS"
+  # ---- SECOND BOOT against the SAME persistent disk: the OS must REMEMBER (REQ-STOR-003) ----
+  echo "==> rebooting the same image against the SAME persistent disk (cross-reboot proof)"
+  LOG2="$WORK/serial2.log"
+  boot_once "$LOG2" "$WORK/vars2.fd"; RC2=$?
+  grep -E 'PERSISTENT MEDIUM' "$LOG2" || true
+  echo "second boot exit code: $RC2 (expect 33)"
+  if [ "$RC2" -eq 33 ] \
+     && grep -q 'PERSISTENT MEDIUM: boot #2, 1 entities verified' "$LOG2" \
+     && grep -q 'e2e\] PASS' "$LOG2"; then
+    echo "SMOKE TEST: PASS"
+    rm -rf "$WORK"
+    exit 0
+  fi
+  echo "SMOKE TEST: FAIL (the OS did not remember across the reboot)"
   rm -rf "$WORK"
-  exit 0
+  exit 1
 fi
 echo "SMOKE TEST: FAIL"
 rm -rf "$WORK"

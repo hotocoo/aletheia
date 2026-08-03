@@ -127,3 +127,20 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         Err((idx, name)) => Err((idx as u32, name)),
     }
 }
+
+/// The PERSISTENT medium: the SECOND virtio block function, if one is attached (REQ-STOR-003, ADR-038).
+///
+/// Function 0 is the scratch disk the destructive suites reformat; the next one is the medium the OS
+/// keeps its store on and never wipes. Two disks is what makes the cross-reboot claim provable: the boot
+/// gate boots the same image twice against the same persistent image file, and the second boot must FIND
+/// and verify what the first one wrote.
+pub fn persistent_device() -> Option<VirtioBlk> {
+    // SAFETY: the BDF names a virtio block function; `PciTransport::new` resolves and MAPS its register
+    // regions (refusing RAM), and the frames handed to the device are identity-mapped and ours.
+    unsafe {
+        let bdf = pci::find_virtio_blk_nth(1)?;
+        let transport = PciTransport::new(bdf).ok()?;
+        let (dev, _report) = VirtioBlk::init(transport).ok()?;
+        Some(dev)
+    }
+}

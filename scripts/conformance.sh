@@ -115,6 +115,11 @@ CONTRACT=(
   "persist: an unknown record format is refused"
   "persist: a truncated record is refused"
   "persist: the witness survives a remount and counts the boot"
+  # The cross-reboot claim itself (REQ-STOR-003, ADR-038). Each target's gate boots the SAME image
+  # TWICE against the SAME persistent disk; this line is boot 1 creating the store on real hardware,
+  # and the gate additionally requires boot 2 to find and verify it. "The OS remembers" must not be a
+  # property of one CPU.
+  "PERSISTENT MEDIUM: boot #1, 0 entities verified"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

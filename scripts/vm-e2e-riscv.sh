@@ -31,12 +31,19 @@ cargo build || { echo "FAIL: build"; exit 3; }
 IMG="$KDIR/target/virtio-blk-test.img"
 dd if=/dev/zero of="$IMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create disk image"; exit 3; }
 
+# A SECOND, PERSISTENT disk (REQ-STOR-003, ADR-038): created ONCE and kept, because the kernel is booted
+# TWICE below. Boot 1 creates the durable store; boot 2 must FIND and verify what boot 1 wrote.
+PIMG="$KDIR/target/virtio-blk-persistent.img"
+rm -f "$PIMG"
+dd if=/dev/zero of="$PIMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create persistent image"; exit 3; }
+
 echo "==> booting in QEMU riscv64 'virt' + OpenSBI (120s watchdog, virtio-blk attached, -smp 4 for the SMP suite)"
 OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
   qemu-system-riscv64 -machine virt -cpu rv64 -smp 4 -m 128M -nographic \
   -bios default -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
-  -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0)"
+  -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
+  -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1)"
 CODE=$?
 
 echo "----------------------------------------"
@@ -57,6 +64,21 @@ echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: files
 echo "$OUT" | grep -q "ALL 20 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
+echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
+
+# ---- SECOND BOOT on the SAME persistent medium: the OS must REMEMBER (REQ-STOR-003) ----
+echo "==> rebooting the same kernel against the SAME persistent disk (cross-reboot proof)"
+OUT2="$(perl -e 'alarm 120; exec @ARGV or die' \
+  qemu-system-riscv64 -machine virt -cpu rv64 -smp 4 -m 128M -nographic \
+  -bios default -kernel "$ELF" \
+  -global virtio-mmio.force-legacy=false \
+  -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
+  -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1)"
+CODE2=$?
+echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
+echo "second boot exit code: $CODE2"
+[ "$CODE2" -eq 0 ] || { echo "FAIL: second boot expected exit 0, got $CODE2"; fail=1; }
+echo "$OUT2" | grep -q "PERSISTENT MEDIUM: boot #2, 1 entities verified" || { echo "FAIL: the OS did not remember across the reboot (boot #2 must verify boot #1's entity)"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then
   echo "VM-E2E (riscv64): PASS"

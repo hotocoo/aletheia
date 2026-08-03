@@ -187,6 +187,17 @@ unsafe fn bar_base(bdf: &Bdf, index: u8) -> Result<usize, &'static str> {
 /// # Safety
 /// Touches the PCI configuration ports.
 pub unsafe fn find_virtio_blk() -> Option<Bdf> {
+    find_virtio_blk_nth(0)
+}
+
+/// Scan bus 0 for the `nth` (0-based) virtio block function — the PCI twin of
+/// `virtioblk::probe_nth`, for a target that attaches a scratch disk and a PERSISTENT one
+/// (REQ-STOR-003). Function order on the bus is the ordering; QEMU assigns slots in command order.
+///
+/// # Safety
+/// Touches the PCI configuration ports.
+pub unsafe fn find_virtio_blk_nth(nth: usize) -> Option<Bdf> {
+    let mut seen = 0usize;
     for device in 0..32u8 {
         // Function 0 decides whether the slot is populated and whether it is multi-function.
         let zero = Bdf {
@@ -211,7 +222,10 @@ pub unsafe fn find_virtio_blk() -> Option<Bdf> {
                 continue;
             }
             if dev_id == DEVICE_BLK_MODERN || dev_id == DEVICE_BLK_TRANSITIONAL {
-                return Some(bdf);
+                if seen == nth {
+                    return Some(bdf);
+                }
+                seen += 1;
             }
         }
     }
