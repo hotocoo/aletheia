@@ -5,7 +5,7 @@
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..042`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..043`.
 
 ## What Aletheia is
 
@@ -17,7 +17,39 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — kill the task, keep the system (2026-08-03, REQ-REL-002)
+## Latest wave — what a device is allowed to touch (2026-08-03, GAPS4 ALET-P1-018, REQ-DRV-006)
+
+Every driver here hands a device a **raw physical address** and trusts it to write only there, and nothing
+checked the address. Enabling PCI bus-master (ADR-037) made that concrete rather than theoretical: a
+descriptor with a wrong address is a device writing wherever the number points — kernel text, another task's
+frame, a page table — and the memory model sees none of it, because none of its checks sit on the path where
+a number becomes a descriptor.
+
+- **`kernel_core::dma` is the boundary the kernel can enforce without an IOMMU.** A driver registers what it
+  intends a device to reach, naming itself owner; registration refuses a misaligned or null address and
+  anything **overlapping the kernel image** — a device writing into kernel text is the write-to-code path
+  W^X closes, arriving from the other side.
+- **Deny by default**, and a range that extends past its registration is refused too: partial visibility is
+  not visibility. **One frame, one owner** — two drivers pointing one device at one frame is a bug in the
+  same way a double free is. **Revocation ends visibility** and revoking twice is refused, so a frame
+  returning to the allocator stops being something a device may be told about (the DMA twin of ADR-033).
+- **An undeclared image span is visibly unenforceable, not silently permissive.** `image_declared()` is
+  false until a target declares its span and the boot invariant checks *that*, so a target which forgets
+  fails a check rather than losing the rule quietly. Every refusal is counted, so a boot can report the
+  boundary did work.
+- **Nine invariants on all three targets** (`ALL 9 DMA-BOUNDARY INVARIANTS HOLD`, boot failing `240 + i`),
+  three of them in the conformance contract (69 → **72**): what the kernel may tell a device is policy, not
+  a hardware property.
+- **ALET-P1-018 stays open, deliberately.** This constrains what the *kernel* tells a device — where every
+  wrong address in this codebase would come from — and cannot constrain a device that invents its own
+  addresses; that needs an IOMMU/SMMU. And the existing drivers' ring/buffer frames are not yet routed
+  through the registry, so today it is a checked policy with a suite rather than a gate on every descriptor.
+  Both limits are in the row and in ADR-043 rather than implied.
+
+Gates after the wave: `quality-gate` PASS, `build-all` PASS, `e2e-all` PASS, `conformance` PASS (72 × 3),
+`register` PASS, `ci-parity` PASS, `traceability` PASS (78 requirements).
+
+## Previous wave — kill the task, keep the system (2026-08-03, REQ-REL-002)
 
 ADR-039 gave every fault a verdict, and `KillTask` had **nowhere to go**: each target's handler ended the
 boot, because nothing could remove one task and let the rest continue. That is why `docs/MATURITY.md` listed

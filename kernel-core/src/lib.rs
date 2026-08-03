@@ -25,6 +25,7 @@
 extern crate alloc;
 
 pub mod device;
+pub mod dma;
 pub mod faultclass;
 pub mod frameown;
 pub mod fs;
