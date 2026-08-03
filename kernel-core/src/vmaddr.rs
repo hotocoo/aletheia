@@ -54,6 +54,10 @@ pub enum MapFault {
     /// `pa` lies outside the physical window the frame allocator owns — firmware tables, MMIO, or
     /// memory belonging to something else.
     PhysOutOfRange,
+    /// `va` is inside the span the kernel image occupies (REQ-MM-006). Mapping there would install a
+    /// fresh, writable page over kernel TEXT — exactly the write-to-code path W^X closes — and
+    /// unmapping there would pull `.data` or the stack out from under the running kernel.
+    ProtectedVirt,
 }
 
 impl MapFault {
@@ -66,6 +70,7 @@ impl MapFault {
             MapFault::NonCanonicalVirt => "va-non-canonical",
             MapFault::NullVirt => "va-null-page",
             MapFault::PhysOutOfRange => "pa-out-of-window",
+            MapFault::ProtectedVirt => "va-kernel-image",
         }
     }
 }
@@ -91,6 +96,8 @@ pub struct AddrPlan {
     canonical: bool,
     ram_base: usize,
     ram_len: usize,
+    protected_start: usize,
+    protected_end: usize,
 }
 
 impl AddrPlan {
@@ -103,7 +110,34 @@ impl AddrPlan {
             canonical,
             ram_base,
             ram_len,
+            protected_start: 0,
+            protected_end: 0,
         }
+    }
+
+    /// Refuse `[start, end)` at the mapping APIs — the span the kernel IMAGE occupies (REQ-MM-006).
+    ///
+    /// Every target that maps its own image at 4 KiB granularity to make text read-only needs this,
+    /// and needs it for the same reason: before the split, those addresses were unreachable because
+    /// the level above was a block/huge descriptor and the walkers refuse to descend into one. The
+    /// split turns that level into a table, so the refusal has to become explicit or the API would
+    /// let a caller map a fresh writable page over kernel text (the write-to-code path W^X closes)
+    /// or unmap `.data` out from under the running kernel. Pass the BLOCK-ALIGNED span the split
+    /// actually covers, not just the image: the same tables map RAM that merely shares those blocks.
+    ///
+    /// A zero-length span (the default) protects nothing, which is what a target that has not split
+    /// its image wants.
+    pub const fn with_protected(self, start: usize, end: usize) -> Self {
+        Self {
+            protected_start: start,
+            protected_end: end,
+            ..self
+        }
+    }
+
+    /// The refused span, `(0, 0)` when the target protects nothing.
+    pub const fn protected(&self) -> (usize, usize) {
+        (self.protected_start, self.protected_end)
     }
 
     /// Virtual-address bits the walker decodes.
@@ -144,6 +178,14 @@ impl AddrPlan {
         } else if self.va_bits < usize::BITS && (va >> self.va_bits) != 0 {
             // Any bit above the decoded width is an alias of the same entry a lower VA reaches.
             return Err(MapFault::VirtOutOfRange);
+        }
+        // Last, because it is the only rule about WHAT lives at the address rather than whether the
+        // address is well-formed: the kernel's own image is not remappable through this API.
+        if self.protected_end > self.protected_start
+            && va >= self.protected_start
+            && va < self.protected_end
+        {
+            return Err(MapFault::ProtectedVirt);
         }
         Ok(())
     }

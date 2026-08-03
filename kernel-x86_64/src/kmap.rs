@@ -105,6 +105,63 @@ pub fn root() -> u64 {
     KERNEL_ROOT.load(Ordering::Relaxed)
 }
 
+/// The 2 MiB-aligned span the image split covers — what the dynamic mapping APIs refuse
+/// (REQ-MM-006, ALET-P2-032), declared to `kernel_core::vmaddr` by [`crate::vm::addr_plan`].
+///
+/// The whole aligned span is refused, not just the image, because the same page tables map RAM that
+/// merely shares the image's 2 MiB regions. Without it, `map_page` could install a fresh writable
+/// page over kernel text — the write-to-code path W^X closes — precisely because the split replaced
+/// the huge-page descriptor that had made those addresses undescendable.
+pub fn protected_span() -> (usize, usize) {
+    let (start, end) = image_span();
+    if start == 0 {
+        return (0, 0);
+    }
+    (align_down(start, BLOCK_2M), align_up(end, BLOCK_2M))
+}
+
+/// Make the kernel's own map the LIVE one: point CR3 at it (ALET-P1-031).
+///
+/// Everything the kernel touches keeps its address — the map is identity — so the switch does not
+/// move code, stack, page tables, MMIO or the framebuffer. What it does move is the RULE: from the
+/// firmware's tree, where a half-million leaves are writable and executable, to one where none is.
+///
+/// CR4.PGE is cleared across the write and restored after. A global TLB entry survives a CR3 load by
+/// definition, and OVMF marks its mappings global — without this, the firmware's permissions would
+/// stay live in the TLB for pages this map deliberately narrowed, which is exactly the silent
+/// half-switch that makes W^X unprovable.
+///
+/// Returns whether CR3 now holds our root.
+pub fn activate() -> bool {
+    use x86_64::registers::control::{Cr3, Cr3Flags, Cr4, Cr4Flags};
+    use x86_64::structures::paging::PhysFrame;
+    use x86_64::PhysAddr;
+
+    let root = root();
+    if root == 0 {
+        return false;
+    }
+    let pge = Cr4::read().contains(Cr4Flags::PAGE_GLOBAL);
+    // SAFETY: single-core at this point (the APs are not yet awake) with interrupts enabled but no
+    // handler that touches page tables. Clearing PGE only stops entries being treated as global;
+    // the CR3 load then flushes them. The new root is a complete identity map covering every
+    // address the kernel executes from, reads, writes, or has mapped as a device — proved by the
+    // nine `kmap` invariants that ran before this call.
+    unsafe {
+        if pge {
+            Cr4::update(|f| f.remove(Cr4Flags::PAGE_GLOBAL));
+        }
+        Cr3::write(
+            PhysFrame::containing_address(PhysAddr::new(root)),
+            Cr3Flags::empty(),
+        );
+        if pge {
+            Cr4::update(|f| f.insert(Cr4Flags::PAGE_GLOBAL));
+        }
+    }
+    Cr3::read().0.start_address().as_u64() == root
+}
+
 #[inline]
 const fn align_down(a: usize, to: usize) -> usize {
     a & !(to - 1)

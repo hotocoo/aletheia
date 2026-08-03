@@ -152,25 +152,17 @@ pub fn image_split_blocks() -> usize {
     last + 1 - first
 }
 
-/// The megapage-aligned RAM span that the image split maps with 4 KiB pages.
+/// The megapage-aligned RAM span that the image split maps with 4 KiB pages — and, declared through
+/// [`AddrPlan::with_protected`] in [`addr_plan`], the span the dynamic mapping APIs refuse
+/// (REQ-MM-006). The whole aligned span is refused, not just the image, because the same tables also
+/// map RAM that merely shares the image's megapages. The refusal ITSELF lives once in
+/// `kernel_core::vmaddr` (ALET-P2-032); this target only says where its image is.
 fn image_split_span() -> (usize, usize) {
     let (text_start, _, rodata_end) = image_spans();
     (
         text_start & !(MEG_2M - 1),
         (rodata_end + MEG_2M - 1) & !(MEG_2M - 1),
     )
-}
-
-/// Is `va` inside the span the image split covers? The dynamic mapping API refuses those addresses
-/// (REQ-MM-006): before the split, a caller could not touch them because the level above was a
-/// megapage LEAF and `map_page`/`unmap_page` refuse to descend into a leaf — the split turned that
-/// level into a table, so the refusal has to become explicit or the API would let a caller map a
-/// fresh writable page over kernel text (exactly the write-to-code path W^X closes) or unmap kernel
-/// `.data` out from under the running kernel. The whole aligned span is refused, not just the image,
-/// because the same tables also map RAM that merely shares the image's megapages.
-fn in_image_split(va: usize) -> bool {
-    let (start, end) = image_split_span();
-    va >= start && va < end
 }
 
 #[inline]
@@ -336,12 +328,14 @@ pub fn build_identity() -> Option<usize> {
 /// non-addressable hole, not a mappable page. A `va` with bit 39 set aliases a low-half entry. The
 /// physical window is read from the frame allocator itself, so the check cannot drift from the pool.
 fn addr_plan() -> AddrPlan {
+    let (protected_start, protected_end) = image_split_span();
     AddrPlan::new(
         39,
         true,
         frames::base(),
         frames::total_count() * vmaddr::PAGE_SIZE,
     )
+    .with_protected(protected_start, protected_end)
 }
 
 /// Software page-table walk: translate `va` to its physical address using `root`, or `None` if
@@ -416,7 +410,7 @@ fn attrs_of(root: usize, va: usize) -> Option<PageAttrs> {
 /// needed. Returns `false` on allocator exhaustion or if an intermediate level is already a leaf
 /// (this wave never splits a giga/megapage). Fences the TLB for `va`.
 pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
-    if addr_plan().validate_map(va, pa).is_err() || in_image_split(va) {
+    if addr_plan().validate_map(va, pa).is_err() {
         return false;
     }
     // W^X and attribute admission (REQ-MM-006, ADR-034): caller-supplied flags are untrusted input
@@ -464,7 +458,7 @@ pub fn map_page(root: usize, va: usize, pa: usize, flags: u64) -> bool {
 /// Unmap the 4 KiB page at `va` (clear its level-0 entry) and fence its TLB entry. Returns `false`
 /// if the page was not present as a 4 KiB mapping.
 pub fn unmap_page(root: usize, va: usize) -> bool {
-    if addr_plan().validate_unmap(va).is_err() || in_image_split(va) {
+    if addr_plan().validate_unmap(va).is_err() {
         return false;
     }
     let (i2, i1, i0) = indices(va);

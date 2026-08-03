@@ -75,6 +75,13 @@ CONTRACT=(
   "wx: a legal non-executable writable mapping still succeeds"
   "wx: the attribute audit actually walked the live address space"
   "wx: NO dynamically mapped page in the live tree is writable+executable"
+  # The kernel image is not remappable through the mapping APIs (REQ-MM-006, ALET-P2-032). Every
+  # target that splits its image into 4 KiB pages to make text read-only also removes the block/huge
+  # descriptor that had made those addresses undescendable — so all three must refuse the span
+  # explicitly, and since the refusal now lives once in `kernel_core::vmaddr` rather than per target,
+  # this pair is what proves each one declared its span rather than merely owning the code.
+  "wx: mapping over the split kernel image is refused (text still maps to itself)"
+  "wx: unmapping the split kernel image is refused (text still read-only + executable)"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )
