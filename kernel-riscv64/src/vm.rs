@@ -29,6 +29,7 @@ use crate::frames;
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::frameown::Owner;
+use kernel_core::layout;
 use kernel_core::memattr::{self, AttrOps, MemKind, PageAttrs};
 use kernel_core::ptreclaim::{self, PathStep, TableOps};
 use kernel_core::teardown::{self, SpaceOps, Teardown};
@@ -107,6 +108,7 @@ extern "C" {
     static __text_start: u8;
     static __text_end: u8;
     static __rodata_end: u8;
+    static __stack_guard: u8;
 }
 
 #[inline]
@@ -117,6 +119,13 @@ fn page_up(a: usize) -> usize {
 /// `(text_start, text_end, rodata_end)` of the running image, the last two rounded UP to a page.
 /// `.rodata` and `.data` both carry `ALIGN(0x1000)` in `linker.ld`, so rounding can never merge a
 /// text page with a rodata page or a rodata page with a data page.
+/// The kernel stack's GUARD page (REQ-MM-007, ALET-P1-012): one page below `__stack_bottom`, reserved by
+/// `linker.ld` and deliberately left UNMAPPED, so a stack overflow faults at the first byte past the stack
+/// instead of walking into `.bss`.
+pub fn stack_guard_page() -> usize {
+    core::ptr::addr_of!(__stack_guard) as usize
+}
+
 fn image_spans() -> (usize, usize, usize) {
     // Only the ADDRESSES of these linker-defined symbols are taken; their contents are never read,
     // which is why no `unsafe` is needed here (`addr_of!` does not create a reference).
@@ -286,9 +295,28 @@ fn indices(va: usize) -> (usize, usize, usize) {
 pub fn build_identity() -> Option<usize> {
     let root = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
 
-    // Root[0] -> peripheral GiB (0..1 GiB) as a Device gigapage leaf.
+    // Root[0] -> peripheral GiB (0..1 GiB), Device. The FIRST megapage of it is split into 4 KiB pages so
+    // VA 0 can be left with NO leaf (REQ-MM-008, ALET-P1-006): `vmaddr` already refuses mapping the null
+    // page through the mapping APIs, but the boot identity map covered it as device memory, so a kernel
+    // null dereference read or WROTE an MMIO register instead of faulting. A gigapage cannot have a hole,
+    // hence two levels of split here — level-1 table for the GiB, level-0 table for its first megapage.
+    let l1_dev = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    let l0_dev0 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    for j in 1..512 {
+        let page = j * vmaddr::PAGE_SIZE;
+        // SAFETY: `l0_dev0` is a fresh, in-RAM, identity-accessible frame; `j` < 512 entries.
+        unsafe { write_entry(l0_dev0, j, pte(page, DEV_LEAF)) };
+    }
+    // SAFETY: fresh tables; entry 0 of the device L1 points at the split megapage, the rest are megapage
+    // leaves covering the remainder of the peripheral GiB.
+    unsafe { write_entry(l1_dev, 0, pte(l0_dev0, PTE_V)) };
+    for i in 1..512 {
+        let pa = i * MEG_2M;
+        // SAFETY: as above; `i` < 512.
+        unsafe { write_entry(l1_dev, i, pte(pa, DEV_LEAF)) };
+    }
     // SAFETY: `root` is a fresh, in-RAM, identity-accessible table; index 0 < 512.
-    unsafe { write_entry(root, 0, pte(0, DEV_LEAF)) };
+    unsafe { write_entry(root, 0, pte(l1_dev, PTE_V)) };
 
     // Root[2] -> a level-1 table of RAM megapages. RAM occupies 0x8000_0000.., which lands in
     // level-2 index 2 (0x8000_0000 >> 30 == 2); within that gigabyte the RAM megapages start at
@@ -296,9 +324,26 @@ pub fn build_identity() -> Option<usize> {
     let l1 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
     let ram_megs = (frames::RAM_END - RAM_BASE) / MEG_2M;
     let (text_start, _, rodata_end) = image_spans();
+    let guard = stack_guard_page();
     for i in 0..ram_megs {
         let pa = RAM_BASE + i * MEG_2M;
-        if pa < rodata_end && pa + MEG_2M > text_start {
+        if pa <= guard && guard < pa + MEG_2M {
+            // The megapage holding the stack guard page becomes a level-0 table so ONE page can be left
+            // invalid (REQ-MM-007): a megapage cannot have a hole, which is why the split is necessary.
+            let l0 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+            for j in 0..512 {
+                let page = pa + j * vmaddr::PAGE_SIZE;
+                let entry = if page == guard {
+                    0 // invalid: the guard page has no translation at all
+                } else {
+                    pte(page, image_page_flags(page))
+                };
+                // SAFETY: `l0` is a fresh, in-RAM, identity-accessible frame; `j` < 512 entries.
+                unsafe { write_entry(l0, j, entry) };
+            }
+            // SAFETY: `l1` fresh in-RAM frame; `i` < ram_megs (== 64) < 512.
+            unsafe { write_entry(l1, i, pte(l0, PTE_V)) };
+        } else if pa < rodata_end && pa + MEG_2M > text_start {
             // This megapage spans kernel text and/or rodata, so it becomes a level-0 table of 4 KiB
             // pages: one leaf cannot be read-only+executable for text and writable for data at the
             // same time, and being both is exactly the W^X violation (REQ-MM-006, ADR-034).
@@ -578,6 +623,39 @@ const TEST_VA: usize = frames::RAM_END;
 const PATTERN: u64 = 0x5EED_2026_A1E7_0001;
 
 /// Prove the virtual-memory invariants live. `Ok(n)` all passed; `Err((idx,name))` = failure.
+/// This target's declared address-space layout (REQ-MM-008, ALET-P1-006). Stating it in one place is what
+/// makes the properties checkable: the regions must not overlap, none may include the null page, and a
+/// user-reachable region must never merely ABUT a kernel one (something that grows would cross the
+/// boundary without ever being unmapped). `layout::Layout::validate` refuses a declaration that breaks
+/// any of those, and the boot suite runs that check — a layout nobody validates is a layout that drifts.
+pub fn layout() -> layout::Layout {
+    let (text_start, _, rodata_end) = image_spans();
+    layout::Layout::new("riscv64")
+        // The peripheral window: device MMIO, kernel-only.
+        .with(layout::Region::new(
+            "device-mmio",
+            0x0000_1000,
+            0x4000_0000,
+            false,
+        ))
+        // Kernel image (text + rodata; data/bss/stack/heap follow inside the RAM window below).
+        .with(layout::Region::new(
+            "kernel-image",
+            text_start,
+            rodata_end,
+            false,
+        ))
+        // The RAM the frame allocator owns, above the image.
+        .with(layout::Region::new(
+            "kernel-ram",
+            rodata_end,
+            frames::RAM_END,
+            false,
+        ))
+        // Where the user-mode suite maps unprivileged code and stack.
+        .with(layout::Region::new("user", 0x5000_0000, 0x5000_2000, true))
+}
+
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     let mut n: u32 = 0;
     macro_rules! check {
@@ -969,5 +1047,49 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     }
 
     frames::free(frame);
+    // The kernel stack's guard page (REQ-MM-007, ALET-P1-012). An overflow must FAULT, so the page below
+    // the stack must have no translation — and the stack's own pages must still work.
+    {
+        let guard = stack_guard_page();
+        let stack_low = guard + vmaddr::PAGE_SIZE;
+        check!(
+            translate(root, guard).is_none(),
+            "guard: the page below the kernel stack has NO translation (an overflow faults)"
+        );
+        check!(
+            leaf_of(root, guard).is_none(),
+            "guard: the guard page has no leaf descriptor at any level (not merely a bad one)"
+        );
+        check!(
+            translate(root, stack_low) == Some(stack_low)
+                && translate(root, stack_low + vmaddr::PAGE_SIZE)
+                    == Some(stack_low + vmaddr::PAGE_SIZE),
+            "guard: the stack's own first pages are still mapped (the guard cost nothing usable)"
+        );
+        check!(
+            attrs_of(root, stack_low).is_some_and(|a| a.write && !a.exec_kernel),
+            "guard: the stack itself is writable and never executable (W^X holds across the split)"
+        );
+    }
+
+    // The declared layout (REQ-MM-008, ALET-P1-006).
+    {
+        let l = layout();
+        check!(
+            l.validate().is_ok(),
+            "layout: the declared address-space layout validates (disjoint, aligned, guarded, no null page)"
+        );
+        let (text_start, _, _) = image_spans();
+        check!(
+            l.region_of(text_start).is_some_and(|r| r.name == "kernel-image" && !r.user)
+                && l.region_of(0x5000_0000).is_some_and(|r| r.user),
+            "layout: kernel text is kernel-only and the user window is user-reachable (no address is both)"
+        );
+        check!(
+            translate(root, 0).is_none() && leaf_of(root, 0).is_none(),
+            "layout: VA 0 has NO translation in the live map (a kernel null dereference faults)"
+        );
+    }
+
     Ok(n)
 }

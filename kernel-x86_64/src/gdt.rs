@@ -20,10 +20,21 @@ use x86_64::VirtAddr;
 /// One stack suffices because the kernel runs IF=0 during the user-mode suite, so entries never
 /// nest (each fully unwinds back to the scheduler before the next `iretq`).
 const KSTACK_SIZE: usize = 16 * 1024;
-#[repr(align(16))]
-#[allow(dead_code)] // storage newtype: the bytes ARE the ring-0 stack, used via addr_of!(KSTACK)
-struct KStack([u8; KSTACK_SIZE]);
-static mut KSTACK: KStack = KStack([0; KSTACK_SIZE]);
+/// One page BELOW the stack, reserved as a guard (REQ-MM-007, ALET-P1-012). The stack grows down from
+/// `RSP0`; without a guard an overflow walks straight into whatever `.bss` put next to it, corrupting it
+/// silently. `kmap` leaves this page UNMAPPED, so an overflow takes a #PF at the first byte past the
+/// stack instead. Page-aligned so exactly one 4 KiB leaf can be omitted, and it is part of the same
+/// static so the linker cannot place anything between the guard and the stack.
+#[repr(C, align(4096))]
+#[allow(dead_code)] // storage newtype: the bytes ARE the guard + ring-0 stack, used via addr_of!
+struct KStack {
+    guard: [u8; 4096],
+    stack: [u8; KSTACK_SIZE],
+}
+static mut KSTACK: KStack = KStack {
+    guard: [0; 4096],
+    stack: [0; KSTACK_SIZE],
+};
 
 static TSS: Racy<TaskStateSegment> = Racy::new(TaskStateSegment::new());
 static GDT: Racy<GlobalDescriptorTable> = Racy::new(GlobalDescriptorTable::new());
@@ -51,8 +62,19 @@ pub fn selectors() -> Selectors {
 
 /// Top of the ring-0 kernel stack (`RSP0`) — highest address, 16-aligned (stack grows down).
 pub fn kernel_stack_top() -> u64 {
-    let base = core::ptr::addr_of!(KSTACK) as u64;
+    // The usable stack starts after the guard page.
+    let base = core::ptr::addr_of!(KSTACK) as u64 + 4096;
     (base + KSTACK_SIZE as u64) & !0xF
+}
+
+/// The ring-0 stack's guard page — the page `kmap` must leave unmapped (REQ-MM-007, ALET-P1-012).
+pub fn kernel_stack_guard() -> usize {
+    core::ptr::addr_of!(KSTACK) as usize
+}
+
+/// The lowest usable stack byte, immediately above the guard page.
+pub fn kernel_stack_low() -> usize {
+    core::ptr::addr_of!(KSTACK) as usize + 4096
 }
 
 pub fn init() {

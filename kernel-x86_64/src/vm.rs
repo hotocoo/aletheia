@@ -307,6 +307,23 @@ fn walk_path(root: u64, va: u64) -> Option<[PathStep; 4]> {
 
 /// Prove the virtual-memory invariants against the live page-table hierarchy. `Ok(n)` = all n
 /// passed; `Err((idx,name))` = check idx failed. x86-64-specific (NOT in the shared selftest).
+/// This target's declared address-space layout (REQ-MM-008, ALET-P1-006). See the aarch64 twin: stating
+/// the layout in one place is what makes its properties checkable, and the boot suite runs that check.
+pub fn layout() -> kernel_core::layout::Layout {
+    use kernel_core::layout::{Layout, Region};
+    let (img_base, img_size) = crate::kmap::image_span();
+    Layout::new("x86-64")
+        // The image the firmware loaded us at (text/rodata/data/bss, including the guarded ring-0 stack).
+        .with(Region::new(
+            "kernel-image",
+            img_base,
+            img_base + img_size,
+            false,
+        ))
+        // Where the ring-3 suite maps unprivileged code and stack.
+        .with(Region::new("user", 0x4000_0000, 0x4000_2000, true))
+}
+
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     let mut n: u32 = 0;
     macro_rules! check {
@@ -874,6 +891,55 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         check!(
             nested_refused && !guard.active(),
             "fault: the re-entrancy guard refuses a nested entry and reopens after leaving"
+        );
+    }
+
+    // The ring-0 stack's guard page (REQ-MM-007, ALET-P1-012). The stack the CPU loads on every
+    // ring3->ring0 transition must fault on overflow rather than continue into `.bss`.
+    {
+        let guard = crate::gdt::kernel_stack_guard();
+        let low = crate::gdt::kernel_stack_low();
+        // Against the KERNEL's own map (`kmap::root()`), not `active_root()`: by this point the suite has
+        // built and torn down per-process spaces, so CR3 may hold one of those. The guard is a property of
+        // the map the kernel built for itself.
+        let root = crate::kmap::root();
+        check!(
+            translate_in(root, guard as u64).is_none(),
+            "guard: the ring-0 stack's guard page has NO translation (an overflow faults)"
+        );
+        check!(
+            crate::kmap::leaf_for(root, guard).is_none(),
+            "guard: the guard page has no leaf at any level (not merely a bad one)"
+        );
+        check!(
+            translate_in(root, low as u64).is_some()
+                && translate_in(root, (low + 0x1000) as u64).is_some(),
+            "guard: the stack's own pages are still mapped (the guard cost nothing usable)"
+        );
+        check!(
+            crate::gdt::kernel_stack_top() as usize > low
+                && crate::gdt::kernel_stack_top() as usize - low <= 16 * 1024,
+            "guard: RSP0 points above the guard, into the usable stack only"
+        );
+    }
+
+    // The declared layout (REQ-MM-008, ALET-P1-006).
+    {
+        let l = layout();
+        check!(
+            l.validate().is_ok(),
+            "layout: the declared address-space layout validates (disjoint, aligned, guarded, no null page)"
+        );
+        let (img_base, _) = crate::kmap::image_span();
+        check!(
+            l.region_of(img_base).is_some_and(|r| r.name == "kernel-image" && !r.user)
+                && l.region_of(0x4000_0000).is_some_and(|r| r.user),
+            "layout: kernel text is kernel-only and the user window is user-reachable (no address is both)"
+        );
+        let kroot = crate::kmap::root();
+        check!(
+            translate_in(kroot, 0).is_none() && crate::kmap::leaf_for(kroot, 0).is_none(),
+            "layout: VA 0 has NO translation in the live map (a kernel null dereference faults)"
         );
     }
 

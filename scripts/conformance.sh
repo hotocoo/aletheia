@@ -120,6 +120,11 @@ CONTRACT=(
   # and the gate additionally requires boot 2 to find and verify it. "The OS remembers" must not be a
   # property of one CPU.
   "PERSISTENT MEDIUM: boot #1, 0 entities verified"
+  # Address-space layout (REQ-MM-007/008, ALET-P1-006/012, ADR-040). Two properties that must not vary
+  # by CPU: a kernel stack overflow FAULTS instead of walking into .bss, and VA 0 has no translation at
+  # all — the second was a real hole this wave found, since the boot identity maps covered page 0.
+  "guard: the guard page has no leaf"
+  "layout: VA 0 has NO translation in the live map (a kernel null dereference faults)"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

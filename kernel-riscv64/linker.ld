@@ -40,7 +40,15 @@ SECTIONS
         __bss_end = .;
     }
 
+    /* A GUARD PAGE below the kernel stack (GAPS4 ALET-P1-012, REQ-MM-007). The stack grows DOWN from
+       __stack_top; without a guard, an overflow walks straight into .bss — silently corrupting whatever
+       lives there and surfacing much later as impossible behavior. This page is reserved here and left
+       UNMAPPED by `vm::build_identity`, so an overflow takes a translation fault at the first byte past
+       the stack instead. It costs one page of address space and nothing at runtime. */
     . = ALIGN(0x1000);
+    __stack_guard = .;
+    . += 0x1000;
+
     __stack_bottom = .;
     . += STACK_SIZE;
     __stack_top = .;
