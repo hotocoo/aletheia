@@ -25,8 +25,8 @@ fn the_sector_geometry_matches_a_4_kib_block() {
 
 #[test]
 fn the_shared_suite_proves_seventeen_invariants_over_a_device() {
-    // Every invariant in the order a target boots them: 4 driver/journal + 12 filesystem + 1
-    // capability gating. The count is what the VM gates grep for ("ALL 17 ..."), so it is asserted.
+    // Every invariant in the order a target boots them: 4 driver/journal + 15 filesystem + 1
+    // capability gating. The count is what the VM gates grep for ("ALL 20 ..."), so it is asserted.
     let dev = MemBlockDevice::new(GATE_BLOCKS);
     let mut seen: alloc::vec::Vec<(usize, alloc::string::String)> = alloc::vec![];
     let n = device_suite(dev, GATE_BLOCKS, |i, passed, name| {
@@ -36,11 +36,11 @@ fn the_shared_suite_proves_seventeen_invariants_over_a_device() {
     .expect("every invariant holds over a well-behaved device");
 
     assert_eq!(
-        n, 17,
+        n, 20,
         "the suite's invariant count changed — update both VM gates"
     );
     // Numbering is dense and 1-based, so an invariant cannot be skipped without the log showing it.
-    assert_eq!(seen.len(), 17);
+    assert_eq!(seen.len(), 20);
     for (idx, (i, _)) in seen.iter().enumerate() {
         assert_eq!(*i, idx + 1, "invariant numbering has a gap at {i}");
     }
@@ -52,8 +52,8 @@ fn the_shared_suite_proves_seventeen_invariants_over_a_device() {
         "group 5 should be the filesystem: {}",
         seen[4].1
     );
-    assert!(seen[15].1.starts_with("fs: "));
-    assert!(seen[16].1.contains("capability-gated I/O"));
+    assert!(seen[18].1.starts_with("fs: "));
+    assert!(seen[19].1.contains("capability-gated I/O"));
 }
 
 #[test]

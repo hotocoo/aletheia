@@ -3,7 +3,7 @@
 **As of:** 2026-08-03
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..037`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..038`.
 
 ## What Aletheia is
 
@@ -15,7 +15,50 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — every target now proves the filesystem on REAL storage (2026-08-03, GAPS4 ALET-P2-019, REQ-DRV-005)
+## Latest wave — the OS remembers, and every byte of what it remembers is verified (2026-08-03, REQ-STOR-003)
+
+Three waves built storage: an atomic multi-block write, a named namespace, real devices on all three
+CPUs. And the **capability-secure spine itself was still rebuilt in RAM at every boot** — not one
+entity, not one recorded event survived a power cycle. An operating system that forgets everything at
+reset is a demo of an operating system. `kernel-core/src/persist.rs` closes that (ADR-038).
+
+- **An update had to become atomic first.** Saving a store means *updating* an object, and the namespace
+  could only create or remove — and "remove then create" is TWO transactions, so a crash between them
+  leaves the name **gone**: data loss where the object was merely being updated. `Filesystem::replace`
+  commits the new data blocks, the old blocks zeroed (ADR-033), the bitmap and the directory **together**,
+  so the name is continuously present and a crash yields the old contents or the new ones. Host-swept at
+  **every** crash prefix across five size transitions (same-size, grow, shrink, from empty, to empty).
+- **A load verifies; it does not merely parse.** Per entity, the `content_hash` the spine computed is
+  recomputed from the bytes actually read — content addressing finally applied to the medium.
+- **Writing that test found a real hole, and the fix is in this wave.** A byte-flip sweep over the
+  encoded record showed that flipping an entity's **id** produced a store that loaded *successfully with
+  different data*: the content hash covers content, and says nothing about id, version, chain,
+  provenance or type. The record now carries a trailing checksum over every preceding byte, and the
+  sweep asserts the property directly — **any** flip is either refused or yields identical data, and most
+  are refused. Content is checked first, so damage to content still reports the precise
+  `ContentHashMismatch` rather than the coarser record failure.
+- **A corrupt store is a refusal, not a reset.** `open_and_witness` never replaces a store it cannot
+  verify with a fresh one: "your data is damaged" must not silently become "your data is gone".
+- **Capabilities are deliberately NOT persisted.** What a capability's lifetime means across a reboot is
+  ALET-P1-026, still open; writing tokens to disk would be inventing durable privilege by accident.
+- **Ids never repeat across a reboot** (`next_id` is part of the record), and the cross-reboot contract
+  is one shared function: boot 1 creates the store, boot 2 on the same medium must find and verify boot
+  1's entities and report boot number 2.
+- **Nine behaviors, every target, in the shared contract.** `ALL 9 DURABLE-STORE INVARIANTS HOLD` on
+  aarch64, RISC-V and x86-64 (boot fails `200 + i`); the filesystem suite grew 12 → 15 with the replace
+  behaviors, so the real-device suite is now 20; `conformance.sh` requires **61** core behaviors of every
+  target, up from 49 — because whether your data is intact must not depend on the CPU.
+- **Every write path is now atomic at the same granularity** — block (journal), name (create/remove),
+  update (replace), store (save) — and each one is crash-swept at every prefix on the host.
+- **Not claimed:** no encryption at rest here (ALET-P1-028/029), no incremental save, no event-log
+  persistence, no schema migration beyond refusing an unknown version, and FNV-1a is integrity against
+  rot and bugs — not a defence against forgery (that needs REQ-BOOT-002's signing hierarchy).
+
+Gates after the wave: `build-all` PASS, `e2e-all` PASS (aarch64 / riscv64 / x86-64 in QEMU),
+`conformance` PASS (61 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (68
+requirements).
+
+## Previous wave — every target now proves the filesystem on REAL storage (2026-08-03, GAPS4 ALET-P2-019, REQ-DRV-005)
 
 The wave below made the driver shared and gave RISC-V a real disk. x86-64 — the *other* first-class
 target — still had none, for a reason no CPU seam could fix: q35 has no virtio-mmio window at all. Its

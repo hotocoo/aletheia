@@ -52,9 +52,10 @@ echo "$OUT" | grep -q "ALL 21 MEMORY INVARIANTS HOLD"  || { echo "FAIL: memory-m
 echo "$OUT" | grep -q "ALL 55 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 22 USER-MODE BOUNDARY INVARIANTS HOLD" || { echo "FAIL: user-mode marker missing"; fail=1; }
 echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
-echo "$OUT" | grep -q "ALL 12 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
+echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
 # 5 driver invariants + the 12 filesystem behaviors, all over the REAL device (REQ-DRV-004).
-echo "$OUT" | grep -q "ALL 17 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
+echo "$OUT" | grep -q "ALL 20 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
+echo "$OUT" | grep -q "ALL 9 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then

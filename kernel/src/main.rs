@@ -175,6 +175,28 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Durable store: the OS REMEMBERS (REQ-STOR-003, ADR-038). The spine was rebuilt in RAM every
+    // boot; now it is encoded into one filesystem object, updated in ONE atomic transaction, and
+    // re-verified against each entity's content address on load — a flipped bit is a refusal, not
+    // silently-accepted state. Proved here over a RAM disk on every target.
+    kprintln!("");
+    kprintln!("--- durable-store selftests (the spine survives: content-verified, atomically saved) ---");
+    let mut store_disk =
+        kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
+    match kernel_core::persist::selftest_on(&mut store_disk, |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[persist] ALL {} DURABLE-STORE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[persist] FAILED at durable-store invariant {}: {}", idx, name);
+            semihosting::exit(200 + idx as i32);
+        }
+    }
+
     bench::run();
 
     kprintln!("");

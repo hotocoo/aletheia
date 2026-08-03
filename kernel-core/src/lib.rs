@@ -30,6 +30,7 @@ pub mod fs;
 pub mod grant;
 pub mod ipc;
 pub mod memattr;
+pub mod persist;
 pub mod priosched;
 pub mod ptreclaim;
 pub mod sched;

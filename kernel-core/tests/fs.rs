@@ -291,3 +291,84 @@ fn a_deterministic_op_campaign_never_breaks_a_structural_invariant() {
         assert_eq!(fs2.read(&mut dev, name).expect("read"), *want);
     }
 }
+
+#[test]
+fn a_replace_is_all_or_nothing_at_every_crash_point_and_never_loses_the_name() {
+    // The reason `replace` exists: "remove then create" is two transactions, so a crash between them
+    // leaves the NAME GONE — data loss where the object was merely being updated. At EVERY prefix of a
+    // replace, the name must be present with either the old contents or the new ones.
+    for (old_len, new_len) in [
+        (100usize, 100usize),      // same size: the extent is reused in place
+        (100, 3 * BLOCK_SIZE + 7), // grows: a new extent, old blocks erased in the same txn
+        (3 * BLOCK_SIZE + 7, 50),  // shrinks: tail blocks erased and freed
+        (0, BLOCK_SIZE),           // from empty
+        (BLOCK_SIZE, 0),           // to empty
+    ] {
+        let mut base = fresh(64);
+        let mut fs = Filesystem::mount(&mut base).expect("mount");
+        let old = body(11, old_len);
+        let new = body(23, new_len);
+        fs.create(&mut base, "keep", &body(7, 100)).expect("keep");
+        fs.create(&mut base, "obj", &old).expect("create");
+        let snap = base.snapshot();
+
+        let total = 2 * (old_len.div_ceil(BLOCK_SIZE) + new_len.div_ceil(BLOCK_SIZE) + 2) + 3;
+        for allow in 0..=total {
+            base.restore(&snap);
+            let mut fs_run = Filesystem::mount(&mut base).expect("remount");
+            {
+                let mut faulty = FaultDevice::new(&mut base, allow);
+                let _ = fs_run.replace(&mut faulty, "obj", &new);
+            }
+            let entries = assert_structurally_sound(&mut base);
+            assert!(
+                entries.iter().any(|e| e.name == "obj"),
+                "the name DISAPPEARED at allow={allow} ({old_len} -> {new_len}) — a replace must never lose it"
+            );
+            let fs_after = Filesystem::mount(&mut base).expect("mount after");
+            let got = fs_after.read(&mut base, "obj").expect("obj readable");
+            assert!(
+                got == old || got == new,
+                "replace left a MIXTURE at allow={allow} ({old_len} -> {new_len}): {} bytes",
+                got.len()
+            );
+            assert_eq!(
+                fs_after.read(&mut base, "keep").expect("keep survives"),
+                body(7, 100)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_replace_that_grows_beyond_one_transaction_is_refused_and_keeps_the_old_contents() {
+    let mut dev = fresh(96);
+    let mut fs = Filesystem::mount(&mut dev).expect("mount");
+    // An object of half the transaction bound can be created, but REPLACED only by something small
+    // enough that both extents fit one transaction — the tighter bound `replace` documents.
+    let big = body(5, 40 * BLOCK_SIZE);
+    fs.create(&mut dev, "big", &big).expect("create");
+    let too_big = body(6, 40 * BLOCK_SIZE);
+    assert_eq!(
+        fs.replace(&mut dev, "big", &too_big),
+        Err(FsError::TooLarge),
+        "old + new + 2 exceeds the journal bound and must be refused"
+    );
+    assert_eq!(
+        fs.read(&mut dev, "big").expect("still there"),
+        big,
+        "a refused replace must leave the old contents untouched"
+    );
+    assert_structurally_sound(&mut dev);
+}
+
+#[test]
+fn replacing_an_absent_name_creates_it() {
+    let mut dev = fresh(32);
+    let mut fs = Filesystem::mount(&mut dev).expect("mount");
+    let data = body(3, 200);
+    fs.replace(&mut dev, "fresh", &data)
+        .expect("replace creates");
+    assert_eq!(fs.read(&mut dev, "fresh").expect("read"), data);
+    assert_structurally_sound(&mut dev);
+}
