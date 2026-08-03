@@ -48,8 +48,12 @@ invariant**. Ring-3 boundary invariants 22 → 26. Anything else would be a poli
 * **Not claimed.** The supervisor does not free the dead task's memory — that is
   `teardown::destroy_address_space` (ADR-032), which a caller invokes with the task's root, and this slice
   does not wire it into the fault path. It does not **restart** anything: a restart policy needs a
-  supervision tree (REQ-REL-001), not a flag. It is wired live on **x86-64 only** — aarch64 and RISC-V still
-  treat an unexpected user fault as fatal, and their handlers need the same three lines. There is no quota,
+  supervision tree (REQ-REL-001), not a flag. The handler is wired on **all three** targets — an
+  unexpected user fault routes through the supervisor everywhere, and every boot asserts the policy behaves
+  (a user fault terminates that task, a kernel fault escalates) — but the **end-to-end** proof, taking an
+  undeclared fault and then running another task, exists on **x86-64 only**. aarch64 and RISC-V need their
+  own unarmed-fault excursion to make the same claim; until they have it, their invariant says exactly what
+  it proves and no more. There is no quota,
   no rate limit on repeated faults, and one excursion runs at a time, so the task id is a counter rather
   than a TCB field. REQ-REL-001 stays deferred.
 

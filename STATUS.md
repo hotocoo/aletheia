@@ -44,8 +44,11 @@ a task supervisor first among the things production would additionally require �
 - **Not claimed:** the supervisor does not free the dead task's address space (that is
   `teardown::destroy_address_space`, and doing it on a trap stack belongs in a scheduler reap step rather
   than being claimed here), does not restart anything (REQ-REL-001 needs a supervision tree, still
-  architecture only), has no quotas or rate limits, and is wired live on **x86-64 only** — aarch64 and
-  RISC-V still treat an unexpected user fault as fatal and need the same three lines.
+  architecture only), has no quotas or rate limits, and — after the same wave — the handler routes
+  through the supervisor on **all three** targets, each asserting the policy behaves (a user fault
+  terminates that task, a kernel fault escalates; conformance 68 → **69** behaviors). What is x86-64-only is
+  the **end-to-end** proof: taking an undeclared fault and then running another task. aarch64 and RISC-V need
+  their own unarmed excursion, and their invariants say exactly what they prove and no more.
 
 Gates after the wave: `quality-gate` PASS, `build-all` PASS, `e2e-all` PASS, `conformance` PASS (68 × 3),
 `register` PASS, `ci-parity` PASS, `traceability` PASS (77 requirements).

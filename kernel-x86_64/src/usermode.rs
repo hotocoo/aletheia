@@ -1778,6 +1778,30 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "ring3: HIGH resumes as highest-priority and receives the body across address spaces"
     );
 
+    // The supervisor's POLICY, asserted on every target so `conformance.sh` can require it (REQ-REL-002):
+    // a user fault terminates that task, a kernel fault escalates. Checked on a scratch supervisor so the
+    // live one's counters stay meaningful for the end-to-end proof immediately below.
+    {
+        use kernel_core::faultclass::{classify, from_x86_error_code, verdict};
+        use kernel_core::sched::TaskId;
+        use kernel_core::supervisor::{Supervisor, SupervisorAction, TerminationReason};
+        let mut probe = Supervisor::new();
+        let user = from_x86_error_code(0b100);
+        let ukind = classify(&user);
+        let contained = probe.on_fault(Some(TaskId(1)), ukind, verdict(ukind));
+        let kernelf = from_x86_error_code(0b011);
+        let kkind = classify(&kernelf);
+        let escalated = probe.on_fault(Some(TaskId(2)), kkind, verdict(kkind));
+        check!(
+            contained == SupervisorAction::TaskTerminated(TerminationReason::Fault(ukind))
+                && !probe.may_run(TaskId(1))
+                && matches!(escalated, SupervisorAction::Escalate(_))
+                && probe.may_run(TaskId(2))
+                && probe.escalations() == 1,
+            "supervisor: the policy is live in this kernel — a user fault terminates that task, a kernel fault escalates"
+        );
+    }
+
     // Kill the task, keep the system (REQ-REL-002, ADR-042). A ring-3 task faults at an address it never
     // declared: the supervisor must terminate THAT task, the boot must continue past it, and a later task
     // must still run — which is the difference between detecting a bad access and surviving one.

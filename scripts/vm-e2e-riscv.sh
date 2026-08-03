@@ -58,7 +58,7 @@ echo "$OUT" | grep -q "S->M boundary OK"              || { echo "FAIL: SBI bound
 echo "$OUT" | grep -q "ALL 11 INVARIANTS HOLD"        || { echo "FAIL: invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 21 MEMORY INVARIANTS HOLD"  || { echo "FAIL: memory-management marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 62 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory marker missing"; fail=1; }
-echo "$OUT" | grep -q "ALL 22 USER-MODE BOUNDARY INVARIANTS HOLD" || { echo "FAIL: user-mode marker missing"; fail=1; }
+echo "$OUT" | grep -q "ALL 24 USER-MODE BOUNDARY INVARIANTS HOLD" || { echo "FAIL: user-mode marker missing"; fail=1; }
 echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
 echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
 # 5 driver invariants + the 12 filesystem behaviors, all over the REAL device (REQ-DRV-004).

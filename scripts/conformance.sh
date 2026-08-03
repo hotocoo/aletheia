@@ -133,6 +133,10 @@ CONTRACT=(
   "net: an ARP request for the gateway is answered with its hardware address"
   "net: an ICMP echo request is answered with a matching reply (both checksums verified)"
   "net: a second echo is matched on its own sequence (replies are read, not assumed)"
+  # The task supervisor's POLICY (REQ-REL-002, ADR-042) — every target compiles it in and routes its
+  # unexpected-user-fault path through it. The end-to-end kill-and-continue proof (take an undeclared fault,
+  # then run another task) is an x86-64 arch extension for now; this is the part that must not vary.
+  "supervisor: the policy is live in this kernel"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )
