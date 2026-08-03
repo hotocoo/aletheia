@@ -46,7 +46,7 @@ milestone work, carrying no false "done" claim).
 | ALET-P1-028 | P1 | open | key management (encryption-at-rest ≠ key lifecycle) |
 | ALET-P1-029 | P1 | open | nonce/IV lifecycle proven per encrypted object |
 | ALET-P1-030 | P1 | open | encrypted content-addressing identity semantics |
-| ALET-P1-031 | P1 | open | x86-64 adopts the OVMF page-table tree at `ExitBootServices`, and that tree holds ~524 795 W^X leaves out of ~524 799 — the firmware's map, not this kernel's, reported informationally at every boot and PINNED by the x86-64 gate. Split out of ALET-P1-007 when the QEMU targets closed (2026-08-03): the fix is not attribute validation (delivered) but the backend building its OWN kernel map from the PE image bounds (`LoadedImageProtocol`, captured before ExitBootServices) instead of inheriting one |
+| ALET-P1-031 | P1 | resolved | x86-64 builds its OWN kernel map and RUNS ON IT (REQ-MM-006, ADR-034 + its 2026-08-03 addendum). `kernel-x86_64/src/kmap.rs` takes the image base/size from `LoadedImage` before `ExitBootServices` and the per-section permissions from the image's own PE section table — the x86-64 equivalent of the `linker.ld` symbols the other two targets read — then builds an identity map: 2 MiB RW+NX huge pages for RAM and sub-4 GiB MMIO, 4 KiB pages over every 2 MiB region the image touches (text RO+X, `.rodata` RO+NX, data/bss RW+NX, headers/padding RO+NX), every table frame claimed through the ADR-030 ownership model. Nine invariants prove each address class is mapped as the right thing BEFORE `kmap::activate()` writes CR3 (build-then-switch, so a wrong map fails a check instead of triple-faulting), and CR4.PGE is cycled across the write because OVMF marks its mappings global and a global TLB entry survives a CR3 load. Measured: 4 GiB covered, 2043 huge + 2560 page leaves, 5 split blocks, 11 table frames; **live audit 4603 leaves, 0 violations** where the inherited tree had 524 795 of 524 799 — and the spine, 4-core SMP and the entire ring-3 suite now execute on the kernel's tree. Boot fails closed (exit 28) on any live violation; the gate requires the ACTIVE marker + zero live violations instead of pinning a bootstrap count. Virtual-memory invariants 40 → 52. Not claimed: devices above 4 GiB (64-bit PCI BARs) are unmapped by this tree |
 | ALET-P2-001 | P2 | open | pin Rust toolchains (dated nightly) across all crates |
 | ALET-P2-002 | P2 | resolved | `--locked` enforced in `build-all.sh` + existing CI `--locked`; each crate carries `Cargo.lock` |
 | ALET-P2-003 | P2 | open | complete CI quality gate set (fmt, clippy -Dwarnings, audit, deny) |
@@ -78,17 +78,22 @@ milestone work, carrying no false "done" claim).
 | ALET-P2-029 | P2 | open | continuous threat-model maintenance |
 | ALET-P2-030 | P2 | open | explicit security-boundary enumeration |
 | ALET-P2-031 | P2 | open | DoS ≠ unauthorized-access distinction in the threat model |
-| ALET-P2-032 | P2 | open | the kernel-image mapping refusal (`in_image_split`, REQ-MM-006) is duplicated per target in `kernel/src/vm.rs` and `kernel-riscv64/src/vm.rs`, unlike the ADR-029/030/031/032 rules that live once in `kernel-core`. x86-64 has no counterpart because it has no split — it will need one when ALET-P1-031 makes it build its own kernel map, which is the point at which the rule should move into `kernel-core` behind the existing seams rather than be written a third time |
+| ALET-P2-032 | P2 | resolved | the kernel-image mapping refusal lives ONCE, in `kernel-core/src/vmaddr.rs`: `AddrPlan::with_protected` + `MapFault::ProtectedVirt` (REQ-MM-006, ADR-034 addendum). Closed at exactly the moment the row predicted — ALET-P1-031 gave x86-64 a split and would have made `in_image_split` a third copy — so instead the two existing copies were deleted and all three targets now declare only WHERE their image is (`image_split_span()` on aarch64/RISC-V, `kmap::protected_span()` on x86-64), while the refusal itself is one implementation applied by both `validate_map` and `validate_unmap`. Host-proved page by page across the span in `kernel-core/tests/vmaddr.rs`: both APIs refuse every page, the boundaries are half-open, a malformed protected address still reports the malformation first, and an undeclared span protects nothing. The two refusal behaviors joined the `conformance.sh` core contract (37 named behaviors) now that all three targets emit them in identical words |
 | ALET-P3-001 | P3 | open | centralized assembly/Rust boundary documentation |
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
 
-**Rollup (2026-08-03):** 69 findings (67 audited + ALET-P1-031 and ALET-P2-032, both split out while closing ALET-P1-007) — 12
-resolved (every P0 closed; the memory cluster now has address admission ALET-P1-001, page-table
-reclamation ALET-P1-002, frame ownership ALET-P1-003, address-space destruction ALET-P1-004,
-erase-on-free ALET-P2-026, per-arch attribute validation ALET-P1-008 and **W^X as a global invariant
-ALET-P1-007**), 46 open, 11 deferred (milestone subsystems). A frame can no longer be aliased,
-double-freed, leaked by unmapping, leaked by dying, or read by its next owner; and on both QEMU
-targets NO descriptor in the address space the kernel builds — dynamic page or bootstrap block — is
-writable+executable, with kernel text mapped read-only at 4 KiB granularity. The one W^X hole left is
-x86-64's inherited OVMF tree, now its own row (ALET-P1-031) so the note describes live work.
+**Rollup (2026-08-03, second update):** 69 findings (67 audited + ALET-P1-031 and ALET-P2-032, both
+split out while closing ALET-P1-007) — **14 resolved**, 44 open, 11 deferred (milestone subsystems).
+Every P0 is closed, and the memory cluster is now complete end to end: address admission
+ALET-P1-001, page-table reclamation ALET-P1-002, frame ownership ALET-P1-003, address-space
+destruction ALET-P1-004, erase-on-free ALET-P2-026, per-arch attribute validation ALET-P1-008, W^X as
+a global invariant ALET-P1-007, **x86-64 running on its own map ALET-P1-031**, and **the image
+refusal unified in `kernel-core` ALET-P2-032**.
+
+A frame can no longer be aliased, double-freed, leaked by unmapping, leaked by dying, or read by its
+next owner. And on **all three targets** — not two — NO descriptor in the live address space is
+writable+executable: kernel text is mapped read-only at 4 KiB granularity, and on x86-64 the
+firmware's 524 795-violation tree is no longer translating at all rather than being reported beside
+the one the kernel built. The last W^X hole is closed; what remains open in this cluster is layout
+hardening (ALET-P1-006: guard pages, layout constants, KASLR posture), not permissions.

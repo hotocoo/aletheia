@@ -15,7 +15,64 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — W^X becomes global: the kernel image is mapped page by page (2026-08-03, GAPS4 ALET-P1-007)
+## Latest wave — x86-64 stops inheriting the firmware's address space (2026-08-03, GAPS4 ALET-P1-031 / ALET-P2-032)
+
+The wave below took both QEMU targets to zero W^X violations and named what it could not close: on
+x86-64 the tree the machine actually translated through was **OVMF's**, holding ~524 795
+writable+executable leaves out of ~524 799. That is not a checking failure — long mode requires
+paging, so the firmware hands the kernel a running MMU and `ExitBootServices` transfers *ownership of
+its hierarchy*, not a chance to build one. No admission check un-maps an inherited page. The kernel
+now builds its own map and runs on it, so the last W^X hole in the memory cluster is closed on **all
+three** targets.
+
+- **The image describes itself, since the linker does not (REQ-MM-006, ADR-034 addendum).** aarch64
+  and RISC-V read `__text_start` / `__text_end` / `__rodata_end` from `linker.ld`; a UEFI PE has no
+  such symbols. `kernel-x86_64/src/kmap.rs` takes base + size from `LoadedImage` (captured *before*
+  ExitBootServices) and reads the image's own **PE section table** for the rest —
+  `IMAGE_SCN_MEM_EXECUTE` and `IMAGE_SCN_MEM_WRITE` carry exactly the facts the linker symbols carry.
+  Headers that do not parse make the build **refuse**, rather than defaulting kernel text to writable.
+- **Same shape as the other two targets.** Identity, so nothing moves: 2 MiB RW+NX huge pages for RAM
+  and sub-4 GiB MMIO, and 4 KiB pages over every 2 MiB region the image touches — text RO+X,
+  `.rodata` RO+NX, data/bss RW+NX, headers and padding RO+NX. Every table frame is claimed through the
+  ADR-030 ownership model. Measured: 4 GiB covered, 2043 huge + 2560 page leaves, 5 split blocks, 11
+  table frames.
+- **Built and proved BEFORE activated, because the failure modes differ.** Nine invariants assert not
+  "nothing was flagged" but that each class of address is mapped as the right thing: text at 4 KiB
+  granularity and RO+X, data RW+NX, `.rodata` neither, bulk RAM a 2 MiB RW+NX block, low memory (the
+  SMP trampoline's home) present. Only then does `kmap::activate()` write CR3. A wrong map fails a
+  readable invariant instead of triple-faulting the machine with nothing to read.
+- **CR4.PGE is cycled across the CR3 write.** A global TLB entry survives a CR3 load *by definition*,
+  and OVMF marks its mappings global — so without clearing PGE the firmware's permissions would stay
+  live in the TLB for pages this map deliberately narrowed. That is a silent half-switch, which would
+  make the W^X claim unprovable rather than false.
+- **Everything after the switch runs on the kernel's own tree.** The spine invariants, SMP bring-up
+  across four cores, and the entire ring-3 suite — syscalls, per-process address spaces, IPC, grants,
+  preemption, priority donation — execute under the map the kernel built. Live audit: **4603 leaves,
+  0 violations**, against the inherited tree's 524 795. The boot **fails closed** (exit 28) if the
+  live audit ever finds one, and the gate requires the ACTIVE marker + zero live violations instead of
+  pinning a bootstrap count. Virtual-memory invariants 40 → **52** on x86-64.
+- **The ceiling is an allowlist, not the memory map's maximum.** Firmware describes an aperture
+  reaching 1 TiB; taking the raw maximum built a 1 TiB tree (524 283 huge leaves, 1032 table frames =
+  4 MiB of page tables) to reach registers this kernel never touches. Only memory types that describe
+  real storage raise the ceiling, with a 4 GiB floor for the platform's devices (LAPIC, IOAPIC, HPET,
+  framebuffer).
+- **The image refusal now lives ONCE (ALET-P2-032).** Splitting an image removes the block/huge
+  descriptor that had made its addresses undescendable, so all three targets need the refusal — it was
+  written twice, and x86-64 was about to need a third copy, which is exactly what that row predicted.
+  `AddrPlan::with_protected` + `MapFault::ProtectedVirt` in `kernel-core/src/vmaddr.rs` hold the rule;
+  each target declares only *where* its image is. Host-proved page by page across the span: both APIs
+  refuse every page, boundaries are half-open, a malformed protected address still reports the
+  malformation first, and an undeclared span protects nothing.
+- **And the pair became a shared contract behavior.** The wave below left the two image-refusal
+  markers out of `conformance.sh` because x86-64 could not emit them. That reason is gone, so both are
+  now core contract behaviors: **37 named behaviors, proved by all three targets** (aarch64 136,
+  RISC-V 131, x86-64 129 total invariants). `kernel-core`: 147 host tests pass.
+- **Not claimed.** Memory-mapped devices above 4 GiB (64-bit PCI BARs) are unmapped by the x86-64
+  tree; nothing this kernel drives lives there, and a driver that needs one must map it explicitly.
+  The framebuffer is mapped as Normal write-back memory like the rest of the sub-4 GiB span, because
+  x86-64 expresses cacheability through PAT/MTRRs rather than a leaf field.
+
+## Previous wave — W^X becomes global: the kernel image is mapped page by page (2026-08-03, GAPS4 ALET-P1-007)
 
 The previous wave made every *dynamic* mapping prove its permissions, and said plainly what it could
 not close: the bootstrap identity map covered the whole kernel image — text, rodata, data, stack, heap
@@ -54,17 +111,19 @@ write primitive can rewrite the code that is running. It is now closed on both Q
   clean RW+NX descriptor) says no. Both APIs now refuse the whole block-aligned split span explicitly,
   and two invariants per target prove it; run against the pre-fix code they fail at invariant 54
   (`exit 114`), so they test the guard rather than restate it.
-- **Not added to the shared conformance contract, deliberately.** `conformance.sh` demands
-  identically-worded behaviors from all three targets, and x86-64 *cannot* emit this one: its image is
-  a PE the firmware loads and maps, not a map this kernel builds. Requiring it would either fail
-  x86-64 for an architectural reason or force a marker that proves nothing — the same reasoning that
-  omits the ret2usr rule on RISC-V's single execute bit.
-- **What is left, split out honestly.** x86-64 adopts the OVMF tree at `ExitBootServices`, and that
-  tree holds ~524 795 W^X leaves of ~524 799 — the firmware's map. It is reported informationally at
-  every boot and stays pinned by the x86-64 gate. ALET-P1-007 is **resolved**; the x86-64 case is now
-  its own row, **ALET-P1-031**, whose fix is the backend building its own kernel map from the PE image
-  bounds rather than inheriting one. A note that describes work nobody is doing is the drift
-  ALET-P2-011 exists to prevent.
+- **Not added to the shared conformance contract at the time, deliberately.** `conformance.sh` demands
+  identically-worded behaviors from all three targets, and x86-64 could not emit this one *then*: its
+  image was a PE the firmware loaded and mapped, not a map this kernel built. Requiring it would have
+  failed x86-64 for an architectural reason — the same reasoning that omits the ret2usr rule on
+  RISC-V's single execute bit. **Superseded by the wave above,** which gave x86-64 its own map and made
+  both markers part of the 37-behavior contract.
+- **What was left, split out honestly — and since closed.** x86-64 adopted the OVMF tree at
+  `ExitBootServices`, and that tree held ~524 795 W^X leaves of ~524 799 — the firmware's map, reported
+  informationally at every boot and pinned by the x86-64 gate. ALET-P1-007 was **resolved** here and
+  the x86-64 case became its own row, **ALET-P1-031**, whose fix was the backend building its own
+  kernel map from the PE image bounds. That row is now **resolved** by the wave above: the firmware's
+  tree no longer translates. A note that describes work nobody is doing is the drift ALET-P2-011 exists
+  to prevent.
 
 ## Previous wave — W^X: permissions are validated, not assumed (2026-08-02, GAPS4 ALET-P1-007 / ALET-P1-008)
 
@@ -104,7 +163,9 @@ execution.
   across ~524 799 leaves; it is the firmware's map, reported informationally at every boot. Closing
   this needed a page-granular kernel-image split via linker symbols — **done by the 2026-08-03 wave
   above**, which took both QEMU targets to zero bootstrap violations and left only the x86-64
-  firmware tree (ALET-P1-031).
+  firmware tree (ALET-P1-031) — **and that too is now closed**, by the latest wave: x86-64 builds its
+  own map from its PE image bounds and CR3 points at it, so W^X is a live global invariant on all
+  three targets.
 
 ## Previous wave — Memory safety: a freed frame carries nothing (2026-08-02, GAPS4 ALET-P2-026)
 

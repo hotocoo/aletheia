@@ -1,8 +1,10 @@
 //! Aletheia microkernel — bare-metal AMD64/x86-64, UEFI boot (ADR-019 first-class target).
 //!
-//! Boot flow (outside-in): firmware `#[entry]` -> capture GOP framebuffer -> **ExitBootServices**
-//! (Aletheia takes the machine) -> own GDT + IDT -> PIC remap + PIT timer -> `sti` and PROVE a
-//! timer IRQ fires -> re-prove the capability-secure spine invariants in kernel space -> exit.
+//! Boot flow (outside-in): firmware `#[entry]` -> capture GOP framebuffer + PE image bounds ->
+//! **ExitBootServices** (Aletheia takes the machine) -> own GDT + IDT -> PIC remap + PIT timer ->
+//! `sti` and PROVE a timer IRQ fires -> own frame allocator -> **build the kernel's OWN address map
+//! and make CR3 point at it** (`kmap`, ALET-P1-031: the firmware's W+X tree stops translating) ->
+//! re-prove the capability-secure spine invariants in kernel space -> SMP -> ring 3 -> exit.
 //!
 //! "Aletheia boots as its own OS" is honest here precisely because it calls ExitBootServices and
 //! then runs on its OWN interrupt/timer/segment state — the UEFI firmware is the hardware/platform
@@ -11,6 +13,7 @@
 //!   exit 33  => all invariants held (e2e PASS)   [isa-debug-exit encodes success 0 as 0x10]
 //!   exit 0x10+i (i=10+idx) => spine invariant idx failed
 //!   i = 30+idx memory · 40+idx virtual-memory · 60+idx SMP · 80+idx ring-3
+//!   28 => the LIVE address space violates W^X · 29 => no owned frame pool (both fail-closed)
 //!   101 => panic, 102 => double fault, 103 => #GP, 104 => #PF, 105 => #UD
 
 #![no_std]

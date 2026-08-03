@@ -1,8 +1,9 @@
 # ADR-034 — W^X and memory attributes: permissions are validated, not assumed
 
-**Status:** Accepted (2026-08-02) — **delivered on both QEMU targets (2026-08-03 addendum: the
-bootstrap map is split at page granularity, ALET-P1-007 resolved); x86-64's inherited firmware tree
-remains, tracked as ALET-P1-031 — see Scope**
+**Status:** Accepted (2026-08-02) — **delivered on ALL THREE targets (2026-08-03 addenda: the
+bootstrap map is split at page granularity, ALET-P1-007; x86-64 builds and ACTIVATES its own kernel
+map instead of inheriting the firmware's, ALET-P1-031; the image refusal moved into `kernel-core`,
+ALET-P2-032) — see Scope**
 **Context:** GAPS4 ALET-P1-007 (W^X as a global invariant + a checker) and ALET-P1-008 (per-arch
 memory-attribute validation) · REQ-MM-006 · builds on ADR-029 (address admission) and ADR-030..033
 (the frame lifetime model)
@@ -97,17 +98,60 @@ RAM) rather than hiding it. That exception is now closed on both QEMU targets:
   the address plan (a legal VA, an owned PA) nor the attribute decode (a clean RW+NX page) refuses it.
   Both APIs now reject the block-aligned split span at their entry, next to the ADR-029 admission check,
   and two invariants per QEMU target assert the refusal *and* that text still maps to itself read-only.
-* **Not a shared conformance behavior, deliberately.** `conformance.sh` requires identically-worded
-  behaviors from *all* targets, and x86-64 cannot emit this one: its image is a PE loaded and mapped
-  by UEFI, not by a map this kernel builds. Adding it would either fail x86-64 for an architectural
-  reason or force a marker that proves nothing. The precedent is the RISC-V single-execute-bit
-  omission above.
+* **Not a shared conformance behavior — until x86-64 could emit it too.** The first landing left this
+  pair out of `conformance.sh` because x86-64's image is a PE loaded by UEFI, not by a map this kernel
+  builds, so requiring the marker would have failed it for an architectural reason. The 2026-08-03
+  addendum below removes that reason, and both behaviors are now part of the core contract, proved by
+  all three targets in identical words.
 
-**Still not delivered (x86-64 only; tracked as ALET-P1-031):** the inherited OVMF tree contains
-~524 795 W^X violations across ~524 799 leaves. That tree is the firmware's, is reported
-informationally at every boot, and cannot be closed by validating mappings — it needs the x86-64
-backend to build its own kernel map from its own PE image bounds instead of adopting the firmware's.
-The x86-64 gate therefore still pins its bootstrap count rather than requiring zero.
+## Addendum, 2026-08-03 — x86-64 builds its own map, and it is the LIVE one (ALET-P1-031)
+
+The first landing could validate every mapping the x86-64 kernel *created* and still leave ~524 795
+W^X violations across ~524 799 leaves live, because the tree the machine translated through was the
+firmware's: long mode requires paging, so OVMF hands the kernel a running MMU and `ExitBootServices`
+transfers *ownership of its hierarchy* rather than the chance to build one. No amount of admission
+checking un-maps an inherited page. The fix is the one the other two targets already implement —
+build the map — and the missing ingredient was the bounds.
+
+* **The image describes itself.** `linker.ld` exports `__text_start`/`__text_end`/`__rodata_end` on
+  aarch64 and RISC-V; a UEFI PE has no such symbols. `kernel-x86_64/src/kmap.rs` takes base + size
+  from `LoadedImage` (captured before `ExitBootServices`) and reads the image's own PE section table
+  for the rest: `IMAGE_SCN_MEM_EXECUTE` and `IMAGE_SCN_MEM_WRITE` carry exactly the facts the linker
+  symbols carry. Unparsable headers make the build REFUSE rather than default kernel text to
+  writable.
+* **Same shape as the other targets.** Identity — so nothing moves — with 2 MiB RW+NX huge pages for
+  RAM and low MMIO, and 4 KiB pages over every 2 MiB region the image touches: text RO+X, `.rodata`
+  RO+NX, data/bss RW+NX, headers and padding RO+NX. Measured: 4 GiB covered, 2043 huge + 2560 page
+  leaves, 5 split blocks, 11 table frames, all claimed through the ADR-030 ownership model.
+* **Built and proved BEFORE activated.** Nine invariants assert not "nothing was flagged" but that
+  each class of address is mapped as the right thing — text at 4 KiB granularity and RO+X, data
+  RW+NX, `.rodata` neither, bulk RAM a 2 MiB RW+NX block, low memory (the SMP trampoline's home)
+  present. Only then does CR3 move. A wrong map fails an invariant instead of triple-faulting.
+* **CR4.PGE is cycled across the CR3 write.** A global TLB entry survives a CR3 load by definition
+  and OVMF marks its mappings global. Without clearing PGE, the firmware's permissions would remain
+  live in the TLB for pages this map deliberately narrowed — a half-switch that makes the claim
+  unprovable rather than false.
+* **Everything after activation runs on it.** The spine invariants, SMP bring-up across four cores,
+  and the whole ring-3 suite (syscalls, per-process spaces, IPC, grants, preemption, priority
+  donation) execute on the kernel's own tree. Live audit: 4603 leaves, **0** violations; the boot
+  fails closed (exit 28) if that ever changes, and the gate requires the marker rather than pinning a
+  number. Virtual-memory invariants 40 → 52.
+* **The ceiling is an allowlist, not the map's maximum.** Firmware describes an aperture reaching
+  1 TiB; taking the raw maximum built a 1 TiB tree (1032 table frames) to reach registers the kernel
+  never touches. Only memory types that describe real storage raise the ceiling, with a 4 GiB floor
+  for the platform's devices.
+* **The image refusal is now one implementation (ALET-P2-032).** Splitting an image removes the
+  block/huge descriptor that had made its addresses undescendable, so all three targets need the
+  refusal — and it was written twice, with x86-64 about to need a third copy.
+  `AddrPlan::with_protected` + `MapFault::ProtectedVirt` in `kernel_core::vmaddr` hold the rule;
+  each target declares only where its image is. Host-proved page by page across the span, both APIs,
+  half-open boundaries, and malformed-address precedence.
+
+**Not claimed:** memory-mapped devices above 4 GiB (64-bit PCI BARs) are unmapped by this tree —
+nothing this kernel drives lives there, and a driver that needs one must map it explicitly. The
+framebuffer is mapped as Normal write-back memory like the rest of the sub-4 GiB span; x86-64
+expresses cacheability through PAT/MTRRs rather than a leaf field, which the decode models
+explicitly (see above) rather than assuming.
 
 ## Consequences
 
@@ -117,10 +161,10 @@ The x86-64 gate therefore still pins its bootstrap count rather than requiring z
   from among the mappings the kernel makes, and the property is checked against the live tree rather
   than trusted from the API.
 * **What it does not buy.** It is not CFI and not ASLR (ALET-P1-006 covers layout hardening, still
-  open). On the QEMU targets the write-to-.text-through-a-block path the first landing disclosed is
-  now gone: kernel text is mapped read-only by 4 KiB pages, so a kernel write primitive has no
-  writable alias of the code to aim at inside this map. On x86-64 that path remains open through the
-  firmware's tree (ALET-P1-031), which is why its count stays pinned rather than described as "some".
+  open). The write-to-.text-through-a-block path the first landing disclosed is now gone on all three
+  targets: kernel text is mapped read-only at 4 KiB granularity, so a kernel write primitive has no
+  writable alias of the code to aim at, and on x86-64 the firmware's tree is no longer translating at
+  all rather than merely being reported.
 
 ## Alternatives considered
 
@@ -130,5 +174,13 @@ The x86-64 gate therefore still pins its bootstrap count rather than requiring z
 * **Fail the boot on any W^X violation.** Rejected as dishonest-by-panic: it would have to except
   the bootstrap blocks anyway, and an exception buried in a panic condition is less visible than a
   pinned number in a gate.
-* **Claim W^X as delivered because the dynamic paths are clean.** Rejected outright. The register
-  entry says "W^X as a complete global invariant"; it is not complete, so it stays open.
+* **Claim W^X as delivered because the dynamic paths are clean.** Rejected outright when the
+  bootstrap map still held violations — the register entry says "W^X as a complete global invariant",
+  and it stayed open until the map actually was one, on every target.
+* **On x86-64: keep the firmware's tree and repair its entries in place.** Rejected. Walking half a
+  million inherited leaves to narrow each one leaves the kernel dependent on the shape of whatever
+  firmware booted it, and there is no honest audit of "we fixed what we found". Building the map from
+  the image's own bounds means the tree's correctness follows from how it was constructed.
+* **On x86-64: activate the new map before proving it.** Rejected. An incomplete identity map faults
+  the instruction after `mov cr3` and surfaces as a QEMU triple fault with no invariant to read. Build,
+  audit, assert each address class, *then* switch — so a mistake is a failed check, not a dead machine.
