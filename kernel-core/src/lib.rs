@@ -25,6 +25,7 @@
 extern crate alloc;
 
 pub mod device;
+pub mod faultclass;
 pub mod frameown;
 pub mod fs;
 pub mod grant;
@@ -33,6 +34,7 @@ pub mod memattr;
 pub mod persist;
 pub mod priosched;
 pub mod ptreclaim;
+pub mod reentry;
 pub mod sched;
 pub mod selftest;
 pub mod shootdown;

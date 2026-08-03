@@ -366,7 +366,10 @@ fn an_ack_never_precedes_the_invalidation_it_covers() {
         // the item. Waiting here would deadlock — nothing services target 0 until below, which is the
         // point (INV-TLB-1: the barrier really does block until an ack arrives).
         let queued = tlb.request(&[0], Invalidation::page(1, round * 0x1000), || false);
-        assert!(!queued, "INV-TLB-1: request completed with no acknowledgement");
+        assert!(
+            !queued,
+            "INV-TLB-1: request completed with no acknowledgement"
+        );
         let acked_before = tlb.acked(0);
         let mut seen = 0usize;
         tlb.service(0, |_inv| {
@@ -399,10 +402,14 @@ fn every_posted_invalidation_is_performed_exactly_once() {
         // Post without waiting (deadline hook gives up immediately when not yet serviced).
         let _ = tlb.request(&[0], Invalidation::page(3, va), || false);
         if i % 4 == 3 {
-            tlb.service(0, |inv| performed.push(inv.va.expect("a page invalidation carries a VA")));
+            tlb.service(0, |inv| {
+                performed.push(inv.va.expect("a page invalidation carries a VA"))
+            });
         }
     }
-    tlb.service(0, |inv| performed.push(inv.va.expect("a page invalidation carries a VA")));
+    tlb.service(0, |inv| {
+        performed.push(inv.va.expect("a page invalidation carries a VA"))
+    });
     assert_eq!(
         performed, posted,
         "INV-TLB-3: the performed sequence is not exactly the posted sequence (drop or duplicate)"

@@ -3,7 +3,7 @@
 **As of:** 2026-08-03
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..038`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..039`.
 
 ## What Aletheia is
 
@@ -15,7 +15,52 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — what must never happen, written down (2026-08-03, GAPS4 ALET-P1-005 / P1-016 / P1-017 / P1-025)
+## Latest wave — a fault handler must know what happened, and must not re-enter itself (2026-08-03, GAPS4 ALET-P1-009/010/011/013)
+
+Three gaps sat on the trap-entry path with the same shape: the code worked, and there was no *model*
+behind it. Handlers printed the raw architectural code and exited — nowhere to state that a fault
+reporting a **reserved bit** in a translation structure must never be resumed. A handler runs on top of
+whatever it interrupted, and nothing said what happens if it re-enters. And the x86-64 trap assembly
+addresses its frame with literal byte offsets that only five compile-time asserts covered.
+
+- **`kernel_core::faultclass` — one total, fail-closed model (REQ-FAULT-001, ADR-039).** A normalized
+  `Fault` (present/write/user/exec/reserved/from-kernel) that all three architectures decode into
+  (x86 error code; aarch64 EC + DFSC class + WnR; RISC-V `scause`), a `FaultKind` for what it *means*,
+  and a `FaultVerdict` for what the kernel may do. Only user faults are survivable; a reserved bit
+  dominates every other reading, because if a translation structure is malformed then what the other
+  bits "mean" is not knowable.
+- **Unknown degrades to fatal, which is what makes the model safe to extend.** An architectural bit the
+  model does not interpret (protection key, shadow stack, SGX) makes the fault `Unknown` — never
+  classified from the bits that happen to be understood. Even `Fault::none()` is a kernel fault, so a
+  decoder that forgets a field cannot make one look routine.
+- **RISC-V's asymmetry is stated, not papered over.** `scause` reports neither present-vs-absent nor the
+  faulting privilege, so those are parameters from the caller. Inventing a bit the ISA does not report
+  would make the classification a guess that reads like a fact.
+- **`kernel_core::reentry` — re-entry becomes detectable and fatal (REQ-FAULT-002).** The x86-64
+  fault-report path is guarded: a fault inside fault reporting prints one line and exits 106 instead of
+  recursing until the stack runs out and the machine triple-faults. The guard is a compare-exchange, so
+  it also catches a *second CPU* entering a section with no lock — a different bug, same consequence —
+  and refusals are counted, so a caller that swallows one still leaves evidence.
+- **The manual ABI now fails the BUILD.** The `TrapFrame` assert block pins size, alignment, the register
+  array's offset and width, the named register indices, every `iretq`-frame offset the assembly's literals
+  use, and that nothing hides past the last field.
+- **Proved where it runs.** Exhaustive host sweeps — every x86 error code including unknown-bit
+  combinations, every EC/DFSC pair, every `scause`, asserted over the whole input space rather than
+  sampled — plus x86-64 boot invariants 56–58 (virtual-memory 55 → 58) proving the classification and the
+  guard behave inside the kernel. A classification that only holds in `cargo test` protects nothing.
+- **Two rows closed, two REFINED rather than flipped.** ALET-P1-010 and ALET-P1-013 are resolved.
+  ALET-P1-009 keeps its `fuzz` half (a register-file round-trip through the real trap assembly) and
+  ALET-P1-011 keeps adversarial *entry* testing (real ring-3 `#UD`/`#GP` trials, contained) — each with
+  the remaining work named in its register row instead of being closed on a partial claim. Register:
+  19 → 21 resolved, 40 → 38 open.
+- **Wiring scope, stated:** the classifier and guard are live on x86-64; the aarch64 and RISC-V decoders
+  are host-proved but not yet wired into those handlers.
+
+Gates after the wave: `build-all` PASS (21 host test binaries), `e2e-all` PASS (each target booted
+twice), `conformance` PASS (62 core behaviors × 3 targets), `ci-parity` PASS, `traceability` PASS (70
+requirements).
+
+## Previous wave — what must never happen, written down (2026-08-03, GAPS4 ALET-P1-005 / P1-016 / P1-017 / P1-025)
 
 Four subsystems were delivered as *code that works* with no written statement of **what must never
 happen**: cross-core TLB shootdown, priority inheritance, IPC cancellation, capability revocation. A

@@ -312,7 +312,8 @@ fn after_revoke_returns_no_later_attempt_can_ever_act() {
         );
     }
     assert_eq!(
-        effects, 1,
+        effects,
+        1,
         "INV-CAP-REVOKE-1: {} effects ran after revoke returned",
         effects - 1
     );
@@ -361,7 +362,9 @@ fn a_revoked_token_is_never_authoritative_again_however_it_is_presented() {
     // Offering the revoked token ALONGSIDE a good one must not launder it: the effect runs, but the
     // authorization must be attributed to the live capability.
     let auth = engine
-        .with_authorization(ACTION, &Target::default(), &[cap, fresh], |_, a| a.capability())
+        .with_authorization(ACTION, &Target::default(), &[cap, fresh], |_, a| {
+            a.capability()
+        })
         .expect("a live capability in the set still authorizes");
     assert_eq!(
         auth, fresh,
@@ -493,7 +496,10 @@ fn revoking_one_capability_never_disturbs_its_siblings() {
         }
     }
     // The parent is untouched too — revocation runs downward, not upward.
-    assert!(!engine.is_revoked(root), "INV-CAP-REVOKE-6: revoking a child revoked its parent");
+    assert!(
+        !engine.is_revoked(root),
+        "INV-CAP-REVOKE-6: revoking a child revoked its parent"
+    );
     engine
         .with_authorization(ACTION, &Target::default(), &[root], |_, _| ())
         .expect("the parent still authorizes");
