@@ -27,6 +27,7 @@ mod frames;
 mod hal;
 mod heap;
 mod semihosting;
+mod shellio;
 mod smp;
 mod usermode;
 mod virtio;
@@ -271,13 +272,35 @@ pub extern "C" fn kmain() -> ! {
         },
     }
 
+    // The interactive console (REQ-CON-001, ADR-044). Every gate above ends in a verdict and an
+    // exit; this is the subsystem that lets the machine STAY up and answer a human. It is proved
+    // here the same way everything else is — a scripted session against a real namespace — so the
+    // gate covers the code an interactive boot runs, not a separate path that only humans see.
+    kprintln!("");
+    kprintln!("--- console selftests (line editing + command dispatch over the namespace) ---");
+    match shellio::selftest() {
+        Ok(n) => kprintln!("[console] ALL {} CONSOLE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[console] FAILED at console invariant {}: {}", idx, name);
+            semihosting::exit(250 + idx as i32);
+        }
+    }
+
     bench::run();
 
     kprintln!("");
     kprintln!(
-        "[e2e] PASS — boot + spine + {} invariants + memory-management + virtual-memory + user-mode + filesystem + benchmark complete",
+        "[e2e] PASS — boot + spine + {} invariants + memory-management + virtual-memory + user-mode + filesystem + console + benchmark complete",
         11
     );
+
+    // Built with `--features interactive`, the boot does NOT end here: it hands the machine to
+    // whoever is at the serial line. The gate builds without the feature, so its exit-code contract
+    // is untouched (a session has no verdict to give).
+    #[cfg(feature = "interactive")]
+    shellio::interactive();
+
+    #[cfg(not(feature = "interactive"))]
     semihosting::exit(0);
 }
 

@@ -40,6 +40,7 @@ pub mod ptreclaim;
 pub mod reentry;
 pub mod sched;
 pub mod selftest;
+pub mod shell;
 pub mod shootdown;
 pub mod smpsched;
 pub mod spine;
