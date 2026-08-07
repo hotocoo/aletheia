@@ -1,6 +1,6 @@
 # Aletheia — Implemented vs Production-Ready
 
-**As of:** 2026-08-03. Closes GAPS4 **ALET-P2-013**.
+**As of:** 2026-08-07. Closes GAPS4 **ALET-P2-013**.
 
 Every gate in this repo answers "does it behave as specified, here, now". None answers "is it ready for
 someone else's machine, data and adversaries". Conflating those is how a project ends up claiming more than
@@ -35,6 +35,7 @@ target, host property tests with crash sweeps at every prefix — and none of th
 | WASM components | **I** | No ambient authority, fuel bounds, attenuated spawn | Resource model beyond fuel (P1-021), ABI versioning (P1-022), supply-chain verification (P1-023), dependency resolution as a boundary (P1-024) |
 | AI subsystem / Context Fabric | **I** | Untrusted-provider model; capability-gated search | Not an OS-native runtime (P2-024 deferred); no scheduler integration |
 | Boot chain / secure boot | **A** | Component provenance (ed25519) is **P** | Measured chain, key custody, rollback: architecture only (P2-014/015/016/017) |
+| Interactive console (line editor + command dispatch) | **P** | Fail-closed admission (only printable ASCII enters a line; bounded; refused bytes never echoed), refusals named, console writes committed — 15 live invariants per target, 20 host tests incl. a full 256-byte sweep, 7 conformance behaviors, and a three-target scripted-operator gate with a reboot | Kernel-space dispatcher over the kernel's own objects — NOT a user-mode shell over a syscall ABI; polled; `getc` itself is hardware and unprovable on the host |
 | Networking | **A** | — | Nothing built (P2-020) |
 | Graphics / compositor, power management | **A** | — | Nothing built (P2-021/022); QEMU cannot prove either honestly |
 

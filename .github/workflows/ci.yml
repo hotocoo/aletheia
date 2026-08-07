@@ -88,6 +88,21 @@ jobs:
       - name: Boot every target and assert each proves the same core semantic contract
         run: ./scripts/conformance.sh
 
+  console-e2e:
+    name: Interactive console (a scripted operator types at the running OS, on all three targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU for all three targets, OVMF firmware, mtools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf mtools perl
+      - name: Install Rust nightly + all cross targets
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add rust-src --toolchain nightly
+          rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly
+      - name: Boot with --features interactive, type at the prompt, halt, reboot, read it back
+        run: ./scripts/console-e2e.sh
+
   traceability:
     name: Requirement traceability (delivered ⇒ evidence)
     runs-on: ubuntu-latest

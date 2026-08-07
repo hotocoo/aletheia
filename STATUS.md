@@ -5,7 +5,7 @@
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..043`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..044`.
 
 ## What Aletheia is
 
@@ -17,7 +17,53 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — addresses that must be dead in EVERY space (2026-08-07, GAPS4 ALET-P2-033)
+## Latest wave — an OS you can sit in front of (2026-08-07, REQ-CON-001, ADR-044)
+
+Every gate here boots, proves its invariants and **exits with a verdict**. That is what makes the claims
+checkable, and it is also why the most ordinary question about an operating system had no answer: *can I
+run it?* You could run a proof. You could not run the system — nothing kept the machine up, and all three
+UART drivers were transmit-only.
+
+- **`kernel-core/src/shell.rs` — the console, defined once.** A serial port differs per target; a line does
+  not. Each target supplies only a non-blocking `getc` and a way to print, and inherits the editor, the
+  command grammar, every refusal and the loop. Three consoles would have meant three input boundaries with
+  three sets of bugs — exactly the divergence `conformance.sh` exists to catch.
+- **The editor is a filter, not a buffer.** Only printable ASCII may ENTER a line; only CR/LF ends one;
+  Ctrl-C discards it; backspace/DEL and Ctrl-U edit it; **every other byte is dropped without an echo**, so
+  an escape sequence, a mouse report or a pasted binary cannot become a command argument. A line stops
+  growing at 256 bytes — a terminal that pastes a megabyte cannot make the kernel allocate one. Because only
+  ASCII is admitted, the buffer is valid UTF-8 by construction rather than by a check that could be skipped.
+- **Commands drive only what is already proved** — the named-object namespace over the journal, the frame
+  allocator, the HAL clock: `help`, `arch`, `uptime`, `mem`, `df`, `ls`, `stat`, `cat`, `write`, `rm`,
+  `echo`, `halt`. `write` goes through `Filesystem::replace`, so a keystroke sequence is ONE transaction and
+  a crash mid-write leaves the old contents or the new ones, never a vanished name.
+- **Interactivity is a cargo feature, off by default.** Without `--features interactive` the boot ends
+  exactly as before, so every gate keeps its exit-code contract. With it, the boot hands the machine to the
+  serial line after the suites pass.
+- **Proof.** 15 live invariants **per target** — scripted sessions against a real namespace, run inside the
+  boot gate, so the gate covers the code an interactive boot runs rather than a parallel path only humans
+  see. Plus 20 host tests that attack it: all 256 byte values swept against the editor, a paste 100x the
+  line bound, verbs matched exactly rather than by prefix, an oversized write refused rather than truncated,
+  and non-text contents reported as a byte count instead of sprayed at a terminal. **7 behaviors joined the
+  cross-architecture conformance contract (78 -> 85)**, because what may become a command, and whether a
+  console write is committed, must not vary by CPU.
+- **`scripts/console-e2e.sh` answers the original question, on all three targets.** A scripted operator
+  waits for the prompt, types, writes an object, reads it back and halts — then the machine **boots again**
+  and still holds what was typed. `halt` exits through the same path the gates use, so a session keeps an
+  exit-code contract and a wedged console fails as a timeout instead of hanging CI.
+- **Waiting, not sleeping.** The operator watches for `aletheia> ` before typing. A byte typed too early is
+  not merely early: on x86-64 the boot's `serial::init` CLEARS the receive FIFO, so those keystrokes are
+  destroyed. A fixed delay would have made the gate a race against however long the suites take on that host.
+- **`scripts/run-interactive.sh [aarch64|riscv64|x86_64]`** is the human entry point: build, boot, get a
+  prompt, keep the disk between runs.
+
+**Not claimed.** The dispatcher runs in **kernel space** over the kernel's own objects — it is not a
+user-mode shell process over a syscall ABI, and the syscall surface each target exposes today is narrower
+than one would need. The console is polled, like every driver here. `getc` reads a hardware register, so it
+is the one part no host test can prove; the sweeps prove what happens to a byte after it arrives, and the
+scripted-operator gate proves real bytes do arrive.
+
+## Previous wave — addresses that must be dead in EVERY space (2026-08-07, GAPS4 ALET-P2-033)
 
 VA 0 and the ring-0 stack guard are given no descriptor on purpose, and ALET-P1-006/012 proved both — of
 the map each kernel built **for itself**. A per-process root is a different tree, so the property was a

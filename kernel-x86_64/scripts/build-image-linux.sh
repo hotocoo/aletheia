@@ -17,7 +17,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" # kernel-x86_64/
 BUILD="$HERE/build"
-IMG="$BUILD/aletheia-x86_64.img"
+# Overridable so a caller can build a SECOND image alongside the default one (the interactive
+# console gate does: a different feature set must not overwrite the image the boot gate asserts on).
+IMG="${IMG:-$BUILD/aletheia-x86_64.img}"
 SIZE_MB="${SIZE_MB:-64}"
 mkdir -p "$BUILD"
 
@@ -37,6 +39,10 @@ echo "==> [1/3] build kernel .efi (x86_64-unknown-uefi)"
 PROFILE="${PROFILE:-release}"
 if [ -z "${EFI:-}" ]; then
   BUILD_FLAGS=""; [ "$PROFILE" = "release" ] && BUILD_FLAGS="--release"
+  # Optional cargo features (REQ-CON-001): `CARGO_FEATURES=interactive` builds the image that hands
+  # the machine to the serial line instead of exiting. Unset by default, so every existing caller —
+  # and therefore every gate's exit-code contract — is unaffected.
+  [ -n "${CARGO_FEATURES:-}" ] && BUILD_FLAGS="$BUILD_FLAGS --features $CARGO_FEATURES"
   ( cd "$HERE" && cargo build $BUILD_FLAGS )
 fi
 EFI="${EFI:-$HERE/target/x86_64-unknown-uefi/$PROFILE/aletheia-kernel-x86_64.efi}"
