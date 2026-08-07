@@ -43,6 +43,32 @@ pub fn init() {
     }
 }
 
+/// Mask IRQ0 (the PIT) on the master PIC (REQ-CON-002).
+///
+/// The boot leaves the PIT free-running for the ring-3 preemption suite. By the time a human is at
+/// the console those suites are long finished, and an unmasked timer would fire thousands of times a
+/// second into a handler the console has no use for — the session would spend its life in interrupt
+/// entry instead of reading the line. Masking is read-modify-write for the same reason `unmask_serial`
+/// is: neither may clobber the other's bit.
+#[cfg(feature = "interactive")]
+pub fn mask_timer() {
+    unsafe {
+        let cur = Port::<u8>::new(PIC1_DATA).read();
+        Port::<u8>::new(PIC1_DATA).write(cur | 1);
+    }
+}
+
+/// Unmask IRQ4 (COM1) on the master PIC, keeping whatever else is already unmasked (REQ-CON-002).
+/// Read-modify-write rather than a fresh mask byte: clobbering the timer's IRQ0 here would stop
+/// preemption as a side effect of turning on the console.
+#[cfg(feature = "interactive")]
+pub fn unmask_serial() {
+    unsafe {
+        let cur = Port::<u8>::new(PIC1_DATA).read();
+        Port::<u8>::new(PIC1_DATA).write(cur & !(1 << 4));
+    }
+}
+
 /// End-of-interrupt. For slave-line vectors (>= 0x28) both PICs must be acknowledged.
 pub fn eoi(vector: u8) {
     unsafe {

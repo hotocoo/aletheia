@@ -15,6 +15,9 @@ use x86_64::{PrivilegeLevel, VirtAddr};
 /// IRQ0 (timer) is remapped to vector 0x20 by the PIC.
 pub const TIMER_VECTOR: u8 = 0x20;
 
+/// IRQ4 (COM1, the console's serial line) is remapped to vector 0x24 by the PIC.
+pub const SERIAL_VECTOR: u8 = 0x24;
+
 /// The software-interrupt vector the ring-3 syscall door uses (`int 0x80`). Its IDT gate is
 /// installed with DPL=3 so an unprivileged task may invoke it; every other user vector stays DPL=0.
 pub const SYSCALL_VECTOR: u8 = 0x80;
@@ -59,8 +62,16 @@ pub fn init() {
         idt.page_fault.set_handler_fn(page_fault);
         idt.double_fault.set_handler_fn(double_fault);
         idt[TIMER_VECTOR].set_handler_fn(timer);
+        idt[SERIAL_VECTOR].set_handler_fn(serial);
         IDT.get().load();
     }
+}
+
+/// COM1 has bytes for the console (REQ-CON-002, ADR-045). Installed unconditionally so the vector is
+/// never a hole; inert unless `conirq::init` unmasked IRQ4, because the PIC then never raises it.
+extern "x86-interrupt" fn serial(_frame: InterruptStackFrame) {
+    crate::conirq::on_serial_irq();
+    crate::pic::eoi(SERIAL_VECTOR);
 }
 
 extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {

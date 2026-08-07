@@ -7,10 +7,8 @@ use core::fmt::{self, Write};
 
 const UART0_BASE: usize = 0x1000_0000;
 const UART_THR: usize = 0x00; // transmit holding register (write)
-#[cfg(feature = "interactive")]
 const UART_RBR: usize = 0x00; // receive buffer register (read)
 const UART_LSR: usize = 0x05; // line status register
-#[cfg(feature = "interactive")]
 const LSR_DR: u8 = 1 << 0; // receive data ready
 const LSR_THRE: u8 = 1 << 5; // transmit holding register empty
 
@@ -20,7 +18,6 @@ const LSR_THRE: u8 = 1 << 5; // transmit holding register empty
 /// will not arrive. Read directly rather than through SBI's console extension for the same reason
 /// `putc` is — the firmware has released the UART by handoff, and this works regardless of which
 /// SBI extensions it chose to enable.
-#[cfg(feature = "interactive")]
 pub fn getc() -> Option<u8> {
     unsafe {
         let lsr = (UART0_BASE + UART_LSR) as *const u8;
@@ -71,4 +68,24 @@ macro_rules! kprint {
 macro_rules! kprintln {
     () => ($crate::console::puts("\n"));
     ($($arg:tt)*) => ({ $crate::console::_print(format_args!($($arg)*)); $crate::console::puts("\n"); });
+}
+
+/// Interrupt-enable register: which UART conditions raise an interrupt.
+#[cfg(feature = "interactive")]
+const UART_IER: usize = 0x01;
+
+/// Ask the UART to interrupt when input arrives (REQ-CON-002). Receive-data-available only: the
+/// transmitter stays polled, because `puts` is synchronous and an interrupt there would buy nothing
+/// but a second concurrency problem.
+#[cfg(feature = "interactive")]
+pub fn rx_interrupt_enable() {
+    // SAFETY: IER is a byte-wide Device register in the identity-mapped UART window.
+    unsafe { core::ptr::write_volatile((UART0_BASE + UART_IER) as *mut u8, 0x01) };
+}
+
+/// Take one byte if the receive register holds one. Same read as `getc`; named apart because the
+/// interrupt handler drains a burst with it while `getc` is the polled fallback. Reading the byte is
+/// also what deasserts the UART's interrupt — there is no separate acknowledge.
+pub fn rx_take() -> Option<u8> {
+    getc()
 }

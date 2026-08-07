@@ -14,8 +14,6 @@ use kernel_core::Hal;
 
 use crate::frames;
 use crate::hal::ActiveHal;
-#[cfg(feature = "interactive")]
-use crate::serial;
 
 /// This target's answers to the questions a command may ask.
 pub struct Host;
@@ -35,6 +33,10 @@ impl ShellHost for Host {
     }
     fn privilege(&self) -> u64 {
         ActiveHal::current_privilege()
+    }
+    #[cfg(feature = "interactive")]
+    fn input_dropped(&self) -> u64 {
+        crate::conirq::dropped()
     }
 }
 
@@ -79,7 +81,10 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
         kprintln!("[console] FATAL: no usable namespace");
         ActiveHal::exit(251)
     };
-    shell::run_loop(&Host, &mut fs, dev, &mut serial::getc, &mut emit);
+    // Interrupt-driven from here (REQ-CON-002, ADR-045): COM1 raises IRQ4, the handler moves the
+    // bytes into the ring, and the loop reads the ring instead of polling a mostly-empty register.
+    crate::conirq::init();
+    shell::run_loop(&Host, &mut fs, dev, &mut crate::conirq::pop, &mut emit);
     ActiveHal::exit(0)
 }
 

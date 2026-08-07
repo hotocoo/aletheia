@@ -73,14 +73,17 @@ drive_session() {
   done
 
   for line in "$@"; do
+    # Sample the prompt count BEFORE typing, not after. Sampling after is a race: if the guest has
+    # already answered and printed its next prompt by the time the sample is taken, `want` is one too
+    # high, that command spins its full timeout, and every later command inherits the skew — six
+    # commands x 30s is exactly the watchdog, which is how this presented (a session that answered
+    # every command and then "never received" the last one).
+    local want cur spun=0
+    want=$(( $(prompt_count "$log") + 1 ))
     printf '%s\r' "$line" >&3
     # `halt` is the one command that does NOT print another prompt — waiting for one would just
     # burn the timeout on every session.
     [ "$line" = "halt" ] && break
-    # One prompt per command: wait for the count to grow rather than guessing how long a
-    # journal transaction takes on this host.
-    local want cur spun=0
-    want=$(( $(prompt_count "$log") + 1 ))
     while : ; do
       cur="$(prompt_count "$log")"
       [ "$cur" -ge "$want" ] && break

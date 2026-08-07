@@ -32,28 +32,38 @@ register almost every time, and burned a core doing it.
   running command, never that a line was too long for the buffer carrying it. **Every dropped byte is
   counted and `mem` reports it**, because input loss the operator cannot see is loss they will blame
   on the command they typed.
-- **aarch64 takes the interrupt.** Vector 0x280 — an interrupt while the KERNEL runs — had been a
+- **All three targets take the interrupt.** On aarch64, vector 0x280 — an interrupt while the KERNEL runs — had been a
   fatal catch-all; it is now a handler that is **still fatal for every INTID except the console's**,
   because making a fatal vector live must not quietly swallow what nobody expected. GICv2 routes
   PL011's SPI 1 (INTID 33) at a priority BELOW the timer's, so a keystroke never outranks preemption.
-- **Two bugs the gate caught, both worth naming.** (1) Acknowledging the UART *after* draining loses a
+- **x86-64 and RISC-V each needed something aarch64 did not.** x86: arming the console **masks IRQ0
+  first** — the boot leaves the PIT free-running for the ring-3 suite, so the instant `sti` executed
+  the timer fired thousands of times a second into a handler the console has no use for and the
+  session never progressed. RISC-V: a **PLIC driver, which did not exist**, whose context number is
+  DERIVED rather than constant — QEMU lays contexts out as `2N`/`2N+1` per hart and OpenSBI's boot-hart
+  lottery may hand us any hartid, so a hardcoded context configured hart 0 whichever hart was really
+  running and the console worked or went deaf on a coin flip inside the firmware.
+- **Three bugs the gate caught, all worth naming.** (1) Acknowledging the UART *after* draining loses a
   byte that lands mid-drain — its condition is cleared while the byte still sits in the FIFO, so no
   further interrupt is raised and the console goes deaf. It presented as a session that answered six
   commands and ignored the seventh. Clear BEFORE draining. (2) The receive interrupt alone never fires
   for a burst shorter than the FIFO trigger level, which is exactly what a human typing one character
-  at a time produces; the receive-TIMEOUT interrupt is what makes single keystrokes work.
+  at a time produces; the receive-TIMEOUT interrupt is what makes single keystrokes work. (3) The gate
+  itself sampled its prompt count AFTER typing — if the guest answered before the sample, that command
+  burned its full 30s timeout and every later one inherited the skew, which is exactly the watchdog.
 - **No lock.** Two parties — handler (producer) and loop (consumer). A spinlock taken in a handler and
   in the code it interrupts is the classic self-deadlock; the consumer masks IRQs around `pop`, and the
   handler cannot be re-entered because the CPU masks IRQs on entry and nothing unmasks before `eret`.
 - **Proof.** 8 live ring invariants on **every** target, 9 host tests that attack the surviving
   contents rather than the counters (after any overpressure, what remains must be exactly the oldest
   prefix; a typed command must come back intact behind a flood), and **3 behaviors added to the
-  conformance contract (85 -> 88)** so the overflow policy cannot diverge by CPU.
+  conformance contract (85 -> 88)** so the overflow policy cannot diverge by CPU — plus the
+  three-target scripted-operator gate, now driving three real interrupt controllers.
 
-**Not claimed.** Only **aarch64** takes the interrupt — x86-64 (PIC, COM1 on IRQ4) and RISC-V (needs a
-PLIC driver that does not exist) still poll, so REQ-CON-002 is `partial`, not `delivered`. The handler
-path itself is hardware and no host test covers it; what proves it is the scripted-operator gate. And
-`run_loop` still spins when the ring is empty — a `wfi` there is the obvious next step, not claimed here.
+**Not claimed.** The **transmit** side is still polled on every target. Each handler's wire path is
+hardware and no host test covers it — what proves it is the scripted-operator gate, and the three bugs
+above are the evidence that gate has teeth. Framing/parity errors are read past rather than reported.
+And `run_loop` still spins when the ring is empty; a `wfi` there is the obvious next step, not claimed here.
 
 ## Previous wave — an OS you can sit in front of (2026-08-07, REQ-CON-001, ADR-044)
 

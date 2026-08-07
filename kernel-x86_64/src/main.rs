@@ -25,6 +25,7 @@ extern crate alloc;
 #[macro_use]
 mod console;
 mod cell;
+mod conirq;
 mod exit;
 mod framebuffer;
 mod frames;
