@@ -24,6 +24,7 @@
 
 extern crate alloc;
 
+pub mod deadva;
 pub mod device;
 pub mod dma;
 pub mod faultclass;
