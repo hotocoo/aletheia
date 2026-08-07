@@ -964,6 +964,23 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             .clean(),
             "dead: an empty declaration is refused, not reported clean (the audit cannot pass vacuously)"
         );
+        // §INV-DEADVA-6, ATTACKED rather than asserted. This suite runs before `kmap::activate()`,
+        // so `active_root()` is still OVMF's tree — the genuinely dirty source that produced the
+        // original hole. Building from it must yield NOTHING and cost nothing: a builder that leaked
+        // its two table frames on the refusal would turn a fail-closed path into an exhaustion bug,
+        // so the frame count is compared, not just the return value.
+        {
+            let dirty = active_root();
+            let before = frames::free_count();
+            let built = build_space_from(dirty);
+            check!(
+                dirty != kroot
+                    && !audit_dead(dirty).clean()
+                    && built.is_none()
+                    && frames::free_count() == before,
+                "dead: building a space from a tree with live dead pages is REFUSED, and costs no frames"
+            );
+        }
         match build_space() {
             Some(derived) => {
                 let report = audit_dead(derived);
@@ -1095,8 +1112,6 @@ unsafe fn mapper_for(pml4_phys: u64) -> x86_64::structures::paging::OffsetPageTa
 /// USER-accessible so ring 3 can walk to its pages (kernel leaves stay supervisor, so the U/S AND
 /// keeps them ring-0-only). Returns the new PML4 physical address, or `None` on exhaustion.
 pub fn build_space() -> Option<u64> {
-    let pml4 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
-    let pdpt = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
     // Copy the KERNEL's own map, not merely whatever CR3 holds (REQ-MM-007/008, ALET-P2-033). This
     // is the line the hole came in through: `kmap::activate()` runs AFTER the virtual-memory suite,
     // so a space built during it copied OVMF's tree — which maps VA 0 as RAM and covers the ring-0
@@ -1104,7 +1119,19 @@ pub fn build_space() -> Option<u64> {
     // two addresses the kernel's own map deliberately cannot. Sourcing from `kmap::root()` makes the
     // property hold by CONSTRUCTION rather than by activation order; `active_root()` remains the
     // fallback for the window before the kernel's map exists at all.
-    let cur = space_source_root();
+    build_space_from(space_source_root())
+}
+
+/// [`build_space`] with the source tree named explicitly.
+///
+/// Split out so the fail-closed half of §INV-DEADVA-6 can be ATTACKED rather than asserted: before
+/// `kmap::activate()`, `active_root()` is still OVMF's tree — VA 0 mapped as RAM, the ring-0 stack
+/// guard under a 2 MiB huge page — so the boot suite can hand this function a genuinely dirty source
+/// and require that it yields no space AND gives its frames back. A failure path with no test is a
+/// claim, not a property.
+pub fn build_space_from(cur: u64) -> Option<u64> {
+    let pml4 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
+    let pdpt = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
     // SAFETY: PML4/PDPT frames are 4 KiB and identity-accessible under OVMF's map; single-core.
     unsafe {
         let src = cur as *const u64;
@@ -1476,8 +1503,11 @@ pub fn unmap_user(root: u64, va: u64) -> bool {
 /// Switch the active address space by writing CR3 (preserving the current CR3 flags).
 ///
 /// # Safety
-/// `root` must be a PML4 that maps the currently-executing kernel (guaranteed by `build_space`,
-/// which copies every kernel slot); otherwise the next instruction fetch faults. Single-core.
+/// `root` must be a PML4 that maps the currently-executing kernel. `build_space` guarantees this by
+/// copying every slot of the tree it derives from — since ALET-P2-033 that is the kernel's own map
+/// whenever one exists (`space_source_root`), which identity-maps all RAM and the image, so the
+/// guarantee holds through the changed source. Otherwise the next instruction fetch faults.
+/// Single-core.
 pub unsafe fn switch_to(root: u64) {
     let (_frame, flags) = Cr3::read();
     let f = X86PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(root));

@@ -79,3 +79,40 @@ translation, and PIE kernel images.
   a bug that continues executing. The point is to stop.
 * **Randomize now, with identity mapping, for "some" entropy.** Rejected as security theater: it would add
   entropy to the boot log and change nothing an attacker must defeat.
+
+## Addendum (2026-08-07) — the dead pages belong to every space, and to construction (ALET-P2-033)
+
+The decision above is written as a property of *the* address space. The system builds many: each
+per-process root is a separate tree, and this ADR said nothing about them. That silence was a real hole,
+not a wording gap.
+
+**What was wrong.** On x86-64 a derived space is built by COPYING a live top-level table, and the source
+was whatever CR3 held. `kmap::activate()` runs *after* the virtual-memory suite, so a space built during
+it copied OVMF's tree — which maps VA 0 as RAM and covers the ring-0 stack guard with a 2 MiB huge page.
+The derived space inherited both. Ring 3 could reach two addresses the kernel's own map deliberately
+cannot: the guard **inverted**, protecting the less privileged tree and not the more privileged one.
+
+**Decision.** Two changes, and the second is the one that generalizes.
+
+1. `vm::space_source_root()` — a derived space is copied from the kernel's own map whenever one exists,
+   and only otherwise from CR3. The dead pages become a property of **construction** rather than of boot
+   ordering, which is the kind of dependency that comes back the next time a phase moves.
+2. `kernel_core::deadva` — the rule is stated once, arch-neutrally, and every builder audits the tree it
+   is about to hand out. The audit asks two questions, not one: the page must not translate, **and** no
+   descriptor at any level may still cover it, because an unreachable page under a live block descriptor
+   is one split away from being alive again. An empty declaration is itself a violation, so a target that
+   forgets to declare fails rather than passing vacuously.
+
+**Why an audit rather than a repair.** Below its private PDPT, a derived space SHARES the kernel's tables.
+Clearing a descriptor to "fix" the derived tree would clear it in the kernel's map too. So inheritance is
+the mechanism and the audit is what stops it being an assumption: a source that does not have these pages
+dead yields no space at all, and the builder returns its frames.
+
+**Consequence recorded rather than discovered later.** Changing the copy source changed what a derived
+space shares. OVMF's tree spreads across many PML4 slots; the kernel's own map covers 4 GiB entirely
+inside PML4[0]. The shared kernel table a teardown must not free therefore lives one level down, in the
+private PDPT — two teardown invariants that had searched PML4 slots 1..512 were corrected rather than left
+passing for the wrong reason.
+
+**Not claimed.** The fail-closed builder path is adversarially proved on x86-64 only (§INV-DEADVA-6):
+`build_identity` on aarch64/RISC-V takes no source, so nothing can hand it a tree that fails the audit.

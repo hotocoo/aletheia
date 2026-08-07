@@ -41,7 +41,7 @@ claim about one space in a system that makes many.
   the wrong reason: the teardown suite searched PML4 slots 1..512 for a shared kernel table, which matched
   only because OVMF's tree spread across them. The kernel's own map covers 4 GiB entirely inside PML4[0], so
   the sharing a teardown must not disturb lives one level down, in the private PDPT.
-- **Gates:** virtual-memory invariants 62 → **66** (aarch64, RISC-V) and 66 → **70** (x86-64); the
+- **Gates:** virtual-memory invariants 62 → **66** (aarch64, RISC-V) and 66 → **71** (x86-64); the
   `conformance.sh` core contract 74 → **78** named behaviors, PASS on all three targets; six host tests;
   `quality-gate` PASS, `register` PASS, `traceability` PASS, `ci-parity` PASS.
 - **Register: 31 → 32 resolved, 31 → 30 open.**
