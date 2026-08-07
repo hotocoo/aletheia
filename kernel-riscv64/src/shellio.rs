@@ -104,3 +104,16 @@ pub fn interactive() -> ! {
         }
     }
 }
+
+/// Prove the console's INPUT RING on this target (REQ-CON-002, ADR-045). The ring is what an
+/// interrupt hands the shell; its overflow policy decides whether a burst truncates a line or
+/// silently rewrites one, so it is proved on every target, not only the ones taking interrupts yet.
+pub fn ring_selftest() -> Result<u32, (u32, &'static str)> {
+    kernel_core::conring::ring_suite(&mut |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    })
+}

@@ -102,6 +102,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 9 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 5 NETWORK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 9 DMA-BOUNDARY INVARIANTS HOLD' "$LOG" \
+&& grep -q 'ALL 8 INPUT-RING INVARIANTS HOLD' "$LOG" \
 && grep -q 'ALL 15 CONSOLE INVARIANTS HOLD' "$LOG" \
    && grep -q 'PERSISTENT MEDIUM: boot #1, 0 entities verified' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then

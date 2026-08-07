@@ -515,6 +515,15 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // and answer a human, proved here the same way everything else is — a scripted session against
     // a real namespace, so the gate covers the code an interactive boot runs.
     kprintln!("");
+    kprintln!("--- input-ring selftests (what an interrupt hands the shell) ---");
+    match shellio::ring_selftest() {
+        Ok(n) => kprintln!("[conring] ALL {} INPUT-RING INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[conring] FAILED at input-ring invariant {}: {}", idx, name);
+            ActiveHal::exit(230 + idx as i32);
+        }
+    }
+
     kprintln!("--- console selftests (line editing + command dispatch over the namespace) ---");
     match shellio::selftest() {
         Ok(n) => kprintln!("[console] ALL {} CONSOLE INVARIANTS HOLD", n),
