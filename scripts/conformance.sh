@@ -157,6 +157,13 @@ CONTRACT=(
   # "what may become a command" must not vary by CPU: a target whose editor admits a byte the others
   # refuse has a different input boundary, and a target whose console write is not committed has a
   # different durability boundary. The editor rules and the namespace effects are both here.
+  # The console's INPUT RING (REQ-CON-002, ADR-045). Only aarch64 takes the interrupt today, but the
+  # ring's overflow POLICY is what decides whether a burst truncates a line or silently rewrites one,
+  # and a target that lost different keystrokes than its siblings would be a different console. The
+  # policy is therefore contracted on every target, ahead of the interrupt wiring.
+  "conring: a full ring refuses the NEWEST byte and never overwrites the oldest"
+  "conring: every refused byte is counted (loss is reportable, not invisible)"
+  "conring: after an overflow the accepted bytes are still intact and in order"
   "console: a non-printable byte never enters the line"
   "console: a line stops growing at its bound instead of allocating"
   "console: Ctrl-C discards the line without running it"

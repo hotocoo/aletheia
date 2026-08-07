@@ -36,6 +36,10 @@ impl ShellHost for Host {
     fn privilege(&self) -> u64 {
         ActiveHal::current_privilege()
     }
+    #[cfg(feature = "interactive")]
+    fn input_dropped(&self) -> u64 {
+        crate::conirq::dropped()
+    }
 }
 
 /// Blocks for the console's scratch namespace when no disk is attached. Small: this is a RAM disk
@@ -79,7 +83,11 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
         kprintln!("[console] FATAL: no usable namespace");
         ActiveHal::exit(251)
     };
-    shell::run_loop(&Host, &mut fs, dev, &mut uart::getc, &mut emit);
+    // Interrupt-driven from here (REQ-CON-002, ADR-045): the UART raises an IRQ when a byte lands,
+    // the handler moves it into the ring, and the loop reads the ring instead of spinning on a
+    // register that is empty almost every time.
+    crate::conirq::init();
+    shell::run_loop(&Host, &mut fs, dev, &mut crate::conirq::pop, &mut emit);
     ActiveHal::exit(0)
 }
 
@@ -107,4 +115,17 @@ pub fn interactive() -> ! {
             session_on(&mut disk)
         }
     }
+}
+
+/// Prove the console's INPUT RING on this target (REQ-CON-002, ADR-045). The ring is what an
+/// interrupt hands the shell; its overflow policy decides whether a burst truncates a line or
+/// silently rewrites one, so it is proved on every target, not only the ones taking interrupts yet.
+pub fn ring_selftest() -> Result<u32, (u32, &'static str)> {
+    kernel_core::conring::ring_suite(&mut |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    })
 }

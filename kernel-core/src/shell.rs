@@ -151,6 +151,12 @@ pub trait ShellHost {
     fn total_frames(&self) -> usize;
     /// Current CPU privilege level, backend-defined (as `Hal::current_privilege`).
     fn privilege(&self) -> u64;
+    /// Console bytes the target refused because the input ring was full (REQ-CON-002). A polled
+    /// target reports 0. Surfaced rather than hidden: input loss the operator cannot see is input
+    /// loss they will blame on the command they typed.
+    fn input_dropped(&self) -> u64 {
+        0
+    }
 }
 
 /// The prompt. A constant because the live suite asserts on it.
@@ -244,6 +250,10 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 free,
                 total,
                 total.saturating_sub(free)
+            ));
+            out(&format!(
+                "input: {} byte(s) dropped since boot",
+                host.input_dropped()
             ));
         }
         "df" => match fs.free_blocks(dev) {

@@ -5,7 +5,7 @@
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..044`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..045`.
 
 ## What Aletheia is
 
@@ -17,7 +17,45 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — an OS you can sit in front of (2026-08-07, REQ-CON-001, ADR-044)
+## Latest wave — the console stops spinning (2026-08-07, REQ-CON-002, ADR-045)
+
+Every driver here polls, and `docs/MATURITY.md` lists that as item 3 of what production would
+additionally require. The console made it concrete: `run_loop` spun on `getc`, reading an empty
+register almost every time, and burned a core doing it.
+
+- **`kernel-core/src/conring.rs` — a bounded ring, and one real decision.** The overflow policy is
+  **DROP-NEWEST**. A ring that overwrites its oldest byte is the conventional choice and it silently
+  changes MEANING: `rm notes` with its head overwritten reads as `notes`, a different command the
+  editor would accept without complaint. Dropping the newest truncates a burst instead — the operator
+  sees a short line and retypes it, and nothing already typed was rewritten underneath them. Capacity
+  equals `MAX_LINE`, so one whole line always fits; an overflow means the operator got ahead of a
+  running command, never that a line was too long for the buffer carrying it. **Every dropped byte is
+  counted and `mem` reports it**, because input loss the operator cannot see is loss they will blame
+  on the command they typed.
+- **aarch64 takes the interrupt.** Vector 0x280 — an interrupt while the KERNEL runs — had been a
+  fatal catch-all; it is now a handler that is **still fatal for every INTID except the console's**,
+  because making a fatal vector live must not quietly swallow what nobody expected. GICv2 routes
+  PL011's SPI 1 (INTID 33) at a priority BELOW the timer's, so a keystroke never outranks preemption.
+- **Two bugs the gate caught, both worth naming.** (1) Acknowledging the UART *after* draining loses a
+  byte that lands mid-drain — its condition is cleared while the byte still sits in the FIFO, so no
+  further interrupt is raised and the console goes deaf. It presented as a session that answered six
+  commands and ignored the seventh. Clear BEFORE draining. (2) The receive interrupt alone never fires
+  for a burst shorter than the FIFO trigger level, which is exactly what a human typing one character
+  at a time produces; the receive-TIMEOUT interrupt is what makes single keystrokes work.
+- **No lock.** Two parties — handler (producer) and loop (consumer). A spinlock taken in a handler and
+  in the code it interrupts is the classic self-deadlock; the consumer masks IRQs around `pop`, and the
+  handler cannot be re-entered because the CPU masks IRQs on entry and nothing unmasks before `eret`.
+- **Proof.** 8 live ring invariants on **every** target, 9 host tests that attack the surviving
+  contents rather than the counters (after any overpressure, what remains must be exactly the oldest
+  prefix; a typed command must come back intact behind a flood), and **3 behaviors added to the
+  conformance contract (85 -> 88)** so the overflow policy cannot diverge by CPU.
+
+**Not claimed.** Only **aarch64** takes the interrupt — x86-64 (PIC, COM1 on IRQ4) and RISC-V (needs a
+PLIC driver that does not exist) still poll, so REQ-CON-002 is `partial`, not `delivered`. The handler
+path itself is hardware and no host test covers it; what proves it is the scripted-operator gate. And
+`run_loop` still spins when the ring is empty — a `wfi` there is the obvious next step, not claimed here.
+
+## Previous wave — an OS you can sit in front of (2026-08-07, REQ-CON-001, ADR-044)
 
 Every gate here boots, proves its invariants and **exits with a verdict**. That is what makes the claims
 checkable, and it is also why the most ordinary question about an operating system had no answer: *can I
