@@ -153,6 +153,17 @@ CONTRACT=(
   "dma: an address nobody registered is never device-visible (deny by default)"
   "dma: a range overlapping the kernel image is refused"
   "dma: revoking ends visibility, and revoking twice is refused"
+  # The interactive console (REQ-CON-001, ADR-044). The console is where a HUMAN meets the OS, so
+  # "what may become a command" must not vary by CPU: a target whose editor admits a byte the others
+  # refuse has a different input boundary, and a target whose console write is not committed has a
+  # different durability boundary. The editor rules and the namespace effects are both here.
+  "console: a non-printable byte never enters the line"
+  "console: a line stops growing at its bound instead of allocating"
+  "console: Ctrl-C discards the line without running it"
+  "console: an unknown command is refused by name"
+  "console: an object written through the console reads back byte for byte"
+  "console: a console write is committed, not held in the session"
+  "console: an invalid name is refused with the reason, and writes nothing"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

@@ -42,6 +42,50 @@ cd aletheia && cargo test          # hosted System Core suite (M1 + P2 + policy 
 ./scripts/build-all.sh             # every crate, each with its own pinned toolchain/target
 ```
 
+## Actually using it — the interactive console
+
+Every command above ends in a **verdict**. To end in a **prompt** instead:
+
+```bash
+./scripts/run-interactive.sh              # aarch64 (default)
+./scripts/run-interactive.sh riscv64
+./scripts/run-interactive.sh x86_64       # needs OVMF + mtools
+```
+
+The machine boots, runs its invariant suites, and then hands you the console (REQ-CON-001, ADR-044):
+
+```
+aletheia> help
+commands:
+  help               list commands
+  arch               active target backend and privilege level
+  uptime             nanoseconds since boot
+  mem                physical frame allocator usage
+  df                 filesystem space, in blocks
+  ls                 every named object
+  stat NAME          one object's extent and length
+  cat NAME           an object's contents
+  write NAME TEXT    create or atomically replace an object
+  rm NAME            remove an object (contents erased)
+  echo TEXT          print TEXT
+  halt               stop the machine
+aletheia> write notes the OS remembers
+wrote 16 bytes to notes
+aletheia> halt
+halting.
+```
+
+Run it again and `cat notes` still answers: the console writes go through the journal onto the persistent
+disk (`kernel*/target/interactive-persistent.img`, kept between runs — delete it for an empty namespace).
+`Ctrl-A X` quits QEMU; `Ctrl-C` at the prompt discards the line you are typing.
+
+**Why this cannot break the gates.** Interactivity is a cargo feature (`--features interactive`), off by
+default, so every gate builds the non-interactive kernel and keeps its exit-code contract. The console is
+still gated, two ways: 15 live invariants run inside every target's normal boot (scripted sessions against a
+real namespace), and `./scripts/console-e2e.sh` boots all three targets WITH the feature, types at them,
+and asserts the transcript — including that a second boot still holds what the first one wrote. Because
+`halt` exits through the same path the gates use, even a session has a machine-checkable exit code.
+
 ---
 
 ## aarch64 (bootstrap / dev backend)

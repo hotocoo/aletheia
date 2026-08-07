@@ -26,6 +26,23 @@ fn transmit_empty() -> bool {
     unsafe { Port::<u8>::new(COM1 + 5).read() & 0x20 != 0 }
 }
 
+/// One byte from the console, or `None` when nothing has been typed (REQ-CON-001).
+///
+/// Non-blocking: the interactive loop owns the waiting, so a gate can never wedge on input that
+/// will not arrive. Line Status Register bit 0 is "data ready"; the byte is then in the receive
+/// buffer at the base port.
+#[cfg(feature = "interactive")]
+pub fn getc() -> Option<u8> {
+    // SAFETY: COM1's LSR and RBR are the ports `init` already programmed; reading them is
+    // side-effect-free apart from consuming the received byte.
+    unsafe {
+        if Port::<u8>::new(COM1 + 5).read() & 0x01 == 0 {
+            return None;
+        }
+        Some(Port::<u8>::new(COM1).read())
+    }
+}
+
 pub fn putc(byte: u8) {
     while !transmit_empty() {}
     unsafe { Port::<u8>::new(COM1).write(byte) }

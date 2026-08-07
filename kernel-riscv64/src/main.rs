@@ -26,6 +26,7 @@ mod frames;
 mod hal;
 mod heap;
 mod sbi;
+mod shellio;
 mod smp;
 mod trap;
 mod usermode;
@@ -303,11 +304,31 @@ pub extern "C" fn kmain() -> ! {
         },
     }
 
+    // The interactive console (REQ-CON-001, ADR-044): the subsystem that lets the machine stay up
+    // and answer a human, proved here the same way everything else is — a scripted session against
+    // a real namespace, so the gate covers the code an interactive boot runs.
+    kprintln!("");
+    kprintln!("--- console selftests (line editing + command dispatch over the namespace) ---");
+    match shellio::selftest() {
+        Ok(n) => kprintln!("[console] ALL {} CONSOLE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[console] FAILED at console invariant {}: {}", idx, name);
+            ActiveHal::exit(250 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!(
-        "[e2e] PASS — RISC-V S-mode boot + SBI + rdtime + 11 spine + memory + virtual-memory + user-mode + filesystem invariants"
+        "[e2e] PASS — RISC-V S-mode boot + SBI + rdtime + 11 spine + memory + virtual-memory + user-mode + filesystem + console invariants"
     );
     kprintln!("[e2e] Aletheia re-proved its invariants on its second first-class target. Halting.");
+
+    // With `--features interactive` the boot hands the machine to the serial line instead of
+    // exiting. The gate builds without the feature, so its exit-code contract is untouched.
+    #[cfg(feature = "interactive")]
+    shellio::interactive();
+
+    #[cfg(not(feature = "interactive"))]
     ActiveHal::exit(0)
 }
 

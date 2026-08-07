@@ -7,8 +7,31 @@ use core::fmt::{self, Write};
 
 const UART0_BASE: usize = 0x1000_0000;
 const UART_THR: usize = 0x00; // transmit holding register (write)
+#[cfg(feature = "interactive")]
+const UART_RBR: usize = 0x00; // receive buffer register (read)
 const UART_LSR: usize = 0x05; // line status register
+#[cfg(feature = "interactive")]
+const LSR_DR: u8 = 1 << 0; // receive data ready
 const LSR_THRE: u8 = 1 << 5; // transmit holding register empty
+
+/// One byte from the console, or `None` when nothing has been typed (REQ-CON-001).
+///
+/// Non-blocking: the interactive loop owns the waiting, so a gate can never wedge on input that
+/// will not arrive. Read directly rather than through SBI's console extension for the same reason
+/// `putc` is — the firmware has released the UART by handoff, and this works regardless of which
+/// SBI extensions it chose to enable.
+#[cfg(feature = "interactive")]
+pub fn getc() -> Option<u8> {
+    unsafe {
+        let lsr = (UART0_BASE + UART_LSR) as *const u8;
+        if core::ptr::read_volatile(lsr) & LSR_DR == 0 {
+            return None;
+        }
+        Some(core::ptr::read_volatile(
+            (UART0_BASE + UART_RBR) as *const u8,
+        ))
+    }
+}
 
 pub fn putc(byte: u8) {
     unsafe {
