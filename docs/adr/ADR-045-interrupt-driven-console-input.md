@@ -54,7 +54,7 @@ in kernel space" from a loud failure into silence.
    on entry and nothing unmasks before `eret`.
 
 7. **All of it stays behind the `interactive` feature.** The non-interactive kernel every gate builds
-   does not arm the GIC, does not enable the UART's interrupt, and never unmasks. Only the *handler*
+   arms no interrupt controller, enables no UART interrupt, and never unmasks. Only the *handler*
    is compiled unconditionally — the vector must resolve its symbol in both builds — and it is inert
    because nothing ever routes an interrupt to it.
 
@@ -64,14 +64,26 @@ in kernel space" from a loud failure into silence.
 running is captured by the device rather than dropped on the floor. One item on the production list
 now has one subsystem that does not belong to it.
 
+**All three targets take the interrupt**, and each needed something the others did not:
+
+* **aarch64** — GICv2, PL011 SPI 1 (INTID 33), priority below the timer's.
+* **x86-64** — the 8259A, COM1 on IRQ4 (vector 0x24). Arming it **masks IRQ0 first**: the boot leaves
+  the PIT free-running for the ring-3 preemption suite, so the instant `sti` executed the timer fired
+  thousands of times a second into a handler the console has no use for, and the session never made
+  progress. Those suites are finished by the time anyone types.
+* **RISC-V** — a PLIC, which had no driver before this. Its context number is **derived, not
+  constant**: QEMU lays contexts out as `2N` (hart N M-mode) and `2N+1` (S-mode), and OpenSBI's
+  boot-hart lottery may hand us any hartid. Hardcoding context 1 configured hart 0 whichever hart was
+  really running, so the console worked or went deaf on a coin flip inside the firmware.
+
 **What it costs, stated plainly.**
 
-* **Only aarch64 takes the interrupt.** x86-64 has a PIC with COM1 on IRQ4 and RISC-V needs a PLIC
-  driver that does not exist yet; both still poll. The *ring* is proved on all three (8 live
-  invariants each) so the policy cannot diverge, but "interrupt-driven" is an aarch64 claim today,
-  and REQ-CON-002 is `partial` for that reason rather than `delivered`.
-* The handler's own path — GIC acknowledge, FIFO drain, EOI — is hardware, so no host test covers it.
+* Each handler's own path — acknowledge, drain, complete — is hardware, so no host test covers it.
   What proves it is the scripted-operator gate: a session that answers command after command is a
-  session whose interrupts kept arriving, and the ordering bug above shows that gate has teeth.
+  session whose interrupts kept arriving. Three real bugs were caught that way, which is the evidence
+  the gate has teeth: the aarch64 acknowledge-ordering race, the x86-64 timer storm, and the RISC-V
+  context lottery.
+* **The transmit side is still polled** on every target. `puts` is synchronous, and an interrupt there
+  would buy nothing but a second concurrency problem.
 * The console still spins in `run_loop` when the ring is empty. A `wfi` there is the obvious next
   step and is not claimed here.

@@ -21,6 +21,7 @@ global_asm!(include_str!("boot.s"));
 #[macro_use]
 mod console;
 mod arch;
+mod conirq;
 mod exit;
 mod frames;
 mod hal;

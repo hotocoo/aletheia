@@ -36,6 +36,10 @@ impl ShellHost for Host {
     fn privilege(&self) -> u64 {
         ActiveHal::current_privilege()
     }
+    #[cfg(feature = "interactive")]
+    fn input_dropped(&self) -> u64 {
+        crate::conirq::dropped()
+    }
 }
 
 /// Blocks for the console's scratch namespace when no disk is attached.
@@ -77,7 +81,12 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
         kprintln!("[console] FATAL: no usable namespace");
         ActiveHal::exit(251)
     };
-    shell::run_loop(&Host, &mut fs, dev, &mut console::getc, &mut emit);
+    // Interrupt-driven from here (REQ-CON-002, ADR-045). The trap vector is re-installed first: the
+    // user-mode suite points `stvec` at its own entry, and a console interrupt arriving at THAT
+    // handler would be read as an unexpected user trap.
+    crate::trap::init();
+    crate::conirq::init();
+    shell::run_loop(&Host, &mut fs, dev, &mut crate::conirq::pop, &mut emit);
     ActiveHal::exit(0)
 }
 
