@@ -21,6 +21,7 @@
 use crate::frames;
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use kernel_core::deadva;
 use kernel_core::frameown::Owner;
 use kernel_core::layout;
 use kernel_core::memattr::{self, AttrOps, MemKind, PageAttrs};
@@ -352,7 +353,39 @@ pub fn build_identity() -> Option<usize> {
     // SAFETY: RAM_BASE is in L1 index 1 (0x4000_0000 >> 30 == 1).
     unsafe { write_entry(l1, 1, (l2_ram as u64) | DESC_TABLE) };
 
+    // REQ-MM-007/008, ALET-P2-033: the two splits above are what make VA 0 and the stack guard dead,
+    // and every DERIVED per-process space comes out of this same builder — so the property is checked
+    // here, at the one place it is established, rather than assumed of each space that inherits it. A
+    // tree that fails yields no space at all and returns its frames, because handing out a space that
+    // can reach the guard is worse than failing to build one.
+    if !audit_dead(l1).clean() {
+        destroy_space(l1);
+        return None;
+    }
     Some(l1)
+}
+
+/// The virtual addresses this target declares permanently dead, in EVERY address space
+/// (REQ-MM-007/008, ALET-P2-033): VA 0 and the kernel stack's guard page — the two pages
+/// [`build_identity`] deliberately splits a block apart to leave without a descriptor.
+pub fn dead_set() -> deadva::DeadSet {
+    deadva::DeadSet::new("aarch64")
+        .with(deadva::DeadSpan::page("null", 0))
+        .with(deadva::DeadSpan::page(
+            "kernel-stack-guard",
+            stack_guard_page(),
+        ))
+}
+
+/// Audit any address space — the kernel's own root or a derived per-process one — for the dead
+/// pages. Asks both questions the property needs: the page must not TRANSLATE, and no descriptor at
+/// any level may still cover it (a live block descriptor is one split away from reviving it).
+pub fn audit_dead(root: usize) -> deadva::DeadReport {
+    deadva::audit(
+        &dead_set(),
+        |va| translate(root, va),
+        |va| leaf_of(root, va).is_some(),
+    )
 }
 
 /// This target's address-space geometry, for the arch-independent mapping-API admission check
@@ -1107,6 +1140,54 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             attrs_of(root, stack_low).is_some_and(|a| a.write && !a.exec_kernel),
             "guard: the stack itself is writable and never executable (W^X holds across the split)"
         );
+    }
+
+    // The dead pages are dead in a DERIVED space too (REQ-MM-007/008, ALET-P2-033). Everything above
+    // is a property of one tree; a per-process root is a different tree, and a user space able to
+    // reach an address the kernel's own map deliberately cannot is the guard inverted. Proved by
+    // BUILDING one and walking it, not by trusting that the same builder made it.
+    {
+        check!(
+            audit_dead(root).clean() && dead_set().pages() == 2,
+            "dead: this map has both dead pages absent, and the declaration names exactly two"
+        );
+        // A set that declares nothing must FAIL rather than pass vacuously — the audit's fail-closed
+        // posture, proved live rather than only on the host.
+        check!(
+            !deadva::audit(
+                &deadva::DeadSet::new("aarch64"),
+                |va| translate(root, va),
+                |va| leaf_of(root, va).is_some(),
+            )
+            .clean(),
+            "dead: an empty declaration is refused, not reported clean (the audit cannot pass vacuously)"
+        );
+        match build_identity() {
+            Some(derived) => {
+                let report = audit_dead(derived);
+                let absent = translate(derived, 0).is_none()
+                    && leaf_of(derived, stack_guard_page()).is_none();
+                destroy_space(derived);
+                check!(
+                    report.clean() && report.pages == 2 && report.spans == 2,
+                    "dead: a DERIVED per-process space has both dead pages absent (walked, not assumed)"
+                );
+                check!(
+                    absent,
+                    "dead: unprivileged code cannot reach VA 0 or the kernel stack guard through its own root"
+                );
+            }
+            None => {
+                check!(
+                    false,
+                    "dead: a DERIVED per-process space has both dead pages absent (walked, not assumed)"
+                );
+                check!(
+                    false,
+                    "dead: unprivileged code cannot reach VA 0 or the kernel stack guard through its own root"
+                );
+            }
+        }
     }
 
     frames::free(frame);

@@ -82,6 +82,15 @@ CONTRACT=(
   # this pair is what proves each one declared its span rather than merely owning the code.
   "wx: mapping over the split kernel image is refused (text still maps to itself)"
   "wx: unmapping the split kernel image is refused (text still read-only + executable)"
+  # Addresses that must be dead in EVERY space (REQ-MM-007/008, ALET-P2-033). The guard page and VA 0
+  # were proved only of the map each kernel built for itself; a per-process root is a different tree,
+  # and a user space that can reach an address the kernel's own map deliberately cannot is the guard
+  # inverted. Worded identically on all three because "which addresses are unreachable" is precisely
+  # the kind of boundary that must not vary by CPU.
+  "dead: this map has both dead pages absent, and the declaration names exactly two"
+  "dead: an empty declaration is refused, not reported clean (the audit cannot pass vacuously)"
+  "dead: a DERIVED per-process space has both dead pages absent (walked, not assumed)"
+  "dead: unprivileged code cannot reach VA 0 or the kernel stack guard through its own root"
   # The filesystem namespace (REQ-FS-001, ADR-035). The namespace is arch-independent code, so a
   # divergence here would mean a target's heap/alloc or storage path behaves differently — and the
   # behaviors that matter are refusals and crash outcomes, which must not vary by CPU. On aarch64 the

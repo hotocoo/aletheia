@@ -33,6 +33,7 @@ use x86_64::{PhysAddr, VirtAddr};
 
 use crate::frames;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use kernel_core::deadva;
 use kernel_core::frameown::Owner;
 use kernel_core::memattr::{self, AttrOps, MemKind, PageAttrs};
 use kernel_core::ptreclaim::{self, PathStep, TableOps};
@@ -590,11 +591,25 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         // Find a COPIED kernel slot: a present PML4 entry other than slot 0 (slot 0 is the PDPT
         // this space privatized). Teardown must not touch the table it points at, because the
         // running kernel translates through the very same table in the live root.
+        //
+        // Compared against the tree the space was DERIVED from, not `active_root()`: since
+        // ALET-P2-033 the source is the kernel's own map, and this suite runs before
+        // `kmap::activate()`, so the two are deliberately different roots here.
+        //
+        // The sharing lives one level DOWN now. The kernel's own map covers 4 GiB, so every one of
+        // its mappings hangs off PML4[0] and slots 1..512 are empty — searching them found nothing.
+        // What the victim actually shares is the rest of the private PDPT: every slot except the
+        // user region still points at the kernel's own PDs.
         let ops = Tables;
+        let src_pdpt = (ops.read(space_source_root() as usize, 0) & PTE_ADDR_MASK) as usize;
+        let vic_pdpt = (ops.read(victim as usize, 0) & PTE_ADDR_MASK) as usize;
         let mut shared_slot = None;
-        for i in 1..512 {
-            let live = ops.read(active_root() as usize, i);
-            if live != 0 && ops.read(victim as usize, i) == live {
+        for i in 0..512 {
+            if i == USER_REGION_PDPT_INDEX {
+                continue;
+            }
+            let live = ops.read(src_pdpt, i);
+            if live != 0 && ops.read(vic_pdpt, i) == live {
                 shared_slot = Some((i, live));
                 break;
             }
@@ -620,7 +635,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             "vm: destroying the space returned every frame it held, including its root"
         );
         check!(
-            ops.read(active_root() as usize, shared_index) == shared_entry,
+            ops.read(src_pdpt, shared_index) == shared_entry,
             "vm: the shared kernel mapping the victim copied is untouched by the teardown"
         );
         // The kernel is still running, still translating, and its own space is untouched — proved
@@ -927,6 +942,55 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
     }
 
+    // The dead pages are dead in a DERIVED space too (REQ-MM-007/008, ALET-P2-033). Everything above
+    // is a property of the map the kernel built for ITSELF; a per-process root is a different tree,
+    // and on this target it is built by COPYING the live one — which is how a space that mapped the
+    // guard region as a 2 MiB huge page came to exist. A user space reaching an address the kernel's
+    // own map deliberately cannot is the guard inverted, so it is checked where it can break.
+    {
+        let kroot = crate::kmap::root();
+        check!(
+            audit_dead(kroot).clean() && dead_set().pages() == 2,
+            "dead: this map has both dead pages absent, and the declaration names exactly two"
+        );
+        // A set that declares nothing must FAIL rather than pass vacuously: the audit's own
+        // fail-closed posture, proved live rather than only on the host.
+        check!(
+            !deadva::audit(
+                &deadva::DeadSet::new("x86_64"),
+                |va| translate_in(kroot, va as u64).map(|pa| pa as usize),
+                |va| crate::kmap::leaf_for(kroot, va).is_some(),
+            )
+            .clean(),
+            "dead: an empty declaration is refused, not reported clean (the audit cannot pass vacuously)"
+        );
+        match build_space() {
+            Some(derived) => {
+                let report = audit_dead(derived);
+                check!(
+                    report.clean() && report.pages == 2 && report.spans == 2,
+                    "dead: a DERIVED per-process space has both dead pages absent (walked, not assumed)"
+                );
+                check!(
+                    translate_in(derived, 0).is_none()
+                        && crate::kmap::leaf_for(derived, crate::gdt::kernel_stack_guard()).is_none(),
+                    "dead: unprivileged code cannot reach VA 0 or the kernel stack guard through its own root"
+                );
+                destroy_space(derived);
+            }
+            None => {
+                check!(
+                    false,
+                    "dead: a DERIVED per-process space has both dead pages absent (walked, not assumed)"
+                );
+                check!(
+                    false,
+                    "dead: unprivileged code cannot reach VA 0 or the kernel stack guard through its own root"
+                );
+            }
+        }
+    }
+
     // The declared layout (REQ-MM-008, ALET-P1-006).
     {
         let l = layout();
@@ -1033,7 +1097,14 @@ unsafe fn mapper_for(pml4_phys: u64) -> x86_64::structures::paging::OffsetPageTa
 pub fn build_space() -> Option<u64> {
     let pml4 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
     let pdpt = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
-    let cur = active_root();
+    // Copy the KERNEL's own map, not merely whatever CR3 holds (REQ-MM-007/008, ALET-P2-033). This
+    // is the line the hole came in through: `kmap::activate()` runs AFTER the virtual-memory suite,
+    // so a space built during it copied OVMF's tree — which maps VA 0 as RAM and covers the ring-0
+    // stack guard with a 2 MiB huge page. The derived space inherited both, and ring 3 could reach
+    // two addresses the kernel's own map deliberately cannot. Sourcing from `kmap::root()` makes the
+    // property hold by CONSTRUCTION rather than by activation order; `active_root()` remains the
+    // fallback for the window before the kernel's map exists at all.
+    let cur = space_source_root();
     // SAFETY: PML4/PDPT frames are 4 KiB and identity-accessible under OVMF's map; single-core.
     unsafe {
         let src = cur as *const u64;
@@ -1050,7 +1121,62 @@ pub fn build_space() -> Option<u64> {
         core::ptr::write_volatile(new_pdpt.add(USER_REGION_PDPT_INDEX), 0);
         core::ptr::write_volatile(dst, pdpt | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
+    // REQ-MM-007/008, ALET-P2-033: the dead pages must be dead HERE too, and this is the target the
+    // property actually escaped from — the copy above inherits whatever the live tree holds, and a
+    // space copied before `kmap` was active mapped the guard region as one 2 MiB huge page, so ring 3
+    // could reach an address the kernel's own map deliberately cannot.
+    //
+    // The rule is a CHECKED PRECONDITION rather than a patch, because below the private PDPT this
+    // space SHARES the kernel's tables: clearing a descriptor here would clear it in the kernel's map
+    // too. So inheritance is the mechanism and the audit is what stops it being an assumption — a
+    // source tree that does not have these pages dead yields no space at all instead of a space that
+    // can reach them.
+    if !audit_dead(pml4).clean() {
+        frames::free_addr_as(pdpt as usize, Owner::PAGETABLE);
+        frames::free_addr_as(pml4 as usize, Owner::PAGETABLE);
+        return None;
+    }
     Some(pml4)
+}
+
+/// The tree [`build_space`] derives a per-process space FROM: the kernel's own map once it exists,
+/// and only otherwise whatever CR3 holds.
+///
+/// The distinction is the substance of ALET-P2-033. `kmap::activate()` runs AFTER the virtual-memory
+/// suite, so a space built during it used to copy OVMF's tree — which maps VA 0 as RAM and covers the
+/// ring-0 stack guard with a 2 MiB huge page. The derived space inherited both, and ring 3 could
+/// reach two addresses the kernel's own map deliberately cannot: the guard inverted, protecting the
+/// less privileged tree and not the more privileged one. Sourcing from `kmap::root()` makes the dead
+/// pages a property of CONSTRUCTION rather than of activation order.
+pub fn space_source_root() -> u64 {
+    match crate::kmap::root() {
+        0 => active_root(),
+        r => r,
+    }
+}
+
+/// The virtual addresses this target declares permanently dead, in EVERY address space
+/// (REQ-MM-007/008, ALET-P2-033): VA 0 and the ring-0 stack guard — exactly the two pages
+/// [`crate::kmap::guard_pages`] counts as deliberately skipped, named here so the audit and the
+/// builder cannot drift apart.
+pub fn dead_set() -> deadva::DeadSet {
+    deadva::DeadSet::new("x86_64")
+        .with(deadva::DeadSpan::page("null", 0))
+        .with(deadva::DeadSpan::page(
+            "kernel-stack-guard",
+            crate::gdt::kernel_stack_guard(),
+        ))
+}
+
+/// Audit any address space — the kernel's own root or a derived per-process one — for the dead
+/// pages. Asks both questions the property needs: the page must not TRANSLATE, and no descriptor at
+/// any level may still cover it (a live block descriptor is one split away from reviving it).
+pub fn audit_dead(root: u64) -> deadva::DeadReport {
+    deadva::audit(
+        &dead_set(),
+        |va| translate_in(root, va as u64).map(|pa| pa as usize),
+        |va| crate::kmap::leaf_for(root, va).is_some(),
+    )
 }
 
 /// This target's address-space geometry, for the arch-independent mapping-API admission check

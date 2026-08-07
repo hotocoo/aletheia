@@ -1,6 +1,6 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-03
+**As of:** 2026-08-07
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
@@ -17,7 +17,41 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — the task lifecycle, written down and attacked (2026-08-03, GAPS4 ALET-P1-015)
+## Latest wave — addresses that must be dead in EVERY space (2026-08-07, GAPS4 ALET-P2-033)
+
+VA 0 and the ring-0 stack guard are given no descriptor on purpose, and ALET-P1-006/012 proved both — of
+the map each kernel built **for itself**. A per-process root is a different tree, so the property was a
+claim about one space in a system that makes many.
+
+- `kernel-core/src/deadva.rs` states the rule once (contract §INV-DEADVA): a target DECLARES its dead
+  spans, `audit` walks them in **any** root, and it asks two questions rather than one — the page must not
+  translate, **and** no descriptor at any level may still cover it, because an unreachable page under a live
+  2 MiB block is one split away from being alive again. An **empty declaration fails**: a target that
+  forgets to declare has proved nothing, and must not look like one with no dead pages.
+- Wired **fail-closed** into all three space builders — `build_space` (x86-64), `build_identity`
+  (aarch64/RISC-V). A tree that fails the audit yields **no space at all** and returns its frames; handing
+  out a space that can reach the guard is worse than failing to build one.
+- **It found the defect the register row only suspected.** `build_space` copied whatever CR3 held, and
+  `kmap::activate()` runs *after* the virtual-memory suite — so a space built during it copied OVMF's tree,
+  which maps VA 0 as RAM and covers the ring-0 stack guard with a 2 MiB huge page. Ring 3 could reach two
+  addresses the kernel's own map deliberately cannot: the guard **inverted**. `vm::space_source_root()` now
+  derives from the kernel's own map whenever one exists, so the property holds by construction rather than
+  by activation order.
+- **Two neighbouring invariants had encoded the old source** and were corrected rather than left passing for
+  the wrong reason: the teardown suite searched PML4 slots 1..512 for a shared kernel table, which matched
+  only because OVMF's tree spread across them. The kernel's own map covers 4 GiB entirely inside PML4[0], so
+  the sharing a teardown must not disturb lives one level down, in the private PDPT.
+- **Gates:** virtual-memory invariants 62 → **66** (aarch64, RISC-V) and 66 → **70** (x86-64); the
+  `conformance.sh` core contract 74 → **78** named behaviors, PASS on all three targets; six host tests;
+  `quality-gate` PASS, `register` PASS, `traceability` PASS, `ci-parity` PASS.
+- **Register: 31 → 32 resolved, 31 → 30 open.**
+- **Also this wave:** `docs/gap/TRIAGE.md` (an external audit dated 2026-08-06) was committed **with a
+  verification note** rather than acted on. Its CRITICAL RISK-001 — `[FAIL 11] fs: two objects never share
+  a data block` — **does not reproduce**: all 15 filesystem invariants pass on every target, including over
+  the real virtio-blk device. An untracked document asserting a false release blocker is exactly the
+  manual-metric drift the register exists to kill, so the correction lives at the top of the file.
+
+## Wave — the task lifecycle, written down and attacked (2026-08-03, GAPS4 ALET-P1-015)
 
 Four task states, and nothing said which transitions are impossible. A lifecycle bug is usually a state
 that is only *briefly* wrong, so `docs/INVARIANT-CONTRACTS.md` §INV-TASK states five invariants and every

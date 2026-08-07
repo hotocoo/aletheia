@@ -179,3 +179,22 @@ and an error that cannot be told apart from another one cannot be handled correc
 | INV-STORE-ERR-2 | A device error is **surfaced**, never swallowed — including a failed **flush**, which is the durability barrier, so swallowing it would report durability that does not exist. And a failed commit leaves the home block untouched. | The difference between a reported failure and silent loss. | `a_device_error_surfaces_through_the_journal_rather_than_being_swallowed` |
 | INV-STORE-ERR-3 | The filesystem **preserves** the device error (`FsError::Storage(Device)`) rather than flattening it, while its own refusals keep their own names. | A caller must be able to tell "your request was wrong" from "the hardware failed". | `the_filesystem_preserves_the_device_error_and_keeps_its_own_refusals_distinct` |
 | INV-STORE-ERR-4 | Every refusal is a **no-op**, proven by comparing the whole device image byte-for-byte before and after — the strongest available form of "nothing happened". | A refusal that wrote something is worse than an accepted operation, because nobody goes looking for its effects. | `every_refusal_leaves_the_device_image_byte_identical` |
+
+## INV-DEADVA — addresses that must be dead in every space (REQ-MM-007 / REQ-MM-008, ALET-P2-033)
+
+Two pages are given no descriptor on purpose: VA 0, so a null dereference faults instead of touching real
+state, and the ring-0 stack guard, so an overflow faults instead of writing what lies below the stack.
+INV-LAYOUT proves both — of the map the kernel built for *itself*. A per-process root is a different tree,
+and on x86-64 it is built by COPYING the live one, so a space copied before the kernel's own map was active
+mapped the guard region as a single 2 MiB huge page. A user space able to reach an address the kernel's own
+map deliberately cannot is the guard **inverted**: it protects the less privileged tree and not the more
+privileged one. These invariants make the property hold of every root, not one.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-DEADVA-1 | A dead page has **no translation** in any address space — the kernel's own root and every derived per-process root alike. | Reachability is the breach; everything else is a precursor to it. | `a_reachable_dead_page_is_a_violation` + each target's boot invariant on a space it BUILDS |
+| INV-DEADVA-2 | A dead page has **no descriptor at any level**, even when it does not translate. A live block/huge entry covering it is one split or permission change away from reviving the address with nothing having mapped it. | This is the exact shape of the hole ALET-P2-033 records: unreachable, yet described. | `a_described_but_unreachable_dead_page_is_still_a_violation` |
+| INV-DEADVA-3 | An **empty declaration fails** the audit. A target that declares nothing has proved nothing, and must not be indistinguishable from one with no dead pages. | Fail-closed: otherwise deleting the declaration is the cheapest way to make every gate green. | `an_empty_declaration_proves_nothing_and_fails` + each target's live "empty declaration is refused" invariant |
+| INV-DEADVA-4 | A **malformed or oversized** declaration is refused *before* any space is walked, and reports zero pages walked. | A partial walk that reported success would be the vacuous pass the whole module exists to refuse. | `a_malformed_or_oversized_declaration_is_refused_before_any_walk` |
+| INV-DEADVA-5 | **Every** violation is counted, not only the first; and a report is clean only if it walked at least one page. | A space that revived two pages must say two, and `violations == 0` over an empty walk is not evidence. | `every_violation_is_counted_not_only_the_first` + `a_space_with_neither_page_mapped_is_clean` |
+| INV-DEADVA-6 | A space-builder that cannot satisfy the audit returns **no space at all** and gives its frames back, rather than a space that can reach the guard. | Handing out a broken space is worse than failing to build one: the failure is visible, the space is not. | The `build_space` / `build_identity` fail-closed path on all three targets |
