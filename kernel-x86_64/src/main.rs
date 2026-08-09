@@ -24,6 +24,7 @@ extern crate alloc;
 
 #[macro_use]
 mod console;
+mod acpi;
 mod cell;
 mod conirq;
 mod exit;
@@ -37,6 +38,7 @@ mod kmap;
 mod pci;
 mod pic;
 mod pit;
+mod ps2;
 mod serial;
 mod shellio;
 mod smp;
@@ -80,7 +82,7 @@ fn efi_main() -> Status {
     uefi::system::with_config_table(|entries| {
         for e in entries {
             if e.guid == uefi::table::cfg::ConfigTableEntry::ACPI2_GUID {
-                smp::stash_rsdp(e.address as usize);
+                acpi::stash_rsdp(e.address as usize);
             }
         }
     });
@@ -336,6 +338,50 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         Err((idx, name)) => {
             kprintln!("[selftest] FAILED at invariant {}: {}", idx, name);
             ActiveHal::exit(10 + idx as i32);
+        }
+    }
+
+    // What a scancode MEANS (REQ-CON-003, ADR-049). Arch-independent, so it is proved on every
+    // target even though only this one has the hardware — the console's byte alphabet is a shared
+    // contract, and a decoder that could emit outside it would be a way to feed the line editor a
+    // byte it has no rule for from a device someone else is holding.
+    kprintln!("");
+    kprintln!("--- keyboard-decode selftests (scancodes to the bytes the console accepts) ---");
+    match kernel_core::keymap::keymap_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[keys] ALL {} KEYBOARD-DECODE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[keys] FAILED at keyboard-decode invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(90 + idx as i32);
+        }
+    }
+
+    // The keyboard itself (REQ-CON-003, ADR-049). Run on EVERY boot, not only interactive ones: a
+    // driver that only runs when someone is sitting at the machine is a driver no gate covers.
+    kprintln!("");
+    kprintln!(
+        "--- PS/2 keyboard bring-up (ACPI declaration, controller + port + device self-test) ---"
+    );
+    match ps2::keyboard_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[ps2] ALL {} KEYBOARD INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[ps2] FAILED at keyboard invariant {}: {}", idx, name);
+            ActiveHal::exit(130 + idx as i32);
         }
     }
 

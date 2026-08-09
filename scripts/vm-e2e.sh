@@ -77,8 +77,8 @@ echo "$OUT" | grep -q "ALL 21 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virti
 echo "$OUT" | grep -q "ALL 5 NETWORK INVARIANTS HOLD" || { echo "FAIL: network invariants marker missing (REQ-NET-001; NIC attached, suite must run)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
-echo "$OUT" | grep -q "ALL 8 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
-echo "$OUT" | grep -q "ALL 15 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
+echo "$OUT" | grep -q "ALL 9 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
+echo "$OUT" | grep -q "ALL 30 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
 

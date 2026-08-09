@@ -87,6 +87,30 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // What a scancode MEANS (REQ-CON-003, ADR-049). This target has no PS/2 controller — the QEMU
+    // `virt` machine exposes none, an honest architectural difference — but the decoder is
+    // arch-independent and its output alphabet is the console's shared contract, so it is proved
+    // here too rather than only where the hardware happens to be.
+    kprintln!("");
+    kprintln!("--- keyboard-decode selftests (scancodes to the bytes the console accepts) ---");
+    match kernel_core::keymap::keymap_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[keys] ALL {} KEYBOARD-DECODE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[keys] FAILED at keyboard-decode invariant {}: {}",
+                idx,
+                name
+            );
+            semihosting::exit(90 + idx as i32);
+        }
+    }
+
     // Capability lifetime across a reboot (REQ-CAP-008, ADR-048). The spine suite above proves
     // authority is correct while the machine is up; this proves what survives a restart and — far
     // more important — what a restored registry must REFUSE, since a persisted registry is

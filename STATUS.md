@@ -1,11 +1,11 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-09 (third wave)
+**As of:** 2026-08-09 (fourth wave)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..048`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..049`.
 
 ## Active triage execution queue (2026-08-09, after the capability-lattice wave)
 
@@ -48,7 +48,72 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave - what "narrower" means, and how long a capability lives (2026-08-09, REQ-CAP-007/008, ADR-048)
+## Latest wave - the OS you can sit in front of, typed at from its own keyboard (2026-08-09, REQ-CON-003, ADR-049)
+
+This one was reported by a user, not found by a gate, and that is the part worth recording.
+
+ADR-044 gave Aletheia an interactive console and ADR-045 made its input interrupt-driven. Both were
+gated on all three targets - and both were gated **over the serial line**, because that was the only
+input source the console had. Under QEMU with `-serial stdio`, and under the VirtualBox host-pipe
+recipe in `docs/VIRTUALBOX.md`, the terminal IS the wire, so a kernel with no keyboard driver is
+indistinguishable from one with a working keyboard. `console-e2e.sh` types on the wire. No amount of
+running it could have found this.
+
+What found it was someone booting the image on a VirtualBox GUI window: the framebuffer showed the
+prompt, the keys reached nothing, and a working OS looked hung.
+
+**What landed.**
+
+* **`kernel_core::keymap` - a keyboard is a second input SOURCE, not a second console.** Scancode set
+  1 in, console bytes out, pushed into the SAME `conring` the UART feeds. `shell` keeps one line
+  editor, one set of refusals, one overflow policy; two input paths with two editors is how they
+  drift. Arch-independent, so all three targets prove it even though only one has the hardware.
+* **The decoder's output alphabet is a security boundary.** The line editor refuses bytes it has no
+  rule for, so a decoder free to emit arbitrary bytes would be a way to hand it one anyway - from
+  hardware someone else may be holding. `feed` emits only printable ASCII, CR, backspace and
+  `Ctrl-C`, proved over the ENTIRE input space: all 256 scancodes against every reachable modifier
+  state. `Ctrl` with anything but `C` produces nothing rather than one of the other 25 control codes.
+* **`kernel-x86_64/src/ps2.rs` - the controller is enumerated, not poked.** The ACPI FADT
+  `IAPC_BOOT_ARCH` bit is consulted BEFORE any port is touched, because on a legacy-free platform
+  those ports are unclaimed rather than empty and reading them is undefined on the bus. An ABSENT
+  field is distinguished from a ZERO one (absent means ACPI 1.0, where the controller is universal).
+  Controller self-test and port-1 interface test are separate, because a controller can pass its own
+  with a dead port. The configuration byte is rewritten after the self-test that resets it, and then
+  **read back** - the translation bit is what makes the set-1 decoder correct, and a controller that
+  silently dropped that write would deliver set 2 into a set-1 decoder, presenting as a broken keymap
+  rather than a broken assumption. Every wait is spin-bounded: a missing keyboard costs a bounded
+  delay and a named reason, never a hang.
+* **Proved on every boot, not only interactive ones.** Five bring-up invariants run in the
+  non-interactive gate build too, against the real controller, and leave IRQ1 MASKED afterwards -
+  arming an input source is the console's decision. A driver that only runs when someone is sitting
+  at the machine is a driver no gate covers.
+* **`scripts/keyboard-e2e.sh` - the gate the old one could not be.** The serial line is a FILE with
+  no writer; the operator drives the emulated i8042 through QMP `send-key`. Every keystroke travels
+  controller, IRQ1, PIC, vector 0x21, decoder, ring, line editor - and the assertions are about
+  Aletheia's own filesystem changing, not about an echo. Shift is sent as a real held modifier.
+* **The ACPI walk left `smp.rs` for `kernel-x86_64/src/acpi.rs`** when the keyboard became its second
+  consumer, and now **verifies table checksums**, which the MADT walk did not.
+* **`scripts/serial-console.ps1`** - a dependency-free Windows terminal for the VirtualBox serial
+  pipe, so the documented recipe needs no PuTTY install.
+* **Two defects the sweeps found, in this session's own new code.** The exhaustive scancode sweep
+  caught `E0 E0` re-arming the extended prefix instead of resolving it: a device emitting a stream of
+  `E0` swallowed every real key after it - a keyboard permanently dead with nothing crashed and no
+  error anywhere. And the ACPI extraction found that the MADT walk had never checksummed a table.
+
+**Measured, on this workstation.** `KEYBOARD-E2E: PASS` (7 checks, QEMU+OVMF) - `VM-E2E-X86: PASS` -
+`VM-E2E: PASS` (aarch64) - `VM-E2E (riscv64): PASS` - `VM-E2E-VBOX: PASS` - `CONFORMANCE: PASS`
+(**104** core behaviors on all three targets) - `CONSOLE-E2E: PASS` - `BUILD-ALL: PASS` -
+`QUALITY-GATE: PASS` - `TRACEABILITY: PASS` - `REGISTER: PASS` - `CI-PARITY: PASS`. On x86-64 the
+boot reports `device id AB 41` - a translated MF2 keyboard, which is itself the evidence that the
+translation bit took. Confirmed by hand on Oracle VirtualBox with `VBoxManage controlvm
+keyboardputstring`: the configuration the bug was reported from now types.
+
+**Not claimed.** No USB HID - there is no USB stack, and on machines with legacy USB emulation
+disabled a USB keyboard will not work. One US QWERTY layout, no key repeat, no LEDs. aarch64 and
+RISC-V still have serial input only, because their QEMU `virt` machines expose no PS/2 controller;
+they prove the decoder, not a device. `docs/MATURITY.md` still governs every claim above.
+
+## Previous wave - what "narrower" means, and how long a capability lives (2026-08-09, REQ-CAP-007/008, ADR-048)
 
 Two of the oldest open P1 rows turned out to be the same question asked at two timescales, and both
 found live defects rather than merely documenting code that already worked.

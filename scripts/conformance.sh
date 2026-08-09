@@ -103,6 +103,20 @@ CONTRACT=(
   "capstore: a child widened in the image is refused (attenuation re-checked on load)"
   "capstore: an image whose counter could re-mint a stored id is refused"
   "capstore: every single-bit corruption of the image is refused"
+  # What a scancode MEANS (REQ-CON-003, ADR-049). The DEVICE is x86-64's alone — the QEMU `virt`
+  # machine has no PS/2 controller — but the decoder is arch-independent and its output alphabet is
+  # the console's shared contract. A target that decoded a byte the line editor refuses would be a
+  # way to feed the editor something it has no rule for, from a device someone else is holding.
+  "keymap: a press types once and its release types nothing"
+  "keymap: shift is held state and ends at its own release"
+  "keymap: caps affects letters only, and shift cancels it"
+  "keymap: a Ctrl chord is delivered only when the editor has a rule for it"
+  "keymap: an extended prefix consumes exactly one code and cannot be re-armed forever"
+  "keymap: Enter is a carriage return and Backspace is 0x08"
+  "keymap: no scancode in any modifier state emits a byte the console refuses"
+  "keymap: the navigation keys emit the sequences the editor parses"
+  "keymap: a navigation key moves the cursor and never types into the line"
+  "keymap: a spurious release or unmapped code changes no state"
   # The filesystem namespace (REQ-FS-001, ADR-035). The namespace is arch-independent code, so a
   # divergence here would mean a target's heap/alloc or storage path behaves differently — and the
   # behaviors that matter are refusals and crash outcomes, which must not vary by CPU. On aarch64 the
@@ -183,6 +197,15 @@ CONTRACT=(
   "console: an object written through the console reads back byte for byte"
   "console: a console write is committed, not held in the session"
   "console: an invalid name is refused with the reason, and writes nothing"
+  # The editor as an EDITOR (REQ-CON-004, ADR-050). An arrow key is a SEQUENCE, and a target that
+  # parsed it differently would type different text into the operator's line than its siblings —
+  # which is exactly the divergence that made the arrows unusable in the first place.
+  "console: an arrow key moves the cursor and types nothing into the line"
+  "console: text is inserted where the cursor is, not always at the end"
+  "console: an unrecognized sequence is consumed whole and leaves the parser unarmed"
+  "console: the up arrow recalls the previous line and it runs again"
+  "console: Tab completes a command name from its prefix"
+  "conring: an escape sequence is admitted whole or not at all, never truncated"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

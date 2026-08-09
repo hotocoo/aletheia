@@ -35,6 +35,7 @@ pub mod frameown;
 pub mod fs;
 pub mod grant;
 pub mod ipc;
+pub mod keymap;
 pub mod layout;
 pub mod memattr;
 pub mod persist;

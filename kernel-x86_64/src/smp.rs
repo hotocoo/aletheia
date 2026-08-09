@@ -52,59 +52,20 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use x86_64::VirtAddr;
 
 // --- ACPI MADT discovery ----------------------------------------------------------------------
-/// RSDP physical address, captured from the UEFI config table BEFORE ExitBootServices (the ACPI
-/// tables themselves live in ACPI-reclaim memory, which persists and stays identity-mapped).
-static RSDP_PA: AtomicUsize = AtomicUsize::new(0);
-
-/// Called from `efi_main` while boot services are alive.
-pub fn stash_rsdp(pa: usize) {
-    RSDP_PA.store(pa, Ordering::Release);
-}
-
-#[inline]
-unsafe fn read_u32(pa: usize) -> u32 {
-    core::ptr::read_unaligned(pa as *const u32)
-}
-#[inline]
-unsafe fn read_u64(pa: usize) -> u64 {
-    core::ptr::read_unaligned(pa as *const u64)
-}
+// The RSDP capture and the XSDT walk moved to `crate::acpi` when the keyboard became a second
+// consumer (it needs the FADT, this needs the MADT). One walk, and it now VERIFIES table checksums,
+// which this code did not: a table that does not sum to zero is one the firmware did not finish
+// writing, and enumerating CPUs from it is worse than finding no table.
 
 /// Walk RSDP -> XSDT -> MADT and collect the LAPIC IDs of every enabled processor that is not
 /// `bsp_apic_id`. Returns the count written into `out`.
 fn madt_secondaries(bsp_apic_id: u32, out: &mut [u32; MAX_CPUS]) -> usize {
-    let rsdp = RSDP_PA.load(Ordering::Acquire);
-    if rsdp == 0 {
+    let Some((madt, madt_len)) = crate::acpi::find_table(b"APIC") else {
         return 0;
-    }
-    // SAFETY: the RSDP came from the UEFI config table; ACPI-reclaim memory is identity-mapped.
+    };
+    // SAFETY: `find_table` validated the table's length against its own checksum, so every read
+    // below is inside memory the firmware declared and finished writing.
     unsafe {
-        if core::ptr::read_unaligned(rsdp as *const [u8; 8]) != *b"RSD PTR " {
-            return 0;
-        }
-        let revision = core::ptr::read_unaligned((rsdp + 15) as *const u8);
-        if revision < 2 {
-            return 0; // no XSDT on ACPI 1.0 — QEMU/OVMF is always >= 2
-        }
-        let xsdt = read_u64(rsdp + 24) as usize;
-        if xsdt == 0 || core::ptr::read_unaligned(xsdt as *const [u8; 4]) != *b"XSDT" {
-            return 0;
-        }
-        let xsdt_len = read_u32(xsdt + 4) as usize;
-        let mut madt: usize = 0;
-        let mut off = 36; // past the SDT header: 8-byte table pointers
-        while off + 8 <= xsdt_len {
-            let table = read_u64(xsdt + off) as usize;
-            if table != 0 && core::ptr::read_unaligned(table as *const [u8; 4]) == *b"APIC" {
-                madt = table;
-                break;
-            }
-            off += 8;
-        }
-        if madt == 0 {
-            return 0;
-        }
-        let madt_len = read_u32(madt + 4) as usize;
         let mut n = 0usize;
         let mut e = 44; // MADT: 36-byte SDT header + local-APIC address (4) + flags (4)
         while e + 2 <= madt_len {
@@ -116,7 +77,7 @@ fn madt_secondaries(bsp_apic_id: u32, out: &mut [u32; MAX_CPUS]) -> usize {
             if ty == 0 && e + 8 <= madt_len {
                 // Type 0: Processor Local APIC — acpi_id(1) apic_id(1) flags(4).
                 let apic_id = core::ptr::read_unaligned((madt + e + 3) as *const u8) as u32;
-                let flags = read_u32(madt + e + 4);
+                let flags = core::ptr::read_unaligned((madt + e + 4) as *const u32);
                 let usable = flags & 0b11 != 0; // enabled OR online-capable
                 if usable && apic_id != bsp_apic_id && n < MAX_CPUS {
                     out[n] = apic_id;

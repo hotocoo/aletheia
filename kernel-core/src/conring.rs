@@ -88,6 +88,32 @@ impl ConsoleRing {
         true
     }
 
+    /// Free slots.
+    pub fn free(&self) -> usize {
+        RING_CAPACITY - self.len
+    }
+
+    /// Accept a whole sequence, or none of it (REQ-CON-004, ADR-050).
+    ///
+    /// A navigation key is not one byte: the left arrow is `ESC [ D`. Pushing those three
+    /// individually would let a full ring keep the head and drop the tail, and a *truncated* escape
+    /// sequence is worse than a dropped one — the editor's parser would still be waiting for a final
+    /// byte when the operator's next real keystroke arrived, and would eat it. So the ring's unit of
+    /// admission for a decoded key is the whole sequence: it fits and is accepted, or it does not
+    /// fit and every one of its bytes is counted as dropped.
+    ///
+    /// Returns whether the sequence was accepted.
+    pub fn push_seq(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() > self.free() {
+            self.dropped = self.dropped.saturating_add(bytes.len() as u64);
+            return false;
+        }
+        for b in bytes {
+            self.push(*b);
+        }
+        true
+    }
+
     /// Take the oldest byte, or `None` when nothing has been typed.
     pub fn pop(&mut self) -> Option<u8> {
         if self.len == 0 {
@@ -255,6 +281,24 @@ pub fn ring_suite<F: FnMut(u32, bool, &str)>(logger: &mut F) -> Result<u32, (u32
     check!(
         "conring: interleaved writes and reads never reorder, duplicate or exceed capacity",
         ok && r.dropped() == 0
+    );
+
+    // 9. A decoded key is admitted WHOLE or not at all. With two slots free, a three-byte arrow
+    //    sequence must not half-enter the ring: the editor would be left mid-sequence and would eat
+    //    the operator's next real keystroke looking for a final byte that never comes.
+    let mut r = ConsoleRing::new();
+    for _ in 0..(RING_CAPACITY - 2) {
+        r.push(b'x');
+    }
+    let refused = !r.push_seq(b"\x1b[D");
+    let unchanged = r.len() == RING_CAPACITY - 2 && r.dropped() == 3;
+    // And with room, the same sequence enters intact and in order.
+    let mut r2 = ConsoleRing::new();
+    let accepted = r2.push_seq(b"\x1b[D");
+    let intact = r2.pop() == Some(0x1b) && r2.pop() == Some(b'[') && r2.pop() == Some(b'D');
+    check!(
+        "conring: an escape sequence is admitted whole or not at all, never truncated",
+        refused && unchanged && accepted && intact
     );
 
     Ok(n)
