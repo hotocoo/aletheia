@@ -15,6 +15,9 @@
 *.s       text eol=lf
 *.ld      text eol=lf
 *.toml    text eol=lf
+# Cargo.lock is checked in and read by `--locked` builds on every host; CRLF here makes the same
+# lockfile hash differently depending on who cloned it.
+*.lock    text eol=lf
 *.yml     text eol=lf
 *.yaml    text eol=lf
 *.rs      text eol=lf
