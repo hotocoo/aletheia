@@ -75,6 +75,9 @@ hr; echo "E2E SUMMARY"; hr
 printf '  aarch64 (full)      : %s\n' "$aarch64_res"
 printf '  riscv64 (full)      : %s\n' "$riscv_res"
 printf '  x86-64  (image)     : %s\n' "$x86_res"
+# The VirtualBox rung gates the exit code below, so it belongs in the summary too: a leg that can
+# fail the run and does not appear here is a leg whose SKIP reads as "not attempted".
+printf '  x86-64  (VirtualBox): %s\n' "$vbox_res"
 hr
 
 fail=0

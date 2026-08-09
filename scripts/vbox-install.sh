@@ -18,8 +18,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 X86="$ROOT/kernel-x86_64"
 BUILD="$X86/build"
 VM_NAME="${VM_NAME:-Aletheia}"
-MEM_MB="${MEM_MB:-1024}"
-CPUS="${CPUS:-4}"
+# 512 MiB and 2 vCPUs, because that is what this OS actually needs and a default that asks for more
+# is a claim about the kernel nobody measured. Both are gated at these values (scripts/vm-e2e-vbox.sh)
+# and both are overridable for anyone who wants a bigger machine.
+MEM_MB="${MEM_MB:-512}"
+CPUS="${CPUS:-2}"
 
 INTERACTIVE=0
 START=0

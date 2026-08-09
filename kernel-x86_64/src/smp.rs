@@ -57,6 +57,17 @@ use x86_64::VirtAddr;
 // which this code did not: a table that does not sum to zero is one the firmware did not finish
 // writing, and enumerating CPUs from it is worse than finding no table.
 
+/// Processors the firmware declares, counting the one this code is running on.
+///
+/// Reported by the console's `arch`/`ver` commands. It is the MADT's count, not a count of cores
+/// this kernel has *started* — an operator asking "what does this machine have" is asking about the
+/// machine, and conflating the two would make a boot that failed to start an AP look like a
+/// single-processor machine instead of a defect.
+pub fn declared_cpu_count() -> usize {
+    let mut ids = [0u32; MAX_CPUS];
+    1 + madt_secondaries(bsp_apic_id(), &mut ids)
+}
+
 /// Walk RSDP -> XSDT -> MADT and collect the LAPIC IDs of every enabled processor that is not
 /// `bsp_apic_id`. Returns the count written into `out`.
 fn madt_secondaries(bsp_apic_id: u32, out: &mut [u32; MAX_CPUS]) -> usize {

@@ -116,9 +116,25 @@ check_session() {
     grep -q "commands:" <<<"$log" || { echo "  FAIL [$label/first] help did not answer"; bad=1; }
     grep -q "$WROTE"    <<<"$log" || { echo "  FAIL [$label/first] the write was not accepted"; bad=1; }
     grep -q "$BODY"     <<<"$log" || { echo "  FAIL [$label/first] the object did not read back"; bad=1; }
+    # The command set an operator actually works with (REQ-CON-005, ADR-051). Each of these is a
+    # DIFFERENT path through the namespace - read-modify-write, copy, rename, create, search,
+    # non-text inspection - and a console that only writes and reads is not one you can work in.
+    grep -q "capability-secure microkernel" <<<"$log" || { echo "  FAIL [$label/first] ver did not answer"; bad=1; }
+    grep -q "blocks of "  <<<"$log" || { echo "  FAIL [$label/first] lsblk did not report the device"; bad=1; }
+    grep -q "manifesto is now" <<<"$log" || { echo "  FAIL [$label/first] append did not extend the object"; bad=1; }
+    grep -q "manifesto -> copy" <<<"$log" || { echo "  FAIL [$label/first] cp did not copy"; bad=1; }
+    grep -q "copy -> backup" <<<"$log" || { echo "  FAIL [$label/first] mv did not rename"; bad=1; }
+    grep -q "created marker" <<<"$log" || { echo "  FAIL [$label/first] touch did not create"; bad=1; }
+    grep -q "work in"     <<<"$log" || { echo "  FAIL [$label/first] grep found nothing it should have"; bad=1; }
+    grep -q "device flushed" <<<"$log" || { echo "  FAIL [$label/first] sync did not report"; bad=1; }
   else
     grep -q "$BODY" <<<"$log" \
       || { echo "  FAIL [$label/second] what the operator wrote did NOT survive the reboot"; bad=1; }
+    # And what the WORKING commands produced survived too: an object made through cp+mv is a real
+    # object on the medium, not a session-lifetime one, and the appended line is part of it. This is
+    # the half a single write cannot prove.
+    grep -q "work in" <<<"$log" \
+      || { echo "  FAIL [$label/second] the appended line did not survive the reboot"; bad=1; }
     if grep -q "no namespace on this device" <<<"$log"; then
       echo "  FAIL [$label/second] the second boot reformatted the disk instead of mounting it"; bad=1
     fi
@@ -155,13 +171,15 @@ mmio_leg() {
   local log; log="$(mktemp)"
 
   echo "--> session 1: an operator writes an object through the console"
-  drive_session "$log" 180 "help" "arch" "mem" "write manifesto $BODY" "cat manifesto" "ls" "halt"
+  drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
+    "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
 
   echo "--> session 2: a SECOND boot must still hold what the operator typed"
-  drive_session "$log" 180 "ls" "cat manifesto" "halt"
+  drive_session "$log" 180 "ls" "cat manifesto" "cat backup" "grep work manifesto" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" second
   local s2=$?
@@ -230,14 +248,16 @@ x86_leg() {
   local log; log="$work/serial.log"
 
   echo "--> session 1: an operator writes an object through the console"
-  drive_session "$log" 180 "help" "arch" "mem" "write manifesto $BODY" "cat manifesto" "ls" "halt"
+  drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
+    "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?
 
   echo "--> session 2: a SECOND boot must still hold what the operator typed"
   cp "$vars" "$work/vars.fd"
-  drive_session "$log" 180 "ls" "cat manifesto" "halt"
+  drive_session "$log" 180 "ls" "cat manifesto" "cat backup" "grep work manifesto" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" second
   local s2=$?

@@ -38,6 +38,28 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    fn cpu_count(&self) -> usize {
+        crate::smp::declared_cpu_count()
+    }
+    /// Reset through the i8042's pulse line — the reset path that exists on every PC-compatible
+    /// machine, including the one this OS is qualified on under two hypervisors. It is asserted
+    /// rather than requested: the controller drives the CPU's RESET pin, so nothing after the write
+    /// runs on a machine that has one. A machine that does NOT (a legacy-free platform, the same
+    /// case the keyboard driver already handles) falls through, and the spin below is what makes
+    /// that visible as "the machine did not restart" rather than as a jump into whatever the halt
+    /// path happened to leave behind.
+    fn reboot(&self) -> bool {
+        // SAFETY: a single byte to the i8042 command port. Interrupts are cleared first so nothing
+        // runs between the request and the reset the hardware performs.
+        unsafe {
+            x86_64::instructions::interrupts::disable();
+            x86_64::instructions::port::Port::<u8>::new(0x64).write(0xFEu8);
+        }
+        for _ in 0..100_000_000u64 {
+            core::hint::spin_loop();
+        }
+        false
+    }
 }
 
 /// Blocks for the console's scratch namespace when no disk is attached.

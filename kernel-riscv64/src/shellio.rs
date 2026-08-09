@@ -40,6 +40,13 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// Reset through the SBI System Reset extension — the firmware call, because on RISC-V there is
+    /// no reset register a supervisor may write and OpenSBI is the thing that owns the platform.
+    /// SRST is optional in the spec, so a firmware without it returns an error and the console says
+    /// the machine did not restart instead of hanging in a loop pretending it did.
+    fn reboot(&self) -> bool {
+        crate::sbi::system_reset()
+    }
 }
 
 /// Blocks for the console's scratch namespace when no disk is attached.

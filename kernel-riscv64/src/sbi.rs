@@ -139,3 +139,22 @@ pub fn probe() -> bool {
         false
     }
 }
+
+// SBI SRST extension (EID "SRST" = 0x5352_5354) — the platform reset path. FID 0
+// `system_reset(reset_type, reset_reason)`: type 1 is a COLD reboot, reason 0 is "no reason".
+//
+// `exit.rs` deliberately does NOT use this (SRST cannot encode a failing invariant's code, which is
+// the whole reason the SiFive-test device is the gate's exit channel). A *user* typing `reboot` is
+// asking for exactly what SRST provides, so this is its one caller.
+const EXT_SRST: usize = 0x5352_5354;
+const SRST_SYSTEM_RESET: usize = 0;
+const RESET_TYPE_COLD_REBOOT: usize = 1;
+
+/// Ask the firmware to restart the machine. Returns only on FAILURE — SRST is an optional extension,
+/// and a firmware that does not implement it returns an error rather than resetting, which the
+/// console reports instead of hanging in a loop that pretends the reboot is in progress.
+pub fn system_reset() -> bool {
+    let (err, _) = ecall(EXT_SRST, SRST_SYSTEM_RESET, RESET_TYPE_COLD_REBOOT, 0, 0);
+    let _ = err;
+    false
+}

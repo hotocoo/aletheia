@@ -5,7 +5,31 @@
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..049`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..051`.
+
+## The console wave (2026-08-09) — what a person sitting at the machine gets
+
+Two defects, both reported by someone using the OS rather than by any gate here, and both closed:
+
+* **ALET-P2-040 — the arrow keys typed into the line.** ADR-044's editor was a filter over single
+  bytes and a terminal sends sequences: `ESC [ A` lost its `ESC` and typed `[A` into the middle of
+  whatever was being written. No gate could have found it, because every console gate typed
+  *characters*. Now: a bounded CSI parser (nothing inside a sequence reaches the line, the parser is
+  never left armed, parameters are counted not buffered), a real cursor with mid-line editing, a
+  bounded history, and Tab completion against the live namespace. **ADR-050.**
+* **ALET-P2-041 — twelve commands is not a system you can work in.** Fifteen more, each a different
+  path through machinery that already existed: `ver`, `lsblk`, `find`, `head`, `wc`, `grep`,
+  `hexdump`, `append`, `touch`, `cp`, `mv`, `sync`, `history`, `clear`, `reboot`. **ADR-051.**
+
+Measured, on all three CPU targets: console invariants **15 → 40**, input-ring **8 → 9**,
+keyboard-decode **10 → 12**, the cross-target conformance contract **112 → 118** named behaviors,
+`keyboard-e2e.sh` **7 → 11** checks (four of them pressing keys that used to corrupt the line), and
+`console-e2e.sh` now drives the working command set at a live console and re-reads what `append`,
+`cp` and `mv` produced *after a reboot*.
+
+**Machine size.** The x86-64 image is gated on Oracle VirtualBox at **2 vCPUs and 512 MiB**, and
+that is now what `scripts/vbox-install.sh` provisions by default. The VirtualBox rung boots the same
+image at 512 MiB and at 1 GiB, because the firmware memory map is an input and one size is one map.
 
 ## Active triage execution queue (2026-08-09, after the capability-lattice wave)
 
@@ -13,7 +37,7 @@ Open GAPS4 backlog count from `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`:
 
 - **P0 open:** 0
 - **P1 open:** 11  (was 12 - `ALET-P1-026` and `ALET-P1-027` closed, `ALET-P1-034` opened this wave)
-- **P2 open:** 12
+- **P2 open:** 12  (ALET-P2-040 and ALET-P2-041 opened and closed in this wave)
 - **P3 open:** 3
 
 Execution order (wave-based, 2-3 tightly related P1 rows per wave):

@@ -142,9 +142,17 @@ macOS or Linux**:
 
 ```bash
 ./scripts/vbox-install.sh                 # build the image + install a persistent VM named "Aletheia"
-./scripts/vbox-install.sh --interactive   # ...the build that hands the machine to a serial console
+./scripts/vbox-install.sh --interactive   # ...the build that hands the machine to a console you can type at
 VBoxManage startvm Aletheia               # watch it boot; the serial log is the machine-checkable verdict
 ```
+
+The VM it provisions has **2 vCPUs and 512 MiB**, which is what this OS needs rather than what was
+convenient to type: the VirtualBox gate boots the same image at that size on every run (`MEM_MB` and
+`CPUS` override it). The interactive build gives you a console with a real line editor — arrows,
+`Home`/`End`, `Delete`, a history walked with the up arrow, `Tab` completion over the names that
+exist — and 27 commands over the namespace (`ls`, `cat`, `write`, `append`, `cp`, `mv`, `grep`,
+`hexdump`, `find`, `wc`, `df`, `mem`, `reboot`, `halt`, …; type `help`). It works from the VM
+window's own keyboard as well as over a host serial pipe.
 
 `kernel-x86_64/scripts/mkesp.py` writes the bootable GPT/ESP image with nothing but the Python
 standard library, so the same artifact comes out byte-identical on all three hosts.

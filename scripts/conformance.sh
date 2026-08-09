@@ -206,6 +206,15 @@ CONTRACT=(
   "console: the up arrow recalls the previous line and it runs again"
   "console: Tab completes a command name from its prefix"
   "conring: an escape sequence is admitted whole or not at all, never truncated"
+  # The command set (REQ-CON-005, ADR-051). What an operator can DO must not vary by CPU: a target
+  # whose `mv` left both names, or whose `touch` truncated, would be a different operating system
+  # wearing the same command table.
+  "console: a copy is an independent object, not a second name for the same bytes"
+  "console: a rename moves the bytes and removes the old name"
+  "console: append keeps what was there and creates what was not"
+  "console: touch leaves an existing object's bytes alone"
+  "console: a bad count is refused rather than replaced with a default"
+  "console: every command that needs an argument refuses to run without one"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )
