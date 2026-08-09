@@ -124,7 +124,9 @@ The kernel halts after `[e2e] PASS` rather than powering the machine off — Vir
 ## 3. Typing at it — the interactive console
 
 The gate builds the non-interactive kernel, which runs every suite and halts. There is also a build
-that hands the machine to the serial line and waits for you (REQ-CON-001, ADR-044):
+that keeps the machine up and waits for you (REQ-CON-001/002/003/004/005, ADR-044/045/049/050/051).
+`scripts/vbox-install.sh --interactive` does everything below in one command; the pieces are here
+because knowing what it did is the point of this document.
 
 ```bash
 cd kernel-x86_64
@@ -142,14 +144,22 @@ Provision as in §2 but point the VDI at `aletheia-interactive.img`, and give se
 "$VB" modifyvm "$VM" --uart1 0x3F8 4 --uart-mode1 server /tmp/aletheia.pipe      # macOS/Linux
 ```
 
-**The VM window cannot type at it.** Aletheia draws to the GOP framebuffer it took from the
-firmware, so the window shows you the prompt — but the console READS from the UART (REQ-CON-002,
-ADR-045) and there is no PS/2 keyboard driver, so keystrokes in the VirtualBox window reach nothing.
-This surprises everyone once: the machine looks hung when it is in fact waiting on a line nobody is
-sending. (Press **Right Ctrl** to release the keyboard back to the host.)
+**Type in the VM window.** Aletheia draws to the GOP framebuffer it took from the firmware, so the
+window shows the prompt, and since ADR-049 it also reads the machine's own i8042 — an ACPI-declared,
+self-tested PS/2 controller whose scancodes are decoded into the SAME input ring the UART feeds. One
+line editor behind two input sources. (Press **Right Ctrl** to release the keyboard back to the host.)
 
-Attach a terminal to the pipe instead. On Windows either use PuTTY's *Serial* mode pointed at
-`\.\pipeletheia`, or run the dependency-free equivalent that ships here — start the VM first,
+Until that landed the window was a display only, and a machine waiting on a line nobody was sending
+looked exactly like a hung one. That was `ALET-P2-039`, reported by the first person to boot this
+image who did not write it.
+
+The editor is a real one (ADR-050): the arrows move a cursor inside the line, `Home`/`End` reach its
+ends, `Delete` removes under the cursor, the up arrow walks a bounded history, `Ctrl-W`/`Ctrl-K`/
+`Ctrl-U` kill a word, a tail and a line, and `Tab` completes command names and the object names that
+actually exist on the device.
+
+You can also drive the same console over the wire. On Windows use PuTTY's *Serial* mode pointed at
+`\\.\pipe\aletheia`, or run the dependency-free equivalent that ships here — start the VM first,
 because the pipe exists only while it runs:
 
 ```powershell
@@ -160,16 +170,32 @@ powershell -ExecutionPolicy Bypass -File scripts/serial-console.ps1
 Elsewhere, `socat -,raw,echo=0 UNIX-CONNECT:/tmp/aletheia.pipe`. Then use the shell:
 
 ```text
-aletheia> help
+aletheia> help                      # 27 commands, with what each one does
+aletheia> ver                       # what this system is, and what it is not
+aletheia> mem                       # frames and MiB, plus any input the ring had to drop
 aletheia> write notes hello
+aletheia> append notes and more
+aletheia> cp notes backup
+aletheia> grep more notes
+aletheia> hexdump notes             # for an object cat declines to print
+aletheia> find no                   # names by prefix
 aletheia> ls
-aletheia> cat notes
-aletheia> mem
 aletheia> halt
 ```
 
 Input is interrupt-driven (ADR-045), so the machine is not spinning while it waits for you.
-`Ctrl-]` detaches `serial-console.ps1` and leaves the VM running; `halt` stops the machine.
+`Ctrl-]` detaches `serial-console.ps1` and leaves the VM running; `halt` stops the machine and
+`reboot` restarts it through the i8042's reset line.
+
+**What you write here does not survive power-off, and that is a VirtualBox limitation rather than a
+filesystem one.** The console mounts a persistent virtio-blk device when one is attached; VirtualBox
+emulates no virtio-blk (§5), so it falls back to a RAM disk and says so on the line above the
+prompt. Under QEMU a second disk is attached and the writes survive a reboot — `scripts/console-e2e.sh`
+proves exactly that, twice, by rebooting and reading the objects back.
+
+**Machine size.** `vbox-install.sh` provisions **2 vCPUs and 512 MiB**, which is what this OS needs;
+`MEM_MB` and `CPUS` override it. The gate boots the same image at 512 MiB *and* 1 GiB, because the
+firmware memory map is an input and one size is one map.
 
 ---
 
