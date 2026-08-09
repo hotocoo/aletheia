@@ -23,7 +23,7 @@ vm-e2e-riscv:
   stage: test
   image: rust:latest
   script:
-    - apt-get update && apt-get install -y qemu-system-misc qemu-system-riscv perl
+    - apt-get update && apt-get install -y qemu-system-misc perl && (apt-get install -y qemu-system-riscv || true)
     - rustup toolchain install nightly-2026-08-09 --profile minimal
     - rustup component add rust-src --toolchain nightly-2026-08-09
     - ./scripts/vm-e2e-riscv.sh
@@ -62,7 +62,7 @@ conformance:
   stage: test
   image: rust:latest
   script:
-    - apt-get update && apt-get install -y qemu-system-arm qemu-system-misc qemu-system-riscv qemu-system-x86 ovmf mtools perl
+    - apt-get update && apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf mtools perl && (apt-get install -y qemu-system-riscv || true)
     - rustup toolchain install nightly-2026-08-09 --profile minimal
     - rustup component add rust-src --toolchain nightly-2026-08-09
     - rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly-2026-08-09
@@ -74,7 +74,7 @@ console-e2e:
   script:
     # The interactive console (REQ-CON-001, ADR-044): build WITH the feature, type at the running
     # machine, halt, reboot, and require that what was typed is still there.
-    - apt-get update && apt-get install -y qemu-system-arm qemu-system-misc qemu-system-riscv qemu-system-x86 ovmf mtools perl
+    - apt-get update && apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf mtools perl && (apt-get install -y qemu-system-riscv || true)
     - rustup toolchain install nightly-2026-08-09 --profile minimal
     - rustup component add rust-src --toolchain nightly-2026-08-09
     - rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly-2026-08-09

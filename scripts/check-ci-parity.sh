@@ -89,10 +89,29 @@ ci_set="$(printf '%s\n%s\n' "$gh_set" "$gl_set" | sort -u | grep -v '^$')"
 
 # Existence + executability of everything CI claims to run: a CI job invoking a missing or
 # non-executable script fails only at push time, on the runner, after the fact.
+#
+# Executability is read from the GIT INDEX, not from the filesystem. On a Windows clone reached
+# through WSL, `/mnt/c` is drvfs and reports EVERY file as mode 777, so `[ -x ]` is unconditionally
+# true and this check could never fail on the host where the mode is most likely to be wrong. That
+# is exactly what happened: `scripts/vm-e2e-vbox.sh` was committed 100644, every local run passed,
+# and two CI jobs died with "Permission denied" — the same class of host-dependence as ALET-P2-035
+# (CRLF). What CI executes is what git recorded, so that is what gets checked; the filesystem bit is
+# the fallback only where git cannot answer (an exported tarball).
+mode_of() {
+  git -C "$ROOT" ls-files -s -- "$1" 2>/dev/null | awk '{print $1; exit}'
+}
 while IFS= read -r s; do
   [ -z "$s" ] && continue
   if [ ! -f "$ROOT/$s" ]; then
     echo "  FAIL: CI executes $s but it does not exist in the tree"; fail=1
+    continue
+  fi
+  m="$(mode_of "$s")"
+  if [ -n "$m" ]; then
+    [ "$m" = "100755" ] || {
+      echo "  FAIL: CI executes $s but git records it as $m, not 100755 (git update-index --chmod=+x $s)"
+      fail=1
+    }
   elif [ ! -x "$ROOT/$s" ]; then
     echo "  FAIL: CI executes $s but it is not executable (chmod +x)"; fail=1
   fi

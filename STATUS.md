@@ -12,7 +12,7 @@ plainly that **nothing here is production-ready** — read it before quoting any
 Open GAPS4 backlog count from `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`:
 
 - **P0 open:** 0
-- **P1 open:** 10  (was 12 - `ALET-P1-026` and `ALET-P1-027` closed this wave)
+- **P1 open:** 11  (was 12 - `ALET-P1-026` and `ALET-P1-027` closed, `ALET-P1-034` opened this wave)
 - **P2 open:** 12
 - **P3 open:** 3
 
@@ -23,9 +23,10 @@ Execution order (wave-based, 2-3 tightly related P1 rows per wave):
    content-addressing identity). The crypto trio is now the front of the queue **and** the gate on
    two named non-claims this wave created: the capability image is checksummed rather than
    authenticated (ADR-048), and signing it needs a key whose own lifetime is `ALET-P1-028`.
-2. **Capability store on the medium:** committing the ADR-048 image through `persist.rs` — a
-   filesystem ordering question (does the capability store commit in the same transaction as the
-   entities whose authority it describes?), tracked in the `ALET-P1-026` row rather than implied.
+2. **Capability store on the medium (`ALET-P1-034`, new this wave):** committing the ADR-048
+   image through `persist.rs` — a filesystem ordering question (does the capability store commit in
+   the same transaction as the entities whose authority it describes?), registered as its own open
+   row rather than left as a paragraph in the row that closed.
 3. **Device isolation realism (P1):** `ALET-P1-018` (software boundary is delivered; hardware DMA
    containment remains IOMMU/SMMU-scoped work).
 4. **Scheduler/IO robustness (P1):** `ALET-P1-014`, `ALET-P1-019`.
@@ -110,7 +111,7 @@ admission test on the way back in.
 `VM-E2E-X86: PASS` (QEMU+OVMF, exit 33 on both boots) - `CONFORMANCE: PASS` (**96** core behaviors on
 all three targets, was 88) - `CONSOLE-E2E: PASS` - `BUILD-ALL: PASS` - `QUALITY-GATE: PASS` -
 `TRACEABILITY: PASS` (87 requirements) - `REGISTER: PASS` - hosted Core 85 tests and `kernel-core`
-294 tests green. Spine invariants 11 -> 13 on every target; a new `[cap] ALL 11 CAPABILITY-LIFETIME
+295 tests green. Spine invariants 11 -> 13 on every target; a new `[cap] ALL 11 CAPABILITY-LIFETIME
 INVARIANTS HOLD` suite on all three, wired into the QEMU and VirtualBox gates. Host side: 10
 exhaustive lattice proofs plus a 20 000-chain rejection campaign, and 19 capability-store proofs
 including a per-byte per-bit corruption sweep and a per-prefix truncation sweep.
