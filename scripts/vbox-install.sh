@@ -94,7 +94,14 @@ echo "==> [4/4] wiring serial port 1 (0x3F8 / IRQ 4)"
 if [ "$INTERACTIVE" = "1" ]; then
   # A host PIPE, so a terminal can type INTO the machine. A file backend is write-only from the
   # guest's side — fine for the gate, useless for a shell.
-  if command -v cygpath >/dev/null 2>&1; then PIPE='\\.\pipe\aletheia'; else PIPE="/tmp/aletheia.pipe"; fi
+  # The pipe's FORM follows the host VirtualBox runs on, not the shell this script runs in. Under
+  # WSL both are true at once — a Unix shell driving a Windows VBoxManage.exe — and a Unix pipe path
+  # handed to the Windows service is one the VM cannot open, which surfaces as a machine that
+  # refuses to start rather than as a serial port that is missing.
+  WIN_PIPE=0
+  case "$VBM" in *.exe) WIN_PIPE=1 ;; esac
+  command -v cygpath >/dev/null 2>&1 && WIN_PIPE=1
+  if [ "$WIN_PIPE" = "1" ]; then PIPE='\\.\pipe\aletheia'; else PIPE="/tmp/aletheia.pipe"; fi
   "$VBM" modifyvm "$VM_NAME" --uart1 0x3F8 4 --uart-mode1 server "$PIPE" >/dev/null 2>&1
   SERIAL_DESC="host pipe $PIPE"
 else
@@ -117,10 +124,22 @@ Installed: VirtualBox machine "$VM_NAME"
 
 EOF
 if [ "$INTERACTIVE" = "1" ]; then
-  echo "  Attach a terminal to the serial pipe to get the Aletheia shell:"
-  echo "    Windows : PuTTY -> Serial -> $PIPE"
-  echo "    other   : socat -,raw,echo=0 UNIX-CONNECT:$PIPE"
-  echo "    commands: help  ls  write <name> <text>  cat <name>  rm <name>  mem  halt"
+  echo "  Type at the VM WINDOW's own keyboard — the console reads the machine's i8042 as well as"
+  echo "  the serial line (REQ-CON-003), with arrows, Home/End, Delete, history and Tab completion."
+  echo ""
+  echo "  Or attach a terminal to the serial pipe for the same shell over the wire:"
+  if [ "${WIN_PIPE:-0}" = "1" ]; then
+    echo "    PuTTY -> Serial -> $PIPE   (or: plink -serial $PIPE)"
+  else
+    echo "    socat -,raw,echo=0 UNIX-CONNECT:$PIPE"
+  fi
+  echo "    commands: type \`help\` — 27 of them, over the namespace and the machine's own facts"
+  echo ""
+  echo "  Note: under VirtualBox the console's namespace is a RAM DISK, so what you write is gone at"
+  echo "  power-off. VirtualBox emulates no virtio-blk device (ADR-046), and the boot disk is the ESP"
+  echo "  the firmware loaded from — writing the OS's own namespace onto it is not something this"
+  echo "  image does. Under QEMU a second virtio-blk disk is attached and writes DO survive a reboot;"
+  echo "  scripts/console-e2e.sh proves exactly that."
 else
   echo "  The boot runs every suite and halts. Read the verdict with:"
   echo "    grep -E 'INVARIANTS HOLD|e2e\\] PASS' \"$SERIAL\""
