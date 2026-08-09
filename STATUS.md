@@ -1,11 +1,36 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-07
+**As of:** 2026-08-09
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..045`.
+
+## Active triage execution queue (2026-08-09)
+
+Open GAPS4 backlog count from `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`:
+
+- **P0 open:** 0
+- **P1 open:** 14
+- **P2 open:** 13
+- **P3 open:** 3
+
+Execution order (wave-based, 2-3 tightly related P1 rows per wave):
+
+1. **Security model completion first (P1):** `ALET-P1-026`, `ALET-P1-027`, `ALET-P1-028`,
+   `ALET-P1-029`, `ALET-P1-030`.
+2. **Kernel entry-path hardening (P1):** `ALET-P1-009`, `ALET-P1-011`.
+3. **Device isolation realism (P1):** `ALET-P1-018` (software boundary is delivered; hardware DMA
+   containment remains IOMMU/SMMU-scoped work).
+4. **Scheduler/IO robustness (P1):** `ALET-P1-014`, `ALET-P1-019`.
+5. **Component security boundaries (P1):** `ALET-P1-021`, `ALET-P1-022`, `ALET-P1-023`,
+   `ALET-P1-024`.
+6. **Qualification depth (P2):** `ALET-P2-007`, `ALET-P2-008`, `ALET-P2-009`, `ALET-P2-010`.
+7. **Networking expansion (P2):** `ALET-P2-020` only after the P1 security-model cluster above is
+   closed.
+8. **Threat-model/process maturity (P2):** `ALET-P2-029`, `ALET-P2-030`, `ALET-P2-031`.
+9. **Architecture governance docs (P3):** `ALET-P3-001`, `ALET-P3-002`, `ALET-P3-003`.
 
 ## What Aletheia is
 
