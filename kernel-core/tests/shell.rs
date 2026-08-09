@@ -72,6 +72,12 @@ fn every_byte_outside_printable_ascii_is_refused_entry_to_the_line() {
                 assert!(ed.is_empty());
             }
             0x03 => assert_eq!(edit, Edit::Cancelled),
+            // Tab asks the SESSION to complete: the editor owns the line, the session owns the
+            // namespace. Nothing enters the line here either.
+            shell::TAB => {
+                assert_eq!(edit, Edit::Complete);
+                assert!(ed.is_empty());
+            }
             0x20..=0x7e => {
                 assert_eq!(edit, Edit::Pending);
                 assert_eq!(ed.len(), 1, "printable byte {byte:#04x} must be admitted");

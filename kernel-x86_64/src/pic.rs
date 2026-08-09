@@ -69,6 +69,24 @@ pub fn unmask_serial() {
     }
 }
 
+/// Unmask IRQ1 (the i8042 keyboard) on the master PIC, keeping whatever else is already unmasked
+/// (REQ-CON-003, ADR-049). Read-modify-write for the same reason `unmask_serial` is: the console has
+/// two input sources now, and arming one must not disarm the other.
+#[cfg(feature = "interactive")]
+pub fn unmask_keyboard() {
+    unsafe {
+        let cur = Port::<u8>::new(PIC1_DATA).read();
+        Port::<u8>::new(PIC1_DATA).write(cur & !(1 << 1));
+    }
+}
+
+/// Is master-PIC line `irq` currently masked? Read rather than remembered: the mask register is the
+/// authority on whether a line can reach the CPU, and a suite asserting its own bookkeeping instead
+/// would pass while the hardware disagreed.
+pub fn irq_masked(irq: u8) -> bool {
+    unsafe { Port::<u8>::new(PIC1_DATA).read() & (1 << irq) != 0 }
+}
+
 /// End-of-interrupt. For slave-line vectors (>= 0x28) both PICs must be acknowledged.
 pub fn eoi(vector: u8) {
     unsafe {

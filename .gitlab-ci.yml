@@ -58,6 +58,18 @@ vm-e2e-vbox:
     - rustup target add x86_64-unknown-uefi --toolchain nightly-2026-08-09
     - ./scripts/vm-e2e-vbox.sh
 
+keyboard-e2e:
+  stage: test
+  image: rust:latest
+  script:
+    # A person at the machine's own keyboard (REQ-CON-003, ADR-049). Types on the EMULATED i8042
+    # through QMP send-key with the serial line pointed at a file, so nothing can be typed at the
+    # wire — which is why `console-e2e` could never have found ALET-P2-039.
+    - apt-get update && apt-get install -y qemu-system-x86 ovmf python3
+    - rustup toolchain install nightly-2026-08-09 --profile minimal
+    - rustup target add x86_64-unknown-uefi --toolchain nightly-2026-08-09
+    - ./scripts/keyboard-e2e.sh
+
 conformance:
   stage: test
   image: rust:latest

@@ -46,6 +46,23 @@ jobs:
       - name: Boot riscv64 kernel in VM and assert 11/11 invariants + exit 0
         run: ./scripts/vm-e2e-riscv.sh
 
+  keyboard-e2e:
+    name: A person at the machine's own keyboard (i8042 -> IRQ1 -> decoder -> line editor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU + OVMF
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf
+      - name: Install Rust nightly + x86_64-unknown-uefi target
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup target add x86_64-unknown-uefi --toolchain nightly-2026-08-09
+      # Types on the EMULATED KEYBOARD through QMP send-key, with the serial line pointed at a file
+      # so nothing can be typed at it. `console-e2e.sh` types on the wire and therefore could never
+      # have found ALET-P2-039 (ADR-049).
+      - name: Boot the interactive image and type on the i8042
+        run: ./scripts/keyboard-e2e.sh
+
   build-all:
     name: Repository-wide integration build (all crates + all CPU targets)
     runs-on: ubuntu-latest

@@ -15,6 +15,11 @@ use x86_64::{PrivilegeLevel, VirtAddr};
 /// IRQ0 (timer) is remapped to vector 0x20 by the PIC.
 pub const TIMER_VECTOR: u8 = 0x20;
 
+/// IRQ1 (the i8042 PS/2 keyboard) is remapped to vector 0x21 by the PIC. The console's SECOND
+/// input source (REQ-CON-003, ADR-049) — a person at the machine's own keyboard rather than on the
+/// wire — feeding the same input ring COM1 does.
+pub const KEYBOARD_VECTOR: u8 = 0x21;
+
 /// IRQ4 (COM1, the console's serial line) is remapped to vector 0x24 by the PIC.
 pub const SERIAL_VECTOR: u8 = 0x24;
 
@@ -63,6 +68,7 @@ pub fn init() {
         idt.double_fault.set_handler_fn(double_fault);
         idt[TIMER_VECTOR].set_handler_fn(timer);
         idt[SERIAL_VECTOR].set_handler_fn(serial);
+        idt[KEYBOARD_VECTOR].set_handler_fn(keyboard);
         IDT.get().load();
     }
 }
@@ -72,6 +78,15 @@ pub fn init() {
 extern "x86-interrupt" fn serial(_frame: InterruptStackFrame) {
     crate::conirq::on_serial_irq();
     crate::pic::eoi(SERIAL_VECTOR);
+}
+
+/// The i8042 has a scancode for the console (REQ-CON-003, ADR-049). Installed unconditionally so
+/// the vector is never a hole; inert unless `conirq::init` brought the controller up and unmasked
+/// IRQ1. The EOI is sent whatever the handler decided, including for a scancode the keymap drops —
+/// a handler that returned without acknowledging would take the line down after one keystroke.
+extern "x86-interrupt" fn keyboard(_frame: InterruptStackFrame) {
+    crate::conirq::on_keyboard_irq();
+    crate::pic::eoi(KEYBOARD_VECTOR);
 }
 
 extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
