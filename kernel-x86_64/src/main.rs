@@ -339,6 +339,30 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // Capability lifetime across a reboot (REQ-CAP-008, ADR-048). The spine suite above proves
+    // authority is correct while the machine is up; this proves what survives a restart and — far
+    // more important — what a restored registry must REFUSE, since a persisted registry is
+    // untrusted input and a load that trusts it is a minting path with no delegation behind it.
+    kprintln!("");
+    kprintln!("--- capability-lifetime selftests (a persisted registry is untrusted input) ---");
+    match kernel_core::capstore::capstore_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[cap] ALL {} CAPABILITY-LIFETIME INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[cap] FAILED at capability-lifetime invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(110 + idx as i32);
+        }
+    }
+
     // SMP: discover the APs from the ACPI MADT, wake them with INIT-SIPI-SIPI through the
     // real-mode trampoline, and prove the 13-invariant cross-core substrate (REQ-SMP-002 parity
     // with aarch64/RISC-V). MUST run before the ring-3 suite: that suite repoints IRQ0 at its own
@@ -535,7 +559,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     }
 
     kprintln!("");
-    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 11 spine invariants + SMP + ring-3 user-mode + filesystem + console");
+    kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 13 spine invariants + capability-lifetime + SMP + ring-3 user-mode + filesystem + console");
     kprintln!("[e2e] Aletheia booted as its own OS on AMD64. Halting.");
 
     // With `--features interactive` the boot hands the machine to the serial line instead of

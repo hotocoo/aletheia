@@ -9,7 +9,7 @@
 //!
 //! Two layers:
 //!   1. `whole_suite_*` — runs the SINGLE shared `selftest::run()` (the identical function the three
-//!      kernels call at boot) and asserts all 11 invariants hold, capturing the per-check reports.
+//!      kernels call at boot) and asserts all 13 invariants hold, capturing the per-check reports.
 //!   2. `invariant_*` — named, granular host tests over the spine API, so a regression names the
 //!      exact broken property instead of a bare index. These are the M1 acceptance criteria.
 
@@ -29,15 +29,15 @@ fn whole_suite_all_invariants_hold_on_host() {
 
     assert_eq!(
         result,
-        Ok(11),
-        "all 11 shared spine invariants must hold on the host"
+        Ok(13),
+        "all 13 shared spine invariants must hold on the host"
     );
-    assert_eq!(reported.len(), 11, "every check must report exactly once");
+    assert_eq!(reported.len(), 13, "every check must report exactly once");
     assert!(
         reported.iter().all(|(_, passed, _)| *passed),
         "no check may report a failure: {reported:?}"
     );
-    // Indices are dense 1..=11 in order — the same numbering the VM gate maps to exit 10+idx.
+    // Indices are dense 1..=13 in order — the same numbering the VM gate maps to exit 10+idx.
     for (i, (n, _, _)) in reported.iter().enumerate() {
         assert_eq!(
             *n as usize,
@@ -53,7 +53,7 @@ fn whole_suite_reports_before_returning() {
     // property the VM gate relies on to attribute a failing exit code to a specific invariant.
     let mut count = 0u32;
     let _ = selftest::run(|_, _, _| count += 1);
-    assert_eq!(count, 11);
+    assert_eq!(count, 13);
 }
 
 // ---------------------------------------------------------------------------

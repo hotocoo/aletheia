@@ -118,6 +118,30 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Capability lifetime across a reboot (REQ-CAP-008, ADR-048). The spine suite above proves
+    // authority is correct while the machine is up; this proves what survives a restart and — far
+    // more important — what a restored registry must REFUSE, since a persisted registry is
+    // untrusted input and a load that trusts it is a minting path with no delegation behind it.
+    kprintln!("");
+    kprintln!("--- capability-lifetime selftests (a persisted registry is untrusted input) ---");
+    match kernel_core::capstore::capstore_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[cap] ALL {} CAPABILITY-LIFETIME INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[cap] FAILED at capability-lifetime invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(110 + idx as i32);
+        }
+    }
+
     // Physical-memory invariants (riscv64 backend; separate from the shared spine suite).
     kprintln!("");
     kprintln!("--- memory-management selftests (physical frames) ---");

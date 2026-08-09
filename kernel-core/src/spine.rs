@@ -100,20 +100,18 @@ impl Constraints {
     }
 }
 
+/// One capability's record. Crate-visible rather than module-private because [`crate::capstore`]
+/// serializes exactly these fields and re-verifies them on load — a persisted registry is an input,
+/// and an input that is trusted because it came from disk is not a capability system. `subject` is
+/// carried for auditability; the minimal kernel `evaluate` path does not read it.
 #[derive(Clone, Debug)]
-struct StoredCapability {
-    // `subject` (the holder) and `parent` (the delegation ancestor) are part of the capability
-    // record for model fidelity and auditability, but the minimal kernel `evaluate` path does not
-    // read them (revocation walks the separate `children` map, not `parent`). Retained rather than
-    // dropped so the kernel spine mirrors the hosted System Core's capability shape; allowed here so
-    // `clippy -D warnings` stays clean now that the spine is a shared library crate.
+pub(crate) struct StoredCapability {
     #[allow(dead_code)]
-    subject: String,
-    action: String,
-    scope: Scope,
-    constraints: Constraints,
-    #[allow(dead_code)]
-    parent: Option<u64>,
+    pub(crate) subject: String,
+    pub(crate) action: String,
+    pub(crate) scope: Scope,
+    pub(crate) constraints: Constraints,
+    pub(crate) parent: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,14 +231,22 @@ impl CapEngine {
             .get(&parent.0)
             .ok_or_else(|| "unknown parent capability".to_string())?
             .clone();
-        if !action_covers(&p.action, action) {
-            return Err("delegation would amplify action".to_string());
-        }
-        if !scope_subset(&p.scope, &scope) {
-            return Err("delegation would amplify scope".to_string());
-        }
-        if !constraints_not_looser(&p.constraints, &constraints) {
-            return Err("delegation would loosen constraints".to_string());
+        // The attenuation rule lives ONCE, in `capalg` (REQ-CAP-007, ADR-048), because the same
+        // rule has to govern a capability created here and a capability read back off a disk by
+        // `capstore` — two copies of "narrower" is two places for authority to widen.
+        if let Some(why) = crate::capalg::refusal(
+            &crate::capalg::Authority {
+                action: &p.action,
+                scope: &p.scope,
+                constraints: &p.constraints,
+            },
+            &crate::capalg::Authority {
+                action,
+                scope: &scope,
+                constraints: &constraints,
+            },
+        ) {
+            return Err(why.to_string());
         }
         let id = self.fresh_id();
         self.registry.insert(
@@ -367,47 +373,84 @@ impl CapEngine {
     pub fn is_revoked(&self, token: CapToken) -> bool {
         self.revoked.contains(&token.0)
     }
+
+    /// The engine's logical clock — the value [`evaluate`](Self::evaluate) compares expiries
+    /// against. Public because a capability's lifetime is only meaningful relative to it: a
+    /// persisted registry that is reloaded under a clock that has moved BACKWARDS would un-expire
+    /// every capability it carries, so [`crate::capstore::load`] has to be able to ask.
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
+    /// How many live (non-revoked) capabilities the registry holds. Evidence for a save/load
+    /// round-trip that would otherwise be provable only through the tokens the caller happens to
+    /// have kept.
+    pub fn live_count(&self) -> usize {
+        self.registry
+            .keys()
+            .filter(|id| !self.revoked.contains(id))
+            .count()
+    }
+
+    // --- capability persistence seam (REQ-CAP-008, ADR-048) ---------------------------------
+    // `capstore` is the only consumer. Crate-visible rather than public: the serialized form is an
+    // implementation detail of the store, and a caller able to assemble a registry by hand would be
+    // a minting path that never passed `delegate`.
+
+    pub(crate) fn parts(&self) -> (&BTreeMap<u64, StoredCapability>, &BTreeSet<u64>, u64, u64) {
+        (&self.registry, &self.revoked, self.next_id, self.secret)
+    }
+
+    /// Rebuild an engine from an already-validated registry. Derives `children` here rather than
+    /// taking it, so a loaded engine's revocation cascade is computed from the parent edges that
+    /// were checked — not from a second, separately corruptible structure.
+    pub(crate) fn from_parts(
+        registry: BTreeMap<u64, StoredCapability>,
+        revoked: BTreeSet<u64>,
+        next_id: u64,
+        secret: u64,
+        now: u64,
+    ) -> Self {
+        let mut children: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for (id, cap) in registry.iter() {
+            if let Some(p) = cap.parent {
+                children.entry(p).or_default().push(*id);
+            }
+        }
+        let mut engine = CapEngine {
+            registry,
+            revoked,
+            children,
+            next_id,
+            secret,
+            now,
+        };
+        // Re-derive the cascade: a store that lists a revoked parent but not its descendants must
+        // not resurrect them. Closing the revoked set under the parent edges is what makes the
+        // revocation list a claim the load VERIFIES rather than one it replays.
+        //
+        // Note this cannot be `for r in roots { self.revoke(r) }`: `revoke` descends only when its
+        // `insert` reports the id as newly revoked, and every seed is already in the set — so the
+        // walk would stop at the first node and every descendant would come back live. The bug was
+        // caught by the invariant below it (`the_cascade_is_recomputed_when_the_image_lists_only_
+        // its_root`), which is the reason that invariant thins the list rather than trusting it.
+        let mut stack: Vec<u64> = engine.revoked.iter().copied().collect();
+        while let Some(t) = stack.pop() {
+            let kids: Vec<u64> = engine.children.get(&t).cloned().unwrap_or_default();
+            for k in kids {
+                if engine.revoked.insert(k) {
+                    stack.push(k);
+                }
+            }
+        }
+        engine
+    }
 }
 
-pub fn action_covers(pattern: &str, action: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
-    if let Some(prefix) = pattern.strip_suffix(".*") {
-        return action == prefix || action.starts_with(&format!("{}.", prefix));
-    }
-    pattern == action
-}
-
-fn scope_covers(scope: &Scope, target: &Target) -> bool {
-    match scope {
-        Scope::All => true,
-        Scope::None => false,
-        Scope::Type(t) => target.etype.map(|e| e == *t).unwrap_or(false),
-        Scope::Entities(set) => target.id.map(|id| set.contains(&id)).unwrap_or(false),
-    }
-}
-
-fn scope_subset(parent: &Scope, child: &Scope) -> bool {
-    match (parent, child) {
-        (Scope::All, _) => true,
-        (_, Scope::None) => true,
-        (Scope::Type(a), Scope::Type(b)) => a == b,
-        (Scope::Entities(p), Scope::Entities(c)) => c.iter().all(|x| p.contains(x)),
-        _ => false,
-    }
-}
-
-fn constraints_not_looser(parent: &Constraints, child: &Constraints) -> bool {
-    let expiry_ok = match (parent.expires_at, child.expires_at) {
-        (Some(p), Some(c)) => c <= p,
-        (Some(_), None) => false,
-        (None, _) => true,
-    };
-    let local_ok = !parent.local_only || child.local_only;
-    let approval_ok = !parent.approval_required || child.approval_required;
-    expiry_ok && local_ok && approval_ok
-}
+// The authority lattice — covering (what `evaluate` asks) and attenuation (what `delegate` asks) —
+// is defined in `crate::capalg` and re-exported here so existing callers and the hosted mirror keep
+// naming it through the spine. See ADR-048 for why the two are different relations.
+pub use crate::capalg::{action_attenuates, action_covers, scope_covers};
 
 // ---------------------------------------------------------------------------
 // Semantic store — content-addressed, versioned, in-memory

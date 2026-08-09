@@ -24,6 +24,8 @@
 
 extern crate alloc;
 
+pub mod capalg;
+pub mod capstore;
 pub mod conring;
 pub mod deadva;
 pub mod device;

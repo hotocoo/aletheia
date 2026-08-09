@@ -91,6 +91,18 @@ CONTRACT=(
   "dead: an empty declaration is refused, not reported clean (the audit cannot pass vacuously)"
   "dead: a DERIVED per-process space has both dead pages absent (walked, not assumed)"
   "dead: unprivileged code cannot reach VA 0 or the kernel stack guard through its own root"
+  # The authority lattice and capability lifetime (REQ-CAP-007/008, ADR-048). What "narrower" means
+  # and what survives a reboot are the two halves of one question, and neither may vary by CPU: a
+  # target that accepts a delegation the others refuse has a different authority boundary, and a
+  # target that resurrects a revoked capability across a restart has no revocation at all.
+  "delegation: a child pattern reaching past its parent is denied"
+  "delegation: a legal two-step narrowing still authorizes at the leaf"
+  "capstore: a revoked capability is still revoked after the reboot"
+  "capstore: the revocation cascade is re-derived, not trusted from the image"
+  "capstore: loading under an earlier clock is refused (expiry would be undone)"
+  "capstore: a child widened in the image is refused (attenuation re-checked on load)"
+  "capstore: an image whose counter could re-mint a stored id is refused"
+  "capstore: every single-bit corruption of the image is refused"
   # The filesystem namespace (REQ-FS-001, ADR-035). The namespace is arch-independent code, so a
   # divergence here would mean a target's heap/alloc or storage path behaves differently — and the
   # behaviors that matter are refusals and crash outcomes, which must not vary by CPU. On aarch64 the

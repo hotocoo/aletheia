@@ -70,6 +70,7 @@ hostpath() {
 # LIST, not as a chain of greps, so a family cannot be dropped by deleting one line unnoticed.
 REQUIRED=(
   'ALL 22 MEMORY INVARIANTS HOLD'
+  'ALL 11 CAPABILITY-LIFETIME INVARIANTS HOLD'
   'VIRTUAL-MEMORY INVARIANTS HOLD'
   'kernel map built @'
   'kernel map ACTIVE'
