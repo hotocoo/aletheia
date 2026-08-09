@@ -1,0 +1,33 @@
+# Line-ending policy (ADR-046: qualification must not be host-shaped).
+#
+# Every gate in this repository is a shell script, and `core.autocrlf=true` — the Git default on a
+# Windows install — checks those scripts out with CRLF. A CRLF `#!/usr/bin/env bash` line makes the
+# kernel look for an interpreter literally named "bash\r", and the gate dies with
+#
+#     env: 'bash\r': No such file or directory
+#
+# before it runs a single check. That is not a Windows problem: the same clone shared into WSL, a
+# container, or a VM fails identically. Since ADR-046 makes a Windows workstation a first-class
+# place to run the x86-64 qualification, the executable text in this repo must be LF everywhere,
+# regardless of the developer's global Git configuration.
+*.sh      text eol=lf
+*.py      text eol=lf
+*.s       text eol=lf
+*.ld      text eol=lf
+*.toml    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.rs      text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# Binary fixtures must never be touched by end-of-line conversion — a WASM module with its 0x0d
+# bytes rewritten is a corrupt module, and the failure surfaces as a validation error far from the
+# cause.
+*.wasm    binary
+*.efi     binary
+*.img     binary
+*.vdi     binary
+*.vmdk    binary

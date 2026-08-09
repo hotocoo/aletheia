@@ -91,14 +91,14 @@ pub struct Cipher {
 impl Cipher {
     pub fn new(key: &[u8; 32]) -> Self {
         Cipher {
-            inner: ChaCha20Poly1305::new(Key::from_slice(key)),
+            inner: ChaCha20Poly1305::new(&Key::from(*key)),
         }
     }
     pub fn seal(&self, plaintext: &[u8]) -> Vec<u8> {
         let nonce_bytes: [u8; 12] = rand::random();
         let ct = self
             .inner
-            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+            .encrypt(&Nonce::from(nonce_bytes), plaintext)
             .expect("aead seal");
         let mut out = Vec::with_capacity(12 + ct.len());
         out.extend_from_slice(&nonce_bytes);
@@ -110,8 +110,14 @@ impl Cipher {
             return Err(AlethError::persistence("ciphertext too short"));
         }
         let (nonce, ct) = data.split_at(12);
+        // `try_into` cannot fail: `data.len() >= 12` was checked above and `split_at(12)` gives
+        // exactly twelve bytes. Written as a fallible conversion anyway because the infallible
+        // `from_slice` was deprecated for precisely the case where that reasoning is wrong.
+        let nonce: [u8; 12] = nonce
+            .try_into()
+            .map_err(|_| AlethError::persistence("nonce is not 12 bytes"))?;
         self.inner
-            .decrypt(Nonce::from_slice(nonce), ct)
+            .decrypt(&Nonce::from(nonce), ct)
             .map_err(|_| AlethError::persistence("aead open failed"))
     }
 }

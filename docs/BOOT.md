@@ -141,7 +141,7 @@ qemu-system-riscv64 -machine virt -cpu rv64 -smp 1 -m 128M -nographic \
 
 The only target that produces a **bootable disk image**: Aletheia boots as its own OS under
 **UEFI firmware**, calls `ExitBootServices` to take the machine, brings up its own GDT/IDT +
-8259 PIC + 8254 PIT, and re-proves **11 spine + 22 memory + 40 virtual-memory + 22 ring-3
+8259 PIC + 8254 PIT, and re-proves **11 spine + 22 memory + 72 virtual-memory + 34 ring-3
 user-mode + 22 SMP** invariants (the virtual-memory count includes the mapping-API admission
 check, REQ-MM-001/ADR-029). The image is GPT with a FAT32 **EFI System Partition** holding
 `\EFI\BOOT\BOOTX64.EFI` — so it needs **UEFI firmware, never legacy BIOS**.

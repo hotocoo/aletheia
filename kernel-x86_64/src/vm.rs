@@ -312,15 +312,21 @@ fn walk_path(root: u64, va: u64) -> Option<[PathStep; 4]> {
 /// the layout in one place is what makes its properties checkable, and the boot suite runs that check.
 pub fn layout() -> kernel_core::layout::Layout {
     use kernel_core::layout::{Layout, Region};
-    let (img_base, img_size) = crate::kmap::image_span();
+    // `image_span()` returns `(base, END)`, page-aligned outward — NOT `(base, size)`. Reading it as
+    // a size and declaring `base .. base + end` made the kernel-image region roughly twice its true
+    // length and put its far edge at an address the image never occupies.
+    //
+    // That was invisible for as long as the firmware loaded the image low: under QEMU+OVMF the base
+    // is around 0x1c70_0000, so even the doubled extent stopped short of the user region at
+    // 0x4000_0000 and `Layout::validate` had nothing to complain about. Under VirtualBox's EFI with
+    // 1 GiB of guest RAM the image lands at 0x3c6c_8000, the bogus extent runs to 0x7965_d000, and
+    // the declaration OVERLAPS the user region — which is what invariant 70 caught. The declared
+    // layout is the thing every other layout check is checked *against*, so a wrong declaration is
+    // worse than a missing one.
+    let (img_base, img_end) = crate::kmap::image_span();
     Layout::new("x86-64")
         // The image the firmware loaded us at (text/rodata/data/bss, including the guarded ring-0 stack).
-        .with(Region::new(
-            "kernel-image",
-            img_base,
-            img_base + img_size,
-            false,
-        ))
+        .with(Region::new("kernel-image", img_base, img_end, false))
         // Where the ring-3 suite maps unprivileged code and stack.
         .with(Region::new("user", 0x4000_0000, 0x4000_2000, true))
 }
@@ -793,8 +799,10 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                 "kmap: kernel read-only data is neither writable nor executable"
             );
         }
-        // Bulk RAM: the frame pool's own base, far from the image, is a huge page — writable so the
-        // allocator works, never executable so no data page is a code page.
+        // Bulk RAM, in two invariants that were previously — wrongly — one.
+        //
+        // The SECURITY property is that the frame pool is writable and never executable. That must
+        // hold at the pool's base whatever granularity the map gave it.
         let pool = match crate::kmap::leaf_for(kroot, frames::base()) {
             Some(v) => v,
             None => {
@@ -805,10 +813,34 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             }
         };
         check!(
-            pool.1 == 2
-                && pool.0 & PageTableFlags::WRITABLE.bits() != 0
+            pool.0 & PageTableFlags::WRITABLE.bits() != 0
                 && pool.0 & PageTableFlags::NO_EXECUTE.bits() != 0,
-            "kmap: RAM outside the image is a 2 MiB RW+NX block — writable, never executable"
+            "kmap: the frame pool is writable and NEVER executable (whatever its granularity)"
+        );
+        // The STRUCTURAL property — bulk RAM gets 2 MiB blocks rather than a page table per 2 MiB —
+        // has to be asserted somewhere the map is not deliberately split. `frames::base()` is not
+        // such a place: under VirtualBox's EFI the largest conventional region starts at 0x100000,
+        // inside the first block, which this map splits to 4 KiB so VA 0 can have no leaf. Asserting
+        // `level == 2` at the pool base therefore encoded "the firmware's memory map looks like
+        // QEMU's", and a correct map failed on a second hypervisor (ADR-046).
+        let bulk = match crate::kmap::bulk_ram_probe() {
+            Some(va) => va,
+            None => {
+                return Err((
+                    n + 1,
+                    "kmap: no bulk-RAM 2 MiB region outside the split spans",
+                ))
+            }
+        };
+        let block = match crate::kmap::leaf_for(kroot, bulk) {
+            Some(v) => v,
+            None => return Err((n + 1, "kmap: bulk RAM is not mapped by the kernel's map")),
+        };
+        check!(
+            block.1 == 2
+                && block.0 & PageTableFlags::WRITABLE.bits() != 0
+                && block.0 & PageTableFlags::NO_EXECUTE.bits() != 0,
+            "kmap: RAM outside every split span is a 2 MiB RW+NX block"
         );
         check!(
             crate::kmap::leaf_for(kroot, 0x8000).is_some(),

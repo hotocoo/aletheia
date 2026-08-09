@@ -1,7 +1,7 @@
 //! `aletheiad` — Aletheia Core Alpha daemon + hosted experience surface.
 //!
 //! Two modes, both exercising the SAME capability-gated service boundary (ADR-016, SAD §17):
-//!   aletheiad serve [--socket PATH] [--data DIR]   long-running Core behind the Unix-socket IPC
+//!   aletheiad serve [--socket PATH] [--data DIR]   long-running Core behind the endpoint IPC
 //!                                                  boundary (clients connect and issue Requests)
 //!   aletheiad [demo] [--data DIR]                  runs the UC-001..004 scenario AS A CLIENT over
 //!                                                  the in-process boundary — the app never touches
@@ -9,7 +9,7 @@
 use aletheia::domain::EntityType;
 use aletheia::experience;
 use aletheia::intent_action::{Intent, Trace, Verb};
-use aletheia::service::{serve_unix, CoreService, Request, Response};
+use aletheia::service::{serve as serve_endpoint, CoreService, Request, Response};
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -74,12 +74,13 @@ fn serve(args: &[String]) {
                 .into_owned()
         });
     let svc = CoreService::open(&dir).expect("open core");
-    println!("Aletheia Core Alpha — serving on {sock}");
-    println!("  data-dir = {dir}");
     println!(
-        "  clients connect via the capability-gated Unix-socket IPC boundary; Ctrl-C to stop."
+        "Aletheia Core Alpha — serving on {sock} (transport: {})",
+        aletheia::transport::backend_name()
     );
-    serve_unix(svc, &sock).expect("serve");
+    println!("  data-dir = {dir}");
+    println!("  clients connect via the capability-gated endpoint IPC boundary; Ctrl-C to stop.");
+    serve_endpoint(svc, &sock).expect("serve");
 }
 
 fn demo(args: &[String]) {
@@ -194,7 +195,7 @@ fn demo(args: &[String]) {
     });
     let n = audit.data.as_array().map(|a| a.len()).unwrap_or(0);
     println!("\naudit surface: {n} immutable events recorded.");
-    println!("run `aletheiad serve` for the long-running Core behind the socket boundary;");
+    println!("run `aletheiad serve` for the long-running Core behind the endpoint boundary;");
     println!(
         "set MODEL_ENDPOINT + start llama-server to route interpretation through the local model."
     );

@@ -167,3 +167,36 @@ pub unsafe fn install_usermode(syscall_entry: u64, timer_entry: u64, pf_entry: u
     idt[TIMER_VECTOR].set_handler_addr(VirtAddr::new(timer_entry));
     idt.page_fault.set_handler_addr(VirtAddr::new(pf_entry));
 }
+
+/// Route `#UD` and `#GP` to the user-mode entry stubs (ALET-P1-011, ADR-039).
+///
+/// Separate from [`install_usermode`] on purpose: those two vectors are *fatal catch-alls* for the
+/// rest of the boot — an illegal opcode or a protection fault in kernel space is a kernel bug and
+/// must stay loud. Only the ring-3 suite, which raises both deliberately and contains them through
+/// the supervisor, takes them over, and [`restore_fatal_traps`] hands them back afterwards.
+///
+/// # Safety
+/// `ud_entry` and `gp_entry` must be valid raw interrupt entry points, installed single-core with
+/// interrupts disabled.
+pub unsafe fn install_ring3_fault_traps(ud_entry: u64, gp_entry: u64) {
+    let idt = IDT.get_mut();
+    idt.invalid_opcode.set_handler_addr(VirtAddr::new(ud_entry));
+    idt.general_protection_fault
+        .set_handler_addr(VirtAddr::new(gp_entry));
+}
+
+/// Give `#UD` and `#GP` back to the fatal handlers installed by [`init`].
+///
+/// Called the moment the adversarial trials are over. Leaving the ring-3 entries installed for the
+/// rest of the boot would mean a kernel-side illegal opcode ran the *containment* path — which
+/// would try to terminate a task that is not running and then resume a scheduler that is not there.
+/// A safety net taken down for a test has to be put back, or the test has made the machine weaker.
+pub fn restore_fatal_traps() {
+    // SAFETY: single-core, IF=0; re-installs the same handlers `init` did.
+    unsafe {
+        let idt = IDT.get_mut();
+        idt.invalid_opcode.set_handler_fn(invalid_opcode);
+        idt.general_protection_fault
+            .set_handler_fn(general_protection);
+    }
+}

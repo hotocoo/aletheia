@@ -3,11 +3,13 @@
 # `clippy` and `rustfmt` are requested explicitly so the quality gate cannot be skipped for lack of a
 # component — a missing component would otherwise look like a passing run on a host that has neither.
 #
-# The channel is still the FLOATING nightly. A dated pin (`nightly-<date>`) is the right answer and is
-# NOT claimed here: installing the dated toolchain failed on the workstation this was developed on
-# (rustup rolled the install back), so landing the pin would have meant claiming a compiler version the
-# gates had never actually been run against. docs/TOOLCHAIN.md records what remains.
+# The channel is the DATED pin (GAPS4 ALET-P2-001, closed 2026-08-09). The floating nightly meant the
+# compiler under every gate could change without a commit, so a passing run said nothing about which
+# compiler it passed under. The pin was blocked before by a rustup install that rolled back on the
+# development workstation; `nightly-2026-08-09` installs cleanly there now, and the gates in
+# docs/TOOLCHAIN.md were re-run against it before this landed. Bumping it touches SIX places — see
+# docs/TOOLCHAIN.md; check-ci-parity.sh requires both pipelines to agree.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-08-09"
 components = ["rust-src", "llvm-tools-preview", "clippy", "rustfmt"]
 targets = ["riscv64gc-unknown-none-elf"]

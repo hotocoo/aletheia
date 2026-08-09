@@ -7,7 +7,7 @@
 //! proves the same contract over the Unix-socket transport.
 use aletheia::domain::EntityType;
 use aletheia::intent_action::{Intent, Verb};
-use aletheia::service::{serve_unix, CoreService, Request, UnixClient};
+use aletheia::service::{serve, CoreService, Request, ServiceClient};
 
 fn dir() -> String {
     std::env::temp_dir()
@@ -244,7 +244,7 @@ fn capability_scope_confined_over_the_api() {
 }
 
 #[test]
-fn same_contract_holds_over_the_unix_socket_transport() {
+fn same_contract_holds_over_the_endpoint_transport() {
     let sock = std::env::temp_dir()
         .join(format!("aletheia-{}.sock", aletheia::domain::new_id()))
         .to_string_lossy()
@@ -254,13 +254,13 @@ fn same_contract_holds_over_the_unix_socket_transport() {
     // Server constructs its own CoreService inside the thread (nothing non-Send crosses the boundary).
     let server = std::thread::spawn(move || {
         let svc = CoreService::open(data).unwrap();
-        let _ = serve_unix(svc, &sock_srv);
+        let _ = serve(svc, &sock_srv);
     });
 
     // Connect (retry briefly while the listener binds).
     let mut client = None;
     for _ in 0..100 {
-        if let Ok(c) = UnixClient::connect(&sock) {
+        if let Ok(c) = ServiceClient::connect(&sock) {
             client = Some(c);
             break;
         }

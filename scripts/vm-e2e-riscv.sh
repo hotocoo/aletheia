@@ -21,6 +21,18 @@ ELF="$KDIR/target/$TARGET/debug/aletheia-kernel-riscv64"
 
 cd "$KDIR" || { echo "FAIL: no kernel-riscv64 dir"; exit 3; }
 
+# Preflight. Without this the gate dies inside the perl watchdog with "Died at -e line 1." and 21
+# marker-missing lines, which reads as a broken kernel rather than as a missing package. A tool the
+# gate cannot run is reported by NAME, and the gate still FAILS (never a silent pass) — the point is
+# a legible diagnosis, not an exemption.
+command -v qemu-system-riscv64 >/dev/null 2>&1 || {
+  echo "FAIL: qemu-system-riscv64 not found on PATH"
+  echo "  install it: apt-get install -y qemu-system-riscv (on current Ubuntu the riscv64 emulator is no
+#   longer part of qemu-system-misc)"
+  echo "VM-E2E (riscv64): FAIL"
+  exit 1
+}
+
 echo "==> building riscv64 kernel"
 cargo build || { echo "FAIL: build"; exit 3; }
 
