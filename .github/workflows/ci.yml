@@ -38,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU (riscv64 system emulation)
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-misc qemu-system-riscv
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-misc && (sudo apt-get install -y qemu-system-riscv || true)
       - name: Install Rust nightly + rust-src (for build-std)
         run: |
           rustup toolchain install nightly-2026-08-09 --profile minimal
@@ -96,7 +96,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU for all three targets, OVMF firmware, mtools
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-riscv qemu-system-x86 ovmf mtools perl
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf mtools perl && (sudo apt-get install -y qemu-system-riscv || true)
       - name: Install Rust nightly + all cross targets
         run: |
           rustup toolchain install nightly-2026-08-09 --profile minimal
@@ -111,7 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU for all three targets, OVMF firmware, mtools
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-riscv qemu-system-x86 ovmf mtools perl
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf mtools perl && (sudo apt-get install -y qemu-system-riscv || true)
       - name: Install Rust nightly + all cross targets
         run: |
           rustup toolchain install nightly-2026-08-09 --profile minimal

@@ -142,8 +142,22 @@ Provision as in §2 but point the VDI at `aletheia-interactive.img`, and give se
 "$VB" modifyvm "$VM" --uart1 0x3F8 4 --uart-mode1 server /tmp/aletheia.pipe      # macOS/Linux
 ```
 
-Then attach a terminal to that pipe (PuTTY's *Serial* mode on Windows, `socat -,raw,echo=0
-UNIX-CONNECT:/tmp/aletheia.pipe` elsewhere) and use the shell:
+**The VM window cannot type at it.** Aletheia draws to the GOP framebuffer it took from the
+firmware, so the window shows you the prompt — but the console READS from the UART (REQ-CON-002,
+ADR-045) and there is no PS/2 keyboard driver, so keystrokes in the VirtualBox window reach nothing.
+This surprises everyone once: the machine looks hung when it is in fact waiting on a line nobody is
+sending. (Press **Right Ctrl** to release the keyboard back to the host.)
+
+Attach a terminal to the pipe instead. On Windows either use PuTTY's *Serial* mode pointed at
+`\.\pipeletheia`, or run the dependency-free equivalent that ships here — start the VM first,
+because the pipe exists only while it runs:
+
+```powershell
+VBoxManage startvm "Aletheia"
+powershell -ExecutionPolicy Bypass -File scripts/serial-console.ps1
+```
+
+Elsewhere, `socat -,raw,echo=0 UNIX-CONNECT:/tmp/aletheia.pipe`. Then use the shell:
 
 ```text
 aletheia> help
@@ -155,6 +169,7 @@ aletheia> halt
 ```
 
 Input is interrupt-driven (ADR-045), so the machine is not spinning while it waits for you.
+`Ctrl-]` detaches `serial-console.ps1` and leaves the VM running; `halt` stops the machine.
 
 ---
 
