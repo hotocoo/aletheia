@@ -25,7 +25,7 @@ IMG="$BUILD/aletheia-x86_64.img"
 VDI="$BUILD/aletheia-vbox.vdi"
 LOG="$BUILD/aletheia-vbox-serial.log"
 VM_NAME="${VM_NAME:-Aletheia-x86_64-e2e}"
-CPUS="${CPUS:-4}"
+CPUS="${CPUS:-2}"
 TIMEOUT_S="${TIMEOUT_S:-180}"
 
 # TWO guest memory sizes, and this is not padding. The firmware's memory map is an INPUT to the

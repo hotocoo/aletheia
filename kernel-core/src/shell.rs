@@ -652,6 +652,22 @@ pub trait ShellHost {
     fn input_dropped(&self) -> u64 {
         0
     }
+    /// Processors this kernel brought up. Defaulted to one because a target that has not answered
+    /// the question has exactly one core it is sure about, and claiming more would be a claim about
+    /// hardware nobody enumerated.
+    fn cpu_count(&self) -> usize {
+        1
+    }
+    /// Bytes in one physical frame, so `mem` can report memory in the unit an operator thinks in
+    /// without the arch-independent dispatcher knowing a page size.
+    fn frame_bytes(&self) -> usize {
+        4096
+    }
+    /// Restart the machine. Returns only on FAILURE — a target with no reset path returns `false`
+    /// and the console says so, rather than pretending to reboot and hanging.
+    fn reboot(&self) -> bool {
+        false
+    }
 }
 
 /// The prompt. A constant because the live suite asserts on it.
@@ -661,18 +677,37 @@ pub const PROMPT: &str = "aletheia> ";
 /// without appearing in `help` (the live suite asserts the two agree).
 pub const COMMANDS: &[(&str, &str)] = &[
     ("help", "list commands"),
+    ("ver", "what this system is, and what it is not"),
     ("arch", "active target backend and privilege level"),
-    ("uptime", "nanoseconds since boot"),
-    ("mem", "physical frame allocator usage"),
+    ("uptime", "time since boot"),
+    ("mem", "physical memory, in frames and bytes"),
+    ("lsblk", "the console's block device geometry"),
     ("df", "filesystem space, in blocks"),
     ("ls", "every named object"),
+    ("find PREFIX", "names beginning with PREFIX"),
     ("stat NAME", "one object's extent and length"),
     ("cat NAME", "an object's contents"),
+    ("head NAME [N]", "the first N lines (default 10)"),
+    ("wc NAME", "lines, words and bytes"),
+    ("grep TEXT NAME", "lines of NAME containing TEXT"),
+    ("hexdump NAME [N]", "the first N bytes, in hex"),
     ("write NAME TEXT", "create or atomically replace an object"),
+    ("append NAME TEXT", "add a line to the end of an object"),
+    ("touch NAME", "create an empty object if it does not exist"),
+    ("cp SRC DST", "copy an object"),
+    ("mv SRC DST", "rename an object"),
     ("rm NAME", "remove an object (contents erased)"),
+    ("sync", "flush the device's write path"),
+    ("history", "lines run in this session"),
     ("echo TEXT", "print TEXT"),
+    ("clear", "clear the screen"),
+    ("reboot", "restart the machine"),
     ("halt", "stop the machine"),
 ];
+
+/// What this system says about itself. One place, so the console and the boot banner cannot claim
+/// different things.
+pub const VERSION: &str = "Aletheia 0.1.0 — capability-secure microkernel";
 
 /// Render a filesystem refusal as one line a human can act on. Every arm is named: an unmatched
 /// error would otherwise print as a debug blob at exactly the moment a user needs to understand it.
@@ -719,6 +754,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
     host: &H,
     fs: &mut Filesystem,
     dev: &mut D,
+    history: &[String],
     out: &mut dyn FnMut(&str),
 ) -> Outcome {
     let (verb, rest) = split_first(line);
@@ -732,14 +768,39 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 out(&format!("  {:<18} {}", name, doc));
             }
         }
+        "ver" => {
+            out(VERSION);
+            out(&format!(
+                "target {}, {} processor(s), privilege level {}",
+                host.arch(),
+                host.cpu_count(),
+                host.privilege()
+            ));
+            // Said here rather than only in a document, because the person most likely to
+            // over-claim about this system is the one sitting in front of it.
+            out("this console runs in kernel space over the kernel's own objects; it is not a");
+            out("user-mode shell over a syscall ABI, and nothing here is production-ready.");
+        }
         "arch" => out(&format!(
-            "{} (privilege level {})",
+            "{} (privilege level {}, {} processor(s))",
             host.arch(),
-            host.privilege()
+            host.privilege(),
+            host.cpu_count()
         )),
-        "uptime" => out(&format!("{} ns since boot", host.uptime_ns())),
+        "uptime" => {
+            let ns = host.uptime_ns();
+            let secs = ns / 1_000_000_000;
+            out(&format!(
+                "up {}h {:02}m {:02}s ({} ns since boot)",
+                secs / 3600,
+                (secs / 60) % 60,
+                secs % 60,
+                ns
+            ));
+        }
         "mem" => {
             let (free, total) = (host.free_frames(), host.total_frames());
+            let bytes = host.frame_bytes();
             out(&format!(
                 "frames: {} free / {} total ({} used)",
                 free,
@@ -747,8 +808,23 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 total.saturating_sub(free)
             ));
             out(&format!(
+                "memory: {} MiB free / {} MiB managed ({} B per frame)",
+                (free * bytes) / (1024 * 1024),
+                (total * bytes) / (1024 * 1024),
+                bytes
+            ));
+            out(&format!(
                 "input: {} byte(s) dropped since boot",
                 host.input_dropped()
+            ));
+        }
+        "lsblk" => {
+            let n = dev.num_blocks();
+            out(&format!(
+                "{} blocks of {} bytes = {} KiB",
+                n,
+                BLOCK_SIZE,
+                (n * BLOCK_SIZE) / 1024
             ));
         }
         "df" => match fs.free_blocks(dev) {
@@ -822,7 +898,254 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 }
             }
         }
+        "find" => {
+            if rest.is_empty() {
+                out("usage: find PREFIX");
+            } else {
+                match fs.list(dev) {
+                    Ok(entries) => {
+                        let mut seen = 0usize;
+                        for e in entries.iter().filter(|e| e.name.starts_with(rest)) {
+                            out(&format!("{:>8}  {}", e.len, e.name));
+                            seen += 1;
+                        }
+                        if seen == 0 {
+                            out("(nothing matches)");
+                        }
+                    }
+                    Err(e) => out(&fs_error(e)),
+                }
+            }
+        }
+        "head" => {
+            let (name, count) = split_first(rest);
+            if name.is_empty() {
+                out("usage: head NAME [N]");
+            } else {
+                // A bad count is a refusal, not a default: silently reading ten lines because the
+                // number could not be parsed is the console lying about what it was asked.
+                let n = if count.is_empty() {
+                    Some(10usize)
+                } else {
+                    count.parse::<usize>().ok()
+                };
+                match n {
+                    None => out("head: N must be a number"),
+                    Some(n) => match fs.read(dev, name) {
+                        Ok(bytes) => match core::str::from_utf8(&bytes) {
+                            Ok(s) => {
+                                for line in s.lines().take(n) {
+                                    out(line);
+                                }
+                            }
+                            Err(_) => out(&format!("<{} bytes, not text>", bytes.len())),
+                        },
+                        Err(e) => out(&fs_error(e)),
+                    },
+                }
+            }
+        }
+        "wc" => {
+            if rest.is_empty() {
+                out("usage: wc NAME");
+            } else {
+                match fs.read(dev, rest) {
+                    Ok(bytes) => {
+                        let lines = bytes.iter().filter(|b| **b == b'\n').count();
+                        let words = core::str::from_utf8(&bytes)
+                            .map(|s| s.split_whitespace().count())
+                            .unwrap_or(0);
+                        out(&format!(
+                            "{:>8} {:>8} {:>8}  {}",
+                            lines,
+                            words,
+                            bytes.len(),
+                            rest
+                        ));
+                    }
+                    Err(e) => out(&fs_error(e)),
+                }
+            }
+        }
+        "grep" => {
+            let (needle, name) = split_first(rest);
+            if needle.is_empty() || name.is_empty() {
+                out("usage: grep TEXT NAME");
+            } else {
+                match fs.read(dev, name) {
+                    Ok(bytes) => match core::str::from_utf8(&bytes) {
+                        Ok(s) => {
+                            let mut hits = 0usize;
+                            for (i, line) in s.lines().enumerate() {
+                                if line.contains(needle) {
+                                    out(&format!("{}: {}", i + 1, line));
+                                    hits += 1;
+                                }
+                            }
+                            if hits == 0 {
+                                out("(no matching line)");
+                            }
+                        }
+                        Err(_) => out(&format!("<{} bytes, not text>", bytes.len())),
+                    },
+                    Err(e) => out(&fs_error(e)),
+                }
+            }
+        }
+        "hexdump" => {
+            let (name, count) = split_first(rest);
+            if name.is_empty() {
+                out("usage: hexdump NAME [N]");
+            } else {
+                let n = if count.is_empty() {
+                    Some(128usize)
+                } else {
+                    count.parse::<usize>().ok()
+                };
+                match n {
+                    None => out("hexdump: N must be a number"),
+                    Some(n) => match fs.read(dev, name) {
+                        Ok(bytes) => {
+                            // Bytes from a device are NOT assumed to be text — which is the whole
+                            // point of this command: it is the one way to look at an object whose
+                            // contents `cat` refuses to spray at a terminal.
+                            for (row, chunk) in bytes
+                                .iter()
+                                .take(n)
+                                .collect::<Vec<_>>()
+                                .chunks(16)
+                                .enumerate()
+                            {
+                                let mut hex = String::new();
+                                let mut txt = String::new();
+                                for b in chunk {
+                                    hex.push_str(&format!("{:02x} ", **b));
+                                    txt.push(if b.is_ascii_graphic() || **b == b' ' {
+                                        **b as char
+                                    } else {
+                                        '.'
+                                    });
+                                }
+                                out(&format!("{:08x}  {:<48} |{}|", row * 16, hex, txt));
+                            }
+                            if bytes.is_empty() {
+                                out("(empty)");
+                            } else if bytes.len() > n {
+                                out(&format!("… {} more byte(s)", bytes.len() - n));
+                            }
+                        }
+                        Err(e) => out(&fs_error(e)),
+                    },
+                }
+            }
+        }
+        "append" => {
+            let (name, text) = split_first(rest);
+            if name.is_empty() {
+                out("usage: append NAME TEXT");
+            } else {
+                // Read, extend, replace: ONE transaction for the write (ADR-035), so a crash leaves
+                // the old contents or the new ones. Appending in place would need an extent that
+                // may not be free, and would be a second failure mode for a command whose whole
+                // value is that it is boring.
+                match fs.read(dev, name) {
+                    Ok(mut bytes) => {
+                        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+                            bytes.push(b'\n');
+                        }
+                        bytes.extend_from_slice(text.as_bytes());
+                        bytes.push(b'\n');
+                        match fs.replace(dev, name, &bytes) {
+                            Ok(()) => out(&format!("{} is now {} bytes", name, bytes.len())),
+                            Err(e) => out(&fs_error(e)),
+                        }
+                    }
+                    Err(FsError::NotFound) => {
+                        let mut bytes = Vec::from(text.as_bytes());
+                        bytes.push(b'\n');
+                        match fs.create(dev, name, &bytes) {
+                            Ok(()) => out(&format!("created {} ({} bytes)", name, bytes.len())),
+                            Err(e) => out(&fs_error(e)),
+                        }
+                    }
+                    Err(e) => out(&fs_error(e)),
+                }
+            }
+        }
+        "touch" => {
+            if rest.is_empty() {
+                out("usage: touch NAME");
+            } else {
+                match fs.stat(dev, rest) {
+                    // An existing object is left ALONE — there is no modification time to update,
+                    // and truncating someone's data because they typed `touch` would be a disaster
+                    // wearing the name of a harmless command.
+                    Ok(e) => out(&format!("{} exists ({} bytes)", e.name, e.len)),
+                    Err(FsError::NotFound) => match fs.create(dev, rest, b"") {
+                        Ok(()) => out(&format!("created {}", rest)),
+                        Err(e) => out(&fs_error(e)),
+                    },
+                    Err(e) => out(&fs_error(e)),
+                }
+            }
+        }
+        "cp" | "mv" => {
+            let (src, dst) = split_first(rest);
+            if src.is_empty() || dst.is_empty() {
+                out(&format!("usage: {} SRC DST", verb));
+            } else if src == dst {
+                out("source and destination are the same name");
+            } else {
+                match fs.read(dev, src) {
+                    Ok(bytes) => match fs.replace(dev, dst, &bytes) {
+                        Ok(()) => {
+                            if verb == "mv" {
+                                // Copy-then-remove, in that order, and NOT one transaction: a crash
+                                // between them leaves both names, which is recoverable. The other
+                                // order loses the data. Said out loud because `mv` reads atomic and
+                                // is not.
+                                match fs.remove(dev, src) {
+                                    Ok(()) => out(&format!("{} -> {}", src, dst)),
+                                    Err(e) => out(&format!(
+                                        "copied, but {} remains: {}",
+                                        src,
+                                        fs_error(e)
+                                    )),
+                                }
+                            } else {
+                                out(&format!("{} -> {} ({} bytes)", src, dst, bytes.len()));
+                            }
+                        }
+                        Err(e) => out(&fs_error(e)),
+                    },
+                    Err(e) => out(&fs_error(e)),
+                }
+            }
+        }
+        "sync" => match dev.flush() {
+            Ok(()) => out("device flushed"),
+            Err(e) => out(&format!("storage: {}", storage_error(e))),
+        },
+        "history" => {
+            if history.is_empty() {
+                out("(nothing yet)");
+            } else {
+                for (i, line) in history.iter().enumerate() {
+                    out(&format!("{:>4}  {}", i + 1, line));
+                }
+            }
+        }
         "echo" => out(rest),
+        // The two screen commands write escape sequences, which is the one place this console
+        // assumes anything about the terminal. Harmless when the assumption is wrong: a terminal
+        // that ignores them shows the sequence's effect as nothing rather than as garbage.
+        "clear" => out("\x1b[2J\x1b[H"),
+        "reboot" => {
+            out("rebooting.");
+            if !host.reboot() {
+                out("reboot: this target has no reset path — use `halt`");
+            }
+        }
         "halt" => {
             out("halting.");
             return Outcome::Halt;
@@ -951,7 +1274,10 @@ impl Session {
                 Outcome::Continue
             }
             Edit::Line(line) => {
-                let outcome = execute(&line, host, fs, dev, &mut |s| {
+                // The history the `history` command prints is the SAME list the up arrow walks:
+                // one list, so what the operator is shown and what they can recall cannot diverge.
+                let history = self.editor.history().to_vec();
+                let outcome = execute(&line, host, fs, dev, &history, &mut |s| {
                     out(s);
                     out("\r\n");
                 });
@@ -1357,6 +1683,122 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
     check!(
         "console: an ambiguous Tab shows the candidates and keeps the line",
         log.contains("help") && log.contains("halt") && log.ends_with("h")
+    );
+
+    // ---- the command set (REQ-CON-005, ADR-051) ---------------------------------------------------
+
+    // 31. `cp` copies contents, and the copy is a SEPARATE object: writing one must not change the
+    //     other. A copy that shared an extent would look right until the first edit.
+    let (log, _) = transcript(
+        "write src alpha\rcp src dst\rwrite src beta\rcat dst\rcat src\r",
+        host,
+        &mut fs,
+        dev,
+    );
+    check!(
+        "console: a copy is an independent object, not a second name for the same bytes",
+        log.contains("alpha") && log.contains("beta")
+    );
+
+    // 32. `mv` renames: the new name has the bytes and the old name is gone. Copy-then-remove in
+    //     that order, so a crash between them leaves both names rather than neither.
+    let (log, _) = transcript("mv dst moved\rcat moved\rcat dst\r", host, &mut fs, dev);
+    check!(
+        "console: a rename moves the bytes and removes the old name",
+        log.contains("alpha") && log.contains("no such object")
+    );
+
+    // 33. `append` adds to the end without losing what was there, and creates the object when it is
+    //     absent — the two halves of the only command here that reads before it writes.
+    let (log, _) = transcript(
+        "write notes one\rappend notes two\rcat notes\rappend fresh line\rcat fresh\r",
+        host,
+        &mut fs,
+        dev,
+    );
+    check!(
+        "console: append keeps what was there and creates what was not",
+        log.contains("one") && log.contains("two") && log.contains("line")
+    );
+
+    // 34. `touch` NEVER truncates an object that exists. A harmless-looking command that ate data
+    //     would be the worst kind of defect in this table.
+    let (log, _) = transcript(
+        "touch notes\rcat notes\rtouch brandnew\r",
+        host,
+        &mut fs,
+        dev,
+    );
+    check!(
+        "console: touch leaves an existing object's bytes alone",
+        log.contains("exists") && log.contains("one") && log.contains("created brandnew")
+    );
+
+    // 35. The reading commands agree with the bytes: `wc` counts them, `grep` finds the line that
+    //     contains the text and not the one that does not, `head` stops at the count it was given.
+    let (log, _) = transcript(
+        "write poem alpha\rappend poem beta\rwc poem\rgrep beta poem\rgrep zeta poem\r",
+        host,
+        &mut fs,
+        dev,
+    );
+    check!(
+        "console: wc counts what is there and grep finds only what matches",
+        log.contains("poem") && log.contains("2: beta") && log.contains("(no matching line)")
+    );
+
+    // 36. `hexdump` is how a non-text object is looked at — the case `cat` deliberately refuses.
+    let (log, _) = transcript("write bin AB\rhexdump bin\r", host, &mut fs, dev);
+    check!(
+        "console: hexdump shows the bytes cat refuses to print",
+        log.contains("41 42") && log.contains("|AB|")
+    );
+
+    // 37. `find` searches the namespace by prefix and says so when nothing matches, rather than
+    //     printing an empty result that reads like a broken command.
+    let (log, _) = transcript("find poe\rfind zzz\r", host, &mut fs, dev);
+    check!(
+        "console: find matches by prefix and names the empty case",
+        log.contains("poem") && log.contains("(nothing matches)")
+    );
+
+    // 38. `history` prints the SAME list the up arrow walks — one list, so what an operator is shown
+    //     and what they can recall cannot diverge.
+    let (log, _) = transcript("echo first\rhistory\r", host, &mut fs, dev);
+    check!(
+        "console: history shows the lines this session ran",
+        log.contains("1  echo first")
+    );
+
+    // 39. A numeric argument that is not a number is REFUSED, not silently defaulted: a console that
+    //     quietly did something else is a console whose output cannot be trusted to answer what was
+    //     asked.
+    let (log, _) = transcript("head poem x\rhexdump poem x\r", host, &mut fs, dev);
+    check!(
+        "console: a bad count is refused rather than replaced with a default",
+        log.contains("head: N must be a number") && log.contains("hexdump: N must be a number")
+    );
+
+    // 40. Every new command refuses a missing argument with a usage line, and none of them can be
+    //     made to act on nothing. Swept over the whole table rather than sampled: a command whose
+    //     usage line was forgotten would act on an empty name.
+    let mut usage_ok = true;
+    for (spec, _) in COMMANDS {
+        let (verb, args) = split_first(spec);
+        if args.is_empty() || args.starts_with('[') {
+            continue; // takes no required argument
+        }
+        if verb == "echo" {
+            continue; // echo of nothing is a blank line, which is what it means
+        }
+        let (log, _) = transcript(&format!("{}\r", verb), host, &mut fs, dev);
+        if !log.contains("usage:") {
+            usage_ok = false;
+        }
+    }
+    check!(
+        "console: every command that needs an argument refuses to run without one",
+        usage_ok
     );
 
     Ok(n)

@@ -283,6 +283,24 @@ must not vary by CPU.
 | INV-CONSOLE-EDIT-8 | **A decoded key enters the input ring whole or not at all.** With two slots free, a three-byte arrow sequence is refused entirely and counted as three drops. | A truncated sequence is worse than a dropped one: the parser would be mid-sequence when the next real keystroke arrived. This is INV-CONSOLE-EDIT-2's failure mode reached through the ring instead of the wire. | in-kernel `conring: an escape sequence is admitted whole or not at all, never truncated` |
 | INV-CONSOLE-EDIT-9 | **One alphabet, defined once.** `keymap::Keymap::is_console_byte` delegates to `shell::editor_accepts`, and the decoder's exhaustive sweep is run against it. | Two producers feed this editor. A second copy of the alphabet in the decoder is a second list that drifts, and the drift is invisible until a device someone else is holding sends the byte that fell through the gap. | `every_byte_the_map_can_emit_is_one_the_console_accepts`; `no_chord_invents_a_control_byte`; `no_sequence_of_scancodes_can_corrupt_the_next_line_typed` |
 
+## INV-CONSOLE-CMD — what the commands do to the namespace (REQ-CON-005, ALET-P2-041, ADR-051)
+
+A command table is a set of promises about someone's data. These invariants are the ones where the
+wrong behavior is *plausible*: a `touch` that truncates, a `mv` that loses the bytes instead of the
+name, an `append` that replaces, a count that silently defaults. Each is proved by an effect on a
+real namespace, not by the command printing that it worked.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-CONSOLE-CMD-1 | **A copy is an independent object.** Writing the source after `cp` leaves the copy unchanged. | A copy that shared an extent would look correct until the first edit, and then silently change data the operator believed was safe. Proved by writing the ORIGINAL afterwards, which a name-aliasing bug cannot survive. | in-kernel `console: a copy is an independent object, not a second name for the same bytes` |
+| INV-CONSOLE-CMD-2 | **A rename moves the bytes and removes the old name** — copy first, remove second, and never the other order. | `mv` reads atomic and is not. In this order a crash leaves both names, which a person can fix; in the other it loses the data. | in-kernel `console: a rename moves the bytes and removes the old name`; `scripts/console-e2e.sh` re-reads the renamed object after a REBOOT |
+| INV-CONSOLE-CMD-3 | **`append` keeps what was there**, and creates the object when it is absent — in one `replace` transaction. | Read-modify-write is the only command here that reads before it writes, so it is the only one that can lose what it read. One transaction means a crash leaves the old contents or the new ones (ADR-035), never a half-appended object. | in-kernel `console: append keeps what was there and creates what was not` |
+| INV-CONSOLE-CMD-4 | **`touch` leaves an existing object's bytes alone.** | There is no modification time here, so the only other thing `touch` could do to an existing object is destroy it — a harmless-looking command that eats data. | in-kernel `console: touch leaves an existing object's bytes alone` |
+| INV-CONSOLE-CMD-5 | **A bad numeric argument is refused, not defaulted.** `head NAME x` and `hexdump NAME x` say so. | Quietly reading ten lines because the count would not parse makes the output an answer to a question nobody asked, exactly when the operator is trying to understand something. | in-kernel `console: a bad count is refused rather than replaced with a default` |
+| INV-CONSOLE-CMD-6 | **Every command that needs an argument refuses to run without one**, swept over the whole table rather than sampled. | A command whose usage line was forgotten acts on an empty name. Sweeping the table is what makes this a property of the console rather than of the six commands someone remembered to test. | in-kernel `console: every command that needs an argument refuses to run without one` |
+| INV-CONSOLE-CMD-7 | **`hexdump` shows the bytes `cat` refuses to print.** | `cat` declines non-text contents so a terminal is not handed escape sequences from a device. Without a second way to look, that refusal makes the object unreadable rather than safe. | in-kernel `console: hexdump shows the bytes cat refuses to print` |
+| INV-CONSOLE-CMD-8 | **`history` prints the same list the up arrow walks.** | One list, so what an operator is shown and what they can recall cannot diverge. | in-kernel `console: history shows the lines this session ran` |
+
 ## INV-PS2 — bringing the controller up (REQ-CON-003, ADR-049)
 
 x86-64 only, and run on **every** boot including the non-interactive gate build: a driver that only

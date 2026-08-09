@@ -301,6 +301,7 @@ fn an_object_too_large_for_one_transaction_is_refused_not_truncated() {
         &host,
         &mut fs,
         &mut dev,
+        &[],
         &mut |s| log.push_str(s),
     );
     assert!(
@@ -332,7 +333,7 @@ fn halt_is_the_only_command_that_ends_the_session() {
     let mut fs = Filesystem::mount(&mut dev).unwrap();
     for (name, _) in COMMANDS {
         let verb = name.split_whitespace().next().unwrap();
-        let outcome = shell::execute(verb, &host, &mut fs, &mut dev, &mut |_| {});
+        let outcome = shell::execute(verb, &host, &mut fs, &mut dev, &[], &mut |_| {});
         let expected = if verb == "halt" {
             Outcome::Halt
         } else {

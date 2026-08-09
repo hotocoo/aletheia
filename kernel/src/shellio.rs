@@ -40,6 +40,24 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// Reset through PSCI `SYSTEM_RESET`, over the same `hvc` conduit `smp.rs` already uses to start
+    /// the secondary CPUs — so this is the firmware interface this kernel is already talking to,
+    /// not a second mechanism invented for one command. PSCI does not return on success; a platform
+    /// that refuses returns an error code and the console reports that the machine did not restart.
+    fn reboot(&self) -> bool {
+        const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
+        // SAFETY: an SMCCC call clobbering only x0..x3, exactly as `psci_cpu_on` does. On success
+        // control never comes back.
+        unsafe {
+            core::arch::asm!(
+                "hvc #0",
+                inout("x0") PSCI_SYSTEM_RESET => _,
+                out("x1") _, out("x2") _, out("x3") _,
+                options(nostack),
+            );
+        }
+        false
+    }
 }
 
 /// Blocks for the console's scratch namespace when no disk is attached. Small: this is a RAM disk
