@@ -1,19 +1,19 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-09
+**As of:** 2026-08-09 (second wave)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..045`.
 
-## Active triage execution queue (2026-08-09)
+## Active triage execution queue (2026-08-09, after the second-hypervisor wave)
 
 Open GAPS4 backlog count from `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`:
 
 - **P0 open:** 0
-- **P1 open:** 14
-- **P2 open:** 13
+- **P1 open:** 12  (was 14 - `ALET-P1-009` and `ALET-P1-011` closed this wave)
+- **P2 open:** 12  (was 13 - `ALET-P2-001`, the dated toolchain pin, closed this wave)
 - **P3 open:** 3
 
 Execution order (wave-based, 2-3 tightly related P1 rows per wave):
@@ -42,7 +42,87 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave — the console stops spinning (2026-08-07, REQ-CON-002, ADR-045)
+## Latest wave - a second hypervisor, and the assumption it caught (2026-08-09, REQ-QUAL-004, ADR-046/047)
+
+Every boot gate in this repository ran on QEMU. That is a narrower claim than it reads as: a kernel
+that boots on QEMU has proved *correct against QEMU*, and no amount of further QEMU testing can find
+an assumption the emulator and the kernel hold together. This wave adds the missing rung and, in
+doing so, immediately found one.
+
+**The research came first.** `docs/research/RUST-OS-DEEP-RESEARCH.md` surveys the 2026 field -
+Redox, Asterinas's framekernel, Theseus, seL4's verification economics, Rust-for-Linux's driver
+abstractions, the Kani/Verus/Miri landscape, and the 2026 agent-OS literature (AgenticOS, Agent
+libOS) - and ends with what it says about *this* repository: five vindicated decisions and six
+exposures. Section 5.2 named the single-hypervisor exposure, and ADR-046 is its answer.
+
+**What landed.**
+
+* **`scripts/vm-e2e-vbox.sh` - the same image, a different hypervisor.** VirtualBox brings its own
+  EFI, its own ACPI tables, SATA/AHCI, and **no `isa-debug-exit`**, so the QEMU pass criterion
+  (process exit 33) does not exist there. The verdict is the serial log, with **marker parity**
+  against the QEMU gate - accepting `[e2e] PASS` alone would pass a kernel that skipped half its
+  suites. Four device families VirtualBox cannot emulate (virtio-blk, durable store, the
+  cross-reboot persistence proof, network) are listed as **SKIP** and re-named in the summary.
+* **`kernel-x86_64/scripts/mkesp.py` - a host-independent image builder.** The macOS builder needs
+  `hdiutil`/`diskutil` and the portable one needs `mtools`; neither runs on Windows. This is a
+  dependency-free Python GPT + FAT32 ESP writer, deterministic (every GUID derived from the payload,
+  no timestamps), producing a byte-identical image on all three hosts. `build-vbox.sh` is now a
+  delegator to the gate - two provisioners for one hypervisor is how they drift.
+* **The assumption it caught, immediately.** x86-64 virtual-memory invariant 48 asserted that
+  `frames::base()` is covered by a **2 MiB block**. Under OVMF the largest conventional region starts
+  well above 2 MiB, so it was; under VirtualBox's EFI it starts at `0x100000` - inside the first
+  block, which this map splits to 4 KiB pages so VA 0 can have no leaf (ALET-P1-006). The invariant
+  had conflated a *security* property (bulk RAM is RW+NX) with a *structural* one (it gets huge
+  pages) and encoded "the firmware's memory map looks like QEMU's". Now two invariants, and the
+  structural one probes an address proved to be outside every split span.
+* **ADR-047 - the Service boundary stops importing POSIX.** `service.rs` imported
+  `std::os::unix::net::{UnixListener, UnixStream}` at the one seam the SAD says is Aletheia-owned, so
+  the hosted Core did not compile on Windows at all (`E0433: cannot find 'unix' in 'os'`). There is
+  now an `aletheia/src/transport.rs` seam with per-host backends: a Unix socket, or on Windows a
+  loopback listener behind a **rendezvous file carrying a 32-byte connect token** compared in
+  constant time. The weaker posture of the Windows backend is written down, not glossed.
+* **ALET-P1-009 and ALET-P1-011 closed - ring-3 invariants 27 to 34.** The static half of P1-009
+  pinned the `TrapFrame`'s offsets; a save/restore pair that swapped two registers consistently would
+  satisfy every one of those asserts. The **fuzz half** primes 15 distinct sentinels, traps, has the
+  kernel compare the whole saved file, **resumes the same frame**, and traps again - so the restore
+  direction is proved, not assumed. P1-011 stops testing only the fault *classifier*: a ring-3 `ud2`
+  and a ring-3 `hlt` now take **vector 6 and vector 13** for real, are classified as user faults,
+  and are contained by the supervisor - with both vectors handed straight back to their fatal
+  catch-all handlers afterwards, because a safety net taken down for a test has to go back up.
+* **ALET-P2-001 closed - the dated toolchain pin.** `nightly-2026-08-09` (rustc 1.99.0-nightly,
+  `771916f90`). The previous attempt was reverted because the install rolled back; the same failure
+  reproduced here as a *partial* install leaving a named-but-unusable toolchain, and
+  `docs/TOOLCHAIN.md` now records that trap. Every nightly-installing job in both pipelines names the
+  date, not just `quality`.
+* **`.gitattributes` - LF for executable text.** With Git's Windows default (`core.autocrlf=true`)
+  every gate script checked out with CRLF and died looking for an interpreter named `bash\r` before
+  running a single check - in WSL, in containers, anywhere the clone was shared. A qualification
+  story that is host-independent cannot rest on the developer's global Git config.
+* **`qemu-system-riscv`.** On current Ubuntu the riscv64 emulator left `qemu-system-misc`; both
+  pipelines installed the wrong package, and the gate died inside its perl watchdog with
+  `Died at -e line 1.` and 21 marker-missing lines - which reads as a broken kernel. Both pipelines
+  fixed, and the aarch64/RISC-V gates now **preflight the emulator by name** before building.
+* **Dependencies at latest.** `sha2` 0.11, `chacha20poly1305` 0.11, `ed25519-dalek` 3, `rand` 0.10,
+  `ulid` 3, plus every lockfile refreshed. The RustCrypto bump deprecated `Array::from_slice`; the
+  AEAD nonce is now a checked conversion, which is the case the deprecation exists for.
+* **`docs/VIRTUALBOX.md`** - how to build the image and run Aletheia in Oracle VirtualBox yourself,
+  headless or in the GUI, including the interactive-console build over a host serial pipe.
+
+**Measured, on this workstation.** `VM-E2E-VBOX: PASS` (VirtualBox 7.2.6, EFI, 4 vCPU, 512 MiB, 13
+required markers, 4 SKIP) - `VM-E2E-X86: PASS` (QEMU+OVMF, exit 33 on both boots) - `VM-E2E: PASS`
+(aarch64) - `VM-E2E (riscv64): PASS` - `CONFORMANCE: PASS` (88 core behaviors on all three targets)
+- `CONSOLE-E2E: PASS` - `BUILD-ALL: PASS` - `TRACEABILITY: PASS` (85 requirements) -
+`CI-PARITY: PASS` - hosted Core 83 tests and `kernel-core` 266 tests green on **Linux and Windows**.
+
+**One difference worth knowing:** VirtualBox does not expose SMEP, so the boot prints
+`exec protections incomplete (NX=true, SMEP=false) - W^X degraded on this CPU`. NX is present, the
+live W^X audit still reports **0 violations**, and the kernel reports the degradation rather than
+assuming a CPU feature it could not verify.
+
+**Not claimed.** VirtualBox is a second *emulation* of the platform contract, not the contract -
+ADR-013's hardware rung is untouched. `docs/MATURITY.md` still governs every claim above.
+
+## Previous wave — the console stops spinning (2026-08-07, REQ-CON-002, ADR-045)
 
 Every driver here polls, and `docs/MATURITY.md` lists that as item 3 of what production would
 additionally require. The console made it concrete: `run_loop` spun on `getc`, reading an empty

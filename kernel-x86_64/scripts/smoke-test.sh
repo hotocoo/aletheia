@@ -90,12 +90,12 @@ echo "QEMU exit code: $RC (expect 33)"
 
 if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 22 MEMORY INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 71 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 72 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
    && grep -q 'kernel map built @' "$LOG" \
    && grep -q 'kernel map ACTIVE' "$LOG" \
    && grep -q 'live W\^X audit: .* 0 violations' "$LOG" \
    && grep -q 'SMP INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 27 RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 34 RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
    && grep -q 'TERMINATED (Fault(UserNotMapped)); system continues' "$LOG" \
    && grep -q 'ALL 15 FILESYSTEM INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 21 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \

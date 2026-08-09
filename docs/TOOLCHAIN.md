@@ -1,31 +1,36 @@
 # Aletheia — Toolchain Policy
 
-**As of:** 2026-08-03. Enforced by `scripts/quality-gate.sh` (CI job `quality`, both pipelines).
+**As of:** 2026-08-09. Enforced by `scripts/quality-gate.sh` (CI job `quality`, both pipelines).
 
 ## What is pinned, and why
 
 | Crate | Channel | Components | Why |
 |-------|---------|-----------|-----|
-| `kernel/` (aarch64) | `nightly` (floating) | `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt` | `build-std` needs `rust-src` |
-| `kernel-riscv64/` | `nightly` (floating) | same | same |
-| `kernel-x86_64/` | `nightly` (floating) | `clippy`, `rustfmt` | `#![feature(abi_x86_interrupt)]` for the IDT handlers |
+| `kernel/` (aarch64) | `nightly-2026-08-09` | `rust-src`, `llvm-tools-preview`, `clippy`, `rustfmt` | `build-std` needs `rust-src` |
+| `kernel-riscv64/` | `nightly-2026-08-09` | same | same |
+| `kernel-x86_64/` | `nightly-2026-08-09` | `clippy`, `rustfmt` | `#![feature(abi_x86_interrupt)]` for the IDT handlers |
 | `kernel-core/`, `aletheia/`, `component-sdk/` | `stable` | `clippy`, `rustfmt` | no unstable features; named for shim selection (below) |
 
-### The dated pin is NOT in place — stated, not implied
+### The dated pin IS in place (2026-08-09) — ALET-P2-001 closed
 
-A dated pin (`channel = "nightly-<date>"`) is the right answer, and this wave did not land it. It was
-written, and then reverted: installing the dated toolchain failed on the workstation this was developed on
-(`rustup` rolled the install back with a download/rename error), so every gate would have been running
-against a *different* compiler than the one the files named. Landing it would have meant claiming a pin
-whose gates had never been run against it — the exact kind of unverified claim this repo's register exists
-to prevent. GAPS4 **ALET-P2-001 therefore stays open**, with this as the reason.
+The three bare-metal crates pin `nightly-2026-08-09` (rustc 1.99.0-nightly, commit `771916f90`,
+2026-08-08; LLVM 23.1.0). Both pipelines install that exact toolchain in every job that needs
+nightly, so a gate result now names the compiler it was produced by.
 
-What DID land, and is verified: every toolchain file now requests `clippy` and `rustfmt` explicitly, so
-the quality gate cannot be skipped for lack of a component; and the host crates name a channel (below).
+**Why this took a second attempt, recorded because the register exists to prevent unverified
+claims.** The first attempt (2026-08-03) wrote the pin and then reverted it: installing the dated
+toolchain failed on the development workstation — rustup rolled the install back with a
+download/rename error — so the files would have named a compiler the gates had never run against.
+The same failure reproduced on 2026-08-09 as a *partial* install: `rustup toolchain uninstall`
+left files behind (`could not remove 'component' file`, `os error 145: The directory is not
+empty`), and the next install then failed with `Missing manifest in toolchain`. Removing the
+toolchain directory outright and reinstalling succeeded. The lesson is worth keeping: a rustup
+install that reports failure can leave a *named but unusable* toolchain behind, which reads as
+"installed" to `rustup toolchain list`.
 
-To finish the row: install a dated nightly successfully, put that date in the three bare-metal files and
-in the `quality` job of **both** pipelines (`check-ci-parity.sh` requires them to agree), then re-run
-`quality-gate.sh`, `build-all.sh`, `e2e-all.sh` and `conformance.sh` before committing.
+Verified before landing: the pin installs cleanly with `rust-src`, `llvm-tools-preview`, `clippy`
+and `rustfmt` plus all three cross targets, and the gates listed under **Bumping the pin** were
+re-run against it.
 
 ## Why the host crates name a channel at all
 
@@ -53,7 +58,10 @@ component (a missing component would otherwise look like a passing run on a host
 ## Bumping the pin
 
 1. `rustup toolchain install nightly-<date> --profile minimal --component rust-src,clippy,rustfmt`
-2. Update the three bare-metal `rust-toolchain.toml` files, the `quality` job in **both** pipelines, and
-   the table above (the same date in all six places — `check-ci-parity.sh` requires the pipelines to agree).
-3. Run `scripts/quality-gate.sh`, `scripts/build-all.sh`, `scripts/e2e-all.sh`, `scripts/conformance.sh`.
+2. Update the three bare-metal `rust-toolchain.toml` files, **every** nightly-installing job in both
+   pipelines (not only `quality` — a job that installs a different nightly than the toml names makes
+   rustup fetch a second toolchain and hides which one built the artifact), and the table above.
+   `check-ci-parity.sh` requires the two pipelines to agree.
+3. Run `scripts/quality-gate.sh`, `scripts/build-all.sh`, `scripts/e2e-all.sh`, `scripts/conformance.sh`,
+   and `scripts/vm-e2e-vbox.sh` (the second-hypervisor rung, ADR-046) on a host with VirtualBox.
 4. Commit as one change, with the gate results in the message.

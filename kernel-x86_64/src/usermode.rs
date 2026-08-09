@@ -179,6 +179,31 @@ isr_pf_entry:
     call    x86_page_fault
     jmp     resume_return
 
+// ---- isr_ud_entry (#UD, vector 6): an ILLEGAL INSTRUCTION executed in ring 3 -------------------
+// ALET-P1-011: the fault CLASSIFIER was already swept exhaustively on the host; what was missing was
+// an attack on the ENTRY path itself — a real ring-3 #UD, contained the way the isolation trials are.
+// #UD pushes no error code, so the full save-first macro applies and the frame is preserved for the
+// dispatcher to read (which is what makes the RIP report meaningful rather than guessed).
+.global isr_ud_entry
+isr_ud_entry:
+    save_frame
+    mov     rdi, [rbx + 120]         // faulting RIP, from the frame we just saved
+    and     rsp, -16
+    call    x86_undefined_opcode
+    jmp     resume_return
+
+// ---- isr_gp_entry (#GP, vector 13): a PRIVILEGED instruction executed in ring 3 ----------------
+// #GP pushes an ERROR CODE ahead of the iretq frame, so `save_frame`'s offsets do not apply — using
+// it here would read the error code as RIP and every field after it would be shifted. Like
+// `isr_pf_entry`, this entry saves nothing and unwinds nothing (resume_return restores rsp from
+// KERNEL_CTX); it passes the error code, which is the datum that says WHAT was refused.
+.global isr_gp_entry
+isr_gp_entry:
+    mov     rdi, [rsp + 0]           // error code (selector index, or 0 for a non-selector #GP)
+    and     rsp, -16
+    call    x86_general_protection
+    jmp     resume_return
+
 // A trap arrived from ring 0 (should be impossible: the kernel runs IF=0). Fail closed.
 from_ring0_fatal:
     mov     edi, 111
@@ -264,6 +289,49 @@ stub_recv_exit_start:
 16: jmp     16b
 .global stub_recv_exit_end
 stub_recv_exit_end:
+
+// ---- adversarial ring-3 entry stubs (ALET-P1-011) ---------------------------------------------
+// These do not ask the kernel for anything. They ATTACK the entry paths: one executes an
+// instruction that does not exist, the other an instruction ring 3 is not allowed to execute. Each
+// must land in its own vector, be classified, and be contained by the supervisor — with the machine
+// still running afterwards. Nothing here is a syscall, so nothing here is cooperative.
+
+// An instruction that is architecturally guaranteed to be undefined: #UD, vector 6.
+.global stub_ud_start
+stub_ud_start:
+    ud2
+20: jmp     20b
+.global stub_ud_end
+stub_ud_end:
+
+// `hlt` is privileged (CPL must be 0), so executing it at CPL 3 raises #GP(0). Chosen over `cli`
+// because `cli`'s outcome depends on RFLAGS.IOPL, and an invariant that changes meaning with a
+// flag the test also sets is not an invariant.
+.global stub_gp_start
+stub_gp_start:
+    hlt
+21: jmp     21b
+.global stub_gp_end
+stub_gp_end:
+
+// ---- register round-trip stub (ALET-P1-009, the `fuzz` half) ----------------------------------
+// The static half of ALET-P1-009 pins the TrapFrame's SIZE and OFFSETS with const-asserts. What
+// that cannot prove is that the trap ASSEMBLY moves each register to the offset it names: a
+// save/restore pair that consistently swaps two registers satisfies every offset assert and is
+// still wrong. So: the frame is primed with 15 distinct sentinels, the stub takes a trap
+// IMMEDIATELY (touching nothing), the kernel compares all 15 saved slots against the sentinels, and
+// the stub then re-presents the register file so the RESTORE direction is proved too.
+//
+// `int 0x80` first — before any instruction of our own — so what the kernel sees is exactly what
+// `resume_frame` loaded. Then a second syscall reports whether every register survived the
+// round trip, computed BY THE STUB from its own registers.
+.global stub_regfuzz_start
+stub_regfuzz_start:
+    int     0x80                     // #1: SYS_REGCHECK — kernel inspects the saved file
+    int     0x80                     // #2: kernel primed rax/rdi for the verdict call
+22: jmp     22b
+.global stub_regfuzz_end
+stub_regfuzz_end:
 "#
 );
 
@@ -290,6 +358,14 @@ extern "sysv64" {
     static stub_spin_end: u8;
     static stub_recv_exit_start: u8;
     static stub_recv_exit_end: u8;
+    static isr_ud_entry: u8;
+    static isr_gp_entry: u8;
+    static stub_ud_start: u8;
+    static stub_ud_end: u8;
+    static stub_gp_start: u8;
+    static stub_gp_end: u8;
+    static stub_regfuzz_start: u8;
+    static stub_regfuzz_end: u8;
 }
 
 /// The running task's frame, published by `resume_frame` and saved into by every entry. One
@@ -383,6 +459,34 @@ const SYS_EXIT: u64 = 3;
 /// kernel endpoint, each authorized by the same `CapEngine` (`ipc.send` / `ipc.recv`).
 const SYS_SEND: u64 = 4;
 const SYS_RECV: u64 = 5;
+/// ALET-P1-009 (`fuzz` half): the trapping task asks the kernel to compare its ENTIRE saved
+/// register file against the sentinels the frame was primed with. Not a real OS service — a
+/// deliberate probe of the trap assembly, and the only syscall whose implementation reads the
+/// `TrapFrame` rather than its two dispatched arguments.
+const SYS_REGCHECK: u64 = 6;
+
+/// The sentinel a register-fuzz frame carries in `regs[i]`.
+///
+/// Distinct per index, and none of them a small integer or a plausible address: a bug that zeroes a
+/// slot, leaves a stale kernel pointer, or copies the neighbouring register is caught by VALUE, not
+/// by luck. `regs[RAX]` is the exception — it must be the syscall number for the trap to dispatch
+/// at all — and `SYS_REGCHECK` is distinct from every other sentinel, so the property still holds.
+const fn regfuzz_sentinel(i: usize) -> u64 {
+    if i == RAX {
+        SYS_REGCHECK
+    } else {
+        0xC0DE_FACE_0000_0000 | ((i as u64) << 8) | (0xA0 | i as u64)
+    }
+}
+
+/// How many times the register file was checked, and the first slot that did not match (as
+/// `index + 1`, so 0 means "nothing mismatched"). Two checks run: one on the way IN (proving the
+/// save direction) and one after a full resume (proving the restore direction).
+static mut REGFUZZ_CHECKS: u32 = 0;
+static mut REGFUZZ_MISMATCH: u32 = 0;
+/// Non-register frame fields the second check also requires: CS/SS still name ring 3, RFLAGS still
+/// has the reserved bit 1 set, and RSP is still inside the user stack page.
+static mut REGFUZZ_FRAME_SANE: bool = false;
 
 /// User virtual addresses — the 1..2 GiB region (`vm::USER_REGION_PDPT_INDEX`). BELOW 4 GiB because
 /// QEMU/OVMF enforce the ring-3 code segment's 4 GiB limit on the `iret` target; `build_space`
@@ -516,6 +620,43 @@ pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
                 }
             }
         }
+        // ALET-P1-009 (`fuzz` half). Reads the SAVED frame, not the two dispatched arguments: the
+        // whole question is whether the trap assembly put every register where the const-asserts
+        // say it did.
+        SYS_REGCHECK => {
+            // SAFETY: single-threaded, IF=0. `CURRENT_FRAME` was published by `resume_frame` and
+            // written by `save_frame` on the way in, so it points at the live, fully-saved frame.
+            unsafe {
+                let fp = *addr_of!(CURRENT_FRAME) as *const TrapFrame;
+                if fp.is_null() {
+                    return u64::MAX;
+                }
+                let f = &*fp;
+                let mut mismatch = 0u32;
+                for i in 0..15 {
+                    if f.regs[i] != regfuzz_sentinel(i) {
+                        mismatch = i as u32 + 1;
+                        break;
+                    }
+                }
+                // Report only the FIRST mismatch across both checks: a later clean pass must not
+                // erase an earlier failure, or the second check would launder the first.
+                if mismatch != 0 && *addr_of!(REGFUZZ_MISMATCH) == 0 {
+                    *addr_of_mut!(REGFUZZ_MISMATCH) = mismatch;
+                }
+                *addr_of_mut!(REGFUZZ_CHECKS) += 1;
+                // The non-register half of the frame, checked on every pass: still ring 3, RFLAGS
+                // still architecturally valid, RSP still inside the one stack page we mapped. A
+                // save that corrupted these would return to ring 0 or to nowhere.
+                let sane = (f.cs & 3) == 3
+                    && (f.ss & 3) == 3
+                    && (f.rflags & (1 << 1)) != 0
+                    && f.rsp > USER_STACK_VA
+                    && f.rsp <= USER_STACK_TOP;
+                *addr_of_mut!(REGFUZZ_FRAME_SANE) = sane;
+            }
+            0
+        }
         SYS_YIELD => {
             sched_report(arg, false);
             0
@@ -573,6 +714,93 @@ pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
             }
         }
         _ => u64::MAX, // unknown syscall — fail closed
+    }
+}
+
+/// `#UD` dispatch (ALET-P1-011). A ring-3 task executed an instruction that does not exist. There
+/// is no capability under which that is a request, so it goes straight to the supervisor — the same
+/// policy an undeclared `#PF` gets, reached through a different entry path, which is the point.
+#[no_mangle]
+pub extern "sysv64" fn x86_undefined_opcode(rip: u64) {
+    use kernel_core::faultclass::{classify, kind_name, verdict, Fault};
+    // An illegal opcode is not a paging event: nothing was present/absent and nothing was written.
+    // It is a USER fault by construction — `isr_ud_entry` runs `save_frame`, which sends any ring-0
+    // arrival to `from_ring0_fatal` before this function is reached.
+    let f = Fault {
+        present: true,
+        write: false,
+        user: true,
+        exec: true,
+        reserved_bit: false,
+        from_kernel: false,
+        unrecognized: None,
+    };
+    let kind = classify(&f);
+    supervise_ring3_fault(kind, verdict(kind), |id, reason| {
+        kprintln!(
+            "[usermode] ring-3 #UD at rip {:#x} -> {} : task {} TERMINATED ({:?}); system continues",
+            rip,
+            kind_name(kind),
+            id,
+            reason
+        );
+    });
+}
+
+/// `#GP` dispatch (ALET-P1-011). A ring-3 task executed a privileged instruction. Same policy, third
+/// entry path. The error code is reported because a #GP with a non-zero selector index means
+/// something different from #GP(0) — and a handler that discards it cannot tell them apart.
+#[no_mangle]
+pub extern "sysv64" fn x86_general_protection(error_code: u64) {
+    use kernel_core::faultclass::{classify, kind_name, verdict, Fault};
+    let f = Fault {
+        present: true,
+        write: false,
+        user: true,
+        exec: false,
+        reserved_bit: false,
+        from_kernel: false,
+        unrecognized: None,
+    };
+    let kind = classify(&f);
+    supervise_ring3_fault(kind, verdict(kind), |id, reason| {
+        kprintln!(
+            "[usermode] ring-3 #GP (error {:#x}) -> {} : task {} TERMINATED ({:?}); system continues",
+            error_code,
+            kind_name(kind),
+            id,
+            reason
+        );
+    });
+}
+
+/// The one place a ring-3 fault becomes a supervisor decision, shared by `#PF`, `#UD` and `#GP`.
+///
+/// Factored out deliberately: three entry paths that each carried their own copy of this policy is
+/// three places for the policy to diverge, and a divergence would show up as one vector containing
+/// a fault that another escalates — the kind of inconsistency the register exists to prevent.
+fn supervise_ring3_fault(
+    kind: kernel_core::faultclass::FaultKind,
+    verdict: kernel_core::faultclass::FaultVerdict,
+    report: impl FnOnce(u64, kernel_core::supervisor::TerminationReason),
+) {
+    use kernel_core::faultclass::kind_name;
+    use kernel_core::sched::TaskId;
+    use kernel_core::supervisor::SupervisorAction;
+    // SAFETY: single-threaded, IF=0 for the whole user-mode suite; only this path mutates it.
+    let (action, id) = unsafe {
+        let id = TaskId(*addr_of!(CURRENT_TASK));
+        (
+            (*addr_of_mut!(SUPERVISOR)).on_fault(Some(id), kind, verdict),
+            id,
+        )
+    };
+    match action {
+        SupervisorAction::TaskTerminated(reason) => report(id.0, reason),
+        SupervisorAction::Escalate(k) => {
+            kprintln!("[usermode] ring-3 fault ESCALATED ({})", kind_name(k));
+            usermode_fatal(104);
+        }
     }
 }
 
@@ -819,6 +1047,121 @@ fn run_unexpected_fault() -> u64 {
     free_leaf(root, USER_CODE_VA, code);
     vm::destroy_space(root);
     id
+}
+
+/// ALET-P1-011: run one ring-3 task whose *only* instruction is an attack on an entry path, and
+/// return the task id the supervisor terminated (0 = the excursion could not be set up).
+///
+/// `stub` is the adversarial code page. The task holds NO capabilities and asks for nothing — the
+/// entire excursion exists to make the CPU take a specific vector from ring 3.
+fn run_entry_attack(stub: &[u8]) -> u64 {
+    let root_main = vm::active_root();
+    let root = match vm::build_space() {
+        Some(r) => r,
+        None => return 0,
+    };
+    let code = vm::map_stub_frame(root, USER_CODE_VA, stub);
+    let stack = vm::map_user(root, USER_STACK_VA, true);
+    if code.is_none() || stack.is_none() {
+        free_leaf(root, USER_STACK_VA, stack);
+        free_leaf(root, USER_CODE_VA, code);
+        return 0;
+    }
+    // armed = false: nothing about this fault is declared, so the dispatcher must reach the
+    // supervisor rather than treat it as an expected isolation proof.
+    let _ = run_in_space(
+        root,
+        root_main,
+        0,
+        0,
+        CapEngine::new(0x11DE, 1000),
+        Vec::new(),
+        false,
+        0,
+    );
+    // SAFETY: single-threaded; the id the excursion just used.
+    let id = unsafe { *addr_of!(CURRENT_TASK) };
+    free_leaf(root, USER_STACK_VA, stack);
+    free_leaf(root, USER_CODE_VA, code);
+    vm::destroy_space(root);
+    id
+}
+
+/// ALET-P1-009 (`fuzz` half): prime all 15 registers with distinct sentinels, trap, let the kernel
+/// compare the saved file, RESUME the same frame, and trap again.
+///
+/// The second resume is the half that matters. One check proves the SAVE direction; only a task
+/// that comes back with the same registers proves the RESTORE direction, and a save/restore pair
+/// that swaps two registers consistently would pass every offset const-assert and fail here.
+///
+/// Returns `(checks_run, first_mismatch_slot, frame_stayed_sane)`.
+fn run_register_roundtrip() -> (u32, u32, bool) {
+    // SAFETY: single-threaded; reset before the excursion that writes them.
+    unsafe {
+        *addr_of_mut!(REGFUZZ_CHECKS) = 0;
+        *addr_of_mut!(REGFUZZ_MISMATCH) = 0;
+        *addr_of_mut!(REGFUZZ_FRAME_SANE) = false;
+    }
+
+    let root_main = vm::active_root();
+    let root = match vm::build_space() {
+        Some(r) => r,
+        None => return (0, 0, false),
+    };
+    let code = vm::map_stub_frame(
+        root,
+        USER_CODE_VA,
+        stub_bytes!(stub_regfuzz_start, stub_regfuzz_end),
+    );
+    let stack = vm::map_user(root, USER_STACK_VA, true);
+    if code.is_none() || stack.is_none() {
+        free_leaf(root, USER_STACK_VA, stack);
+        free_leaf(root, USER_CODE_VA, code);
+        return (0, 0, false);
+    }
+
+    set_trial(Trial {
+        engine: CapEngine::new(0x0F09, 1000),
+        store: Store::new(),
+        caps: Vec::new(),
+        action: "regcheck",
+        armed: false,
+        expect_fault_va: 0,
+        allowed: false,
+        isolation_held: false,
+        fault_va: 0,
+    });
+
+    let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    for i in 0..15 {
+        f.regs[i] = regfuzz_sentinel(i);
+    }
+
+    // SAFETY: single-threaded, IF=0. `root` identity-maps the running kernel exactly as
+    // `run_in_space` requires, and the previous root is restored immediately after.
+    unsafe {
+        vm::switch_to(root);
+        // TWO resumes of the SAME frame. `save_frame` writes back into this very struct (it is what
+        // `CURRENT_FRAME` points at), so the second resume continues the task at the instruction
+        // after its first `int 0x80`, carrying whatever the restore path put in its registers.
+        resume_frame(&mut f as *mut TrapFrame);
+        resume_frame(&mut f as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    let _ = take_trial();
+
+    free_leaf(root, USER_STACK_VA, stack);
+    free_leaf(root, USER_CODE_VA, code);
+    vm::destroy_space(root);
+
+    // SAFETY: excursion complete; single-threaded read-back.
+    unsafe {
+        (
+            *addr_of!(REGFUZZ_CHECKS),
+            *addr_of!(REGFUZZ_MISMATCH),
+            *addr_of!(REGFUZZ_FRAME_SANE),
+        )
+    }
 }
 
 fn run_isolation() -> (bool, u64) {
@@ -1829,6 +2172,77 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         check!(
             held,
             "supervisor: a later ring-3 task still runs and proves its own invariant after the kill"
+        );
+    }
+
+    // ---- ALET-P1-009 (`fuzz` half): the trap assembly really does move every register ----------
+    // The const-assert block pins the frame's LAYOUT. This pins the trap path's BEHAVIOR over that
+    // layout, which no static assertion can: a save/restore pair that swapped two registers
+    // consistently would satisfy every offset assert and still corrupt every task it interrupts.
+    {
+        let (checks, mismatch, frame_sane) = run_register_roundtrip();
+        check!(
+            checks == 2,
+            "trapframe: the task trapped, was resumed, and trapped AGAIN — save and restore both ran"
+        );
+        check!(
+            mismatch == 0,
+            "trapframe: all 15 ring-3 registers arrive in the slots the const-asserts name, and survive the resume"
+        );
+        check!(
+            frame_sane,
+            "trapframe: the saved CS/SS still name ring 3, RFLAGS stays architecturally valid, RSP stays in the user stack"
+        );
+    }
+
+    // ---- ALET-P1-011: the ENTRY paths themselves, attacked from ring 3 -------------------------
+    // `kernel_core::faultclass` is already swept exhaustively on the host — every x86 error code,
+    // every EC/DFSC pair, every `scause`. What that proves is that the CLASSIFIER is fail-closed.
+    // It says nothing about whether a real illegal opcode or a real privileged instruction executed
+    // at CPL 3 reaches a handler at all, arrives with the right privilege reading, and is contained
+    // rather than escalated. Two vectors that were fatal catch-alls until this point now take a
+    // deliberate hit each, and are handed straight back afterwards.
+    {
+        // SAFETY: single-core, IF=0 for the whole suite; the entries are the asm stubs above.
+        unsafe {
+            idt::install_ring3_fault_traps(
+                addr_of!(isr_ud_entry) as u64,
+                addr_of!(isr_gp_entry) as u64,
+            );
+        }
+
+        let before = supervisor().terminated();
+        let ud_task = run_entry_attack(stub_bytes!(stub_ud_start, stub_ud_end));
+        check!(
+            ud_task != 0
+                && supervisor().terminated() == before + 1
+                && !supervisor().may_run(kernel_core::sched::TaskId(ud_task)),
+            "entry: a ring-3 ILLEGAL OPCODE (#UD) reaches vector 6 and terminates exactly that task"
+        );
+
+        let before_gp = supervisor().terminated();
+        let gp_task = run_entry_attack(stub_bytes!(stub_gp_start, stub_gp_end));
+        check!(
+            gp_task != 0
+                && supervisor().terminated() == before_gp + 1
+                && !supervisor().may_run(kernel_core::sched::TaskId(gp_task)),
+            "entry: a ring-3 PRIVILEGED instruction (#GP) reaches vector 13 and terminates exactly that task"
+        );
+
+        check!(
+            supervisor().escalations() == 0,
+            "entry: neither adversarial entry escalated — a user fault stays a user fault on every vector"
+        );
+
+        // The safety net goes back up before anything else runs. A #UD in kernel space must be
+        // fatal again; leaving the containment path installed would make a kernel bug look survivable.
+        idt::restore_fatal_traps();
+
+        // ...and the machine is still usable after being attacked twice through two different vectors.
+        let (held, _va) = run_isolation();
+        check!(
+            held,
+            "entry: after #UD and #GP were both contained, a later ring-3 task still runs to completion"
         );
     }
 

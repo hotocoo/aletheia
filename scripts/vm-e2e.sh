@@ -19,6 +19,17 @@ ELF="$KDIR/target/$TARGET/debug/aletheia-kernel"
 
 cd "$KDIR" || { echo "FAIL: no kernel dir"; exit 3; }
 
+# Preflight. Without this the gate dies inside the perl watchdog with "Died at -e line 1." and 21
+# marker-missing lines, which reads as a broken kernel rather than as a missing package. A tool the
+# gate cannot run is reported by NAME, and the gate still FAILS (never a silent pass) — the point is
+# a legible diagnosis, not an exemption.
+command -v qemu-system-aarch64 >/dev/null 2>&1 || {
+  echo "FAIL: qemu-system-aarch64 not found on PATH"
+  echo "  install it: apt-get install -y qemu-system-arm"
+  echo "VM-E2E: FAIL"
+  exit 1
+}
+
 echo "==> building kernel"
 cargo build || { echo "FAIL: build"; exit 3; }
 

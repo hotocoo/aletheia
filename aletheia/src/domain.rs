@@ -5,7 +5,7 @@ use ulid::Ulid;
 pub type Id = String;
 
 pub fn new_id() -> Id {
-    Ulid::new().to_string()
+    Ulid::generate().to_string()
 }
 
 pub fn now() -> u64 {

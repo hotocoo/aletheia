@@ -128,11 +128,38 @@ MODEL_ENDPOINT=http://localhost:8080 cargo run   # provider becomes healthy → 
 
 ./scripts/vm-e2e.sh              # build + boot the aarch64 microkernel in QEMU + assert invariants (P4)
 ./scripts/vm-e2e-riscv.sh        # ...the RISC-V target        ./scripts/vm-e2e-x86.sh   # ...the x86-64 target
-./scripts/e2e-all.sh             # all three CPU targets, one aggregate pass/fail
+./scripts/vm-e2e-vbox.sh         # the SAME x86-64 image on a SECOND hypervisor: Oracle VirtualBox (ADR-046)
+./scripts/e2e-all.sh             # all three CPU targets + the VirtualBox rung, one aggregate pass/fail
 ./scripts/conformance.sh         # every target proves the SAME core semantic contract
 ./scripts/check-traceability.sh  # every "delivered" requirement maps to evidence that EXISTS
 ./scripts/check-ci-parity.sh     # ...and that CI actually RUNS it (every arch boot-gated, both pipelines agree)
 ```
+
+### Run it as an OS, in Oracle VirtualBox
+
+No QEMU, no OVMF, no `mtools`, no WSL — VirtualBox, Rust and Python 3 are enough, on **Windows,
+macOS or Linux**:
+
+```bash
+./scripts/vbox-install.sh                 # build the image + install a persistent VM named "Aletheia"
+./scripts/vbox-install.sh --interactive   # ...the build that hands the machine to a serial console
+VBoxManage startvm Aletheia               # watch it boot; the serial log is the machine-checkable verdict
+```
+
+`kernel-x86_64/scripts/mkesp.py` writes the bootable GPT/ESP image with nothing but the Python
+standard library, so the same artifact comes out byte-identical on all three hosts.
+[docs/VIRTUALBOX.md](docs/VIRTUALBOX.md) is the full walkthrough — reading the boot log, the
+interactive shell over a host serial pipe, and what VirtualBox *cannot* cover.
+
+**Why two hypervisors.** A kernel that boots only on QEMU has proved "correct against QEMU": the
+emulator and the kernel can be wrong together, and more QEMU testing cannot find it. VirtualBox
+brings its own EFI, its own ACPI tables, SATA/AHCI (**no virtio-blk**) and no `isa-debug-exit`, so
+the verdict there is the serial log with marker parity against the QEMU gate, and the four device
+families it cannot emulate are printed as SKIP rather than quietly dropped. Adding the rung caught
+two real defects on its first runs — an invariant that had encoded OVMF's memory map, and a
+mis-declared kernel-image extent that only overlapped the user region at a larger guest RAM size
+(the gate now boots at two memory sizes for exactly that reason). See
+[ADR-046](docs/adr/ADR-046-second-hypervisor-qualification-virtualbox.md).
 
 Configuration (all optional; defaults shown):
 
@@ -143,6 +170,16 @@ MODEL_ENDPOINT=http://localhost:8080
 MODEL_REF=GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF
 # MODEL_PATH=/abs/path/to/model.gguf   # explicit override; otherwise resolved from the HF cache
 ```
+
+## Research
+
+[docs/research/RUST-OS-DEEP-RESEARCH.md](docs/research/RUST-OS-DEEP-RESEARCH.md) is the survey this
+architecture is argued against rather than asserted over: the 2026 Rust-OS field (Redox, Asterinas's
+framekernel, Theseus, seL4's verification economics, Rust-for-Linux), precisely what Rust buys a
+kernel and the four places the guarantee leaks, the Kani/Verus/Miri verification landscape, and the
+2026 agent-OS literature — which converged independently on the two decisions this repository made
+first: **no ambient authority**, and **authority separate from governance**. It closes with five
+vindicated decisions and six exposures, each mapped to an open row in the gap register.
 
 ## Status
 

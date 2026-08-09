@@ -461,6 +461,38 @@ pub fn leaf_for(root: u64, va: usize) -> Option<(u64, usize)> {
     None
 }
 
+/// A 2 MiB-aligned RAM address inside the frame pool that is guaranteed to lie outside **every**
+/// split block — so its leaf really is the huge-page descriptor bulk RAM is supposed to get.
+///
+/// This exists because the obvious probe — `frames::base()` — is not one. Two regions of this map
+/// are deliberately built at 4 KiB granularity: the first 2 MiB (so VA 0 can be left with no leaf,
+/// ALET-P1-006) and the 2 MiB-aligned span the image touches. Whether the frame pool's base lands
+/// inside one of those is a property of the *firmware's* memory map, not of the kernel: under
+/// QEMU+OVMF the largest conventional region starts well above 2 MiB, so the probe found a block;
+/// under VirtualBox's EFI it starts at 0x100000 — **inside the split first block** — and the same
+/// correct map failed the invariant. That is a QEMU-shaped assumption, found by a second
+/// hypervisor exactly as ADR-046 predicted.
+///
+/// Returns `None` if the pool has no 2 MiB-aligned candidate outside the split spans at all, which
+/// the caller reports rather than silently skips.
+pub fn bulk_ram_probe() -> Option<usize> {
+    let pool_start = frames::base();
+    let pool_end = pool_start + frames::total_count() * PAGE;
+    let (guard_start, guard_end) = protected_span();
+    let mut candidate = align_up(core::cmp::max(pool_start, BLOCK_2M), BLOCK_2M);
+    // At most a handful of iterations: the only split spans are the first block and the image's.
+    while candidate + BLOCK_2M <= pool_end {
+        let clears_image = guard_start == guard_end
+            || candidate + BLOCK_2M <= guard_start
+            || candidate >= guard_end;
+        if clears_image {
+            return Some(candidate);
+        }
+        candidate += BLOCK_2M;
+    }
+    None
+}
+
 /// First address inside an executable section, or `None` if the image declares none (which would
 /// itself be a failure the gate reports).
 pub fn text_probe() -> Option<usize> {

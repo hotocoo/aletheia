@@ -8,22 +8,27 @@
 //!
 //! Two transports behind one request/response contract:
 //! - **in-process** (`CoreService::handle`) — the primary, deterministic path (apps + conformance).
-//! - **Unix domain socket** (`serve_unix` / `UnixClient`) — length-prefixed JSON frames, std-only,
-//!   sequential accept loop (no async runtime, no external deps).
+//! - **endpoint** (`serve` / `ServiceClient`) — length-prefixed JSON frames, std-only, sequential
+//!   accept loop (no async runtime, no external deps), carried by `crate::transport`.
 //!
-//! HOSTED-CONTRACT HONESTY (KC-IPC): SAD §5 requires "no global connectable namespace." A Unix
-//! socket path IS locally connectable, and the capability check runs per-request *inside* the
-//! service, not at connect time. This is the hosted approximation of capability-named IPC; the
-//! `serve_unix`/`UnixClient` seam is exactly where the native Aletheia kernel will enforce a
+//! This module names NO platform API (ADR-047). What an endpoint physically is — a Unix-domain
+//! socket, a token-guarded loopback port, later a capability-named kernel endpoint — belongs to
+//! `transport.rs`. The framing below is a protocol property and is identical on every backend.
+//!
+//! HOSTED-CONTRACT HONESTY (KC-IPC): SAD §5 requires "no global connectable namespace." Every hosted
+//! endpoint IS locally connectable, and the capability check runs per-request *inside* the service,
+//! not at connect time. This is the hosted approximation of capability-named IPC; the
+//! `serve`/`ServiceClient` seam is exactly where the native Aletheia kernel will enforce a
 //! capability to *name* the endpoint. Documented, not hidden — same honesty as the CapEngine
-//! unforgeability and IPC-benchmark contracts.
+//! unforgeability and IPC-benchmark contracts. `transport.rs` records how the two hosted backends
+//! differ in posture; they are not equally strong.
 use crate::domain::EntityType;
 use crate::intent_action::Intent;
 use crate::syscore::SysCore;
+use crate::transport::{self, Conn};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 
 /// A request across the Core's service surfaces. `caps` is the caller's offered capabilities; the
 /// Core authorizes against them before any effect.
@@ -238,11 +243,11 @@ impl CoreService {
     }
 }
 
-// --- Unix-socket transport (hosted realization of the IPC boundary) ---
+// --- endpoint transport (hosted realization of the IPC boundary; ADR-047) ---
 
-/// Serve requests on a Unix domain socket until the listener is dropped. Sequential accept loop:
-/// one connection at a time, each connection may issue many requests (length-prefixed JSON frames).
-/// std-only; no async runtime.
+/// Serve requests on the endpoint named by `path` until the listener is dropped. Sequential accept
+/// loop: one connection at a time, each connection may issue many requests (length-prefixed JSON
+/// frames). std-only; no async runtime; no platform API named here.
 /// Maximum accepted request frame (8 MiB): bounds a malicious length prefix BEFORE allocation.
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 /// Per-connection read timeout: a client that stalls mid-frame is dropped rather than blocking the
@@ -250,47 +255,56 @@ const MAX_FRAME: usize = 8 * 1024 * 1024;
 /// request processing, so a long model interpretation is unaffected.
 const CONN_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-pub fn serve_unix(mut svc: CoreService, socket_path: &str) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)?;
-    for conn in listener.incoming() {
-        let mut stream = conn?;
-        let _ = stream.set_read_timeout(Some(CONN_READ_TIMEOUT));
-        while let Ok(Some(bytes)) = read_frame(&mut stream) {
+pub fn serve(mut svc: CoreService, path: &str) -> std::io::Result<()> {
+    let listener = transport::bind(path)?;
+    loop {
+        let mut conn = listener.accept()?;
+        let _ = conn.set_read_timeout(Some(CONN_READ_TIMEOUT));
+        while let Ok(Some(bytes)) = read_frame(&mut conn) {
             let resp = match serde_json::from_slice::<Request>(&bytes) {
                 Ok(req) => svc.handle(req),
                 Err(e) => Response::err(format!("bad request: {e}")),
             };
             let out = serde_json::to_vec(&resp).unwrap_or_default();
-            if write_frame(&mut stream, &out).is_err() {
+            if write_frame(&mut conn, &out).is_err() {
                 break;
             }
         }
     }
-    Ok(())
 }
 
-/// A client over the Unix-socket transport. Holds one connection; `call` is a synchronous
-/// request/response round trip.
-pub struct UnixClient {
-    stream: UnixStream,
+/// Deprecated alias kept so existing callers keep compiling through the ADR-047 rename. The name
+/// asserted a platform the boundary no longer names; use [`serve`].
+#[deprecated(note = "the endpoint is not necessarily a Unix socket (ADR-047); use `serve`")]
+pub fn serve_unix(svc: CoreService, socket_path: &str) -> std::io::Result<()> {
+    serve(svc, socket_path)
 }
-impl UnixClient {
-    pub fn connect(socket_path: &str) -> std::io::Result<Self> {
-        Ok(UnixClient {
-            stream: UnixStream::connect(socket_path)?,
+
+/// A client over the endpoint transport. Holds one connection; `call` is a synchronous
+/// request/response round trip.
+pub struct ServiceClient {
+    conn: Box<dyn Conn>,
+}
+impl ServiceClient {
+    pub fn connect(path: &str) -> std::io::Result<Self> {
+        Ok(ServiceClient {
+            conn: transport::connect(path)?,
         })
     }
     pub fn call(&mut self, req: &Request) -> std::io::Result<Response> {
         let out = serde_json::to_vec(req).unwrap_or_default();
-        write_frame(&mut self.stream, &out)?;
-        let bytes = read_frame(&mut self.stream)?.ok_or_else(|| {
+        write_frame(&mut self.conn, &out)?;
+        let bytes = read_frame(&mut self.conn)?.ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "server closed")
         })?;
         serde_json::from_slice(&bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 }
+
+/// Deprecated alias kept so existing callers keep compiling through the ADR-047 rename.
+#[deprecated(note = "the endpoint is not necessarily a Unix socket (ADR-047); use `ServiceClient`")]
+pub type UnixClient = ServiceClient;
 
 /// 4-byte little-endian length prefix + payload (mirrors the store log framing). Returns Ok(None)
 /// on a clean EOF at a frame boundary.
