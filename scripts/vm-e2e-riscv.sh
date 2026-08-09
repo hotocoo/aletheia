@@ -67,7 +67,8 @@ echo "vm exit code: $CODE"
 fail=0
 [ "$CODE" -eq 0 ] || { echo "FAIL: expected exit 0, got $CODE"; fail=1; }
 echo "$OUT" | grep -q "S->M boundary OK"              || { echo "FAIL: SBI boundary marker missing"; fail=1; }
-echo "$OUT" | grep -q "ALL 11 INVARIANTS HOLD"        || { echo "FAIL: invariants marker missing"; fail=1; }
+echo "$OUT" | grep -q "ALL 13 INVARIANTS HOLD"        || { echo "FAIL: invariants marker missing"; fail=1; }
+echo "$OUT" | grep -q "ALL 11 CAPABILITY-LIFETIME INVARIANTS HOLD" || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
 echo "$OUT" | grep -q "ALL 21 MEMORY INVARIANTS HOLD"  || { echo "FAIL: memory-management marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 66 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 24 USER-MODE BOUNDARY INVARIANTS HOLD" || { echo "FAIL: user-mode marker missing"; fail=1; }

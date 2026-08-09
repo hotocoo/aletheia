@@ -219,5 +219,52 @@ pub fn run(mut report: impl FnMut(u32, bool, &'static str)) -> Result<u32, (u32,
         );
     }
 
+    // 12 — the delegation test is not the authorization test (REQ-CAP-007, ADR-048). Asking
+    // "is the child's PATTERN inside the parent's reach" instead of "is the child's REACH inside
+    // the parent's" accepts this delegation, after which the child authorizes `entity.delete` and
+    // the parent never could. Named in the conformance contract because a target where this
+    // delegation is accepted has a different authority boundary, whatever its CPU.
+    {
+        let mut e = CapEngine::new(0xA5A5, 1000);
+        let odd = e.mint("user", "entity.*.*", Scope::All, Constraints::none());
+        let amp = e.delegate(odd, "agent", "entity.*", Scope::All, Constraints::none());
+        check!(
+            amp.is_err(),
+            "delegation: a child pattern reaching past its parent is denied"
+        );
+    }
+
+    // 13 — and the legitimate narrowing the same rule must still allow, so 12 cannot be satisfied
+    // by a relation that simply refuses everything.
+    {
+        let mut e = CapEngine::new(0xA5A5, 1000);
+        let root = e.mint("user", "entity.*", Scope::All, Constraints::none());
+        let ok = e.delegate(
+            root,
+            "agent",
+            "entity.derive.*",
+            Scope::All,
+            Constraints::none(),
+        );
+        let deeper = ok.and_then(|c| {
+            e.delegate(
+                c,
+                "tool",
+                "entity.derive.summary",
+                Scope::All,
+                Constraints::none(),
+            )
+        });
+        let reaches = deeper
+            .map(|t| {
+                e.evaluate("entity.derive.summary", &Target::default(), &[t]) == Decision::Allow
+            })
+            .unwrap_or(false);
+        check!(
+            reaches,
+            "delegation: a legal two-step narrowing still authorizes at the leaf"
+        );
+    }
+
     Ok(n)
 }

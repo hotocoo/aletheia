@@ -159,3 +159,99 @@ fn agent_cannot_self_escalate() {
         "agent cannot grant itself authority"
     );
 }
+
+/// The delegation test is not the authorization test (REQ-CAP-007, ADR-048). Asking
+/// `action_covers(parent, child_pattern)` — "is the child's STRING inside the parent's reach" —
+/// instead of `action_attenuates` — "is the child's REACH inside the parent's" — accepts
+/// `entity.*.*` → `entity.*`, and the child then authorizes `entity.delete`, which its parent
+/// never could. The hosted Core and the kernel spine must agree about this or a component proved
+/// safe on one is not proved safe on the other.
+#[test]
+fn a_child_pattern_reaching_past_its_parent_is_denied() {
+    use aletheia::capabilities::{action_attenuates, action_covers, CapEngine};
+
+    // The disagreement itself.
+    assert!(action_covers("entity.*.*", "entity.*"));
+    assert!(!action_attenuates("entity.*.*", "entity.*"));
+    // …and what it would have cost: the action the child reaches and the parent does not.
+    assert!(action_covers("entity.*", "entity.delete"));
+    assert!(!action_covers("entity.*.*", "entity.delete"));
+
+    let mut e = CapEngine::new();
+    let odd = e.mint(
+        "human:owner",
+        "entity.*.*",
+        Scope::All,
+        Constraints::none(),
+        "human:owner",
+    );
+    assert!(
+        e.delegate(
+            &odd.token,
+            "agent:worker",
+            "entity.*",
+            Scope::All,
+            Constraints::none(),
+            "human:owner",
+        )
+        .is_err(),
+        "a child whose reach exceeds its parent's must be refused"
+    );
+
+    // The legitimate narrowing the same rule must still allow, so the refusal above is not a
+    // relation that simply denies everything.
+    assert!(e
+        .delegate(
+            &odd.token,
+            "agent:worker",
+            "entity.*.x",
+            Scope::All,
+            Constraints::none(),
+            "human:owner",
+        )
+        .is_ok());
+}
+
+/// An entity set with no members reaches nothing, so it is the narrowest scope there is and every
+/// scope must be able to delegate to it. Mirrors `kernel_core::capalg::scope_attenuates`.
+#[test]
+fn an_empty_entity_scope_is_a_legal_narrowing_of_anything() {
+    use aletheia::capabilities::CapEngine;
+
+    let mut e = CapEngine::new();
+    let typed = e.mint(
+        "human:owner",
+        "entity.derive",
+        Scope::Type(EntityType::Document),
+        Constraints::none(),
+        "human:owner",
+    );
+    assert!(e
+        .delegate(
+            &typed.token,
+            "agent:worker",
+            "entity.derive",
+            Scope::Entities(vec![]),
+            Constraints::none(),
+            "human:owner",
+        )
+        .is_ok());
+    // …and nothing can be widened back out of it.
+    let empty = e.mint(
+        "human:owner",
+        "entity.derive",
+        Scope::Entities(vec![]),
+        Constraints::none(),
+        "human:owner",
+    );
+    assert!(e
+        .delegate(
+            &empty.token,
+            "agent:worker",
+            "entity.derive",
+            Scope::Type(EntityType::Document),
+            Constraints::none(),
+            "human:owner",
+        )
+        .is_err());
+}

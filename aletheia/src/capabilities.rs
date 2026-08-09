@@ -139,7 +139,7 @@ impl CapEngine {
             .get(parent_token)
             .ok_or_else(|| AlethError::authorization("unknown parent capability"))?
             .clone();
-        if !action_covers(&parent.action, action) {
+        if !action_attenuates(&parent.action, action) {
             return Err(AlethError::authorization("delegation would amplify action"));
         }
         if !scope_subset(&parent.scope, &scope) {
@@ -232,6 +232,7 @@ impl Default for CapEngine {
     }
 }
 
+/// Is `action` inside `pattern`'s reach? The **authorization** test (`evaluate`).
 pub fn action_covers(pattern: &str, action: &str) -> bool {
     if pattern == "*" {
         return true;
@@ -240,6 +241,28 @@ pub fn action_covers(pattern: &str, action: &str) -> bool {
         return action == prefix || action.starts_with(&format!("{}.", prefix));
     }
     pattern == action
+}
+
+/// Is `child`'s reach a subset of `parent`'s? The **delegation** test (`delegate`).
+///
+/// A different relation from [`action_covers`], and the mirror of `kernel_core::capalg`'s — the
+/// hosted Core and the kernel spine must not disagree about what "narrower" means, or a component
+/// proved safe on one is not proved safe on the other (ADR-048, REQ-CAP-007). Asking the covering
+/// question here accepted `entity.*.*` → `entity.*`, after which the child authorized
+/// `entity.delete` and its parent could not.
+pub fn action_attenuates(parent: &str, child: &str) -> bool {
+    if parent == "*" {
+        return true;
+    }
+    if child == "*" {
+        return false;
+    }
+    match (parent.strip_suffix(".*"), child.strip_suffix(".*")) {
+        (Some(p), Some(c)) => c == p || c.starts_with(&format!("{}.", p)),
+        (Some(p), None) => child == p || child.starts_with(&format!("{}.", p)),
+        (None, Some(_)) => false,
+        (None, None) => parent == child,
+    }
 }
 
 fn scope_covers(scope: &Scope, target: &Target) -> bool {
@@ -255,10 +278,29 @@ fn scope_covers(scope: &Scope, target: &Target) -> bool {
     }
 }
 
+/// Reaches nothing: `None`, or an entity set with no members. The two are the same scope spelled
+/// differently, and a relation that did not know it would refuse a delegation to the narrowest
+/// scope there is.
+fn scope_is_empty(scope: &Scope) -> bool {
+    match scope {
+        Scope::None => true,
+        Scope::Entities(s) => s.is_empty(),
+        _ => false,
+    }
+}
+
+/// Mirrors `kernel_core::capalg::scope_attenuates` — see ADR-048 for why `Type ↔ Entities` is
+/// refused in both directions rather than guessed at.
 fn scope_subset(parent: &Scope, child: &Scope) -> bool {
+    if scope_is_empty(child) {
+        return true;
+    }
+    if scope_is_empty(parent) {
+        return false;
+    }
     match (parent, child) {
         (Scope::All, _) => true,
-        (_, Scope::None) => true,
+        (_, Scope::All) => false,
         (Scope::Type(a), Scope::Type(b)) => a == b,
         (Scope::Entities(p), Scope::Entities(c)) => c.iter().all(|x| p.contains(x)),
         _ => false,

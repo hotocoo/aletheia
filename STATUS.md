@@ -1,26 +1,31 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-09 (second wave)
+**As of:** 2026-08-09 (third wave)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..045`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..048`.
 
-## Active triage execution queue (2026-08-09, after the second-hypervisor wave)
+## Active triage execution queue (2026-08-09, after the capability-lattice wave)
 
 Open GAPS4 backlog count from `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`:
 
 - **P0 open:** 0
-- **P1 open:** 12  (was 14 - `ALET-P1-009` and `ALET-P1-011` closed this wave)
-- **P2 open:** 12  (was 13 - `ALET-P2-001`, the dated toolchain pin, closed this wave)
+- **P1 open:** 10  (was 12 - `ALET-P1-026` and `ALET-P1-027` closed this wave)
+- **P2 open:** 12
 - **P3 open:** 3
 
 Execution order (wave-based, 2-3 tightly related P1 rows per wave):
 
-1. **Security model completion first (P1):** `ALET-P1-026`, `ALET-P1-027`, `ALET-P1-028`,
-   `ALET-P1-029`, `ALET-P1-030`.
-2. **Kernel entry-path hardening (P1):** `ALET-P1-009`, `ALET-P1-011`.
+1. **Security model completion (P1):** ~~`ALET-P1-026`~~, ~~`ALET-P1-027`~~ closed; next
+   `ALET-P1-028` (key management), `ALET-P1-029` (nonce/IV lifecycle), `ALET-P1-030` (encrypted
+   content-addressing identity). The crypto trio is now the front of the queue **and** the gate on
+   two named non-claims this wave created: the capability image is checksummed rather than
+   authenticated (ADR-048), and signing it needs a key whose own lifetime is `ALET-P1-028`.
+2. **Capability store on the medium:** committing the ADR-048 image through `persist.rs` — a
+   filesystem ordering question (does the capability store commit in the same transaction as the
+   entities whose authority it describes?), tracked in the `ALET-P1-026` row rather than implied.
 3. **Device isolation realism (P1):** `ALET-P1-018` (software boundary is delivered; hardware DMA
    containment remains IOMMU/SMMU-scoped work).
 4. **Scheduler/IO robustness (P1):** `ALET-P1-014`, `ALET-P1-019`.
@@ -42,7 +47,83 @@ authority), and a deterministic pipeline executes and verifies everything. See P
 The v1 premise (Linux-hosted AI app) was rejected by the product owner; the original docs are retained
 as `*_v1_superseded.md` for an auditable before/after.
 
-## Latest wave - a second hypervisor, and the assumption it caught (2026-08-09, REQ-QUAL-004, ADR-046/047)
+## Latest wave - what "narrower" means, and how long a capability lives (2026-08-09, REQ-CAP-007/008, ADR-048)
+
+Two of the oldest open P1 rows turned out to be the same question asked at two timescales, and both
+found live defects rather than merely documenting code that already worked.
+
+`ALET-P1-027` asks what **narrower** means. Every capability guarantee in this repository rests on
+attenuation - a delegation may only produce equal-or-narrower authority - and that phrase had no
+definition anywhere. `delegate` compared parent and child field by field, inline, with whichever
+predicate was at hand; `docs/INVARIANT-CONTRACTS.md` had no section for it. It was the load-bearing
+property with the least written down about it.
+
+`ALET-P1-026` asks how long a capability lives. ADR-038 made *entities* durable and said plainly that
+authority is not: the engine is born empty at every boot. That is the safe default and a real
+limitation - an OS whose authority evaporates on restart has to mint wide authority at a point in the
+boot where nothing has authenticated anyone.
+
+They belong in one wave because **the answer to the second is an application of the first**:
+persisting authority is the dangerous direction, and what makes it safe is being able to re-run the
+admission test on the way back in.
+
+**What landed.**
+
+* **`kernel-core/src/capalg.rs` - the lattice, once.** Three partial orders (action patterns, scopes,
+  constraints) and their conjunction `attenuates`, applied by BOTH `spine::CapEngine::delegate` at
+  mint time and `capstore::load` at admission time. Two copies of "narrower" is two places for
+  authority to widen.
+* **A live privilege amplification, found by writing the relation down.** An action pattern denotes a
+  SET of actions, and two different questions are asked of patterns: `action_covers(pattern, action)`
+  - is this concrete action inside the reach, which is what `evaluate` needs - and
+  `action_attenuates(parent, child)` - is the child's REACH a subset of the parent's, which is what
+  `delegate` needs. **`delegate` was asking the first question with the child's pattern in the action
+  slot.** The two agree on every pattern whose only `*` is trailing and disagree the moment one
+  appears elsewhere: `entity.*.*` reaches the string `entity.*` but not `entity.delete`, while
+  `entity.*` reaches `entity.delete`. So the delegation was ACCEPTED and the child then authorized an
+  action its parent never could - amplification through the one mechanism the model says cannot
+  amplify. Fixed in the kernel spine and in the hosted `aletheia/src/capabilities.rs`, because a
+  component proved safe on one host and run on the other is not proved safe.
+* **`kernel-core/src/capstore.rs` - a persisted registry is untrusted input.** Written as a list of
+  refusals, with no partial load, because the parts a partial load drops - the revocation list, a
+  parent record - are the parts that make the rest safe. Three of the refusals are substance rather
+  than hygiene. **ClockRewound:** expiry is relative to a logical clock, so reloading under a clock
+  that restarts at zero un-expires everything; the image carries the clock it was taken under and a
+  load under an earlier one is refused. **IdReusable:** ids come from `next_id ^ secret`, so an image
+  whose counter could re-mint a stored id would hand a REVOKED token back to whoever still holds it.
+  **The cascade is re-derived**, not replayed - naming only a cascade's root, the smallest edit that
+  resurrects the most authority, still returns the whole subtree dead.
+* **That last check found a real defect in the loader's own first draft.** The re-derivation was
+  written as `for r in already_revoked { revoke(r) }`, and `revoke` descends only when its `insert`
+  reports the id as newly revoked - every seed was already in the set, so the walk stopped at the
+  first node and every descendant came back LIVE. The invariant thins the revocation list rather than
+  trusting a well-formed one, which is why it was caught here rather than in the field.
+* **Two smaller corrections.** `Entities([])` and `None` are now recognized as the same scope - a
+  relation that refuses the narrowest possible delegation on a spelling pushes callers toward wider
+  ones. And `Type(T)` vs `Entities([...])` is refused in BOTH directions with the reason recorded: a
+  `Target` carries id and etype independently, so neither is a subset of the other, and deciding a
+  particular case needs a store lookup an authority check must not acquire (one that reads the store
+  can be starved). Deliberately incomplete, never unsound - and the test proves the incompleteness is
+  real rather than conservative.
+
+**Measured, on this workstation.** `VM-E2E: PASS` (aarch64) - `VM-E2E (riscv64): PASS` -
+`VM-E2E-X86: PASS` (QEMU+OVMF, exit 33 on both boots) - `CONFORMANCE: PASS` (**96** core behaviors on
+all three targets, was 88) - `CONSOLE-E2E: PASS` - `BUILD-ALL: PASS` - `QUALITY-GATE: PASS` -
+`TRACEABILITY: PASS` (87 requirements) - `REGISTER: PASS` - hosted Core 85 tests and `kernel-core`
+294 tests green. Spine invariants 11 -> 13 on every target; a new `[cap] ALL 11 CAPABILITY-LIFETIME
+INVARIANTS HOLD` suite on all three, wired into the QEMU and VirtualBox gates. Host side: 10
+exhaustive lattice proofs plus a 20 000-chain rejection campaign, and 19 capability-store proofs
+including a per-byte per-bit corruption sweep and a per-prefix truncation sweep.
+
+**Not claimed.** The capability image is **checksummed, not authenticated** - the bit sweep proves
+the checksum covers every byte, and whoever can write the block can write a matching one; signing it
+needs a key whose own lifetime is `ALET-P1-028`, still open. Nothing yet writes the image to a disk:
+`save`/`load` are the model and its admission test, proved in kernel space on every target, while
+committing it through `persist.rs` is a filesystem ordering decision that gets its own wave. The
+logical clock is still a caller-supplied constant on every target - monotonicity is enforced, where a
+real monotonic value comes from is not solved. `docs/MATURITY.md` still governs every claim above.
+
+## Previous wave - a second hypervisor, and the assumption it caught (2026-08-09, REQ-QUAL-004, ADR-046/047)
 
 Every boot gate in this repository ran on QEMU. That is a narrower claim than it reads as: a kernel
 that boots on QEMU has proved *correct against QEMU*, and no amount of further QEMU testing can find
