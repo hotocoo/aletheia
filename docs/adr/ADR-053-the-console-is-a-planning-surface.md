@@ -62,7 +62,11 @@ What the hosted side adds is what the kernel table cannot know:
 **2. The model reaches the console through native tool calling, not through constrained JSON.** The
 commands are sent as OpenAI-shaped tool definitions generated from the registry, `tool_choice` is
 `required`, and the returned `tool_calls` entry becomes the plan. `llama-server` must run with
-`--jinja`; `runtime::spawn_llama_server` now passes it.
+`--jinja`, or it never parses the model's tool call and a correct answer reads as no answer at all.
+`runtime::spawn_llama_server` now passes it — but that helper has no callers, so on any machine the
+server is started by an operator, and the exact invocation is written into the header of
+`scripts/console-ai-e2e.sh` rather than left in somebody's shell history. A measurement nobody else
+can reproduce is a measurement with the same standing as an assertion.
 
 **3. The console gets a context brief, as the Core already has (ADR-018).** Before planning, the
 driver types `ls` at the live machine and hands back what it printed, framed as data. The brief is
@@ -135,6 +139,9 @@ and the live gate re-reads `ls` for the same reason.
   English works. `docs/MATURITY.md` governs.
 * Approval is a flag on a CLI (`--approve`), not a human-in-the-loop surface. The Core has a real
   pending-approval mechanism (ADR-015); the console planner does not use it yet.
+* The model arm is operator-started. Nothing here launches an inference server, so a fresh checkout
+  runs the deterministic arm and SKIPs the model arm — loudly, but it does mean `8/8` needs a person
+  to set the machine up before it can be reproduced.
 * The gate runs the aarch64 target only. The other two boot the same dispatcher and are covered by
   `console-e2e.sh`, but the model arm has not been run against them.
 * The model plans ONE command at a time. Multi-step console plans parse and render, and no case
