@@ -1,7 +1,7 @@
 {
   "crate": "aletheia",
   "format": "aletheia-sbom/1",
-  "package_count": 110,
+  "package_count": 111,
   "packages": [
     {
       "license": "MIT OR Apache-2.0",
@@ -242,6 +242,12 @@
       "name": "js-sys",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.3.104"
+    },
+    {
+      "license": "",
+      "name": "kernel-core",
+      "source": "local",
+      "version": "0.1.0"
     },
     {
       "license": "MIT OR Apache-2.0",

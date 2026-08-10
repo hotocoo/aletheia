@@ -26,7 +26,11 @@
 //! - `llama`    — the hosted-phase `LlamaCppProvider` implementation
 //! - `registry` — the pinned model set and the operator's selection (ADR-052)
 //! - `bench`    — the operation-surface benchmark, and the identity check that guards it (ADR-052)
+//! - `console`  — planning for the KERNEL CONSOLE's command table, the second operation family
+//!   (ADR-053); the model proposes commands, a host driver types them, and the kernel stays
+//!   `no_std` with no inference engine under it
 pub mod bench;
+pub mod console;
 pub mod llama;
 pub mod registry;
 pub mod runtime;

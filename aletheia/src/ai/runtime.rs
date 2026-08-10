@@ -172,7 +172,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 /// both work. The caller owns the returned child process. `ctx` is the context window (`-c`).
 ///
 /// Matches the model card's recommended invocation (chat template is embedded in the GGUF, so no
-/// `--jinja`/`--chat-template` is needed): `llama-server -m <gguf> -c <ctx> --port <port>`.
+/// `--chat-template` is needed): `llama-server -m <gguf> -c <ctx> --port <port> --jinja`.
 pub fn spawn_llama_server(cfg: &AiConfig, ctx: u32) -> std::io::Result<std::process::Child> {
     let path = resolve_model_path(cfg).ok_or_else(|| {
         std::io::Error::new(
@@ -188,6 +188,12 @@ pub fn spawn_llama_server(cfg: &AiConfig, ctx: u32) -> std::io::Result<std::proc
         .arg(ctx.to_string())
         .arg("--port")
         .arg(port.to_string())
+        // `--jinja` renders the model's own chat template, which is what makes llama-server PARSE
+        // tool calls into `message.tool_calls` instead of leaving them as prose in `content`. The
+        // console planner (ADR-053) speaks that channel, and without this flag it sees a response
+        // with no tool call — a model that answered correctly, reported as a model that said
+        // nothing. The Core's JSON path is unaffected, so this is safe for every caller.
+        .arg("--jinja")
         .spawn()
 }
 

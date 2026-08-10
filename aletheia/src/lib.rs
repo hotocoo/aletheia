@@ -7,6 +7,7 @@ pub mod agents;
 pub mod ai;
 pub mod capabilities;
 pub mod component;
+pub mod console_ops;
 pub mod crypto;
 pub mod domain;
 pub mod experience;

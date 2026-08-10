@@ -92,6 +92,24 @@ console-e2e:
     - rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly-2026-08-09
     - ./scripts/console-e2e.sh
 
+console-ai-e2e:
+  stage: test
+  image: rust:latest
+  script:
+    # The model drives the console (REQ-AI-006, ADR-053): read the namespace off the live machine,
+    # ask in plain English, validate what came back against the kernel's own command table, type it,
+    # and assert what the console printed — then power-cycle and check it survived.
+    #
+    # In CI this runs the DETERMINISTIC arm only, and that is the point of having two arms: the
+    # runner has no GPU, no weights and no llama-server, so the model arm SKIPs (loudly, never
+    # silently) while the whole pipe — registry, validation, rendering, typing, persistence — is
+    # still gated on every push. The model arm is a workstation gate.
+    - apt-get update && apt-get install -y qemu-system-arm perl
+    - rustup toolchain install nightly-2026-08-09 --profile minimal
+    - rustup component add rust-src --toolchain nightly-2026-08-09
+    - rustup target add aarch64-unknown-none-softfloat --toolchain nightly-2026-08-09
+    - ./scripts/console-ai-e2e.sh
+
 traceability:
   stage: test
   image: rust:latest
