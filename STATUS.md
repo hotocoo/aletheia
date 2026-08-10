@@ -1,11 +1,61 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-09 (fourth wave)
+**As of:** 2026-08-10 (console-planning wave)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..051`.
+
+## The console-planning wave (2026-08-10) — the model reaches the machine you sit in front of
+
+The previous wave's benchmark ended by printing what it had *not* measured: the six hosted
+operations, **NOT** the twenty-seven-command kernel console, with "no path from one to the other in
+this build". That sentence was true and it described the hole. Aletheia had two command surfaces and
+intelligence attached to one of them.
+
+* **ALET-P2-044 — the console becomes a planning surface, from the kernel's own table.** A second
+  operation family, disjoint from the entity operations by construction (`entity.derive` and `grep`
+  share no vocabulary), derived from `kernel_core::shell::COMMANDS` — the table the dispatcher and
+  `help` are both generated from — rather than retyped. A command cannot be added to the kernel
+  without appearing in the model's menu. The hosted side adds what the kernel cannot know: an
+  exhaustive risk classification (writes to the medium and stopping the machine are `Destructive`;
+  an unclassified command fails a test) and a rendering contract in which a validated step becomes
+  **exactly one console line**. A control byte in any argument is a refused plan, so a model
+  argument cannot become a second command with the first one's authority. **ADR-053.**
+* **ALET-P2-045 — five defects only a live model could expose, and none of them were the model.**
+  Under a permissive JSON schema LFM2.5 looped argument keys until it exhausted the generation
+  budget and returned empty on three of eight cases; caught in that raw output, it was trying to
+  escape into `<|tool_call_start|>[write(name='notes', …)]` — it had produced the right call and the
+  decode would not let it emit the format it was trained on. The console path now speaks **native
+  tool calling**, and `spawn_llama_server` passes `--jinja`, without which `llama-server` never
+  parses a tool call and a correct answer reads as no answer at all. A prompt clause saying *"only
+  call `ls` when…"* took the score from 6/8 to **3/8**, because the negation is not what survives
+  contact with a small model — the token is; the system prompt now names no command, enforced by a
+  test. And with no context brief the model answered `ls` for anything needing a file, its own
+  reasoning saying *"Let me first look at what files are available"* — correct for an agent, wrong
+  for an interpreter, and fixed by letting it see. That is ADR-018 arriving on a second surface.
+* **The loop is closed at a booted machine.** `scripts/console-ai-e2e.sh` boots the interactive
+  kernel, types `ls` and reads the namespace **off the live guest**, asks in plain English, validates
+  what the model chose against the kernel's own table, types the rendered line, asserts what the
+  console printed — then power-cycles and requires that what was written survived and what was
+  removed stayed removed. Two arms: the deterministic control arm needs no model and gates the whole
+  pipe in CI; the model arm SKIPs, loudly, when nothing is serving the selected model.
+
+**Measured, this workstation** (LFM2.5-2.6B-Q4_K_M, llama.cpp `--jinja`, `-c 8192`, 27 tools
+offered): the console surface went **4/8 → 3/8 → 4/8 → 3/8 → 5-6/8 → 8/8**, and 8/8 held on two
+consecutive runs at a median of ~800 ms, against a deterministic control arm at 8/8 and 0 ms. The
+live gate passes both arms including the reboot leg. Register **83 → 87 findings, 48 → 50 resolved**;
+traceability **92 → 93 requirements**.
+
+**Not claimed.** There is still **no inference engine in kernel space** — `kernel-core` remains
+`no_std` with no network, the model runs on the host, and what crosses into the guest is a line of
+ASCII indistinguishable from one a person typed. 8/8 is eight cases, one machine, one quant, one
+model: a floor for reproducing the setup, not a claim that arbitrary English drives this OS.
+Approval is a CLI flag, not the Core's human-in-the-loop surface (**ALET-P2-046**, open). The live
+gate drives aarch64 only; the other two targets run the same dispatcher under `console-e2e.sh` but
+have never been driven by the model (**ALET-P2-047**, open). `docs/MATURITY.md` still governs every
+claim above.
 
 ## The AI wave (2026-08-10) — the OS gets to choose its own mind, and gets measured
 
@@ -78,18 +128,21 @@ keyboard-decode **10 → 12**, the cross-target conformance contract **112 → 1
 that is now what `scripts/vbox-install.sh` provisions by default. The VirtualBox rung boots the same
 image at 512 MiB and at 1 GiB, because the firmware memory map is an input and one size is one map.
 
-## Active triage execution queue (2026-08-10, after the AI wave)
+## Active triage execution queue (2026-08-10, after the console-planning wave)
 
 Open GAPS4 backlog count from `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`:
 
 - **P0 open:** 0
-- **P1 open:** 11  (unchanged: the AI wave opened and closed its own two rows and touched no P1)
-- **P2 open:** 12  (`ALET-P2-042` and `ALET-P2-043` opened and closed in this wave)
+- **P1 open:** 11  (unchanged: the console-planning wave touched no P1, exactly as the AI wave did not)
+- **P2 open:** 14  (`ALET-P2-044`/`045` opened and closed; `ALET-P2-046`/`047` opened and left open)
 - **P3 open:** 3
 
-The queue below is unchanged by this wave, deliberately. The AI work was a separate axis — the model
-subsystem — and none of it advances the crypto trio at the front of the queue. Saying so is cheaper
-than letting a reader infer that a busy wave moved the security backlog, which it did not.
+The queue below is unchanged by this wave, deliberately, for the second wave running. The console
+planning work was the same separate axis — the model subsystem — and none of it advances the crypto
+trio at the front of the queue. Saying so is cheaper than letting a reader infer that a busy wave
+moved the security backlog, which it did not. Two of its own rows stayed open rather than being
+folded into the rows that closed: `ALET-P2-046` (approval is a flag, not a human) and `ALET-P2-047`
+(one CPU target, one command per plan).
 
 Execution order (wave-based, 2-3 tightly related P1 rows per wave):
 

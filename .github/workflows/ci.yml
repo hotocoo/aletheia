@@ -137,6 +137,25 @@ jobs:
       - name: Boot with --features interactive, type at the prompt, halt, reboot, read it back
         run: ./scripts/console-e2e.sh
 
+  console-ai-e2e:
+    name: The model drives the console (plan in English, validate, type at a booted machine)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU for aarch64
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm perl
+      - name: Install Rust nightly + the aarch64 bare-metal target
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup component add rust-src --toolchain nightly-2026-08-09
+          rustup target add aarch64-unknown-none-softfloat --toolchain nightly-2026-08-09
+      # The runner has no weights and no llama-server, so the MODEL arm skips — loudly, never
+      # silently — and the DETERMINISTIC arm gates the whole pipe: the registry derived from the
+      # kernel's command table, plan validation, the one-step-one-line rendering contract, typing at
+      # a live console, and persistence across a power cycle. The model arm is a workstation gate.
+      - name: Read the namespace off a booted machine, plan, type it, assert, reboot
+        run: ./scripts/console-ai-e2e.sh
+
   traceability:
     name: Requirement traceability (delivered ⇒ evidence)
     runs-on: ubuntu-latest

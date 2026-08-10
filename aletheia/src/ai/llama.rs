@@ -22,10 +22,24 @@ const PROBE_TIMEOUT_MS: u64 = 400;
 /// Overall budget for one interpretation (model generation can be slow on CPU).
 const GEN_TIMEOUT_MS: u64 = 120_000;
 
+/// Which planning surface this provider is driving. The backend, the sampling parameters and the
+/// structured-output strategy are properties of the MODEL and are identical either way; the prompt,
+/// the grammar and the operation enum are properties of the SURFACE. Keeping them apart is what lets
+/// one provider plan the hosted Core's six operations and the kernel console's twenty-seven commands
+/// without either menu leaking into the other's grammar (ADR-053).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanDomain {
+    /// The hosted Core's entity/capability operations (`crate::tools`).
+    Core,
+    /// The kernel console's command table (`crate::console_ops`).
+    Console,
+}
+
 pub struct LlamaCppProvider {
     host: String,
     port: u16,
     label: String,
+    domain: PlanDomain,
     /// Sampling and template behavior, taken from the selected model's manifest (ADR-052) rather
     /// than hardcoded. One model's forced `<think>` phase is not every model's, and a provider that
     /// bakes in one model's quirk is a provider that silently mis-drives the next one.
@@ -45,6 +59,7 @@ impl LlamaCppProvider {
             host,
             port,
             label: format!("llama.cpp:{name}"),
+            domain: PlanDomain::Core,
             temperature: 0.3,
             top_p: 0.95,
             thinking: false,
@@ -67,10 +82,22 @@ impl LlamaCppProvider {
         p
     }
 
+    /// Drive the kernel console's command surface instead of the Core's operation surface. The
+    /// label carries the domain so a trace, a benchmark row or a log line never has to guess which
+    /// menu produced a plan.
+    pub fn for_console(mut self) -> Self {
+        self.domain = PlanDomain::Console;
+        self.label = format!("{}/console", self.label);
+        self
+    }
+
     /// Shared request path. `context` is the capability-scoped Context-Engine brief (empty when the
     /// caller supplies none). It is included as prior CONTEXT for the model to reason over — it is
     /// data, never authority, and the resulting plan is still validated + authorized downstream.
     fn run(&self, intent: &Intent, context: &str) -> Result<String, ModelError> {
+        if self.domain == PlanDomain::Console {
+            return self.run_console(intent, context);
+        }
         let user = if context.trim().is_empty() {
             format!(
                 "Intent from subject `{}`: {:?}. Produce the plan as JSON only.",
@@ -141,6 +168,61 @@ impl LlamaCppProvider {
             .ok_or(ModelError::InvalidOutput)?;
         // The candidate plan is untrusted text — extract JSON here; parse/validate happen downstream.
         prompt::extract_plan_json(content).ok_or(ModelError::InvalidOutput)
+    }
+
+    /// The console request path (ADR-053). Same transport, same sampling, same structured-output
+    /// strategy, same untrusted-output contract — a different menu and a different grammar.
+    ///
+    /// It carries no context brief: the Context Engine assembles ENTITY context, and a console
+    /// command does not act on entities. Handing the model an entity brief while asking it for
+    /// `grep` would be feeding it the wrong vocabulary at the exact moment it has to pick a word.
+    fn run_console(&self, intent: &Intent, context: &str) -> Result<String, ModelError> {
+        let request = match &intent.verb {
+            crate::intent_action::Verb::Raw { text } => text.clone(),
+            // A structured Core verb reaching the console path is a wiring mistake, not a request:
+            // refuse it rather than stringifying it into a prompt that will produce a plausible
+            // command for an intent nobody made.
+            _ => return Err(ModelError::InvalidOutput),
+        };
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": super::console::system_prompt() },
+                { "role": "user", "content": super::console::user_message(&request, context) }
+            ],
+            // The commands are sent as TOOLS, and the model is required to call one. This is the
+            // channel LFM2.5 is trained on, and using anything else was measurably worse: under a
+            // JSON schema it emitted `{"name":"manifesto","text":"manifesto","op":"cat",…}` in a
+            // loop, ran the whole generation budget on three cases out of eight, and — caught in the
+            // raw output — tried to escape into `<|tool_call_start|>[write(name='notes', …)]`
+            // anyway. It was asking for this channel; the schema was refusing to give it.
+            "tools": super::console::tool_definitions(),
+            "tool_choice": "required",
+            "parallel_tool_calls": false,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "n_predict": 2048,
+            "cache_prompt": true,
+            "stream": false
+        });
+        if self.thinking {
+            body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+        }
+        let body = body.to_string();
+        let (status, resp) = http(
+            &self.host,
+            self.port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&body),
+            GEN_TIMEOUT_MS,
+        )
+        .map_err(|_| ModelError::Runtime)?;
+        if status != 200 {
+            return Err(ModelError::Runtime);
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&resp).map_err(|_| ModelError::InvalidOutput)?;
+        super::console::plan_from_tool_calls(&v["choices"][0]["message"])
     }
 }
 

@@ -6,6 +6,7 @@
 //!   aletheiad [demo] [--data DIR]                  runs the UC-001..004 scenario AS A CLIENT over
 //!                                                  the in-process boundary — the app never touches
 //!                                                  Core internals, only Request/Response.
+use aletheia::ai::provider::ModelProvider as _;
 use aletheia::domain::EntityType;
 use aletheia::experience;
 use aletheia::intent_action::{Intent, Trace, Verb};
@@ -56,7 +57,186 @@ fn main() {
     match args.get(1).map(|s| s.as_str()).unwrap_or("demo") {
         "serve" => serve(&args),
         "model" => model_cmd(&args),
+        "console" => console_cmd(&args),
         _ => demo(&args),
+    }
+}
+
+/// `aletheiad console <ops|plan|bench>` — the kernel console as a planning surface (ADR-053).
+///
+/// This command PLANS; it does not type. What it prints on stdout is console lines and nothing else,
+/// one per line, so a driver can pipe them at a live machine's serial port; everything explanatory
+/// goes to stderr. That split is the whole reason it is usable as a gate: a message that leaked into
+/// stdout would be typed at the console as a command.
+fn console_cmd(args: &[String]) {
+    let dir = model_dir(args);
+    let dirp = std::path::Path::new(&dir);
+    match args.get(2).map(|s| s.as_str()) {
+        Some("ops") => console_ops_list(),
+        Some("cases") => console_cases(),
+        Some("bench") => console_bench(dirp),
+        Some("plan") => {
+            // The request is every word that is neither a flag nor a flag's VALUE. Filtering only
+            // on the leading `--` silently swallowed `--context-file /tmp/ctx` into the request,
+            // and the model was then asked to plan a sentence with a path in the middle of it.
+            const TAKES_VALUE: &[&str] =
+                &["--interpreter", "--context", "--context-file", "--data"];
+            let mut request_words: Vec<String> = Vec::new();
+            let mut skip_next = false;
+            for a in args.iter().skip(3) {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if a.starts_with("--") {
+                    skip_next = TAKES_VALUE.contains(&a.as_str());
+                    continue;
+                }
+                request_words.push(a.clone());
+            }
+            let request = request_words.join(" ");
+            if request.trim().is_empty() {
+                eprintln!("usage: aletheiad console plan [--approve] [--interpreter model|deterministic] <request>");
+                std::process::exit(2);
+            }
+            console_plan(dirp, &request, args);
+        }
+        _ => {
+            eprintln!("usage: aletheiad console <ops|plan|bench>");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Every command the model may propose, with its arguments and its risk — the same table the prompt
+/// is generated from, so an operator can read exactly what the model was offered.
+fn console_ops_list() {
+    println!("{:<10} {:<22} {:<12} does", "command", "args", "risk");
+    for op in aletheia::console_ops::all() {
+        let args = if op.args.is_empty() {
+            "-".to_string()
+        } else {
+            op.args.join(", ")
+        };
+        println!(
+            "{:<10} {:<22} {:<12} {}",
+            op.name,
+            args,
+            format!("{:?}", op.risk),
+            op.doc
+        );
+    }
+}
+
+/// The benchmark's cases, as tab-separated records, so the E2E gate drives the SAME eight requests
+/// the benchmark measures instead of keeping its own copy of them in shell. Two lists of cases would
+/// drift, and the drift would show up as a gate and a benchmark disagreeing about a model that had
+/// not changed.
+///
+/// Fields: natural request, literal request, expected line, approved, what the live console says.
+fn console_cases() {
+    for c in aletheia::ai::console::CASES {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            c.natural, c.literal, c.expect, c.approved, c.console_says
+        );
+    }
+}
+
+/// Which interpreter a plan came from, chosen the way the pipeline chooses: the model when one is
+/// really there, the deterministic arm otherwise — and it is always SAID, because a silent fallback
+/// is how a live model and no model at all came to look identical once already (ADR-052).
+fn console_interpreter(
+    dir: &std::path::Path,
+    args: &[String],
+) -> Box<dyn aletheia::ai::provider::ModelProvider> {
+    let forced = arg_value(args, "--interpreter").unwrap_or_else(|| "auto".into());
+    if forced == "deterministic" {
+        eprintln!("interpreter: deterministic-console (forced)");
+        return Box::new(aletheia::ai::console::DeterministicConsole);
+    }
+    let cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
+    if cfg.wants_local_model() {
+        let p = aletheia::ai::llama::LlamaCppProvider::from_config(&cfg).for_console();
+        if p.healthy() {
+            eprintln!("interpreter: {} at {}", p.name(), cfg.endpoint);
+            return Box::new(p);
+        }
+        if forced == "model" {
+            eprintln!(
+                "interpreter: no model answers {} — refusing, because `--interpreter model` was asked for",
+                cfg.endpoint
+            );
+            std::process::exit(3);
+        }
+        eprintln!(
+            "interpreter: deterministic-console (nothing answers {})",
+            cfg.endpoint
+        );
+    } else {
+        eprintln!(
+            "interpreter: deterministic-console (AI_PROVIDER={})",
+            cfg.provider
+        );
+    }
+    Box::new(aletheia::ai::console::DeterministicConsole)
+}
+
+/// The console's current state, handed to the interpreter as DATA (ADR-018 applied to this surface).
+///
+/// `--context-file` is how the E2E driver passes what the live guest just printed: it types `ls`,
+/// captures the answer and hands it back, so the model plans against the machine that exists rather
+/// than the one it imagines. Absent, the brief is empty and the model is planning blind — which is
+/// legitimate for a one-off request and measurably worse, so it is not silent.
+fn console_context(args: &[String]) -> String {
+    match arg_value(args, "--context-file") {
+        Some(p) => match std::fs::read_to_string(&p) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("context: cannot read {p}: {e} — planning with no console state");
+                String::new()
+            }
+        },
+        None => arg_value(args, "--context").unwrap_or_default(),
+    }
+}
+
+fn console_plan(dir: &std::path::Path, request: &str, args: &[String]) {
+    let approved = args.iter().any(|a| a == "--approve");
+    let provider = console_interpreter(dir, args);
+    let context = console_context(args);
+    match aletheia::ai::console::plan_lines(
+        provider.as_ref(),
+        "human:operator",
+        request,
+        &context,
+        approved,
+    ) {
+        Ok((lines, _raw)) => {
+            for line in lines {
+                println!("{line}");
+            }
+        }
+        Err(e) => {
+            eprintln!("refused: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn console_bench(dir: &std::path::Path) {
+    let cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
+    match aletheia::ai::console::bench(&cfg) {
+        Ok(report) => {
+            print!("{}", aletheia::ai::console::render(&report));
+            if report.passed() != report.total() {
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("benchmark refused: {e}");
+            std::process::exit(2);
+        }
     }
 }
 

@@ -70,6 +70,7 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-AI-003 | AI execution substrate + heterogeneous CPU/GPU/NPU scheduler | ADR-022 | - | - | - | deferred |
 | REQ-AI-004 | Pinned model registry + operator-selectable resident model | ADR-052 | aletheia/src/ai/registry.rs; aletheia/src/ai/mod.rs; models/lfm2.5.toml; models/minicpm.toml; models/aletheia-lm.toml | aletheia/tests/model_registry.rs | - | delivered |
 | REQ-AI-005 | Operation-surface benchmark with served-model identity check | ADR-052 | aletheia/src/ai/bench.rs; aletheia/src/ai/llama.rs | aletheia/tests/model_registry.rs | - | delivered |
+| REQ-AI-006 | Kernel-console command surface as a planning target (native tool calling + context brief), gated live | ADR-053 | aletheia/src/console_ops.rs; aletheia/src/ai/console.rs; aletheia/src/ai/llama.rs; kernel-core/src/shell.rs | aletheia/tests/console_plan.rs | scripts/console-ai-e2e.sh | delivered |
 | REQ-KERN-001 | aarch64 microkernel boots + spine invariants | ADR-019 | kernel/src/main.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-KERN-002 | x86-64 bootable image + spine invariants | ADR-019 | kernel-x86_64/src/main.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e-x86.sh | delivered |
 | REQ-KERN-003 | RISC-V microkernel + spine invariants | ADR-019 | kernel-riscv64/src/main.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e-riscv.sh | delivered |

@@ -24,6 +24,11 @@ ed25519-dalek = "3"
 rand = "0.10"
 ulid = { version = "3", features = ["serde"] }
 wasmi = "1.1.0"
+# The kernel's arch-independent contracts — depended on for ONE thing: `shell::COMMANDS`, the
+# command table the console dispatcher and its `help` are generated from, so the menu the model is
+# shown cannot drift from the commands the kernel accepts (ADR-053). `no_std`, zero dependencies,
+# and nothing in the hosted Core's own paths reaches for it.
+kernel-core = { path = "../kernel-core" }
 
 [dev-dependencies]
 proptest = "1"

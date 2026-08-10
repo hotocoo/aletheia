@@ -25,11 +25,17 @@
 //! refusal, not a warning.
 //!
 //! **What is NOT measured, said plainly.** This benchmark drives the *hosted Core's* operation
-//! surface (`aletheia/`). It does not drive the kernel console (`kernel-core/src/shell.rs`): that
-//! dispatcher runs in kernel space, in a `no_std` crate, with no inference engine underneath it and
-//! no path from one to the other in this build. The console has its own live suite and its own gate
-//! (`scripts/console-e2e.sh`). Two surfaces, two gates; calling them one would be the kind of claim
-//! `docs/MATURITY.md` exists to prevent.
+//! surface (`aletheia/`). It does not drive the kernel console (`kernel-core/src/shell.rs`), which
+//! is a different operation family with a different vocabulary, its own benchmark
+//! (`ai::console::bench`) and its own live gate (`scripts/console-ai-e2e.sh`).
+//!
+//! This paragraph used to end by saying there was *no path* from the model to the console. ADR-053
+//! built one, so that sentence is now false and saying it here would be worse than saying nothing.
+//! What remains true, and is the part worth keeping: the console dispatcher still runs in kernel
+//! space, in a `no_std` crate, with **no inference engine underneath it**. Every model call happens
+//! on the host; what reaches the guest is a validated line of ASCII, indistinguishable from one a
+//! person typed. Two surfaces, two benchmarks, two gates — calling them one would be the kind of
+//! claim `docs/MATURITY.md` exists to prevent.
 use super::config::AiConfig;
 use super::prompt;
 use crate::domain::EntityType;
@@ -268,8 +274,9 @@ pub fn render(r: &BenchReport) -> String {
         BenchReport::median_ms(&r.control)
     ));
     s.push_str(
-        "this measures the hosted Core's operation surface, NOT the kernel console\n\
-         (kernel-core/src/shell.rs has no inference engine under it — see scripts/console-e2e.sh)\n",
+        "this measures the hosted Core's operation surface. The kernel console is a separate\n\
+         command family with its own benchmark (`aletheiad console bench`, ADR-053); it still has\n\
+         no inference engine under it — the model plans on the host and Aletheia types the line.\n",
     );
     s
 }
