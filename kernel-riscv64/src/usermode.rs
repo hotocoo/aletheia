@@ -938,6 +938,14 @@ fn run_preemptive() -> (bool, bool) {
             s.preempted = false;
             s.exited = false;
         }
+        // The slice budget must start when the TASK starts, not when the previous preemption was
+        // handled. The handler re-arms (that is what clears the pending timer), but everything
+        // between there and here — the bookkeeping above, two address-space switches — spends that
+        // budget in the KERNEL, and `rdtime` is wall-clock under TCG: on a loaded host the deadline
+        // could already be past when the task resumed, so it took its interrupt before executing a
+        // single `addi s2, s2, 1` and invariant 10 (progress) failed for a reason that had nothing
+        // to do with state preservation. Re-arming here bounds that window to the resume itself.
+        timer_arm();
         // SAFETY: roots replicate the kernel identity map; tasks run in U-mode where the delegated
         // S-timer interrupt fires regardless of sstatus.SIE.
         unsafe {

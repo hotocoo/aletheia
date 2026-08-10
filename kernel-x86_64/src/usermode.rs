@@ -1576,6 +1576,11 @@ fn run_preemptive() -> (bool, bool) {
             s.preempted = false;
             s.exited = false;
         }
+        // Start the slice budget when the TASK starts. The PIT free-runs at 100 Hz, so without this
+        // a task resumes into whatever is LEFT of the current 10 ms period — which on a loaded host
+        // can be nothing, and it would then take IRQ0 before executing a single `inc` and fail the
+        // progress invariant for a reason that has nothing to do with state preservation.
+        crate::pit::rearm();
         // SAFETY: roots[slot] maps the kernel; run the task until the timer preempts it.
         unsafe {
             vm::switch_to(roots[slot]);

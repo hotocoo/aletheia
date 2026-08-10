@@ -1228,6 +1228,13 @@ fn run_preemptive() -> (bool, bool) {
             s.preempted = false;
             s.exited = false;
         }
+        // Start the slice budget when the TASK starts, not when the previous preemption was handled
+        // (the same reason as the RISC-V twin): the handler re-arms, but the bookkeeping above and
+        // two address-space switches then spend that budget in the KERNEL, so on a loaded host a
+        // task can resume with CNTP_TVAL already expired and take its interrupt before executing a
+        // single increment — which would fail the progress invariant for a reason that has nothing
+        // to do with state preservation. CNTP_TVAL_EL0 is a fresh down-counter, so this is exact.
+        timer_arm();
         // SAFETY: roots[slot] identity-maps the kernel; run the task until the timer preempts it.
         unsafe {
             vm::switch_address_space(roots[slot]);

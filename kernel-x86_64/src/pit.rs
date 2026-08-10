@@ -25,6 +25,18 @@ pub fn init() {
     }
 }
 
+/// Restart channel 0's count from the top, so the caller gets a WHOLE period before the next IRQ0
+/// rather than whatever remains of the current one.
+///
+/// The other two targets arm a one-shot timer per slice; the PIT free-runs, so a ring-3 task can be
+/// resumed a microsecond before a tick that was already due and be preempted before executing a
+/// single instruction of its own. Writing the control word halts and reloads the counter (8254
+/// §Control Word), which is the PIT's equivalent of that arm. `TICKS` is untouched — this changes
+/// the PHASE of the tick, never its rate, so every deadline computed from [`ticks`] stays valid.
+pub fn rearm() {
+    init();
+}
+
 /// Called from the IRQ0 handler.
 pub fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
