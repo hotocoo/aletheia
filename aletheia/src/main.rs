@@ -385,13 +385,23 @@ fn console_agent(dir: &std::path::Path, request: &str, args: &[String]) {
 
     let driver = console_agent_interpreter(dir, args);
     let corrections_before = session.corrections.len();
+    // Timed here rather than inside `advance`, because what an operator waits for is the whole turn
+    // — every model call it took, including the ones that were corrected and never typed. A number
+    // that counted only the successful call would report a turn as fast precisely when it was slow.
+    let started = std::time::Instant::now();
     let outcome = agent::advance(&mut session, driver.as_ref());
+    let elapsed_ms = started.elapsed().as_millis();
     // A correction is a model proposal that Aletheia refused and re-asked WITHOUT typing anything.
     // It is reported on stderr, never stdout, because stdout is the line the driver types — but it
     // is reported, because a turn that silently cost three model calls is a turn nobody can debug.
     for c in session.corrections.iter().skip(corrections_before) {
         eprintln!("corrected: `{}` — {}", c.proposed, c.refusal);
     }
+    // One machine-readable line per turn, so the gate can report a median instead of a claim.
+    eprintln!(
+        "turn-ms: {elapsed_ms} calls: {}",
+        1 + session.corrections.len() - corrections_before
+    );
     // The transcript is written whatever happened — including on a refusal, which is the case where
     // somebody most wants to read it.
     if let Err(e) = std::fs::write(

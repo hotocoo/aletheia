@@ -58,6 +58,26 @@ DRIVER_MAX_TURNS=10
 
 fail=0
 declare -a RESULTS=()
+# Every turn's wall time and how many model calls it cost, across one arm. Reset per arm, because a
+# median that mixes the deterministic control arm's zero-millisecond turns with a model's would
+# report a speed no configuration actually has.
+declare -a TURN_MS=() TURN_CALLS=()
+
+# The MIDDLE turn, not the mean: one cold start or one page fault moves a mean and does not move a
+# median, and the number is here to describe what a turn usually costs.
+median_of() {
+  local -a xs=("$@")
+  [ "${#xs[@]}" -eq 0 ] && { printf 'n/a'; return; }
+  local -a sorted
+  IFS=$'\n' read -r -d '' -a sorted < <(printf '%s\n' "${xs[@]}" | sort -n; printf '\0')
+  printf '%s' "${sorted[$(( ${#sorted[@]} / 2 ))]}"
+}
+
+sum_of() {
+  local t=0 x
+  for x in "$@"; do t=$((t + x)); done
+  printf '%s' "$t"
+}
 hr() { printf '========================================================================\n'; }
 
 # ---------------------------------------------------------------------------------------------
@@ -184,6 +204,11 @@ run_case() {
     # BEFORE the step they preceded -- a turn that quietly cost three model calls is a turn nobody
     # can debug from a log that only records the one that worked.
     sed -n 's/^corrected: /        ~ re-asked: /p' "$err"
+    # How long the whole turn took, including the model calls that were corrected and never typed.
+    # Collected so the summary can report a MEDIAN rather than a claim about speed.
+    while read -r ms calls; do
+      TURN_MS+=("$ms"); TURN_CALLS+=("$calls")
+    done < <(sed -n 's/^turn-ms: \([0-9]*\) calls: \([0-9]*\)$/\1 \2/p' "$err")
     case "$rc" in
       0)
         [ -z "$line" ] && { echo "  FAIL [$label/$arm] exit 0 with no line to type"; bad=1; break; }
@@ -331,6 +356,7 @@ run_arm() {
   local label="$1" arm="$2"; shift 2
   local bad=0
   hr; echo "==> $label / $arm arm"; hr
+  TURN_MS=(); TURN_CALLS=()
 
   if ! session_open "$@"; then
     echo "  FAIL [$label/$arm] the machine never reached a prompt"
@@ -382,6 +408,12 @@ run_arm() {
   fi
 
   rm -f "$brief" "$SESSION_LOG"
+  # What a turn cost, measured rather than claimed. `calls` is the interesting one: it is 1 when the
+  # model wrote a valid command first time and more when it had to be corrected, so a rising median
+  # here is the signal that a prompt change has made the model worse at writing commands.
+  printf -- '--- %s/%s: %s turns, median %s ms/turn, %s model calls total\n' \
+    "$label" "$arm" "${#TURN_MS[@]}" "$(median_of "${TURN_MS[@]:-}")" \
+    "$(sum_of "${TURN_CALLS[@]:-0}")"
   [ "$bad" -eq 0 ] || fail=1
   return $bad
 }
