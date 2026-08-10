@@ -1,0 +1,44 @@
+# Aletheia first-party AI model manifest — the DEFAULT resident model (ADR-017, ADR-052).
+#
+# The model INTEGRATION ships in-repo (aletheia/src/ai/); the WEIGHTS are an external artifact
+# provisioned ON DEMAND into the local Hugging Face cache by `aletheiad model pull`
+# (aletheia/src/ai/runtime.rs::ensure_model) — never committed to git. This manifest is the pinned,
+# authoritative declaration of one selectable model, and `aletheiad model use lfm2.5` selects it.
+#
+# `sha256` and `size_bytes` below were MEASURED on the resolved blob (`shasum -a 256`, `stat`), not
+# copied from a listing: a manifest field that cannot be checked is worse than one that is absent.
+
+[model]
+id          = "lfm2.5"
+name        = "LFM2.5-2.6B"
+repo        = "LiquidAI/LFM2.5-2.6B-GGUF"
+file        = "LFM2.5-2.6B-Q4_K_M.gguf"
+quant       = "Q4_K_M"
+sha256      = "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14"
+size_bytes  = 1674454848
+# Substring the serving backend's advertised model id MUST contain before any benchmark number is
+# recorded (ADR-052). Without this, a benchmark run against whatever else happens to hold the port
+# reports another model's latency under this model's name.
+serve_id    = "LFM2.5"
+default     = true
+
+[runtime]
+backend           = "llama_cpp"
+endpoint          = "http://localhost:8080"
+# 8192 is the context the hosted gate runs at; it is a deliberate floor, not the model's limit. The
+# Context Engine's brief plus the plan schema fit inside it with room, and a larger window costs
+# resident memory on a machine that is also running the Core.
+context           = 8192
+# LFM2.5 is NOT a forced-thinking model, so no `enable_thinking` override is sent. The response path
+# still strips a `<think>` block if one appears — see aletheia/src/ai/mod.rs::prompt.
+thinking          = false
+temperature       = 0.3
+top_p             = 0.95
+structured_output = "gbnf-grammar"  # constrains generation to the Aletheia Plan schema
+
+[provision]
+# Weights are NOT in git. Provision them into the local HF cache with either:
+#   aletheiad model pull                      # Aletheia-owned provisioning (huggingface-cli / hf, else curl)
+#   huggingface-cli download LiquidAI/LFM2.5-2.6B-GGUF LFM2.5-2.6B-Q4_K_M.gguf
+# Or set MODEL_PATH to an existing .gguf. The provider falls back to the deterministic interpreter
+# whenever no model is available (the OS stays fully functional without a resident model).

@@ -1,0 +1,46 @@
+# Aletheia's OWN model — the first-party language model being pretrained for this OS (ADR-052).
+#
+# This manifest exists BEFORE the weights do, on purpose. The point of the registry is that the
+# operator can say `aletheiad model use aletheia-lm` the moment pretraining finishes without editing
+# any source, and — just as important — that saying it BEFORE pretraining finishes produces a named
+# refusal rather than a silent fall-back to another model. A switch that appears to work while
+# quietly serving something else is the failure mode this entry is shaped to prevent.
+#
+# Training lives outside this repo (MLX, Apple silicon): `dl/src/aletheia_lm/`, checkpoints under
+# `$ALETHEIA_RUN_DIR/checkpoints`. Nothing in this repository trains it, and nothing here downloads
+# it: it is not on a hub, so `aletheiad model pull` refuses it by name.
+
+[model]
+id          = "aletheia-lm"
+name        = "Aletheia-LM (first-party, in training)"
+# Empty because the artifact is produced locally rather than fetched. `model pull` treats an empty
+# repo as "not provisionable" and says so, instead of constructing a hub URL that cannot exist.
+repo        = ""
+file        = ""
+quant       = ""
+sha256      = ""
+size_bytes  = 0
+serve_id    = "aletheia"
+default     = false
+# `pretraining` | `ready`. While `pretraining`, `model use` SELECTS the entry and then reports the
+# model absent; it never silently promotes the deterministic interpreter into the model's place.
+status      = "pretraining"
+# The environment variable that names the finished weights. Set it to a converted GGUF (llama.cpp
+# backend) or to a checkpoint directory (native backend, when one exists) and re-run `model status`.
+path_env    = "ALETHEIA_LM_MODEL"
+
+[runtime]
+backend           = "llama_cpp"
+endpoint          = "http://localhost:8080"
+context           = 8192
+thinking          = false
+temperature       = 0.3
+top_p             = 0.95
+structured_output = "gbnf-grammar"
+
+[provision]
+# There is no hub artifact. Provision by pointing Aletheia at the trained weights:
+#   export ALETHEIA_LM_MODEL=/path/to/aletheia-lm.gguf
+#   aletheiad model use aletheia-lm
+#   aletheiad model status          # must print `ready`, naming the resolved path
+# Until then this entry is selectable and honest about being empty.
