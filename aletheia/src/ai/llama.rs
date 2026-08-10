@@ -26,6 +26,12 @@ pub struct LlamaCppProvider {
     host: String,
     port: u16,
     label: String,
+    /// Sampling and template behavior, taken from the selected model's manifest (ADR-052) rather
+    /// than hardcoded. One model's forced `<think>` phase is not every model's, and a provider that
+    /// bakes in one model's quirk is a provider that silently mis-drives the next one.
+    temperature: f32,
+    top_p: f32,
+    thinking: bool,
 }
 
 impl LlamaCppProvider {
@@ -36,7 +42,24 @@ impl LlamaCppProvider {
             host,
             port,
             label: format!("llama.cpp:{name}"),
+            temperature: 0.3,
+            top_p: 0.95,
+            thinking: false,
         }
+    }
+
+    /// Build from the resolved configuration, so the request carries the SELECTED model's sampling
+    /// parameters. Falls back to the same defaults as `new` when the configuration came from the
+    /// environment rather than from a registry entry.
+    pub fn from_config(cfg: &super::config::AiConfig) -> Self {
+        let mut p = Self::new(&cfg.endpoint, &cfg.model_ref);
+        if let Some(e) = &cfg.entry {
+            p.temperature = e.temperature;
+            p.top_p = e.top_p;
+            p.thinking = e.thinking;
+            p.label = format!("llama.cpp:{}", e.id);
+        }
+        p
     }
 
     /// Shared request path. `context` is the capability-scoped Context-Engine brief (empty when the
@@ -54,23 +77,27 @@ impl LlamaCppProvider {
                 intent.subject, intent.verb
             )
         };
-        let body = json!({
+        let mut body = json!({
             "messages": [
                 { "role": "system", "content": prompt::system_prompt() },
                 { "role": "user", "content": user }
             ],
-            // MiniCPM is a "thinking" model: a strict JSON grammar collides with its forced <think>
-            // phase and yields empty output. Validated fix (model card + live test) — run in no-think
-            // mode (enable_thinking=false, temp 0.7) WITH the GBNF grammar, which yields clean plan JSON.
-            "temperature": 0.7,
-            "top_p": 0.95,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
             "n_predict": 512,
             "cache_prompt": true,
-            "chat_template_kwargs": { "enable_thinking": false },
             "grammar": prompt::plan_grammar(),
             "stream": false
-        })
-        .to_string();
+        });
+        // A forced-thinking model must be asked to stop: a strict JSON grammar collides with the
+        // `<think>` phase and yields empty output (observed on MiniCPM, model card + live test).
+        // The flag is sent ONLY for models the registry marks as thinking, because a backend serving
+        // a model whose template has no such switch may reject an unknown template argument — and a
+        // request refused for a parameter the model never needed is a fallback nobody can explain.
+        if self.thinking {
+            body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+        }
+        let body = body.to_string();
 
         let (status, resp) = http(
             &self.host,
@@ -127,6 +154,46 @@ impl ModelRuntime for LlamaCppProvider {
     fn interpret_with_context(&self, intent: &Intent, context: &str) -> Result<String, ModelError> {
         self.run(intent, context)
     }
+}
+
+/// What the backend says it is serving, from the OpenAI-compatible `/v1/models`. `None` means the
+/// question could not be answered — nothing listening, or a backend that does not implement the
+/// endpoint — which callers must treat as "unknown", never as "it matches".
+///
+/// This exists because the endpoint is a *port*, not a model. Any process can hold `:8080`, and a
+/// benchmark that assumes the thing answering is the thing that was selected will happily record
+/// another model's latency under this model's name. Asking is cheap; assuming is not correctable
+/// after the fact.
+pub fn served_models(endpoint: &str) -> Option<Vec<String>> {
+    let (host, port) = endpoint_host_port(endpoint);
+    let (status, body) = http(&host, port, "GET", "/v1/models", None, PROBE_TIMEOUT_MS).ok()?;
+    if status != 200 {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let ids: Vec<String> = v["data"]
+        .as_array()?
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    Some(ids)
+}
+
+/// Does the backend at `endpoint` serve a model whose advertised id contains `serve_id`?
+///
+/// Substring rather than equality on purpose: llama.cpp advertises a path or a file name, and which
+/// of the two depends on how the server was started. `LFM2.5` appears in both; pinning the exact
+/// string would make the check fail for a correctly served model, and a check that cries wolf is a
+/// check that gets disabled. An empty `serve_id` is `false` — a model that declared no identity
+/// cannot be identified, and saying so is the fail-closed answer.
+pub fn serving_matches(endpoint: &str, serve_id: &str) -> bool {
+    if serve_id.is_empty() {
+        return false;
+    }
+    let want = serve_id.to_ascii_lowercase();
+    served_models(endpoint)
+        .map(|ids| ids.iter().any(|id| id.to_ascii_lowercase().contains(&want)))
+        .unwrap_or(false)
 }
 
 /// Split `http://host:port` (scheme optional, default port 8080) into `(host, port)`.

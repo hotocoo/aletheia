@@ -26,6 +26,17 @@ pub fn ref_to_cache_dirname(model_ref: &str) -> String {
 /// Find the GGUF for `model_ref` under `cache_root`, choosing the largest `.gguf` across snapshots
 /// (the highest-fidelity available quant). Returns None if the model isn't cached.
 pub fn resolve_in_cache(cache_root: &Path, model_ref: &str) -> Option<PathBuf> {
+    resolve_in_cache_file(cache_root, model_ref, "")
+}
+
+/// Find the GGUF for `model_ref`, preferring the EXACT `file` the manifest pinned and falling back
+/// to the largest `.gguf` when no name was given (or the named one is not cached).
+///
+/// The exact-name pass is not a nicety. A repo that ships `Q4_K_M` and `Q8_0` resolves by size to
+/// whichever is bigger, which is a different set of weights from the one whose checksum, context and
+/// sampling parameters this OS pinned — so `model use` would report one model and the provider would
+/// load another, with nothing anywhere saying they differed.
+pub fn resolve_in_cache_file(cache_root: &Path, model_ref: &str, file: &str) -> Option<PathBuf> {
     let snaps = cache_root
         .join(ref_to_cache_dirname(model_ref))
         .join("snapshots");
@@ -37,24 +48,36 @@ pub fn resolve_in_cache(cache_root: &Path, model_ref: &str) -> Option<PathBuf> {
         };
         for f in entries.flatten() {
             let p = f.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("gguf") {
-                // Follow symlink (HF stores blobs behind snapshot symlinks) for the real size.
-                let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                if best.as_ref().map(|(b, _)| sz > *b).unwrap_or(true) {
-                    best = Some((sz, p));
-                }
+            if p.extension().and_then(|e| e.to_str()) != Some("gguf") {
+                continue;
+            }
+            if !file.is_empty() && p.file_name().and_then(|n| n.to_str()) == Some(file) {
+                return Some(p);
+            }
+            // Follow symlink (HF stores blobs behind snapshot symlinks) for the real size.
+            let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            if best.as_ref().map(|(b, _)| sz > *b).unwrap_or(true) {
+                best = Some((sz, p));
             }
         }
     }
     best.map(|(_, p)| p)
 }
 
-/// Resolve the model to a concrete GGUF path: explicit `MODEL_PATH` wins, else HF-cache discovery.
+/// Resolve the model to a concrete GGUF path: explicit `MODEL_PATH` wins, else HF-cache discovery
+/// for the manifest's pinned file.
 pub fn resolve_model_path(cfg: &AiConfig) -> Option<PathBuf> {
     if let Some(p) = &cfg.model_path {
         return Some(PathBuf::from(p));
     }
-    resolve_in_cache(&default_hf_hub(), &cfg.model_ref)
+    // A model with no repo id (one produced locally, ADR-052) is not in any cache: it is present
+    // only when its path was named. Returning None here is what makes `model status` say
+    // "not present" instead of resolving some other repo's weights by accident.
+    if cfg.model_ref.is_empty() {
+        return None;
+    }
+    let file = cfg.entry.as_ref().map(|e| e.file.as_str()).unwrap_or("");
+    resolve_in_cache_file(&default_hf_hub(), &cfg.model_ref, file)
 }
 
 /// Best-effort: launch a hosted `llama-server` for the configured model. Hosted-dev convenience
@@ -93,7 +116,23 @@ pub fn ensure_model(cfg: &AiConfig) -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    let file = super::config::DEFAULT_MODEL_FILE;
+    // The file to fetch is the SELECTED model's, not the compiled-in default's: pulling after
+    // `model use minicpm` must fetch MiniCPM's GGUF, and a model with nothing to fetch must say so
+    // rather than construct a hub URL out of two empty strings.
+    let entry = cfg.entry.as_ref();
+    if let Some(e) = entry {
+        if !e.is_provisionable() {
+            return Err(format!(
+                "{} has no published artifact to pull — it is produced locally; set {} to its weights",
+                e.id,
+                if e.path_env.is_empty() { "MODEL_PATH" } else { &e.path_env }
+            ));
+        }
+    }
+    let file = entry
+        .map(|e| e.file.as_str())
+        .filter(|f| !f.is_empty())
+        .unwrap_or(super::config::DEFAULT_MODEL_FILE);
     // Preferred: the HF CLI places the file in the standard cache and verifies its checksum.
     for tool in ["huggingface-cli", "hf"] {
         match std::process::Command::new(tool)
@@ -147,9 +186,47 @@ mod tests {
     #[test]
     fn cache_dirname_matches_hf_layout() {
         assert_eq!(
+            ref_to_cache_dirname("LiquidAI/LFM2.5-2.6B-GGUF"),
+            "models--LiquidAI--LFM2.5-2.6B-GGUF"
+        );
+        assert_eq!(
             ref_to_cache_dirname("GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF"),
             "models--GnLOLot--MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF"
         );
+    }
+
+    /// The bug the exact-name pass exists to prevent: two quants in one repo, and the pinned one is
+    /// the SMALLER. Size-based discovery alone would hand the provider the other set of weights.
+    #[test]
+    fn the_pinned_filename_wins_over_the_bigger_file() {
+        let root = std::env::temp_dir().join(format!("hf-pin-{}", crate::domain::new_id()));
+        let snap = root.join("models--org--m").join("snapshots").join("abc");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("m-Q4_K_M.gguf"), vec![0u8; 10]).unwrap();
+        std::fs::write(snap.join("m-Q8_0.gguf"), vec![0u8; 100]).unwrap();
+        let found = resolve_in_cache_file(&root, "org/m", "m-Q4_K_M.gguf").unwrap();
+        assert_eq!(found.file_name().unwrap(), "m-Q4_K_M.gguf");
+        // With no name pinned, the old behavior stands: the largest available quant.
+        let found = resolve_in_cache_file(&root, "org/m", "").unwrap();
+        assert_eq!(found.file_name().unwrap(), "m-Q8_0.gguf");
+        // A pinned name that is not cached falls back rather than failing: the operator asked for a
+        // model, and the cache has a copy of it, just not that quant.
+        let found = resolve_in_cache_file(&root, "org/m", "m-Q2_K.gguf").unwrap();
+        assert_eq!(found.file_name().unwrap(), "m-Q8_0.gguf");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A locally produced model has no repo id, so there is no cache directory to search. It must
+    /// resolve to nothing rather than to whatever the empty-string repo happens to hash to.
+    #[test]
+    fn a_model_with_no_repo_never_resolves_from_the_cache() {
+        let cfg = AiConfig {
+            model_ref: String::new(),
+            model_path: None,
+            entry: super::super::registry::find("aletheia-lm"),
+            ..AiConfig::default()
+        };
+        assert!(resolve_model_path(&cfg).is_none());
     }
 
     #[test]

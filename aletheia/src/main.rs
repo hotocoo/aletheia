@@ -28,6 +28,29 @@ fn data_dir(args: &[String]) -> String {
         })
 }
 
+/// Where the MODEL commands keep their state — and deliberately not `data_dir`.
+///
+/// `data_dir` invents a fresh temp directory when none is given, which is right for a demo that
+/// should leave nothing behind and catastrophically wrong for `model use`: the selection would be
+/// written into a directory that never gets read again, so the switch would report success and have
+/// no effect. A machine-level choice needs a machine-level home, so this falls back to
+/// `$HOME/.aletheia` and only then to a temp path (for a environment with no HOME at all).
+fn model_dir(args: &[String]) -> String {
+    if let Some(d) = arg_value(args, "--data").or_else(|| std::env::var("ALETHEIA_DATA").ok()) {
+        return d;
+    }
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => std::path::Path::new(&h)
+            .join(".aletheia")
+            .to_string_lossy()
+            .into_owned(),
+        _ => std::env::temp_dir()
+            .join("aletheia")
+            .to_string_lossy()
+            .into_owned(),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()).unwrap_or("demo") {
@@ -37,17 +60,27 @@ fn main() {
     }
 }
 
-/// `aletheiad model [pull]` — Aletheia-owned model provisioning (ADR-017). `pull` fetches the
-/// first-party model (models/minicpm.toml) into the local cache if missing; no arg reports status.
+/// `aletheiad model <list|use ID|status|pull|bench>` — the model surface (ADR-017, ADR-052).
+///
+/// This is where an operator changes which intelligence the OS runs, and where they find out what it
+/// is currently running. Both halves matter: a switch whose effect cannot be confirmed is a switch
+/// nobody can trust, so `use` and `status` are the same command's two faces.
 fn model_cmd(args: &[String]) {
-    let cfg = aletheia::ai::config::AiConfig::from_env();
+    let dir = model_dir(args);
+    let dirp = std::path::Path::new(&dir);
     match args.get(2).map(|s| s.as_str()) {
+        Some("list") => model_list(dirp),
+        Some("use") => match args.get(3) {
+            Some(id) => model_use(dirp, id),
+            None => {
+                eprintln!("usage: aletheiad model use <id>   (see `aletheiad model list`)");
+                std::process::exit(2);
+            }
+        },
+        Some("bench") => model_bench(dirp),
         Some("pull") => {
-            println!(
-                "provisioning model {} ({})...",
-                cfg.model_ref,
-                aletheia::ai::config::DEFAULT_MODEL_FILE
-            );
+            let cfg = aletheia::ai::config::AiConfig::resolve(Some(dirp));
+            println!("provisioning {}...", cfg.label());
             match aletheia::ai::runtime::ensure_model(&cfg) {
                 Ok(p) => println!("model ready: {}", p.display()),
                 Err(e) => {
@@ -56,10 +89,119 @@ fn model_cmd(args: &[String]) {
                 }
             }
         }
-        _ => match aletheia::ai::runtime::resolve_model_path(&cfg) {
-            Some(p) => println!("model present: {}", p.display()),
-            None => println!("model not present — run: aletheiad model pull"),
+        _ => model_status(dirp),
+    }
+}
+
+/// Every model this OS knows about, with the selected one marked. `*` is the running selection;
+/// `(default)` is what an unswitched machine would run.
+fn model_list(dir: &std::path::Path) {
+    let selected = aletheia::ai::config::AiConfig::resolve(Some(dir))
+        .entry
+        .map(|e| e.id);
+    for e in aletheia::ai::registry::builtin() {
+        let mark = if Some(&e.id) == selected.as_ref() {
+            "*"
+        } else {
+            " "
+        };
+        let tags = match (e.default, e.is_ready()) {
+            (true, true) => " (default)",
+            (true, false) => " (default, not yet trained)",
+            (false, true) => "",
+            (false, false) => " (not yet trained)",
+        };
+        println!("{mark} {:<14} {}{}", e.id, e.name, tags);
+    }
+    println!("\nselect one with: aletheiad model use <id>");
+}
+
+/// Switch the machine's model. Persists the choice, then IMMEDIATELY reports whether the chosen
+/// model is actually present — because the failure this guards against is a switch that appears to
+/// work while the OS quietly keeps answering from the deterministic interpreter.
+fn model_use(dir: &std::path::Path, id: &str) {
+    let Some(entry) = aletheia::ai::registry::find(id) else {
+        eprintln!("no model `{id}` is registered — try `aletheiad model list`");
+        std::process::exit(1);
+    };
+    if let Err(e) = aletheia::ai::registry::save_selection(dir, &entry.id) {
+        eprintln!(
+            "could not persist the selection under {}: {e}",
+            dir.display()
+        );
+        std::process::exit(1);
+    }
+    println!("selected {} ({})", entry.id, entry.name);
+    model_status(dir);
+}
+
+/// What this machine is running, and whether it can actually run it.
+fn model_status(dir: &std::path::Path) {
+    let cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
+    println!("model:     {}", cfg.label());
+    println!("backend:   {} at {}", cfg.backend, cfg.endpoint);
+    println!(
+        "selection: {}",
+        aletheia::ai::registry::selection_path(dir).display()
+    );
+    match aletheia::ai::runtime::resolve_model_path(&cfg) {
+        Some(p) if p.exists() => println!("weights:   present — {}", p.display()),
+        Some(p) => println!("weights:   MISSING — expected at {}", p.display()),
+        // A model still in training is not "missing weights someone forgot to fetch": it is a model
+        // that does not exist yet, and saying so names the actual next step instead of sending the
+        // operator to `model pull` for an artifact no hub has.
+        None => match cfg.entry.as_ref() {
+            Some(e) if !e.is_ready() => println!(
+                "weights:   NOT YET TRAINED — set {} to the finished weights once pretraining ends",
+                if e.path_env.is_empty() {
+                    "MODEL_PATH"
+                } else {
+                    &e.path_env
+                }
+            ),
+            _ => println!("weights:   not present — run: aletheiad model pull"),
         },
+    }
+    // Said last because it is the only line that depends on something outside this machine's own
+    // filesystem, and because "the OS still works without it" is the point being made.
+    let serving = aletheia::ai::llama::served_models(&cfg.endpoint);
+    match (serving, cfg.entry.as_ref()) {
+        (Some(ids), Some(e))
+            if ids.iter().any(|i| {
+                i.to_ascii_lowercase()
+                    .contains(&e.serve_id.to_ascii_lowercase())
+            }) =>
+        {
+            println!("serving:   yes — {}", ids.join(", "))
+        }
+        (Some(ids), _) => println!(
+            "serving:   a DIFFERENT model is on {} — {}",
+            cfg.endpoint,
+            ids.join(", ")
+        ),
+        (None, _) => println!(
+            "serving:   nothing answers {} — the Core falls back to the deterministic interpreter",
+            cfg.endpoint
+        ),
+    }
+}
+
+/// Run the operation-surface benchmark and print the table (ADR-052, REQ-AI-005).
+fn model_bench(dir: &std::path::Path) {
+    let cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
+    match aletheia::ai::bench::run(&cfg) {
+        Ok(report) => {
+            print!("{}", aletheia::ai::bench::render(&report));
+            // A benchmark that exits 0 whatever it measured cannot be a gate. Any operation the
+            // model could not plan is a non-zero exit, so a script can depend on the verdict.
+            if report.passed() != report.total() {
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("benchmark refused: {e}");
+            std::process::exit(2);
+        }
     }
 }
 

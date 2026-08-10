@@ -24,7 +24,11 @@
 //! - `prompt`   — prompt/response protocol + structured-output (grammar) strategy
 //! - `runtime`  — model discovery (HF cache) + `llama-server` lifecycle
 //! - `llama`    — the hosted-phase `LlamaCppProvider` implementation
+//! - `registry` — the pinned model set and the operator's selection (ADR-052)
+//! - `bench`    — the operation-surface benchmark, and the identity check that guards it (ADR-052)
+pub mod bench;
 pub mod llama;
+pub mod registry;
 pub mod runtime;
 
 /// Build the configured `ModelProvider` (ADR-017). `local` + `llama_cpp` → `LlamaCppProvider`
@@ -32,7 +36,7 @@ pub mod runtime;
 /// down, INT-004); anything else → the deterministic interpreter as primary — the test oracle.
 pub fn select_provider(cfg: &config::AiConfig) -> Box<dyn provider::ModelProvider> {
     if cfg.wants_local_model() {
-        Box::new(llama::LlamaCppProvider::new(&cfg.endpoint, &cfg.model_ref))
+        Box::new(llama::LlamaCppProvider::from_config(cfg))
     } else {
         Box::new(provider::DeterministicRuntime)
     }
@@ -48,21 +52,34 @@ pub mod provider {
 }
 
 pub mod config {
-    //! AI configuration, resolved from the environment with hosted-dev defaults. The model is
-    //! referenced by a *configurable* Hugging Face repo id or explicit path — never a hardcoded
-    //! machine-specific absolute path (ADR-017).
+    //! AI configuration, resolved from the *registry* and then the environment (ADR-017, ADR-052).
+    //!
+    //! Resolution order, highest first — and it is an order rather than a merge because an operator
+    //! who exports `MODEL_PATH` to try something is entitled to have it win over a selection they
+    //! made last month:
+    //!
+    //!   1. `MODEL_REF` / `MODEL_PATH` / `MODEL_ENDPOINT` / … — the escape hatch, anything at all
+    //!   2. the persisted selection under `<data>/ai/selected-model` (`aletheiad model use <id>`)
+    //!   3. the registry manifest marked `default`
+    //!
+    //! The model is referenced by a *configurable* Hugging Face repo id or explicit path — never a
+    //! hardcoded machine-specific absolute path.
 
-    /// Default local model for the hosted macOS phase. Model-agnostic: change via `MODEL_REF`.
-    /// These pin the first-party model declared in `models/minicpm.toml` (ADR-017); the weights are
-    /// provisioned on demand (`aletheiad model pull`), never committed to git.
-    pub const DEFAULT_MODEL_REF: &str = "GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF";
-    pub const DEFAULT_MODEL_FILE: &str = "MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-Q8_0.gguf";
+    use super::registry::{self, ModelEntry};
+    use std::path::Path;
+
+    /// The built-in default, mirroring `models/lfm2.5.toml`. These constants are what a caller with
+    /// no data directory and no environment gets; they exist so the AI subsystem has an answer
+    /// before any selection has ever been made, and a unit test holds them equal to the manifest so
+    /// the two cannot drift.
+    pub const DEFAULT_MODEL_REF: &str = "LiquidAI/LFM2.5-2.6B-GGUF";
+    pub const DEFAULT_MODEL_FILE: &str = "LFM2.5-2.6B-Q4_K_M.gguf";
     pub const DEFAULT_MODEL_SHA256: &str =
-        "fc3ee1eddd305c155f63b6bd7bb189daa4d5f226ca325ab219bd7acd3b00ec77";
+        "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14";
     pub const DEFAULT_MODEL_CTX: u32 = 8192;
     pub const DEFAULT_ENDPOINT: &str = "http://localhost:8080";
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq)]
     pub struct AiConfig {
         /// `local` (real model, fallback to deterministic if unavailable) or `deterministic`.
         pub provider: String,
@@ -74,22 +91,70 @@ pub mod config {
         pub model_ref: String,
         /// Explicit GGUF path override (`MODEL_PATH`); takes precedence over cache discovery.
         pub model_path: Option<String>,
+        /// The registry entry this configuration came from, when it came from one. `None` means the
+        /// environment named a model the registry has made no claim about — which is legitimate and
+        /// is reported as such rather than being dressed up as a pinned model.
+        pub entry: Option<ModelEntry>,
     }
 
     impl AiConfig {
+        /// Environment only — the pre-registry behavior, kept because a great many call sites (and
+        /// every test that does not care which model) want exactly this.
         pub fn from_env() -> Self {
+            Self::resolve(None)
+        }
+
+        /// Full resolution: registry default, overridden by a persisted selection under `data_dir`,
+        /// overridden by the environment.
+        pub fn resolve(data_dir: Option<&Path>) -> Self {
             let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+            // `ALETHEIA_MODEL` selects a REGISTERED model for one invocation without persisting —
+            // the difference between "try the other model once" and "switch this machine".
+            let entry = get("ALETHEIA_MODEL")
+                .and_then(|id| registry::find(&id))
+                .or_else(|| data_dir.and_then(registry::load_selection))
+                .or_else(registry::default_entry);
+            let (backend, endpoint, model_ref) = match &entry {
+                Some(e) => (e.backend.clone(), e.endpoint.clone(), e.repo.clone()),
+                None => (
+                    "llama_cpp".to_string(),
+                    DEFAULT_ENDPOINT.to_string(),
+                    DEFAULT_MODEL_REF.to_string(),
+                ),
+            };
+            // A locally produced model has no repo id; its weights are named by an environment
+            // variable the manifest declares. Read here so `model status` and the provider agree.
+            let entry_path = entry
+                .as_ref()
+                .filter(|e| !e.path_env.is_empty())
+                .and_then(|e| get(&e.path_env));
+            let env_ref = get("MODEL_REF");
+            let from_env_ref = env_ref.is_some();
             AiConfig {
                 provider: get("AI_PROVIDER").unwrap_or_else(|| "local".into()),
-                backend: get("MODEL_BACKEND").unwrap_or_else(|| "llama_cpp".into()),
-                endpoint: get("MODEL_ENDPOINT").unwrap_or_else(|| DEFAULT_ENDPOINT.into()),
-                model_ref: get("MODEL_REF").unwrap_or_else(|| DEFAULT_MODEL_REF.into()),
-                model_path: get("MODEL_PATH"),
+                backend: get("MODEL_BACKEND").unwrap_or(backend),
+                endpoint: get("MODEL_ENDPOINT").unwrap_or(endpoint),
+                model_ref: env_ref.unwrap_or(model_ref),
+                model_path: get("MODEL_PATH").or(entry_path),
+                // An explicit `MODEL_REF` means the running model is NOT the registered one, so the
+                // entry is dropped rather than left attached to a different set of weights — that
+                // attachment is exactly how a benchmark ends up labelled with the wrong model.
+                entry: if from_env_ref { None } else { entry },
             }
         }
+
         /// True when configuration asks for the real local model backend.
         pub fn wants_local_model(&self) -> bool {
             self.provider == "local" && self.backend == "llama_cpp"
+        }
+
+        /// How this configuration should be named in output: the registry id when there is one,
+        /// otherwise the repo id, and `(unregistered)` marked as such.
+        pub fn label(&self) -> String {
+            match &self.entry {
+                Some(e) => format!("{} ({})", e.id, e.name),
+                None => format!("{} (unregistered)", self.model_ref),
+            }
         }
     }
 
@@ -101,6 +166,7 @@ pub mod config {
                 endpoint: DEFAULT_ENDPOINT.into(),
                 model_ref: DEFAULT_MODEL_REF.into(),
                 model_path: None,
+                entry: registry::default_entry(),
             }
         }
     }
@@ -113,9 +179,13 @@ pub mod prompt {
     //!
     //! The model MUST return only a JSON `Plan` `{"steps":[{"op":..,"args":{..}}]}` where each `op`
     //! is one of the registered operations. We constrain generation with a GBNF grammar (llama.cpp
-    //! `grammar` param) AND state the schema in the system prompt — a 1B model needs both. MiniCPM is
-    //! a "thinking" model, so responses may be wrapped in `<think>..</think>`; we strip that and
-    //! extract the first JSON object before the plan ever reaches `parse_plan`.
+    //! `grammar` param) AND state the schema in the system prompt — a small model needs both.
+    //!
+    //! `extract_plan_json` strips a `<think>..</think>` block if one is present. That is a property
+    //! of the OUTPUT, not of any particular model: some models emit a reasoning block and some do
+    //! not, the registry records which (`thinking`) so the request can ask a forced-thinking model
+    //! to stop, and this side of the protocol tolerates one either way. Writing it as "MiniCPM does
+    //! X" would tie live code to whichever model happened to be default the day it was written.
     use crate::tools;
 
     /// The operations the model may propose. Sourced from the tool registry so the prompt can never
@@ -225,11 +295,25 @@ mod tests {
     use super::prompt;
 
     #[test]
-    fn config_defaults_to_local_minicpm() {
+    fn config_defaults_to_the_local_registry_default() {
         let c = AiConfig::default();
         assert!(c.wants_local_model());
         assert_eq!(c.model_ref, DEFAULT_MODEL_REF);
         assert_eq!(c.backend, "llama_cpp");
+        assert_eq!(c.entry.as_ref().map(|e| e.id.as_str()), Some("lfm2.5"));
+    }
+
+    /// The constants are a copy of the default manifest, and a copy is a thing that drifts. This is
+    /// the check that makes the copy safe: if someone edits `models/lfm2.5.toml` and not this file
+    /// (or promotes a different manifest to `default`), the build says so here rather than at the
+    /// moment a benchmark reports one model's numbers under another model's name.
+    #[test]
+    fn the_constants_and_the_default_manifest_agree() {
+        let e = super::registry::default_entry().expect("a default model is registered");
+        assert_eq!(e.repo, DEFAULT_MODEL_REF);
+        assert_eq!(e.file, DEFAULT_MODEL_FILE);
+        assert_eq!(e.sha256, DEFAULT_MODEL_SHA256);
+        assert_eq!(e.context, DEFAULT_MODEL_CTX);
     }
 
     #[test]
