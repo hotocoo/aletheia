@@ -7,6 +7,47 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..051`.
 
+## The AI wave (2026-08-10) — the OS gets to choose its own mind, and gets measured
+
+Everything this repository proved about the AI subsystem was a claim about **shape**: the provider is
+model-agnostic, the plan is validated, the model never executes. Two things were never settled.
+*Which* model — that was two `const`s and a manifest no code read, so changing the OS's intelligence
+needed a compiler. And whether the resident model can actually plan Aletheia's operations at all —
+a question that had never been asked, so it had never been answered.
+
+* **ALET-P2-042 — the model becomes a system property.** A registry of pinned manifests
+  (`models/*.toml`, embedded with `include_str!` so a binary cannot disagree with what it was built
+  from), a persisted selection, and `aletheiad model list | use | status | pull | bench`.
+  **LFM2.5-2.6B (Q4_K_M) is the new default**, with a sha256 and size that were *measured* rather
+  than copied from a listing. MiniCPM is retained, not deleted — a benchmark whose baseline has been
+  deleted is not a baseline. **ADR-052.**
+* **Aletheia's own model is registered before it exists.** `aletheiad model use aletheia-lm` works
+  today and reports `NOT YET TRAINED`, naming the variable that will point at the finished weights.
+  The switch is ready the moment pretraining is, and selecting it early cannot silently serve
+  something else.
+* **ALET-P2-043 — three defects only a live model could expose.** The health probe had tried only
+  the **first resolved address** since ADR-017: `localhost` resolves to `::1` before `127.0.0.1`,
+  `llama-server` binds IPv4 only, so a *running* model was indistinguishable from no model at all and
+  the Core fell back to the deterministic interpreter without a word. The GBNF grammar — written for
+  MiniCPM — made LFM2.5 return an **empty completion for all six operations**, because its chat
+  template opens with a token the grammar has no rule for. And `n_predict = 512` truncated a
+  schema-constrained decode mid-whitespace, presenting as "the model cannot plan this operation".
+* **The benchmark refuses before it measures.** The endpoint is a *port*, and on the machine this was
+  written on another project's service already held `:8080`. `model bench` asks the backend what it
+  is serving and will not record a number until the answer matches the selected manifest.
+
+**Measured, this workstation** (LFM2.5-2.6B-Q4_K_M, llama.cpp, `-c 8192`): the operation surface went
+**0/6 → 2/6 → 6/6**, and 6/6 held on two consecutive runs, median 3.5–3.9 s per interpretation
+against a deterministic control arm at 6/6 and 0 ms. Register **81 → 83 findings, 46 → 48 resolved**;
+traceability **90 → 92 requirements**.
+
+**Not claimed.** The benchmark drives the hosted Core's **six operations**, NOT the 27-command kernel
+console: that dispatcher is in kernel space, in a `no_std` crate, with no inference engine underneath
+it and no path from one to the other in this build. It keeps its own gate, `scripts/console-e2e.sh`.
+One machine, one quant, one backend — a floor for reproducing the setup, not a benchmark of the
+model. And the manifests *record* a checksum without yet enforcing it at load time; that is the
+natural next row. `docs/MATURITY.md` still governs every claim above.
+
 ## The console wave (2026-08-09) — what a person sitting at the machine gets
 
 Two defects, both reported by someone using the OS rather than by any gate here, and both closed:
@@ -31,14 +72,18 @@ keyboard-decode **10 → 12**, the cross-target conformance contract **112 → 1
 that is now what `scripts/vbox-install.sh` provisions by default. The VirtualBox rung boots the same
 image at 512 MiB and at 1 GiB, because the firmware memory map is an input and one size is one map.
 
-## Active triage execution queue (2026-08-09, after the capability-lattice wave)
+## Active triage execution queue (2026-08-10, after the AI wave)
 
 Open GAPS4 backlog count from `docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`:
 
 - **P0 open:** 0
-- **P1 open:** 11  (was 12 - `ALET-P1-026` and `ALET-P1-027` closed, `ALET-P1-034` opened this wave)
-- **P2 open:** 12  (ALET-P2-040 and ALET-P2-041 opened and closed in this wave)
+- **P1 open:** 11  (unchanged: the AI wave opened and closed its own two rows and touched no P1)
+- **P2 open:** 12  (`ALET-P2-042` and `ALET-P2-043` opened and closed in this wave)
 - **P3 open:** 3
+
+The queue below is unchanged by this wave, deliberately. The AI work was a separate axis — the model
+subsystem — and none of it advances the crypto trio at the front of the queue. Saying so is cheaper
+than letting a reader infer that a busy wave moved the security backlog, which it did not.
 
 Execution order (wave-based, 2-3 tightly related P1 rows per wave):
 
