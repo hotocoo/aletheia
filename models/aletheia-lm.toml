@@ -32,7 +32,14 @@ path_env    = "ALETHEIA_LM_MODEL"
 [runtime]
 backend           = "llama_cpp"
 endpoint          = "http://localhost:8080"
-context           = 8192
+# 2048, not 8192: the model is pretrained at seq_len 2048 and its global (non-windowed) layers have
+# never seen a RoPE position past that, so a longer prompt returns confident noise rather than an
+# error. `ContextEngine` budgets in characters and does not read this field today, so the old 8192
+# was cosmetic — but a manifest that advertises a context the weights cannot honour is the kind of
+# fact that stops being cosmetic the moment something starts trusting it. The MLX shim refuses
+# `prompt + max_tokens > 2048` with a 400 rather than truncating, because truncating a rendered
+# prompt drops the system message and answers from the transcript alone.
+context           = 2048
 thinking          = false
 temperature       = 0.3
 top_p             = 0.95
