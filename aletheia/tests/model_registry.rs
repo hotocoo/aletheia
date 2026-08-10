@@ -19,16 +19,65 @@ fn scratch(tag: &str) -> std::path::PathBuf {
     d
 }
 
+/// A machine with no selection still resolves to SOMETHING — the catalog is discovered, so which
+/// model that is depends on what this machine has pulled, and asserting `lfm2.5` here would be a
+/// test that passes on the author's laptop and fails on a runner with a different cache. What must
+/// hold everywhere is that resolution never comes back empty and never comes back incoherent.
 #[test]
-fn a_machine_with_no_selection_runs_the_default_model() {
+fn a_machine_with_no_selection_still_resolves_a_coherent_model() {
     let dir = scratch("default");
     let cfg = AiConfig::resolve(Some(&dir));
-    let e = cfg.entry.as_ref().expect("the default is a registry entry");
-    assert_eq!(e.id, "lfm2.5");
-    assert_eq!(cfg.model_ref, DEFAULT_MODEL_REF);
-    assert_eq!(e.file, DEFAULT_MODEL_FILE);
-    assert_eq!(e.sha256, DEFAULT_MODEL_SHA256);
+    let e = cfg
+        .entry
+        .as_ref()
+        .expect("resolution always yields an entry");
+    assert!(!e.id.is_empty());
+    assert_eq!(
+        cfg.model_ref, e.repo,
+        "the configuration must describe the entry it came from"
+    );
+    if e.pinned && !e.sha256.is_empty() {
+        assert_eq!(e.sha256.len(), 64, "a pin is a full sha256 or nothing");
+    }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The compiled-in constants describe the DEFAULT manifest, and a copy is a thing that drifts. This
+/// is machine-independent because it reads the manifests, not the cache.
+#[test]
+fn the_constants_match_the_manifest_marked_default() {
+    let d = registry::manifests()
+        .into_iter()
+        .find(|e| e.default)
+        .expect("one manifest is marked default");
+    assert_eq!(d.repo, DEFAULT_MODEL_REF);
+    assert_eq!(d.file, DEFAULT_MODEL_FILE);
+    assert_eq!(d.sha256, DEFAULT_MODEL_SHA256);
+}
+
+/// The catalog is DISCOVERED. A model this machine holds must appear even though no manifest and no
+/// line of source has ever named it — that is the difference between a registry and a hardcoded list.
+#[test]
+fn the_catalog_reports_models_that_no_manifest_names() {
+    let known: Vec<String> = registry::manifests().into_iter().map(|e| e.repo).collect();
+    for e in registry::catalog() {
+        if e.present && !known.contains(&e.repo) {
+            assert!(!e.pinned, "an uncharacterized model must not claim a pin");
+            assert!(
+                e.sha256.is_empty(),
+                "{} claims a checksum nobody pinned",
+                e.id
+            );
+            assert!(
+                e.path.is_some(),
+                "a present model names the file it will load"
+            );
+            return;
+        }
+    }
+    // A machine whose cache holds only the characterized models is a legitimate state; there is
+    // simply nothing to assert here. Say so rather than passing silently on a vacuous run.
+    eprintln!("note: this machine holds no uncharacterized GGUF model — discovery not exercised");
 }
 
 #[test]
@@ -75,9 +124,13 @@ fn the_first_party_model_can_be_selected_before_it_is_trained() {
 #[test]
 fn an_unknown_selection_falls_back_to_the_default_rather_than_failing() {
     let dir = scratch("unknown");
-    registry::save_selection(&dir, "a-model-that-was-removed").expect("persist");
+    registry::save_selection(&dir, "a-model-that-was-removed-from-this-machine").expect("persist");
     let cfg = AiConfig::resolve(Some(&dir));
-    assert_eq!(cfg.entry.as_ref().map(|e| e.id.as_str()), Some("lfm2.5"));
+    let picked = cfg
+        .entry
+        .as_ref()
+        .expect("a stale selection must not break resolution");
+    assert_ne!(picked.id, "a-model-that-was-removed-from-this-machine");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
