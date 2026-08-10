@@ -38,6 +38,8 @@ pub mod ipc;
 pub mod keymap;
 pub mod layout;
 pub mod memattr;
+pub mod mlrisk;
+pub mod mlrisk_contract;
 pub mod persist;
 pub mod priosched;
 pub mod ptreclaim;

@@ -19,6 +19,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::mlrisk::{Advice, Verdict};
 use crate::sched::{TaskId, TaskState};
 use crate::spine::{CapEngine, CapToken, Decision, Target};
 
@@ -62,6 +63,13 @@ pub struct PriorityScheduler {
     waiters: BTreeMap<Endpoint, Vec<TaskId>>,
     /// task → the endpoint it is currently blocked on (for transitive donation).
     blocked_on: BTreeMap<TaskId, Endpoint>,
+    /// task → the risk model's *advisory* verdict, when a model is loaded and decisive (ADR-056).
+    ///
+    /// Absent for every task when no model is loaded, and absent for a task whose verdict was
+    /// `Abstain`, so an abstention is genuinely no opinion rather than a middle opinion. This map
+    /// affects **tiebreaks only**: it can never change a task's priority, its state, an authorization
+    /// outcome, or whether it is admitted at all (INV-014).
+    risk: BTreeMap<TaskId, Verdict>,
 }
 
 impl PriorityScheduler {
@@ -79,6 +87,38 @@ impl PriorityScheduler {
         self.state.insert(id, TaskState::Ready);
         if !self.order.contains(&id) {
             self.order.push_back(id);
+        }
+    }
+
+    /// Admit a task, recording the risk model's advice alongside it (ADR-056).
+    ///
+    /// The advice is a **tiebreak hint and nothing else**: `base` is used exactly as
+    /// [`Self::admit`] would use it, and an `Abstain` verdict is stored as no verdict at all. Call
+    /// [`Self::admit`] when no model is loaded — the two produce identical schedules in that case,
+    /// which `tests/mlrisk.rs` asserts rather than assumes.
+    pub fn admit_with_advice(&mut self, id: TaskId, base: Priority, advice: Advice) {
+        self.admit(id, base);
+        if advice.verdict.is_decisive() {
+            self.risk.insert(id, advice.verdict);
+        } else {
+            self.risk.remove(&id);
+        }
+    }
+
+    /// The advisory verdict recorded for a task, if any.
+    pub fn risk_of(&self, id: TaskId) -> Option<Verdict> {
+        self.risk.get(&id).copied()
+    }
+
+    /// Should `challenger` be preferred over `incumbent` when their effective priorities are equal?
+    ///
+    /// Only when BOTH have a decisive verdict and the challenger's is the better one. With no model
+    /// loaded — or with either side abstaining — this is always `false`, so selection falls back to
+    /// the FIFO age order the model-free kernel uses.
+    fn risk_prefers(&self, challenger: TaskId, incumbent: TaskId) -> bool {
+        match (self.risk.get(&challenger), self.risk.get(&incumbent)) {
+            (Some(Verdict::Low), Some(Verdict::Elevated)) => true,
+            _ => false,
         }
     }
 
@@ -229,7 +269,16 @@ impl PriorityScheduler {
             }
             let p = self.effective_priority(t);
             match best {
-                Some((_, bp)) if p <= bp => {}
+                // Strictly higher priority always wins, exactly as before.
+                Some((bt, bp)) if p == bp => {
+                    // Equal priority: FIFO age decides, UNLESS the risk model has a decisive opinion
+                    // about both, in which case the task it expects to survive goes first. Priority
+                    // is never traded for risk — only the order among equals moves (ADR-056).
+                    if self.risk_prefers(t, bt) {
+                        best = Some((t, p));
+                    }
+                }
+                Some((_, bp)) if p < bp => {}
                 _ => best = Some((t, p)),
             }
         }
