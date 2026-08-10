@@ -41,8 +41,14 @@ impl ShellHost for Host {
         crate::conirq::dropped()
     }
     /// `wfi` — safe here because this target's console is interrupt-driven (REQ-CON-002): the UART
-    /// IRQ that fills the ring is exactly the event that ends the wait. The generic timer's PPI is
-    /// also live on this target, so even a lost UART edge cannot park the machine forever.
+    /// IRQ that fills the ring is exactly the event that ends the wait, and `scripts/console-e2e.sh`
+    /// is what proves it, because a target that got this wrong stops answering the first thing typed
+    /// at it.
+    ///
+    /// No claim is made here about the generic timer as a second wake source. It is armed by the
+    /// preemption suite in `usermode.rs`, which runs BEFORE the interactive handoff, and whether it
+    /// is still enabled at the prompt is not something this comment has checked — so the UART is the
+    /// only wake source this relies on.
     fn idle(&self) {
         // SAFETY: `wfi` is a hint with no memory effects. Interrupts are unmasked in the console
         // loop's context, so the UART IRQ (and the generic timer PPI) will resume execution.

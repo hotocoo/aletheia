@@ -53,7 +53,7 @@ cargo clippy --manifest-path aletheia/Cargo.toml --all-targets -- -D warnings
 cd kernel-x86_64 && ./scripts/smoke-test.sh   # x86-64 under OVMF/UEFI (expects QEMU exit 33)
 ```
 
-CI (GitHub Actions + GitLab) runs the hosted acceptance suite and all three VM boot gates on every
+CI (GitHub Actions) runs the hosted acceptance suite and all three VM boot gates on every
 push and pull request; they are hard gates.
 
 ### Toolchain

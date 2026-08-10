@@ -13,9 +13,13 @@
 #       Discovery is from the tree, not a hand-written list, so adding a fourth CPU target without
 #       a boot gate FAILS the build instead of quietly shipping an unqualified architecture.
 #
-#   [2] CI configuration parity — .github/workflows/ci.yml and .gitlab-ci.yml must execute the SAME
-#       set of scripts. The repo pushes to both GitHub and the self-hosted GitLab origin; a gate
-#       wired into only one of them is enforced for only half the pushes.
+#   [2] Every gate script in the tree is either executed by CI or explicitly exempt. This check used
+#       to be a PARITY check between .github/workflows/ci.yml and a .gitlab-ci.yml, because the repo
+#       once pushed to a self-hosted GitLab as well. **Aletheia is published to GitHub only**, the
+#       GitLab pipeline was removed, and a parity check with one side deleted is a check that always
+#       passes — which is worse than no check, because it reads like one that is working. What
+#       replaces it is the question parity was a proxy for: is there a gate script sitting in
+#       scripts/ that nothing runs?
 #
 #   [3] Claimed-gate enforcement — every path in the `VM Gate` column of docs/TRACEABILITY.md must
 #       actually be executed by CI: either directly, or (for an aggregate runner like e2e-all.sh)
@@ -30,11 +34,11 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GH="${GH_CI:-$ROOT/.github/workflows/ci.yml}"
-GL="${GL_CI:-$ROOT/.gitlab-ci.yml}"
+
 MATRIX="${TRACEABILITY_MATRIX:-$ROOT/docs/TRACEABILITY.md}"
 STATUS="${STATUS_DOC:-$ROOT/STATUS.md}"
 
-for f in "$GH" "$GL" "$MATRIX" "$STATUS"; do
+for f in "$GH" "$MATRIX" "$STATUS"; do
   [ -f "$f" ] || { echo "FAIL: required file not found: $f"; exit 2; }
 done
 
@@ -68,24 +72,35 @@ scripts_in() {
 
 # --- [1]+[2] the set of scripts CI actually executes -----------------------------------------
 gh_set="$(scripts_in "$GH")"
-gl_set="$(scripts_in "$GL")"
+ci_set="$gh_set"
 
-echo "== [2] CI configuration parity (.github/workflows/ci.yml vs .gitlab-ci.yml)"
-only_gh="$(comm -23 <(printf '%s\n' "$gh_set") <(printf '%s\n' "$gl_set"))"
-only_gl="$(comm -13 <(printf '%s\n' "$gh_set") <(printf '%s\n' "$gl_set"))"
-if [ -n "$only_gh" ]; then
-  while IFS= read -r s; do [ -n "$s" ] && echo "  FAIL: $s runs in GitHub CI but not in GitLab CI"; done <<<"$only_gh"
-  fail=1
-fi
-if [ -n "$only_gl" ]; then
-  while IFS= read -r s; do [ -n "$s" ] && echo "  FAIL: $s runs in GitLab CI but not in GitHub CI"; done <<<"$only_gl"
-  fail=1
-fi
-[ -z "$only_gh$only_gl" ] && echo "  PASS: both pipelines execute the same $(printf '%s\n' "$gh_set" | grep -c .) scripts"
+# Scripts that exist to be run BY something else, or by a person, rather than by CI directly. Each
+# one needs a reason, because "it is exempt" with no reason is how a gate stops being run.
+#
+#   e2e-all.sh, build-all.sh   aggregate runners; CI executes the scripts they invoke
+#   run-interactive.sh         an operator sits at this one and types; there is nothing to assert
+#   vbox-install.sh            installs a hypervisor onto an operator's machine
+#   serial-console.ps1         a Windows helper for the VirtualBox walkthrough
+#   linux_pipe_bench.sh        a host-side baseline for a discussion, superseded as a GATE by
+#                              comparative-bench.sh, which CI does run
+#   sbom.py                    invoked by quality-gate.sh
+#   build-example-component.sh regenerates the example component's .wasm, which is COMMITTED — CI
+#                              consumes the fixture (aletheia/tests/sdk_component.rs) rather than
+#                              rebuilding it, so that a wasm toolchain is not a condition of running
+#                              the test suite
+EXEMPT="e2e-all.sh build-all.sh run-interactive.sh vbox-install.sh serial-console.ps1 linux_pipe_bench.sh sbom.py build-example-component.sh"
 
-# CI-executed set = union of both pipelines (parity is asserted separately above, so a wiring gap
-# is reported once as a parity failure rather than cascading into every other check).
-ci_set="$(printf '%s\n%s\n' "$gh_set" "$gl_set" | sort -u | grep -v '^$')"
+echo "== [2] every gate script in scripts/ is executed by CI or explicitly exempt"
+unrun=0
+for path in "$ROOT"/scripts/*.sh; do
+  base="$(basename "$path")"
+  case " $EXEMPT " in *" $base "*) continue ;; esac
+  if ! printf '%s\n' "$ci_set" | grep -qx "scripts/$base"; then
+    echo "  FAIL: scripts/$base exists but no CI job executes it, and it is not exempt"
+    unrun=1; fail=1
+  fi
+done
+[ "$unrun" -eq 0 ] && echo "  PASS: every non-exempt gate script in scripts/ is executed by CI"
 
 # Existence + executability of everything CI claims to run: a CI job invoking a missing or
 # non-executable script fails only at push time, on the runner, after the fact.
@@ -198,7 +213,7 @@ done <<<"$ci_set"
 
 echo "----------------------------------------"
 if [ "$fail" -eq 0 ]; then
-  echo "CI-PARITY: PASS (every architecture is boot-gated, both pipelines agree, every claimed gate runs)"
+  echo "CI-PARITY: PASS (every architecture is boot-gated, every gate script runs, every claimed gate runs)"
   exit 0
 else
   echo "CI-PARITY: FAIL (a claim is unenforced — see failures above)"

@@ -1,11 +1,99 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-10 (console-planning wave)
+**As of:** 2026-08-10 (console-agent wave)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..051`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
+
+## The console-agent wave (2026-08-10) — one request becomes a session, on three CPU targets
+
+The previous wave left two things written down as open, and this one closes one of them completely
+and refuses to pretend about the other.
+
+* **ALET-P2-047 — a request is a bounded SESSION now, not a single command (REQ-AI-007, ADR-054).**
+  `console.rs` planned one command, which is right for an interpreter and a ceiling on the surface: a
+  request whose answer is not visible in the namespace listing is not a harder one-command request,
+  it is not a one-command request at all. `aletheia/src/ai/agent.rs` makes it a loop — propose,
+  validate, render, type, observe, propose again — in which the model reads **the machine's answer to
+  its own previous command**. That deleted the `case "$planned" in write*|rm*|…` list of verbs the
+  previous gate used to guess when the model's picture had gone stale: a second copy of the kernel's
+  command table, in the one language nothing here tests. Every ADR-053 guarantee is re-applied per
+  step, and three bounds exist only because it is a loop: a step budget, no-progress detection, and a
+  refusal to end the session it is observing (`halt` refused **even with approval** — an agent that
+  stops the machine cannot read the result of stopping it).
+* **The other half of ALET-P2-047: the model arm now runs on all three CPU targets.**
+  `scripts/console-agent-e2e.sh` is three legs — aarch64, riscv64, x86-64 under OVMF. The same
+  dispatcher running on all three was never a reason to believe the *planning path* had been driven
+  on more than one.
+* **ALET-P2-048 — four defects a live model found, and none of them were the model (REQ-AI-008/009/010,
+  ADR-055).** The loop passed its deterministic arm first time and then failed **all three** cases
+  against a real model. (a) It proposed `cat` with a two-word name and the session died on a refusal
+  Aletheia knew the words for — *"cat: name must be one word"* — and told nobody; recoverable
+  refusals are now **corrections** that enter the transcript and get re-asked, bounded at three and
+  never charged to the console budget, split from real bounds by `Refusal::is_recoverable` (which the
+  previous wave defined and never called). (b) It read an object, changed it, read it again, and was
+  refused for "no progress" that was no longer true — the same "assume the machine is static" defect
+  the wave accused the old shell list of, in Rust. (c) The first cut of that fix let it repeat the
+  **change** instead, growing an object from 25 bytes to 49. (d) It answered correctly with `stat`
+  and the gate failed it for not being `wc`; `must_type` is now a set of alternatives, each of which
+  must be both typed and confirmed by what the console printed.
+
+**Measured, this workstation** (LFM2.5-2.6B-Q4_K_M, llama.cpp `--jinja`, `-c 8192`, 27 tools
+offered), `scripts/console-agent-e2e.sh`, **all six arms PASS** — 3/3 cases on each of three CPU
+targets driven by a real model at a live console, plus four bound assertions and a power-cycle leg on
+each. Median 7.2–8.6 s per model-arm turn; the deterministic control arm is 0 ms.
+
+## The performance wave (2026-08-10) — an idle machine cost a whole core (ADR-056)
+
+* **REQ-CON-006 — the console stopped spinning.** `kernel_core::shell::run_loop` read `let Some(byte)
+  = getc() else { continue }`, so a machine parked at a prompt with nobody typing asked the input
+  ring for a byte, was told there was none, and asked again, forever, on every core. Measured on this
+  host: **91.8% of a host CPU, idle.** It had been wrong since ADR-045, because console input arrives
+  by *interrupt* and the loop already had something to wait for. `ShellHost::idle` parks on it —
+  `wfi` on aarch64/RISC-V, `sti; hlt` on x86-64 — and **defaults to doing nothing**, so a polled
+  target can never be parked forever. **91.8% → 0.9%.** All three targets still PASS
+  `scripts/console-e2e.sh`.
+* **REQ-PERF-001 — a comparison on ONE substrate.** `scripts/comparative-bench.sh` boots Aletheia and
+  a real Linux 6.12-lts kernel under the *same* `qemu-system-x86_64`, same host, same
+  `-machine/-m/-smp/-cpu`, same TCG, to the same end state: an interactive shell on `ttyS0` blocked
+  on input.
+
+  | | Aletheia (x86-64) | Linux 6.12-lts |
+  |---|---|---|
+  | boot to interactive shell | 4068 ms | **2053 ms** |
+  | idle host CPU at prompt | **0.9 %** | 1.1 % |
+  | bootable payload | **522 752 B** | 13 895 207 B |
+  | privileged lines of code | **22 083 (Rust)** | ~40 M (C, cited, not measured) |
+
+  **Linux boots faster, and the script's own commentary predicted the opposite until the first run
+  corrected it.** Most of that gap is the boot *path*: Aletheia goes through OVMF, a full UEFI
+  firmware implementation, while the Linux leg is loaded directly with `-kernel` and skips firmware.
+  The two columns worth arguing about are the last two — idle CPU is a fair fight, and privileged
+  lines of code depends on no emulator, no host and no workload. The script prints what Aletheia
+  **loses**, in its own output.
+* **A theory that was wrong, kept because it is instructive.** The agent gate's ~8 s turns looked like
+  contention from four spinning vCPUs. After the idle fix took the guest to 0.9%, the medians were
+  re-measured: 8567/7204/8172 ms against 9877/7849/7768 before — unchanged inside the noise. Per-call
+  token accounting found the real cost: a tool-call turn is ~224–353 completion tokens and 1.7–2.3 s,
+  an *answer* turn is **859–1121 completion tokens** for one short sentence because LFM2.5 emits a
+  long `reasoning_content` first, and the ~2000-token prompt is prefix-cached so prefill is not the
+  cost. **Aletheia's own overhead is not measurable next to the model's generation time.** Sending
+  `enable_thinking: false` was tried and changed nothing (296/224/353 tokens either way); recorded as
+  a negative result in ADR-056 so nobody spends the afternoon on it twice.
+
+* **The GitLab pipeline is gone, and the gate that depended on it was rewritten rather than
+  weakened.** Aletheia is published to **GitHub only**. `.gitlab-ci.yml` is deleted, and
+  `check-ci-parity.sh`'s check [2] — which required the two pipelines to execute the same script set
+  — could not simply be dropped: a parity check with one side deleted is a check that always passes,
+  which is worse than no check because it reads like one that is working. It now asks the question
+  parity was a proxy for: **is there a gate script in `scripts/` that nothing runs?** Every script is
+  either executed by CI or exempt *with a stated reason*. Wiring it found one real gap immediately —
+  `build-example-component.sh`, which regenerates a committed fixture — now exempt on the record.
+  `console-agent-e2e.sh` and `comparative-bench.sh` are wired into GitHub CI; both run their
+  deterministic/Aletheia arms on a runner with no weights and no model, and SKIP the model and Linux
+  legs loudly. `check-ci-parity.sh`, `check-register.sh` and `check-traceability.sh` all PASS.
 
 ## The console-planning wave (2026-08-10) — the model reaches the machine you sit in front of
 
