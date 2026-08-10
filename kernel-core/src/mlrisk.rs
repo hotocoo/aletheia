@@ -29,6 +29,8 @@
 //! magic, wrong version, wrong feature count, a feature contract that does not match the one this
 //! kernel was built against, a child index out of range, or a truncated tail are each a refusal at
 //! load time. A model the kernel cannot verify is a model the kernel does not run.
+use alloc::vec::Vec;
+
 use crate::mlrisk_contract::{FEATURE_CONTRACT, N_FEATURES};
 
 /// Bytes of the fixed header; the feature-range table follows immediately.
@@ -333,4 +335,431 @@ impl<'a> RiskAdvisor<'a> {
         let r = self.depth_of(rd_i32(self.bytes, base + 12) as usize);
         1 + if l > r { l } else { r }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The bundled model, and the in-kernel suite that gates it on every target.
+// ---------------------------------------------------------------------------
+
+/// The frozen forest this kernel was built with, embedded in the image (ADR-056).
+///
+/// `include_bytes!` rather than a boot-time file read: the blob is *part of the build*, so its bytes
+/// are covered by whatever attests the image, and a kernel can never be running a model its own
+/// artifact hash does not account for. Loading it from a capability-scoped file at boot is deferred
+/// (ADR-056), not rejected — it needs a signature check to be worth the extra trust boundary.
+///
+/// Embedding is not the same as trusting: [`RiskAdvisor::load`] verifies these bytes exactly as it
+/// would verify bytes off a disk, and every target *checks the result at boot* rather than assuming
+/// its own image is intact.
+pub const BUNDLED_MODEL: &[u8] = include_bytes!("../models/aletheia_risk.altm");
+
+/// The trainer's own integer margins and verdicts for a sample of held-out rows, emitted by the
+/// `aletheia-ml` exporter. Parity is a *test*, not a claim (ADR-056), and it is asserted here — in
+/// kernel space, on the real target — as well as on the host in `tests/mlrisk.rs`.
+const PARITY_FIXTURE: &str = include_str!("../models/parity_fixture.tsv");
+
+/// One row of [`PARITY_FIXTURE`]: the input, and what the trainer says about it.
+struct FixtureRow {
+    x: [i32; N_FEATURES],
+    margin: i64,
+    verdict: Verdict,
+    out_of_range: bool,
+}
+
+/// Parse one fixture line, or `None` if it is not a well-formed row. A malformed fixture is a failed
+/// check (the suite counts the rows it parsed), never a silently skipped one.
+fn parse_fixture_row(line: &str) -> Option<FixtureRow> {
+    let mut f = line.split_whitespace();
+    let margin: i64 = f.next()?.parse().ok()?;
+    let verdict = match f.next()? {
+        "low" => Verdict::Low,
+        "abstain" => Verdict::Abstain,
+        "elevated" => Verdict::Elevated,
+        _ => return None,
+    };
+    let out_of_range = f.next()? == "1";
+    let mut x = [0i32; N_FEATURES];
+    for slot in x.iter_mut() {
+        *slot = f.next()?.parse().ok()?;
+    }
+    if f.next().is_some() {
+        return None; // extra columns mean the fixture and this kernel disagree about the shape
+    }
+    Some(FixtureRow {
+        x,
+        margin,
+        verdict,
+        out_of_range,
+    })
+}
+
+/// Every parseable row of the committed fixture.
+fn fixture_rows() -> Vec<FixtureRow> {
+    PARITY_FIXTURE
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .filter_map(parse_fixture_row)
+        .collect()
+}
+
+/// The number of fixture lines that *should* have parsed — so a fixture whose rows silently stopped
+/// being readable fails rather than shrinking the evidence.
+fn fixture_line_count() -> usize {
+    PARITY_FIXTURE
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .count()
+}
+
+/// A minimal, *valid* `ALTM1` blob: one tree, one split on feature 0, two leaves.
+///
+/// The refusal checks below mutate this rather than the 100 KiB bundled blob, so the suite costs a
+/// few hundred bytes of heap per check on targets whose kernel allocator is a bump allocator. It is
+/// built to load successfully first (check 17), so that every refusal after it is a refusal of a
+/// *specific* corruption rather than of a blob that was never acceptable to begin with.
+fn synthetic_blob() -> Vec<u8> {
+    let n_trees = 1usize;
+    let n_nodes = 3usize;
+    let mut b = Vec::with_capacity(HEADER_LEN + 8 * N_FEATURES + 4 * n_trees + NODE_LEN * n_nodes);
+    b.extend_from_slice(&MAGIC);
+    b.extend_from_slice(&VERSION.to_le_bytes());
+    b.extend_from_slice(&(N_FEATURES as u32).to_le_bytes());
+    b.extend_from_slice(&(n_trees as u32).to_le_bytes());
+    b.extend_from_slice(&(n_nodes as u32).to_le_bytes());
+    b.extend_from_slice(&crate::mlrisk_contract::LEAF_FRAC_BITS.to_le_bytes());
+    b.extend_from_slice(&0i64.to_le_bytes()); // base margin
+    b.extend_from_slice(&0i64.to_le_bytes()); // threshold margin
+    b.extend_from_slice(&(-1i64).to_le_bytes()); // abstain band lo
+    b.extend_from_slice(&0i64.to_le_bytes()); // abstain band hi (band = [-1, 0])
+    b.extend_from_slice(&FEATURE_CONTRACT);
+    debug_assert_eq!(b.len(), HEADER_LEN);
+    for _ in 0..N_FEATURES {
+        b.extend_from_slice(&0i32.to_le_bytes()); // range lo
+        b.extend_from_slice(&100i32.to_le_bytes()); // range hi
+    }
+    b.extend_from_slice(&0u32.to_le_bytes()); // the single root: node 0
+                                              // node 0: if feature[0] < 10 -> node 1 else node 2
+    b.extend_from_slice(&0i32.to_le_bytes());
+    b.extend_from_slice(&10i32.to_le_bytes());
+    b.extend_from_slice(&1i32.to_le_bytes());
+    b.extend_from_slice(&2i32.to_le_bytes());
+    // node 1: leaf, -8 in fixed point (decisively Low)
+    b.extend_from_slice(&LEAF.to_le_bytes());
+    b.extend_from_slice(&(-8i32 << crate::mlrisk_contract::LEAF_FRAC_BITS).to_le_bytes());
+    b.extend_from_slice(&0i32.to_le_bytes());
+    b.extend_from_slice(&0i32.to_le_bytes());
+    // node 2: leaf, +8 in fixed point (decisively Elevated)
+    b.extend_from_slice(&LEAF.to_le_bytes());
+    b.extend_from_slice(&(8i32 << crate::mlrisk_contract::LEAF_FRAC_BITS).to_le_bytes());
+    b.extend_from_slice(&0i32.to_le_bytes());
+    b.extend_from_slice(&0i32.to_le_bytes());
+    b
+}
+
+/// Offset of the first node in a blob with `n_trees` trees.
+fn nodes_offset(n_trees: usize) -> usize {
+    HEADER_LEN + 8 * N_FEATURES + 4 * n_trees
+}
+
+/// The order a [`crate::priosched::PriorityScheduler`] runs its admitted tasks in, drained to
+/// completion. Used to compare a model-free schedule against an advised one *by observation*.
+fn drained_order(sched: &mut crate::priosched::PriorityScheduler) -> Vec<u64> {
+    let mut order = Vec::new();
+    while let Some(t) = sched.schedule_next() {
+        order.push(t.0);
+        sched.finish(t);
+    }
+    order
+}
+
+/// The in-kernel risk-advisor invariants (REQ-ML-001, ADR-056) — the VM gate for the forest.
+///
+/// Arch-independent, like [`crate::selftest::run`]: all three CPU targets call this and format the
+/// lines with their own `kprintln!`, so the invariants and their names are defined exactly once. It
+/// proves, on the real target, against the image's own embedded blob:
+///
+/// * the bundled model **verifies at boot** and its hot-path cost is a *measured* bound;
+/// * every margin and verdict matches the trainer **exactly** (parity is not a host-only claim);
+/// * every way a blob can be wrong is a **named** refusal, never a silent degradation; and
+/// * the advice is **advisory**: an abstaining model schedules bit-identically to the model-free
+///   kernel, and priority is never traded for risk.
+///
+/// `Ok(n)` = all `n` passed; `Err((idx, name))` = check `idx` failed.
+pub fn mlrisk_suite(
+    mut report: impl FnMut(u32, bool, &'static str),
+) -> Result<u32, (u32, &'static str)> {
+    use crate::priosched::{Priority, PriorityScheduler};
+    use crate::sched::TaskId;
+
+    let mut n: u32 = 0;
+    macro_rules! check {
+        ($cond:expr, $name:expr) => {{
+            n += 1;
+            let passed = $cond;
+            report(n, passed, $name);
+            if !passed {
+                return Err((n, $name));
+            }
+        }};
+    }
+
+    // 1 — the image's own blob verifies. A kernel that cannot verify its model does not run it.
+    let loaded = RiskAdvisor::load(BUNDLED_MODEL);
+    check!(
+        loaded.is_ok(),
+        "mlrisk: the bundled forest verifies at boot"
+    );
+    let model = match loaded {
+        Ok(m) => m,
+        Err(_) => return Err((n, "mlrisk: the bundled forest verifies at boot")),
+    };
+
+    // 2 — the hot-path cost is a number the scheduler can check, not a training parameter it must
+    // trust. `worst_case_compares` walks the shipped table.
+    {
+        let bound = model.worst_case_compares();
+        check!(
+            model.trees() > 0 && model.nodes() > model.trees() && bound > 0 && bound < 100_000,
+            "mlrisk: the worst-case compare bound is measured from the shipped table"
+        );
+    }
+
+    // 3 — the evidence is present and whole: every non-comment fixture line parsed.
+    let rows = fixture_rows();
+    check!(
+        rows.len() >= 64 && rows.len() == fixture_line_count(),
+        "mlrisk: the committed parity fixture is present, whole, and large enough to be evidence"
+    );
+
+    // 4 — parity, in kernel space: the trainer's integer margins reproduce EXACTLY here.
+    {
+        let mut ok = true;
+        for r in rows.iter() {
+            if model.margin(&r.x) != r.margin {
+                ok = false;
+                break;
+            }
+        }
+        check!(ok, "mlrisk: every margin matches the trainer exactly");
+    }
+
+    // 5 — and so does every three-way verdict and range-guard flag: same numbers, same decisions.
+    {
+        let mut ok = true;
+        for r in rows.iter() {
+            let a = model.advise(&r.x);
+            if a.margin != r.margin || a.verdict != r.verdict || a.out_of_range != r.out_of_range {
+                ok = false;
+                break;
+            }
+        }
+        check!(
+            ok,
+            "mlrisk: every verdict and range guard matches the trainer exactly"
+        );
+    }
+
+    // 6 — the same input gives the same answer every time. A scheduler tiebreak that drifted run to
+    // run would make the whole machine irreproducible.
+    {
+        let mut ok = true;
+        for r in rows.iter().take(32) {
+            let first = model.margin(&r.x);
+            for _ in 0..8 {
+                if model.margin(&r.x) != first {
+                    ok = false;
+                }
+            }
+        }
+        check!(ok, "mlrisk: evaluation is deterministic");
+    }
+
+    // 7 — outside the box the forest was fitted in, the kernel declines instead of extrapolating.
+    {
+        let mut x = rows[0].x;
+        x[0] = i32::MAX;
+        let a = model.advise(&x);
+        check!(
+            a.out_of_range && a.verdict == Verdict::Abstain,
+            "mlrisk: an input outside the training box abstains instead of extrapolating"
+        );
+    }
+
+    // 8 — a minimal, well-formed blob LOADS and evaluates as built, so the refusals below are
+    // refusals of specific corruptions rather than of a blob that could never be accepted.
+    {
+        let good = synthetic_blob();
+        let ok = match RiskAdvisor::load(&good) {
+            Ok(m) => {
+                let mut lo = [0i32; N_FEATURES];
+                lo[0] = 1; // takes the left leaf: -8 << LEAF_FRAC_BITS
+                let mut hi = [0i32; N_FEATURES];
+                hi[0] = 50; // takes the right leaf: +8 << LEAF_FRAC_BITS
+                let scale = 1i64 << crate::mlrisk_contract::LEAF_FRAC_BITS;
+                m.trees() == 1
+                    && m.nodes() == 3
+                    && m.margin(&lo) == -8 * scale
+                    && m.margin(&hi) == 8 * scale
+                    && m.advise(&lo).verdict == Verdict::Low
+                    && m.advise(&hi).verdict == Verdict::Elevated
+            }
+            Err(_) => false,
+        };
+        check!(
+            ok,
+            "mlrisk: a minimal well-formed blob loads and evaluates as built"
+        );
+    }
+
+    // 9..16 — every way a blob can be wrong is a NAMED refusal (ADR-056 constraint 5).
+    check!(
+        RiskAdvisor::load(&[]).err() == Some(ModelError::TooShort)
+            && RiskAdvisor::load(&[0u8; HEADER_LEN - 1]).err() == Some(ModelError::TooShort),
+        "mlrisk: a blob shorter than the header is refused as TooShort"
+    );
+
+    {
+        let mut bad = synthetic_blob();
+        bad[0] = b'X';
+        check!(
+            RiskAdvisor::load(&bad).err() == Some(ModelError::BadMagic),
+            "mlrisk: wrong magic is refused by name"
+        );
+    }
+
+    {
+        let mut bad = synthetic_blob();
+        bad[4..8].copy_from_slice(&99u32.to_le_bytes());
+        check!(
+            RiskAdvisor::load(&bad).err() == Some(ModelError::UnsupportedVersion(99)),
+            "mlrisk: an unsupported format version is refused by name"
+        );
+    }
+
+    {
+        let mut bad = synthetic_blob();
+        bad[8..12].copy_from_slice(&7u32.to_le_bytes());
+        check!(
+            RiskAdvisor::load(&bad).err()
+                == Some(ModelError::FeatureCount {
+                    expected: N_FEATURES,
+                    found: 7,
+                }),
+            "mlrisk: a feature-count mismatch is refused by name"
+        );
+    }
+
+    {
+        let mut bad = synthetic_blob();
+        bad[20..24].copy_from_slice(&11u32.to_le_bytes());
+        check!(
+            matches!(
+                RiskAdvisor::load(&bad).err(),
+                Some(ModelError::LeafScale { .. })
+            ),
+            "mlrisk: a different fixed-point scale is refused by name"
+        );
+    }
+
+    {
+        // The same shape with different feature MEANINGS — the failure a length check cannot catch.
+        let mut bad = synthetic_blob();
+        bad[56] ^= 0xFF;
+        check!(
+            RiskAdvisor::load(&bad).err() == Some(ModelError::ContractMismatch),
+            "mlrisk: a moved feature contract is refused by name, not by length"
+        );
+    }
+
+    {
+        let mut short = synthetic_blob();
+        short.truncate(short.len() - 4);
+        let mut long = synthetic_blob();
+        long.extend_from_slice(&[0, 0, 0, 0]);
+        check!(
+            RiskAdvisor::load(&short).err() == Some(ModelError::Truncated)
+                && RiskAdvisor::load(&long).err() == Some(ModelError::Truncated),
+            "mlrisk: a truncated or over-long table is refused by name"
+        );
+    }
+
+    {
+        let mut bad = synthetic_blob();
+        bad[12..16].copy_from_slice(&0u32.to_le_bytes());
+        check!(
+            RiskAdvisor::load(&bad).err() == Some(ModelError::EmptyForest),
+            "mlrisk: an empty forest is refused by name"
+        );
+    }
+
+    {
+        // A child pointing at or before its parent could make evaluation loop forever: the loader
+        // must refuse the blob rather than let the scheduler hang on it.
+        let mut bad = synthetic_blob();
+        let node0 = nodes_offset(1);
+        bad[node0 + 8..node0 + 12].copy_from_slice(&0i32.to_le_bytes());
+        let mut oob = synthetic_blob();
+        oob[node0 + 12..node0 + 16].copy_from_slice(&9999i32.to_le_bytes());
+        check!(
+            RiskAdvisor::load(&bad).err() == Some(ModelError::BadIndex)
+                && RiskAdvisor::load(&oob).err() == Some(ModelError::BadIndex),
+            "mlrisk: a backwards or out-of-range child index is refused by name"
+        );
+    }
+
+    // 18 — ADVISORY, part 1: an abstaining model schedules bit-identically to the model-free kernel.
+    // Asserted by running both and comparing the observed orders, not assumed from the code shape.
+    {
+        let mut plain = PriorityScheduler::new("kernel.endpoint.acquire");
+        let mut advised = PriorityScheduler::new("kernel.endpoint.acquire");
+        for (i, r) in rows.iter().take(8).enumerate() {
+            let id = TaskId(i as u64 + 1);
+            plain.admit(id, Priority(5));
+            let mut x = r.x;
+            x[0] = i32::MAX; // force the range guard, hence Abstain
+            advised.admit_with_advice(id, Priority(5), model.advise(&x));
+        }
+        check!(
+            drained_order(&mut plain) == drained_order(&mut advised),
+            "mlrisk: an abstaining model schedules bit-identically to the model-free kernel"
+        );
+    }
+
+    // 19/20 — ADVISORY, part 2: a decisive verdict may reorder EQUALS, and may never outrank
+    // priority. Uses fixture rows the trainer itself labelled, so the inputs are not hand-picked.
+    let low = rows.iter().find(|r| r.verdict == Verdict::Low);
+    let elevated = rows.iter().find(|r| r.verdict == Verdict::Elevated);
+    match (low, elevated) {
+        (Some(low), Some(elevated)) => {
+            {
+                let mut s = PriorityScheduler::new("kernel.endpoint.acquire");
+                s.admit_with_advice(TaskId(1), Priority(5), model.advise(&elevated.x));
+                s.admit_with_advice(TaskId(2), Priority(5), model.advise(&low.x));
+                let ordered = s.risk_of(TaskId(1)) == Some(Verdict::Elevated)
+                    && s.risk_of(TaskId(2)) == Some(Verdict::Low)
+                    && drained_order(&mut s) == [2, 1];
+                check!(
+                    ordered,
+                    "mlrisk: a decisive verdict reorders tasks of EQUAL priority"
+                );
+            }
+            {
+                let mut s = PriorityScheduler::new("kernel.endpoint.acquire");
+                s.admit_with_advice(TaskId(1), Priority(9), model.advise(&elevated.x));
+                s.admit_with_advice(TaskId(2), Priority(5), model.advise(&low.x));
+                check!(
+                    drained_order(&mut s) == [1, 2],
+                    "mlrisk: priority is never traded for risk"
+                );
+            }
+        }
+        _ => {
+            check!(
+                false,
+                "mlrisk: a decisive verdict reorders tasks of EQUAL priority"
+            );
+        }
+    }
+
+    Ok(n)
 }

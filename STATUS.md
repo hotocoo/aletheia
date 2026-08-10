@@ -1,11 +1,63 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-10 (console-agent wave)
+**As of:** 2026-08-10 21:39 +08 (risk-advisor VM-gate wave)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
+
+## The risk-advisor VM gate (2026-08-10 21:39 +08) — the forest is on the boot path of all three targets
+
+The previous wave landed the in-kernel risk forest (REQ-ML-001, ADR-056) and said so honestly: the
+traceability row read *"hosted; no VM gate — the advisor is not on any target's boot path yet"*. A
+model proved only on the host is a model no booted machine has ever verified. This wave closes that,
+and the closure is a gate, not a paragraph.
+
+* **The blob is part of the image.** `kernel_core::mlrisk::BUNDLED_MODEL` embeds
+  `models/aletheia_risk.altm` with `include_bytes!`, so the bytes the kernel evaluates are covered by
+  whatever attests the image and a running kernel cannot be holding a model its own artifact hash
+  does not account for. Embedding is not trusting: every target calls `RiskAdvisor::load` **at boot**
+  and prints what it got — `[mlrisk] bundled forest: 119 trees, 6367 nodes, worst case 714 compares
+  per advice` — or the named `ModelError` that refused it. A refusal is printed, never inferred from
+  silence.
+* **One suite, three targets, twenty invariants.** `mlrisk::mlrisk_suite` is arch-independent in the
+  same sense as `selftest::run`: the invariants and their names are defined once and each target
+  formats the lines with its own `kprintln!`. It proves, in kernel space, against the image's own
+  bytes: the model verifies; the hot-path cost is a bound **measured** by walking the shipped table;
+  every margin, verdict and range-guard flag over the **whole** committed fixture matches the
+  trainer **exactly**; evaluation is deterministic; an input outside the training box abstains;
+  a minimal well-formed blob loads and evaluates as built; and each of the nine ways a blob can be
+  wrong (short, magic, version, feature count, fixed-point scale, moved feature contract, truncated
+  or over-long, empty forest, backwards or out-of-range child) is a **named** refusal.
+* **The advisory property is proved by observation, not by code shape.** Invariant 18 runs a
+  model-free `PriorityScheduler` and an abstaining-model one over the same admissions and requires
+  the drained orders to be **identical**; 19 shows a decisive verdict reordering two tasks of EQUAL
+  priority; 20 shows a higher-priority high-risk task still running before a lower-priority low-risk
+  one. Priority is never traded for risk, and that is now asserted on real hardware paths rather than
+  only on the host.
+* **The refusals cost a few hundred bytes, not a megabyte.** The corruption checks mutate a
+  synthetic 400-byte blob built in-kernel rather than copying the 100 KiB bundled one, because two of
+  the three targets allocate from a bump allocator that never reclaims. Check 8 loads that synthetic
+  blob successfully first, so every refusal after it refuses a *specific* corruption instead of a
+  blob that was never acceptable.
+* **Gated, everywhere.** `scripts/vm-e2e.sh`, `scripts/vm-e2e-riscv.sh` and
+  `kernel-x86_64/scripts/smoke-test.sh` now require `ALL 20 RISK-ADVISOR INVARIANTS HOLD`; the hosted
+  `tests/mlrisk.rs` pins the count at 20 and asserts `BUNDLED_MODEL` is byte-identical to the file the
+  hosted parity tests read, so the VM gate can never be proving something about bytes no test has
+  seen. `./scripts/e2e-all.sh` is green on aarch64 + RISC-V + x86-64 (VirtualBox rung SKIPs: an arm64
+  host cannot virtualize x86-64). `kernel-core` hosted suite **322 passed** (28 suites);
+  `clippy -D warnings` clean (this wave also fixed a `match_like_matches_macro` lint the previous one
+  left in `priosched.rs`); `check-traceability.sh` and `check-ci-parity.sh` PASS — the traceability
+  gate was **failing** on the previous commit because the REQ-ML-001 VM-gate cell held prose instead
+  of script paths, which is exactly the failure the gate exists to catch.
+
+**Still open, named:** the suite is on the boot path; *real-task feature extraction* is not. Deriving
+the 20-feature vector from live kernel tasks needs feature meanings the kernel does not yet measure,
+and inventing them would make the parity fixture a decoration. Until then the forest is verified,
+bounded and proved advisory on every boot, and the scheduler's tiebreak uses it only where a caller
+supplies advice. Loading the blob from a capability-scoped file with a signature check remains
+deferred by ADR-056.
 
 ## The console-agent wave (2026-08-10) — one request becomes a session, on three CPU targets
 
@@ -2615,12 +2667,12 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 146 passed (16 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+(cd ../kernel-core && cargo test)  # 322 passed (28 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 11 spine + 21 memory + 49 virtual-memory + 22 EL0 user-mode + 5 virtio-blk + 22 SMP invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 11 spine + 21 memory + 49 Sv39 vm + 22 U-mode + 22 SMP invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 21 memory + 66 virtual-memory + 24 EL0 user-mode + 20 risk-advisor + 21 virtio-blk + 22 SMP invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 21 memory + Sv39 vm + U-mode + 20 risk-advisor + 22 SMP invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 

@@ -116,10 +116,10 @@ impl PriorityScheduler {
     /// loaded — or with either side abstaining — this is always `false`, so selection falls back to
     /// the FIFO age order the model-free kernel uses.
     fn risk_prefers(&self, challenger: TaskId, incumbent: TaskId) -> bool {
-        match (self.risk.get(&challenger), self.risk.get(&incumbent)) {
-            (Some(Verdict::Low), Some(Verdict::Elevated)) => true,
-            _ => false,
-        }
+        matches!(
+            (self.risk.get(&challenger), self.risk.get(&incumbent)),
+            (Some(Verdict::Low), Some(Verdict::Elevated))
+        )
     }
 
     /// Acquire a free endpoint, authorized by `acquire_action`. Fail-closed: no capability ⇒
