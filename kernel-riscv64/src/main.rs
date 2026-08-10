@@ -6,6 +6,7 @@
 //! code (via the SiFive-test device) is the machine-checkable verdict (ADR-010: this runs):
 //!   0     => all invariants held (e2e PASS)
 //!   10+i  => invariant i failed
+//!   150+i => risk-advisor invariant i failed (REQ-ML-001, ADR-056)
 //!   101   => kernel panic
 //!   102   => unexpected S-mode trap
 #![no_std]
@@ -163,6 +164,43 @@ pub extern "C" fn kmain() -> ! {
                 name
             );
             ActiveHal::exit(110 + idx as i32);
+        }
+    }
+
+    // The frozen risk forest this image carries (REQ-ML-001, ADR-056). It is ADVISORY: it may
+    // reorder tasks whose effective priority is already equal, and nothing else. So the suite proves
+    // the advisory property itself — an abstaining model schedules bit-identically to the model-free
+    // kernel, and priority is never traded for risk — alongside exact parity with the trainer and a
+    // NAMED refusal for every way a blob can be wrong. The printed invariant NAME is the
+    // authoritative diagnosis; the exit code is a coarse index on top of it.
+    kprintln!("");
+    kprintln!("--- risk-advisor selftests (a frozen integer forest, advisory only) ---");
+    match kernel_core::mlrisk::RiskAdvisor::load(kernel_core::mlrisk::BUNDLED_MODEL) {
+        Ok(m) => kprintln!(
+            "[mlrisk] bundled forest: {} trees, {} nodes, worst case {} compares per advice",
+            m.trees(),
+            m.nodes(),
+            m.worst_case_compares()
+        ),
+        // Absence is NAMED, never silent: the kernel says which check refused the blob and carries
+        // on with its deterministic policy (the suite below then fails on this same load).
+        Err(e) => kprintln!("[mlrisk] bundled forest REFUSED: {:?}", e),
+    }
+    match kernel_core::mlrisk::mlrisk_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[mlrisk] ALL {} RISK-ADVISOR INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[mlrisk] FAILED at risk-advisor invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(150 + idx as i32);
         }
     }
 

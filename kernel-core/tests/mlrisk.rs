@@ -247,3 +247,32 @@ fn decisive_advice_reorders_only_within_equal_priority() {
     s.admit_with_advice(TaskId(2), Priority(5), m.advise(&low.x));
     assert_eq!(drain(&mut s), vec![1, 2]);
 }
+
+// ---------------------------------------------------------------------------
+// The in-kernel suite, run on the host — same doctrine as `tests/invariants.rs`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_in_kernel_suite_holds_on_the_host_and_reports_every_check_once() {
+    let mut reported: Vec<(u32, bool, &'static str)> = Vec::new();
+    let outcome =
+        kernel_core::mlrisk::mlrisk_suite(|n, passed, name| reported.push((n, passed, name)));
+    let count = match outcome {
+        Ok(n) => n,
+        Err((idx, name)) => panic!("in-kernel risk-advisor invariant {idx} failed: {name}"),
+    };
+    assert_eq!(reported.len() as u32, count);
+    for (i, (n, passed, _)) in reported.iter().enumerate() {
+        assert_eq!(*n, i as u32 + 1);
+        assert!(passed);
+    }
+    // Pinned: the boot gates grep for this number.
+    assert_eq!(count, 20);
+}
+
+#[test]
+fn the_bundled_model_is_the_one_the_hosted_tests_verify() {
+    // The kernel image embeds `BUNDLED_MODEL`; these tests read the file. If those two ever diverge
+    // the VM gate would be proving something about bytes no test here has seen.
+    assert_eq!(kernel_core::mlrisk::BUNDLED_MODEL, BLOB);
+}
