@@ -658,6 +658,22 @@ pub trait ShellHost {
     fn cpu_count(&self) -> usize {
         1
     }
+    /// Wait until something might have happened, called when the input ring is empty (REQ-CON-006).
+    ///
+    /// The console loop used to spin: `let Some(byte) = getc() else { continue }`. A machine sitting
+    /// at a prompt with nobody typing therefore burned a whole core doing nothing, on every target
+    /// and every core — which is invisible on hardware with a fan and extremely visible under
+    /// emulation, where four spinning guest vCPUs are four saturated host threads. It is also simply
+    /// wrong: input arrives by INTERRUPT (REQ-CON-002), so the loop already has something to wait
+    /// for.
+    ///
+    /// **Defaulted to doing nothing**, and that default is the safety argument. A target whose
+    /// console is polled rather than interrupt-driven would never be woken, and halting such a
+    /// machine forever is a far worse failure than spinning on it. A target opts in only by
+    /// implementing this, which is a statement that an interrupt will arrive — and the console gates
+    /// on all three targets are what prove the statement, because a target that got it wrong stops
+    /// responding to the very first thing typed at it.
+    fn idle(&self) {}
     /// Bytes in one physical frame, so `mem` can report memory in the unit an operator thinks in
     /// without the arch-independent dispatcher knowing a page size.
     fn frame_bytes(&self) -> usize {
@@ -1312,7 +1328,12 @@ pub fn run_loop<H: ShellHost, D: BlockDevice>(
     let mut session = Session::new();
     session.prompt(out);
     loop {
-        let Some(byte) = getc() else { continue };
+        let Some(byte) = getc() else {
+            // Nothing typed. Wait for an interrupt rather than asking again immediately; see
+            // `ShellHost::idle`, which does nothing at all unless a target has said it is safe.
+            host.idle();
+            continue;
+        };
         if session.feed(byte, host, fs, dev, out) == Outcome::Halt {
             return;
         }

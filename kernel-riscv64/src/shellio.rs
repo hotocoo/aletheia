@@ -40,6 +40,15 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// `wfi` — safe here because this target's console is interrupt-driven through the PLIC
+    /// (REQ-CON-002), and the UART's external interrupt is what ends the wait. On RISC-V `wfi` is
+    /// permitted to return spuriously, which the surrounding `loop` already handles: a spurious wake
+    /// simply asks the ring again.
+    fn idle(&self) {
+        // SAFETY: `wfi` is a hint with no memory effects. `sstatus.SIE` is set in the console loop's
+        // context, so the PLIC's external interrupt resumes execution.
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) }
+    }
     /// Reset through the SBI System Reset extension — the firmware call, because on RISC-V there is
     /// no reset register a supervisor may write and OpenSBI is the thing that owns the platform.
     /// SRST is optional in the spec, so a firmware without it returns an error and the console says

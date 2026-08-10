@@ -38,6 +38,18 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// `sti; hlt` — safe here because this target's console is interrupt-driven through the 8259A on
+    /// IRQ4 (REQ-CON-002), and the UART interrupt is what ends the wait.
+    ///
+    /// `sti` before `hlt` rather than a bare `hlt`, and the ordering is the whole correctness
+    /// argument: `hlt` with interrupts masked is a machine that never wakes. `sti` has a
+    /// one-instruction interrupt shadow, so the pair cannot lose an interrupt that arrives between
+    /// them — this is the canonical idle idiom for exactly that reason.
+    fn idle(&self) {
+        // SAFETY: enabling interrupts is what the console loop already runs with, and `hlt` merely
+        // parks the CPU until one arrives. Neither instruction touches memory.
+        unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack, preserves_flags)) }
+    }
     fn cpu_count(&self) -> usize {
         crate::smp::declared_cpu_count()
     }

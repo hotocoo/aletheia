@@ -40,6 +40,14 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// `wfi` — safe here because this target's console is interrupt-driven (REQ-CON-002): the UART
+    /// IRQ that fills the ring is exactly the event that ends the wait. The generic timer's PPI is
+    /// also live on this target, so even a lost UART edge cannot park the machine forever.
+    fn idle(&self) {
+        // SAFETY: `wfi` is a hint with no memory effects. Interrupts are unmasked in the console
+        // loop's context, so the UART IRQ (and the generic timer PPI) will resume execution.
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) }
+    }
     /// Reset through PSCI `SYSTEM_RESET`, over the same `hvc` conduit `smp.rs` already uses to start
     /// the secondary CPUs — so this is the firmware interface this kernel is already talking to,
     /// not a second mechanism invented for one command. PSCI does not return on success; a platform
