@@ -27,11 +27,21 @@
 //! * **a step budget**, because an agent that cannot terminate is a denial of service against the
 //!   operator sitting at the console;
 //! * **no-progress detection**, because the cheapest way for a small model to burn a budget is to
-//!   propose the same command twice, and the second one teaches it nothing it did not already know;
+//!   propose the same command twice, and the second one teaches it nothing it did not already know —
+//!   *unless the machine moved in between*, which is the correction ADR-055 had to make to this
+//!   sentence after a live run watched it refuse the only command that answered the request;
 //! * **a refusal to end the session it is observing** — `halt` and `reboot` are refused here even
 //!   WITH approval, because an agent that stops the machine cannot read the result of stopping it,
 //!   so the loop would report a step it has no evidence for. Stopping the machine is an operator's
 //!   command, and the operator has a console.
+//!
+//! One thing is NOT a bound, and the distinction is ADR-055: a proposal Aletheia can name the fault
+//! in — a command that does not exist, an argument with a space in it — is handed back to the model
+//! as a `Correction` and asked again, without typing anything and without spending a console step.
+//! The first live run of this loop died three times out of three on mistakes the model would have
+//! fixed if it had been told, and a loop that refuses to say what was wrong is a loop that makes the
+//! model re-roll instead of think. The split is `Refusal::is_recoverable`: malforming gets told how,
+//! overreaching gets refused.
 //!
 //! What this does NOT claim: there is still no inference engine in kernel space. `kernel-core` is
 //! still `no_std` with no network. The model runs on the host, and what crosses into the guest is
@@ -63,6 +73,17 @@ pub const MAX_OBSERVATION_LINES: usize = 40;
 /// turns that into something it can say it does not know.
 pub const TRUNCATION_MARKER: &str = "… (output truncated — you were not shown all of it)";
 
+/// How many times ONE step may be re-proposed after a correctable refusal before the session gives
+/// up (REQ-AI-008, ADR-055).
+///
+/// Corrections are deliberately NOT charged to `budget`. The budget counts lines typed at a live
+/// machine, and a refused proposal types nothing — spending a console step on a command the console
+/// never saw would make the number mean two things at once. This is the separate bound that keeps a
+/// model which cannot write a valid command from asking forever, and three is chosen because a model
+/// that has been told what is wrong with its proposal three times is not going to be told a fourth
+/// time to any effect.
+pub const MAX_CORRECTIONS: usize = 3;
+
 /// One completed turn: the line Aletheia typed, and what the console said back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
@@ -72,6 +93,21 @@ pub struct Turn {
     /// What the console printed, admitted through `admit_observation`. `None` while the step is in
     /// flight: the line has been rendered and handed to the driver, and the driver has not come back.
     pub observation: Option<String>,
+}
+
+/// A proposal that never reached the console, and what Aletheia told the model about it.
+///
+/// This is the other half of the loop's memory. `Turn` records what the machine said; `Correction`
+/// records what *Aletheia* said, in the cases where the proposal did not survive validation and no
+/// line was ever typed. Without it a model is refused for a reason it is never shown, and its next
+/// proposal is a re-roll rather than a second attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Correction {
+    /// The command the model asked for, as it would have read on the line — recorded even though it
+    /// was never typed, because "you wrote it wrong" is not useful without "here is what you wrote".
+    pub proposed: String,
+    /// What Aletheia refused it for, in the same words the operator would have seen.
+    pub refusal: String,
 }
 
 /// The whole state of one agent session, and the only state there is.
@@ -91,6 +127,10 @@ pub struct Session {
     pub brief: String,
     #[serde(default)]
     pub turns: Vec<Turn>,
+    /// Proposals refused before they became a line, kept for the whole session so a model cannot be
+    /// corrected about the same mistake twice without noticing.
+    #[serde(default)]
+    pub corrections: Vec<Correction>,
     /// How many steps this session may still spend, decremented as each line is rendered.
     pub budget: usize,
     /// Whether the operator authorized commands that change the machine.
@@ -109,6 +149,7 @@ impl Session {
             request: request.to_string(),
             brief: admit_observation(brief),
             turns: Vec::new(),
+            corrections: Vec::new(),
             budget,
             approved,
             answer: None,
@@ -137,7 +178,14 @@ impl Session {
 }
 
 /// Why an agent session refused. Every variant is terminal: there is no "retry the same step",
-/// because every reason here is a reason the next attempt would be identical.
+/// because by the time one of these is returned, every attempt worth making has been made.
+///
+/// That is a claim about `advance` rather than about the variants. A proposal Aletheia can describe
+/// the fault in — a command that does not exist, an argument with a space in it, a command whose
+/// answer is already in the transcript — is NOT refused on sight: it is handed back to the model as
+/// a `Correction` and asked again, up to `MAX_CORRECTIONS` times, and only the last attempt becomes
+/// one of these. What remains here is the set of things a further attempt cannot change: a bound was
+/// reached, the authority was absent, or the model could not be reached at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRefusal {
     /// The step budget ran out with no answer.
@@ -231,6 +279,22 @@ pub trait ConsoleAgent {
 /// model answers, nothing is recorded before it validates, and nothing is returned to the driver
 /// before it has been rendered by the same function the single-step path uses. A caller that got a
 /// line from here has a line that a person could have typed.
+///
+/// One turn may cost several *model* calls, and none of them cost a console step (REQ-AI-008,
+/// ADR-055). A proposal that fails validation is a sentence Aletheia can say back — "no such console
+/// command", "name must be one word" — and the first live run of this loop showed what happens when
+/// it is not said: a model asked to show one line of an object proposed `cat` with a two-word name,
+/// was refused, and the whole session died on a mistake it would have fixed if it had been told. The
+/// same run showed the other half: having run `cp` and then `stat`, the model proposed `stat` again
+/// rather than answering — which is a small model with the answer in hand and no better way to say
+/// so — and no-progress killed the session at the exact moment it had succeeded. Both are now
+/// corrections: the refusal goes into the transcript the model reads, and it is asked again.
+///
+/// The split between "correct it" and "refuse it" is `Refusal::is_recoverable`, and it is the line
+/// between MALFORMING and OVERREACHING. A model that wrote a command wrongly gets told how. A model
+/// that asked for authority it does not have gets refused, because asking again changes nothing
+/// except how many times it was invited to try — and the same is true of `halt`, of the budget, and
+/// of a backend that cannot be reached.
 pub fn advance(session: &mut Session, agent: &dyn ConsoleAgent) -> Result<Advance, AgentRefusal> {
     if let Some(a) = &session.answer {
         // Answering twice is not harmful, but it is a driver bug, and a loop that hides driver bugs
@@ -246,33 +310,132 @@ pub fn advance(session: &mut Session, agent: &dyn ConsoleAgent) -> Result<Advanc
             spent: session.turns.len(),
         });
     }
-    let chosen = agent.next_move(session).map_err(AgentRefusal::Model)?;
-    let step = match chosen {
-        Move::Answer(text) => {
-            let answer = admit_observation(&text);
-            session.answer = Some(answer.clone());
-            return Ok(Advance::Done(answer));
+    // Corrections are counted per CALL, not per session: each one is a re-ask of the same step, and
+    // a step that eventually rendered has nothing left to correct.
+    let mut corrected = 0usize;
+    loop {
+        let chosen = agent.next_move(session).map_err(AgentRefusal::Model)?;
+        let step = match chosen {
+            Move::Answer(text) => {
+                let answer = admit_observation(&text);
+                session.answer = Some(answer.clone());
+                return Ok(Advance::Done(answer));
+            }
+            Move::Command(s) => s,
+        };
+        // Refused BEFORE rendering, and never corrected: `halt` renders to a perfectly valid line,
+        // and the point is that it must never be handed to a driver at all.
+        if matches!(step.op.as_str(), "halt" | "reboot") {
+            return Err(AgentRefusal::EndsTheSession { op: step.op });
         }
-        Move::Command(s) => s,
+        let line = match console_ops::render(&step.op, &step.args, session.approved) {
+            Ok(line) => line,
+            Err(refusal) => {
+                if !refusal.is_recoverable() || corrected >= MAX_CORRECTIONS {
+                    return Err(AgentRefusal::Step(refusal));
+                }
+                // The proposal never became a line, so there is no line to quote back. Quote the
+                // step instead, in the shape the model asked for it.
+                session.corrections.push(Correction {
+                    proposed: describe_step(&step),
+                    refusal: refusal.to_string(),
+                });
+                corrected += 1;
+                continue;
+            }
+        };
+        // No-progress is checked on the RENDERED line rather than on the step, because two different
+        // argument spellings that render identically are the same command typed twice.
+        if repeats_since_the_machine_changed(session, &line) {
+            if corrected >= MAX_CORRECTIONS {
+                return Err(AgentRefusal::NoProgress { line });
+            }
+            session.corrections.push(Correction {
+                proposed: line.clone(),
+                refusal: format!(
+                    "`{}` has already been run and its output is in the transcript above. Running it \
+again would tell you nothing new. If what you have already been shown answers the request, do not \
+call a tool — reply in one short sentence with the answer.",
+                    line.escape_debug()
+                ),
+            });
+            corrected += 1;
+            continue;
+        }
+        session.budget -= 1;
+        session.turns.push(Turn {
+            line: line.clone(),
+            observation: None,
+        });
+        return Ok(Advance::Type(line));
+    }
+}
+
+/// Has this exact line already been run, *and* has nothing changed the machine since?
+///
+/// The first version of this rule asked only the first half, and the first live run showed the cost
+/// (REQ-AI-009, ADR-055). A model asked to add a line to an object and then show that line ran `cat
+/// poem`, then `append poem second line`, then `cat poem` — and the third step was refused as "no
+/// progress" on the grounds that `cat poem` was already in the transcript. It was, and it said
+/// `hello world!`, because it ran BEFORE the append. The machine had moved and the rule had not
+/// noticed, so Aletheia refused the one command that would have answered the request.
+///
+/// That is the same defect this module's own header accuses the previous gate of: assuming a picture
+/// of the machine stays true. The fix uses the classification that already exists rather than a new
+/// list — `console_ops` marks every command that writes to the medium `Destructive`, derived from
+/// `kernel_core::shell::COMMANDS`, and that is precisely the set of commands after which every
+/// earlier reading is stale. Repetition is therefore judged only over the turns since the last one.
+///
+/// A command that does not change anything, run twice with nothing in between, is still no progress
+/// — which is the case the bound was written for and the case it still catches.
+fn repeats_since_the_machine_changed(session: &Session, line: &str) -> bool {
+    let last_mutation = session
+        .turns
+        .iter()
+        .rposition(|t| line_changes_the_machine(&t.line));
+    let considered = match last_mutation {
+        // Everything up to and including the mutation is a reading of a machine that no longer
+        // exists. Only what was observed afterwards can be repeated knowledge.
+        Some(i) => &session.turns[i + 1..],
+        None => &session.turns[..],
     };
-    // Refused BEFORE rendering: `halt` renders to a perfectly valid line, and the point is that it
-    // must never be handed to a driver at all.
-    if matches!(step.op.as_str(), "halt" | "reboot") {
-        return Err(AgentRefusal::EndsTheSession { op: step.op });
+    considered.iter().any(|t| t.line == line)
+}
+
+/// Does running this line change what a later command would print?
+///
+/// The op is the first word, because that is how the kernel's own dispatcher splits it. A line whose
+/// op is not in the registry cannot have been rendered by `console_ops::render`, so it cannot be in
+/// a transcript — but if one ever is, it is treated as a mutation, because the safe assumption about
+/// an unrecognised command is that it did something.
+fn line_changes_the_machine(line: &str) -> bool {
+    let op = line.split_whitespace().next().unwrap_or_default();
+    match console_ops::lookup(op) {
+        Some(meta) => matches!(meta.risk, crate::tools::Risk::Destructive),
+        None => true,
     }
-    let line =
-        console_ops::render(&step.op, &step.args, session.approved).map_err(AgentRefusal::Step)?;
-    // No-progress is checked on the RENDERED line rather than on the step, because two different
-    // argument spellings that render identically are the same command typed twice.
-    if session.turns.iter().any(|t| t.line == line) {
-        return Err(AgentRefusal::NoProgress { line });
+}
+
+/// A refused proposal, written the way the model asked for it.
+///
+/// Deliberately NOT `console_ops::render` — the whole reason this function exists is that `render`
+/// refused, so there is no line. It reconstructs `op arg arg` from the step's own arguments so the
+/// correction names something the model recognises as the thing it just wrote, and it escapes them,
+/// because the one thing that must not happen is a rejected argument full of control bytes arriving
+/// intact in the next prompt.
+fn describe_step(step: &Step) -> String {
+    let mut out = step.op.clone();
+    if let Some(map) = step.args.as_object() {
+        for value in map.values() {
+            let raw = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            out.push(' ');
+            out.push_str(&raw.escape_debug().to_string());
+        }
     }
-    session.budget -= 1;
-    session.turns.push(Turn {
-        line: line.clone(),
-        observation: None,
-    });
-    Ok(Advance::Type(line))
+    out
 }
 
 /// Admit untrusted text into a prompt: bounded, one-directional, and never a command.
@@ -355,6 +518,15 @@ pub fn transcript_prompt(session: &Session) -> String {
             }
         }
     }
+    // Last, and deliberately so: this is the most recent thing that happened, and on a small model
+    // the end of the prompt is the part that survives. A correction placed above the transcript is a
+    // correction the model reads before the thing it is correcting.
+    if !session.corrections.is_empty() {
+        s.push_str("\nProposals Aletheia REFUSED — these never reached the machine:\n");
+        for c in &session.corrections {
+            s.push_str(&format!("$ {}\n  refused: {}\n", c.proposed, c.refusal));
+        }
+    }
     s.push_str(&format!(
         "\nOperator request: {}\nCommands remaining: {}",
         session.request, session.budget
@@ -395,18 +567,35 @@ control characters."
 /// makes the control column an oracle for the loop, the rendering and the typing path, while the
 /// model column — and only the model column — measures whether a model can choose a second command
 /// in light of the first one's output.
+/// One command that answers a case, and what the live console prints when it runs.
+///
+/// The two travel together because separating them is how a gate comes to assert that SOME asserted
+/// line was typed and SOME asserted text was printed, without the two having anything to do with
+/// each other.
+pub struct Reached {
+    /// The exact line, as `console_ops::render` would produce it.
+    pub line: &'static str,
+    /// What the machine prints in response — so the gate proves the command ran on the machine
+    /// rather than only that Aletheia was willing to render it.
+    pub console_says: &'static str,
+}
+
 pub struct AgentCase {
     /// What an operator would say.
     pub natural: &'static str,
     /// The same task as literal commands, `;`-separated, for `DeterministicAgent`.
     pub scripted: &'static str,
-    /// The line the session must have typed at the live console for the answer to mean anything.
-    /// This is the assertion that survives both arms: it says the agent reached the right command,
-    /// which is the whole claim.
-    pub must_type: &'static str,
-    /// What the live console prints when `must_type` runs — so the gate proves the command ran on
-    /// the machine rather than only that Aletheia was willing to render it.
-    pub console_says: &'static str,
+    /// The ways the session may have reached the answer. ONE of them must have been typed at the
+    /// live console for the answer to mean anything, and that is the assertion which survives both
+    /// arms: the agent reached a command that could not have been chosen before the first one ran.
+    ///
+    /// A list rather than a string, and the first live model run is the reason (REQ-AI-009). Asked
+    /// how big a copy was, the model ran `cp manifesto backup` and then `stat backup` — which is a
+    /// correct answer, reached through exactly the dependency this table exists to assert, and the
+    /// gate failed it for not being `wc`. The kernel's table offers two commands that report a size;
+    /// insisting on one of them was the gate asserting a preference and calling it a claim. Every
+    /// entry here must be independently sufficient: if a row lists it, typing it answers the request.
+    pub must_type: &'static [Reached],
     /// A fact the ANSWER must contain. Asserted for the control arm only: a language model's prose
     /// is not something a gate can assert without becoming a string-match on English, and a gate
     /// that fails because a correct answer was worded differently is a gate that gets disabled.
@@ -440,8 +629,16 @@ pub const AGENT_CASES: &[AgentCase] = &[
     AgentCase {
         natural: "make a copy of manifesto called backup, then tell me how big the copy is",
         scripted: "cp manifesto backup ; wc backup",
-        must_type: "wc backup",
-        console_says: "30  backup",
+        must_type: &[
+            Reached {
+                line: "wc backup",
+                console_says: "30  backup",
+            },
+            Reached {
+                line: "stat backup",
+                console_says: "backup: 30 bytes",
+            },
+        ],
         answer_contains: "30  backup",
         approved: true,
     },
@@ -450,8 +647,16 @@ pub const AGENT_CASES: &[AgentCase] = &[
     AgentCase {
         natural: "create an object called greeting containing hello there, then tell me its size",
         scripted: "write greeting hello there ; wc greeting",
-        must_type: "wc greeting",
-        console_says: "11  greeting",
+        must_type: &[
+            Reached {
+                line: "wc greeting",
+                console_says: "11  greeting",
+            },
+            Reached {
+                line: "stat greeting",
+                console_says: "greeting: 11 bytes",
+            },
+        ],
         answer_contains: "11  greeting",
         approved: true,
     },
@@ -462,8 +667,18 @@ pub const AGENT_CASES: &[AgentCase] = &[
     AgentCase {
         natural: "add a line saying second line to the poem, then show me that line",
         scripted: "append poem second line ; grep second poem",
-        must_type: "grep second poem",
-        console_says: "2: second line",
+        must_type: &[
+            Reached {
+                line: "grep second poem",
+                console_says: "2: second line",
+            },
+            // `cat poem` could be typed at any time, but it cannot PRINT `second line` until the
+            // append has run — and the pair is what the gate asserts, so the dependency survives.
+            Reached {
+                line: "cat poem",
+                console_says: "second line",
+            },
+        ],
         answer_contains: "2: second line",
         approved: true,
     },
@@ -624,7 +839,12 @@ mod tests {
     #[test]
     fn repeating_a_command_that_already_answered_is_no_progress() {
         let mut s = Session::new("r", "", 6, false);
+        // A model that will not stop repeating itself is corrected toward answering, and when it
+        // keeps repeating anyway the bound is still there underneath.
         let agent = scripted(vec![
+            Move::Command(step("ls", json!({}))),
+            Move::Command(step("ls", json!({}))),
+            Move::Command(step("ls", json!({}))),
             Move::Command(step("ls", json!({}))),
             Move::Command(step("ls", json!({}))),
         ]);
@@ -634,6 +854,7 @@ mod tests {
             advance(&mut s, &agent).unwrap_err(),
             AgentRefusal::NoProgress { line: "ls".into() }
         );
+        assert_eq!(s.corrections.len(), MAX_CORRECTIONS);
     }
 
     #[test]
@@ -676,8 +897,15 @@ mod tests {
 
     #[test]
     fn an_unknown_command_is_refused_by_the_registry_not_by_a_list_here() {
+        // `format` is not in `kernel_core::shell::COMMANDS`, so it is not a command, and no list in
+        // this file says so. A model that insists on it is corrected first and refused after.
         let mut s = Session::new("r", "", 6, true);
-        let agent = scripted(vec![Move::Command(step("format", json!({})))]);
+        let agent = scripted(vec![
+            Move::Command(step("format", json!({}))),
+            Move::Command(step("format", json!({}))),
+            Move::Command(step("format", json!({}))),
+            Move::Command(step("format", json!({}))),
+        ]);
         assert_eq!(
             advance(&mut s, &agent).unwrap_err(),
             AgentRefusal::Step(Refusal::UnknownCommand("format".into()))
@@ -803,12 +1031,37 @@ mod tests {
                 "`{}` is one command — it belongs in console::CASES",
                 c.natural
             );
+            assert!(
+                !c.must_type.is_empty(),
+                "`{}` asserts no way of reaching the answer",
+                c.natural
+            );
+            // The scripted arm walks alternative ZERO, so that is the one the control arm proves.
             assert_eq!(
                 steps.last().copied(),
-                Some(c.must_type),
-                "the asserted line must be the LAST command of `{}`",
+                Some(c.must_type[0].line),
+                "the first alternative must be the LAST command of `{}`",
                 c.scripted
             );
+            // Every alternative has to be a command the registry knows, or it can never be typed and
+            // the row is quietly asserting a shorter list than it looks like it does.
+            for r in c.must_type {
+                let plan = super::super::console::interpret_text(r.line)
+                    .unwrap_or_else(|| panic!("`{}` is not a console command", r.line));
+                let step = &plan.steps[0];
+                assert_eq!(
+                    console_ops::render(&step.op, &step.args, true)
+                        .ok()
+                        .as_deref(),
+                    Some(r.line),
+                    "an alternative must be written exactly as it renders"
+                );
+                assert!(
+                    !r.console_says.is_empty(),
+                    "`{}` asserts nothing about what the machine printed",
+                    r.line
+                );
+            }
             // And every scripted command must be one the registry knows, so a typo in this table
             // fails here rather than as a mysterious refusal inside a booted VM.
             for s in &steps {
@@ -883,7 +1136,7 @@ mod tests {
                     Ok(Advance::Type(line)) => {
                         typed.push(line.clone());
                         // Stand in for the machine: the gate uses a real one.
-                        s.observe(if line == c.must_type {
+                        s.observe(if line == c.must_type[0].line {
                             c.answer_contains
                         } else {
                             "manifesto  poem"
@@ -895,10 +1148,10 @@ mod tests {
                 }
             };
             assert!(
-                typed.iter().any(|l| l == c.must_type),
+                typed.iter().any(|l| l == c.must_type[0].line),
                 "`{}` never typed `{}`",
                 c.natural,
-                c.must_type
+                c.must_type[0].line
             );
             assert!(
                 answer.contains(c.answer_contains),
@@ -924,5 +1177,211 @@ mod tests {
             Advance::Done(a) => assert!(a.contains("the OS you can sit in front of")),
             other => panic!("expected an answer, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Corrections (REQ-AI-008, ADR-055). Each of these is a case the first LIVE model run failed.
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_malformed_proposal_is_corrected_rather_than_ending_the_session() {
+        // Exactly the live failure: `cat` with a two-word name, refused, then written properly.
+        let agent = scripted(vec![
+            Move::Command(step("cat", json!({ "name": "second line" }))),
+            Move::Command(step("cat", json!({ "name": "poem" }))),
+        ]);
+        let mut s = Session::new("show me that line", "", 6, false);
+        assert_eq!(
+            advance(&mut s, &agent).unwrap(),
+            Advance::Type("cat poem".into()),
+            "a fixable mistake must not end the session"
+        );
+        assert_eq!(s.corrections.len(), 1);
+        assert!(s.corrections[0].refusal.contains("must be one word"));
+        assert_eq!(
+            s.budget, 5,
+            "a refused proposal typed nothing, so it must not cost a console step"
+        );
+    }
+
+    #[test]
+    fn the_correction_is_in_the_prompt_the_model_reads() {
+        // A correction the model is never shown is a re-roll, not a second attempt.
+        let agent = scripted(vec![
+            Move::Command(step("nosuchcommand", json!({}))),
+            Move::Command(step("ls", json!({}))),
+        ]);
+        let mut s = Session::new("what is here", "", 6, false);
+        advance(&mut s, &agent).unwrap();
+        let prompt = transcript_prompt(&s);
+        assert!(prompt.contains("REFUSED"));
+        assert!(prompt.contains("nosuchcommand"));
+        assert!(
+            prompt.contains("no such console command"),
+            "the model must be shown WHY, not just that it failed: {prompt}"
+        );
+    }
+
+    #[test]
+    fn a_repeat_is_corrected_toward_answering_before_it_refuses() {
+        // The other live failure: the model had run `stat`, had the answer, and proposed `stat`
+        // again because that is the only move its tool head knows. Correct it, do not kill it.
+        let agent = scripted(vec![
+            Move::Command(step("stat", json!({ "name": "backup" }))),
+            Move::Answer("backup is 30 bytes".into()),
+        ]);
+        let mut s = Session::new("how big is backup", "", 6, false);
+        s.turns.push(Turn {
+            line: "stat backup".into(),
+            observation: Some("backup: 30 bytes".into()),
+        });
+        match advance(&mut s, &agent).unwrap() {
+            Advance::Done(a) => assert!(a.contains("30 bytes")),
+            other => panic!("expected the correction to produce an answer, got {other:?}"),
+        }
+        assert_eq!(s.corrections.len(), 1);
+        assert!(
+            s.corrections[0].refusal.contains("do not call a tool"),
+            "the correction must tell the model what to do INSTEAD: {}",
+            s.corrections[0].refusal
+        );
+    }
+
+    #[test]
+    fn a_model_that_cannot_be_corrected_still_refuses() {
+        // The bound behind the bound: correction is not a licence to ask forever.
+        let mut moves = Vec::new();
+        for _ in 0..(MAX_CORRECTIONS + 1) {
+            moves.push(Move::Command(step("cat", json!({ "name": "two words" }))));
+        }
+        let agent = scripted(moves);
+        let mut s = Session::new("show me", "", 6, false);
+        match advance(&mut s, &agent) {
+            Err(AgentRefusal::Step(_)) => {}
+            other => {
+                panic!("expected a refusal after {MAX_CORRECTIONS} corrections, got {other:?}")
+            }
+        }
+        assert_eq!(s.corrections.len(), MAX_CORRECTIONS);
+        assert_eq!(s.budget, 6, "no console step was ever spent");
+    }
+
+    #[test]
+    fn overreaching_is_never_corrected() {
+        // MALFORMING gets told how; OVERREACHING gets refused. A model asked to try again for
+        // authority it does not have is a model being invited to keep trying.
+        let agent = scripted(vec![
+            Move::Command(step("rm", json!({ "name": "poem" }))),
+            Move::Command(step("ls", json!({}))),
+        ]);
+        let mut s = Session::new("delete the poem", "", 6, false);
+        match advance(&mut s, &agent) {
+            Err(AgentRefusal::Step(r)) => assert!(!r.is_recoverable()),
+            other => panic!("an unapproved destructive step must refuse outright, got {other:?}"),
+        }
+        assert!(
+            s.corrections.is_empty(),
+            "missing authority is not a writing mistake"
+        );
+    }
+
+    #[test]
+    fn stopping_the_machine_is_never_corrected() {
+        let agent = scripted(vec![
+            Move::Command(step("halt", json!({}))),
+            Move::Command(step("ls", json!({}))),
+        ]);
+        let mut s = Session::new("shut it down", "", 6, true);
+        match advance(&mut s, &agent) {
+            Err(AgentRefusal::EndsTheSession { op }) => assert_eq!(op, "halt"),
+            other => panic!("expected halt to be refused outright, got {other:?}"),
+        }
+        assert!(s.corrections.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_argument_cannot_smuggle_control_bytes_into_the_next_prompt() {
+        // The correction quotes the model back to itself, and the model's argument is untrusted.
+        let agent = scripted(vec![
+            Move::Command(step("cat", json!({ "name": "a\u{1b}[2Jb" }))),
+            Move::Command(step("ls", json!({}))),
+        ]);
+        let mut s = Session::new("read it", "", 6, false);
+        advance(&mut s, &agent).unwrap();
+        let prompt = transcript_prompt(&s);
+        assert!(
+            !prompt.contains('\u{1b}'),
+            "an escape sequence survived into the prompt"
+        );
+    }
+
+    #[test]
+    fn reading_the_same_object_again_after_it_changed_is_progress() {
+        // The live failure, exactly: read, append, read again. The second read is the ONLY command
+        // that answers "show me that line", and the first version of the rule refused it.
+        let mut s = Session::new("add a line and show it", "", 6, true);
+        s.turns.push(Turn {
+            line: "cat poem".into(),
+            observation: Some("hello world!".into()),
+        });
+        s.turns.push(Turn {
+            line: "append poem second line".into(),
+            observation: Some("poem is now 25 bytes".into()),
+        });
+        let agent = scripted(vec![Move::Command(step("cat", json!({ "name": "poem" })))]);
+        assert_eq!(
+            advance(&mut s, &agent).unwrap(),
+            Advance::Type("cat poem".into()),
+            "the machine changed between the two reads, so the second one is new information"
+        );
+        assert!(s.corrections.is_empty());
+    }
+
+    #[test]
+    fn reading_the_same_object_twice_with_nothing_in_between_is_still_no_progress() {
+        // The case the bound was written for, and it must survive the fix to the case it broke.
+        let mut s = Session::new("what is in poem", "", 6, false);
+        s.turns.push(Turn {
+            line: "cat poem".into(),
+            observation: Some("hello world!".into()),
+        });
+        s.turns.push(Turn {
+            line: "ls".into(),
+            observation: Some("poem".into()),
+        });
+        let mut moves = Vec::new();
+        for _ in 0..(MAX_CORRECTIONS + 1) {
+            moves.push(Move::Command(step("cat", json!({ "name": "poem" }))));
+        }
+        let agent = scripted(moves);
+        match advance(&mut s, &agent) {
+            Err(AgentRefusal::NoProgress { line }) => assert_eq!(line, "cat poem"),
+            other => panic!("expected no-progress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn what_counts_as_changing_the_machine_comes_from_the_registry() {
+        // No list of verbs here: `console_ops` derives risk from the kernel's own command table, and
+        // this test fails the moment somebody writes a second one.
+        assert!(line_changes_the_machine("write poem hello"));
+        assert!(line_changes_the_machine("append poem more"));
+        assert!(line_changes_the_machine("cp a b"));
+        assert!(line_changes_the_machine("rm poem"));
+        assert!(!line_changes_the_machine("cat poem"));
+        assert!(!line_changes_the_machine("ls"));
+        assert!(!line_changes_the_machine("grep x poem"));
+        assert!(
+            line_changes_the_machine("nosuchcommand"),
+            "the safe assumption about an unrecognised line is that it did something"
+        );
+    }
+
+    #[test]
+    fn a_transcript_written_before_corrections_existed_still_loads() {
+        // `corrections` is #[serde(default)] and this is the test that says why.
+        let old = r#"{"request":"x","brief":"","turns":[],"budget":6,"approved":false}"#;
+        let s: Session = serde_json::from_str(old).expect("an older transcript must still load");
+        assert!(s.corrections.is_empty());
     }
 }

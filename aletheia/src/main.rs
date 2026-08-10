@@ -108,11 +108,25 @@ fn console_cmd(args: &[String]) {
 ///
 /// Fields: natural request, scripted request, the line that must be typed, what the live console
 /// says when it runs, what the control arm's answer must contain, approved.
+/// The case table, as tab-separated rows for the shell gate.
+///
+/// A case may be reachable by more than one command, so the `must_type` and `console_says` columns
+/// are `|`-separated and INDEX-ALIGNED: the driver requires some i where alternative i was typed and
+/// the console printed reply i. Aligned rather than two independent sets, because "some asserted
+/// line ran and some asserted text appeared" is a much weaker claim than the one this gate makes,
+/// and the difference between them is invisible in a passing log.
 fn console_agent_cases() {
     for c in aletheia::ai::agent::AGENT_CASES {
+        let lines: Vec<&str> = c.must_type.iter().map(|r| r.line).collect();
+        let says: Vec<&str> = c.must_type.iter().map(|r| r.console_says).collect();
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}",
-            c.natural, c.scripted, c.must_type, c.console_says, c.answer_contains, c.approved
+            c.natural,
+            c.scripted,
+            lines.join("|"),
+            says.join("|"),
+            c.answer_contains,
+            c.approved
         );
     }
 }
@@ -370,7 +384,14 @@ fn console_agent(dir: &std::path::Path, request: &str, args: &[String]) {
     }
 
     let driver = console_agent_interpreter(dir, args);
+    let corrections_before = session.corrections.len();
     let outcome = agent::advance(&mut session, driver.as_ref());
+    // A correction is a model proposal that Aletheia refused and re-asked WITHOUT typing anything.
+    // It is reported on stderr, never stdout, because stdout is the line the driver types — but it
+    // is reported, because a turn that silently cost three model calls is a turn nobody can debug.
+    for c in session.corrections.iter().skip(corrections_before) {
+        eprintln!("corrected: `{}` — {}", c.proposed, c.refusal);
+    }
     // The transcript is written whatever happened — including on a refusal, which is the case where
     // somebody most wants to read it.
     if let Err(e) = std::fs::write(
