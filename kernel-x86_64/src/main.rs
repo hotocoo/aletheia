@@ -13,6 +13,8 @@
 //!   exit 33  => all invariants held (e2e PASS)   [isa-debug-exit encodes success 0 as 0x10]
 //!   exit 0x10+i (i=10+idx) => spine invariant idx failed
 //!   i = 30+idx memory · 40+idx virtual-memory · 60+idx SMP · 80+idx ring-3 · 150+idx risk-advisor
+//!   (the risk-advisor window overlaps 160+; a failure there is identified by its
+//!    `[mlrisk] FAILED at risk-advisor invariant N: <name>` line, never by the code alone)
 //!   28 => the LIVE address space violates W^X · 29 => no owned frame pool (both fail-closed)
 //!   101 => panic, 102 => double fault, 103 => #GP, 104 => #PF, 105 => #UD
 

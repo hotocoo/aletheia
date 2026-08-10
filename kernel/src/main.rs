@@ -6,7 +6,9 @@
 //! semihosting exit code is the machine-checkable verdict:
 //!   0     => all invariants held (e2e PASS)
 //!   10+i  => invariant i failed
-//!   150+i => risk-advisor invariant i failed (REQ-ML-001, ADR-056)
+//!   150+i => risk-advisor invariant i failed (REQ-ML-001, ADR-056) — this window overlaps the
+//!            160+ family, so a risk-advisor failure is identified by its `[mlrisk] FAILED at
+//!            risk-advisor invariant N: <name>` line, never by the exit code alone
 //!   101   => kernel panic
 //!   102   => unexpected CPU exception
 #![no_std]
