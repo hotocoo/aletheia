@@ -56,6 +56,27 @@ if [ -z "$VBM" ]; then
   echo "VM-E2E-VBOX: SKIP (VirtualBox absent — this rung did NOT run)"
   exit 0
 fi
+
+# VirtualBox present is not the same as VirtualBox able. This gate boots an x86-64 guest, and
+# VirtualBox virtualizes the HOST architecture -- it is not an emulator. On an arm64 host the ARM
+# build installs, `VBoxManage --version` answers, and `startvm` then dies at the point where it would
+# have needed x86 hardware that is not there.
+#
+# That used to be reported as FAIL, which is the wrong word for it: nothing about Aletheia was tested
+# and nothing about Aletheia was wrong. It is the same situation as a host with no OVMF or no Docker,
+# and it gets the same treatment everywhere else in this repository -- SKIP, loudly, naming what did
+# not run, so a summary can never read as though a second hypervisor qualified the image when no
+# second hypervisor was capable of trying.
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+  x86_64 | amd64) ;;
+  *)
+    echo "SKIP: this host is $HOST_ARCH and VirtualBox virtualizes the host architecture — it cannot"
+    echo "      run an x86-64 guest here. Run this rung on an x86-64 host (see docs/VIRTUALBOX.md)."
+    echo "VM-E2E-VBOX: SKIP (host cannot virtualize x86-64 — this rung did NOT run)"
+    exit 0
+    ;;
+esac
 echo "==> VBoxManage: $VBM ($("$VBM" --version 2>/dev/null | tr -d '\r'))"
 
 # VBoxManage is a Windows binary under Git Bash/WSL and does not understand POSIX paths.

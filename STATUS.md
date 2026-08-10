@@ -62,17 +62,28 @@ each. Median 7.2–8.6 s per model-arm turn; the deterministic control arm is 0 
 
   | | Aletheia (x86-64) | Linux 6.12-lts |
   |---|---|---|
-  | boot to interactive shell | 4068 ms | **2053 ms** |
-  | idle host CPU at prompt | **0.9 %** | 1.1 % |
-  | bootable payload | **522 752 B** | 13 895 207 B |
-  | privileged lines of code | **22 083 (Rust)** | ~40 M (C, cited, not measured) |
+  | boot to a prompt (median of 3) | 3079 ms *(3058, 4082, 3079)* | 3048 ms *(2040, 3048, 3072)* |
+  | idle host CPU at prompt | **1.2 %** | 1.7 % |
+  | bootable payload | **523 776 B** | 13 895 205 B |
+  | privileged lines of code | **22 557 (Rust)**, 302 `unsafe` | ~40 M (C, cited, not measured) |
 
-  **Linux boots faster, and the script's own commentary predicted the opposite until the first run
-  corrected it.** Most of that gap is the boot *path*: Aletheia goes through OVMF, a full UEFI
-  firmware implementation, while the Linux leg is loaded directly with `-kernel` and skips firmware.
-  The two columns worth arguing about are the last two — idle CPU is a fair fight, and privileged
-  lines of code depends on no emulator, no host and no workload. The script prints what Aletheia
-  **loses**, in its own output.
+  **No boot-time winner is claimed, and how that number behaved is the most useful thing in this
+  section.** The script's commentary first predicted Aletheia would win. The first run said Linux, by
+  2053 ms to 4068. The second run, same host and same binaries, said 3070 to 3080. One sample had
+  been read as a result — twice, in opposite directions — and both readings were written into a
+  commit message before the third run caught it. Boot time is now a **median over repeated runs with
+  every sample printed**, and at 3079 against 3048 with that spread, the honest statement is that
+  this benchmark does not distinguish them. One structural asymmetry is real and is Aletheia's to
+  own: it boots through OVMF, a full UEFI firmware implementation, while the Linux leg is loaded
+  directly with `-kernel` and skips firmware entirely — a boot-*path* difference, not a kernel-speed
+  one.
+
+  The two columns worth arguing about are the last two. **Idle CPU** is a fair fight — identical work
+  (none), identical emulator — and parity with Linux is the claim. **Privileged lines of code**
+  depends on no emulator, no host and no workload: it is how much code must be correct for the
+  machine to be correct. The script prints what Aletheia **loses**, in its own output, and carries an
+  attribute table for Redox, seL4, Theseus and Hubris with no numbers attached, because a number from
+  somebody else's benchmark on somebody else's hardware is the exact thing it exists to refuse.
 * **A theory that was wrong, kept because it is instructive.** The agent gate's ~8 s turns looked like
   contention from four spinning vCPUs. After the idle fix took the guest to 0.9%, the medians were
   re-measured: 8567/7204/8172 ms against 9877/7849/7768 before — unchanged inside the noise. Per-call
