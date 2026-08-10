@@ -68,6 +68,8 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-AI-001 | Model-agnostic, untrusted AI provider | ADR-017 | aletheia/src/ai/mod.rs; aletheia/src/ai/runtime.rs | aletheia/tests/acceptance.rs | - | delivered |
 | REQ-AI-002 | Context Fabric (capability-aware, not RAG) | ADR-018 | aletheia/src/ai/context.rs | aletheia/tests/search.rs | - | delivered |
 | REQ-AI-003 | AI execution substrate + heterogeneous CPU/GPU/NPU scheduler | ADR-022 | - | - | - | deferred |
+| REQ-AI-004 | Pinned model registry + operator-selectable resident model | ADR-052 | aletheia/src/ai/registry.rs; aletheia/src/ai/mod.rs; models/lfm2.5.toml; models/minicpm.toml; models/aletheia-lm.toml | aletheia/tests/model_registry.rs | - | delivered |
+| REQ-AI-005 | Operation-surface benchmark with served-model identity check | ADR-052 | aletheia/src/ai/bench.rs; aletheia/src/ai/llama.rs | aletheia/tests/model_registry.rs | - | delivered |
 | REQ-KERN-001 | aarch64 microkernel boots + spine invariants | ADR-019 | kernel/src/main.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-KERN-002 | x86-64 bootable image + spine invariants | ADR-019 | kernel-x86_64/src/main.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e-x86.sh | delivered |
 | REQ-KERN-003 | RISC-V microkernel + spine invariants | ADR-019 | kernel-riscv64/src/main.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e-riscv.sh | delivered |

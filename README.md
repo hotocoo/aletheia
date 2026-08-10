@@ -75,22 +75,66 @@ runtime is an implementation detail: the Core never depends on llama.cpp APIs or
 ```text
 ai/
 ├── provider   ModelProvider trait (one seam — a native Aletheia model service implements it later)
-├── config     AiConfig from env: AI_PROVIDER / MODEL_BACKEND / MODEL_ENDPOINT / MODEL_REF (+ MODEL_PATH)
+├── config     AiConfig: registry default → persisted selection → env (MODEL_REF / MODEL_PATH / …)
+├── registry   the pinned model set + the operator's selection (ADR-052)
 ├── context    native Context Engine (Context Fabric) — capability-aware, structured-first, budgeted
-├── prompt      intent/planner protocol + GBNF plan grammar + <think>-stripping JSON extraction
+├── prompt      intent/planner protocol + plan grammar / JSON schema + <think>-stripping extraction
 ├── runtime    HF-cache GGUF discovery + llama-server lifecycle
+├── bench      the operation-surface benchmark + the served-model identity check (ADR-052)
 └── llama       LlamaCppProvider — dependency-free localhost HTTP to llama-server; deterministic fallback
 ```
 
-**Hosted-dev model:** `GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF` (Q8_0). It is a
-**declared first-party model** (pinned in [models/minicpm.toml](models/minicpm.toml)) that ships with
-Aletheia and is **provisioned on demand** — `aletheiad model pull` fetches it into the local Hugging
-Face cache. The **weights are never committed to the repo**; the repo carries the integration + the
-pinned declaration, so a fresh clone provisions the exact model on first use.
-Validated live: MiniCPM is a *thinking* model, so a strict JSON grammar collides with its `<think>`
-phase; Aletheia runs it in **no-think mode + GBNF grammar** (`enable_thinking=false`, temp 0.7),
-which yields clean, correct plan JSON. When no model is available, the **deterministic interpreter**
-takes over (the OS is fully functional with no resident model) and serves as the test oracle.
+### Which model, and how you change it
+
+The model is a property of the **system**, not a constant in the source. Aletheia ships a registry of
+pinned manifests — repo, exact file, quant, **measured** sha256, context, sampling, and the
+structured-output strategy — embedded in the binary so it cannot disagree with what it was built
+from. The **weights are never committed**; `aletheiad model pull` fetches them into the local Hugging
+Face cache on demand.
+
+```bash
+aletheiad model list          # every model this OS knows about; * marks the running selection
+aletheiad model use lfm2.5    # switch, persisted under $HOME/.aletheia — survives a reboot
+aletheiad model status        # what is selected, whether its weights are here, what is being served
+aletheiad model pull          # provision the selected model's weights
+aletheiad model bench         # run the whole operation surface through it (below)
+```
+
+| id | model | notes |
+|----|-------|-------|
+| `lfm2.5` | **LFM2.5-2.6B (Q4_K_M)** | the default resident model |
+| `minicpm` | MiniCPM5-1B-Thinking (Q8_0) | the previous default, kept so earlier measurements keep their baseline |
+| `aletheia-lm` | **Aletheia's own model** | registered *before* its weights exist — see below |
+
+`aletheia-lm` is deliberately selectable while it is still being pretrained. Selecting it says
+`NOT YET TRAINED` and names the environment variable that will point at the finished weights; it does
+**not** quietly fall back to another model. When no model is available at all, the **deterministic
+interpreter** takes over — the OS is fully functional with no resident model, and that interpreter is
+also the test oracle.
+
+Model quirks live in the manifest, not in the provider: MiniCPM is a *thinking* model whose forced
+`<think>` phase collides with a strict grammar (so it runs in no-think mode), while LFM2.5 returns
+**empty output** under that same grammar and is constrained by JSON schema instead. One model's
+workaround is not every model's.
+
+### Does the model actually drive the OS?
+
+`aletheiad model bench` asks that question rather than assuming it. One intent per registered
+operation goes through the **same** provider and the **same** validation the pipeline uses; the
+deterministic interpreter runs the identical set as a control arm. Before any number is recorded, the
+backend is asked what it is serving and the answer must match the selected manifest — the endpoint is
+a *port*, and a benchmark that measures whatever holds it would publish another model's latency under
+this model's name.
+
+Measured on one workstation (LFM2.5-2.6B-Q4_K_M, llama.cpp, `-c 8192`): **6/6 operations planned
+correctly on two consecutive runs**, median ~3.5 s, control arm 6/6 at 0 ms. Getting there closed
+four real defects — including a health probe that had tried only the first resolved address since
+ADR-017, which made a *running* model indistinguishable from no model at all. See
+[ADR-052](docs/adr/ADR-052-the-model-is-a-system-property.md).
+
+This benchmark covers the hosted Core's **six operations**. It does **not** drive the kernel console
+(`kernel-core/src/shell.rs`), which runs in kernel space with no inference engine underneath it and
+has its own gate, `scripts/console-e2e.sh`.
 
 ### Context Engine — Context Fabric, not RAG
 
@@ -121,9 +165,11 @@ cargo run                        # aletheiad demo: runs UC-001..004 as a CLIENT 
 cargo run -- serve               # long-running Core Alpha behind the Unix-socket IPC boundary
 
 # Optional: use the real local model as the primary AI provider (hosted dev)
-cargo run -- model pull          # provision the first-party MiniCPM model into the HF cache (once)
-cargo run -- serve --ensure-model &   # (or start llama-server yourself:)
-llama-server -m "$(python3 -c 'import glob,os;print(glob.glob(os.path.expanduser("~/.cache/huggingface/hub/models--GnLOLot--MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF/snapshots/*/*.gguf"))[0])')" -c 8192 --port 8080
+cargo run -- model list          # what is registered, and which one is selected
+cargo run -- model pull          # provision the SELECTED model's weights into the HF cache (once)
+llama-server -m "$(python3 -c 'import glob,os;print(glob.glob(os.path.expanduser("~/.cache/huggingface/hub/models--LiquidAI--LFM2.5-2.6B-GGUF/snapshots/*/*.gguf"))[0])')" -c 8192 --port 8080
+cargo run -- model status        # confirms the backend is serving the model you selected
+cargo run -- model bench         # every registered operation through the real model; exits non-zero on any failure
 MODEL_ENDPOINT=http://localhost:8080 cargo run   # provider becomes healthy → model interprets intents
 
 ./scripts/vm-e2e.sh              # build + boot the aarch64 microkernel in QEMU + assert invariants (P4)
@@ -175,9 +221,16 @@ Configuration (all optional; defaults shown):
 AI_PROVIDER=local            # or "deterministic" to force the fallback interpreter
 MODEL_BACKEND=llama_cpp
 MODEL_ENDPOINT=http://localhost:8080
-MODEL_REF=GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-V2-Thinking-GGUF
+MODEL_REF=LiquidAI/LFM2.5-2.6B-GGUF    # from the selected manifest; setting it leaves the registry
 # MODEL_PATH=/abs/path/to/model.gguf   # explicit override; otherwise resolved from the HF cache
+# ALETHEIA_MODEL=minicpm               # use a REGISTERED model for one run without persisting a switch
+# ALETHEIA_LM_MODEL=/path/to/aletheia-lm.gguf   # where `model use aletheia-lm` will look, once trained
 ```
+
+Resolution is an order, not a merge: **environment** beats the **persisted selection**, which beats
+the manifest marked `default`. Setting `MODEL_REF` detaches the configuration from the registry — the
+model is then reported as `(unregistered)` and `model bench` refuses to run, because a model whose
+identity Aletheia cannot verify must not be measured under a registry name.
 
 ## Research
 
