@@ -13,8 +13,25 @@ benchmark against a real Linux kernel on one substrate)
 
 The console agent gate reported a median of **7.8–9.9 seconds per turn** against the resident model.
 Run standalone against the same backend, the same turn took **1.2–1.8 seconds**. The model had not
-changed, the prompt had not changed, and the backend had not changed. The difference was that during
-the gate there were four emulated guest vCPUs running next to it.
+changed, the prompt had not changed, and the backend had not changed. The obvious suspect was that
+during the gate there were four emulated guest vCPUs running next to it.
+
+**That suspicion was wrong, and this ADR records it as wrong rather than deleting it**, because the
+investigation it started found a real defect anyway. After the fix below took an idle guest from
+91.8% of a host CPU to 0.9%, the gate's medians were re-measured: **8567 / 7204 / 8172 ms**, against
+9877 / 7849 / 7768 before. Unchanged inside the noise. Contention was not what made the gate slow.
+
+What made it slow is the model, and `REQ-AI-010`'s per-call token accounting is what said so. A turn
+that ends in a tool call costs ~224–353 completion tokens and 1.7–2.3 s. A turn that ends in an
+ANSWER costs **859–1121 completion tokens** to produce one short sentence, because LFM2.5 emits a
+long `reasoning_content` first — and a turn that was corrected pays for both. The prompt is ~2000
+tokens and is prefix-cached, so prefill is not the cost. **Aletheia's own overhead is not measurable
+next to this.**
+
+One optimisation was tried and is recorded as a NEGATIVE result so nobody spends the afternoon on it
+twice: sending `chat_template_kwargs: {enable_thinking: false}` for this model changes nothing.
+Completion tokens were identical (296 / 224 / 353) with and without it. `models/lfm2.5.toml` keeps
+`thinking = false` for that reason.
 
 `kernel_core::shell::run_loop` read:
 
@@ -41,7 +58,7 @@ instruction that parks the CPU until an interrupt arrives:
 
 | Target | Instruction | What wakes it |
 |---|---|---|
-| aarch64 | `wfi` | UART IRQ through GICv2; the generic timer PPI is also live |
+| aarch64 | `wfi` | UART IRQ through GICv2. An earlier draft of this table also claimed the generic timer PPI as a second wake source; it is armed by the preemption suite, which runs *before* the interactive handoff, and whether it is still enabled at the prompt was never checked — so the claim is withdrawn rather than left standing |
 | RISC-V | `wfi` | UART external interrupt through the PLIC (a spurious `wfi` return is permitted and the surrounding loop simply asks again) |
 | x86-64 | `sti; hlt` | UART interrupt on IRQ4 through the 8259A |
 
@@ -104,9 +121,14 @@ advertising.
 
 ## Consequences
 
-**Good.** An idle Aletheia costs what an idle Linux costs. The agent loop's measured turn latency
-stops being dominated by the machine it is driving. Comparative claims have a script behind them that
-anyone can re-run, including the parts where Aletheia loses.
+**Good.** An idle Aletheia costs what an idle Linux costs, and a machine that is waiting for its
+operator is no longer competing with the model deciding what to type. Per-call token accounting makes
+"the turn was slow" a diagnosis rather than an observation: a re-prefilled prompt and a long
+generation are different problems with different fixes. Comparative claims have a script behind them
+that anyone can re-run, including the parts where Aletheia loses.
+
+**Explicitly not delivered by this ADR.** Agent turn latency is unchanged, because it was never
+Aletheia's to fix — it is a 2.6 B Q4 model's generation time on this workstation.
 
 **Costs.** `idle` is a per-target `unsafe` asm block, three more of them. The Linux leg needs Docker
 and network access and SKIPs loudly without them.

@@ -156,6 +156,52 @@ jobs:
       - name: Read the namespace off a booted machine, plan, type it, assert, reboot
         run: ./scripts/console-ai-e2e.sh
 
+  console-agent-e2e:
+    name: The model drives a MULTI-STEP session on three CPU targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU for all three targets, plus mtools and OVMF for the x86-64 leg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 \
+                                  ovmf mtools dosfstools perl python3
+      - name: Install Rust nightly + all three bare-metal targets
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup component add rust-src --toolchain nightly-2026-08-09
+          rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf \
+                            x86_64-unknown-uefi --toolchain nightly-2026-08-09
+      # Same two-arm contract as every AI gate here (REQ-AI-007/008/009/010, ADR-054/055). The
+      # runner has no weights and no llama-server, so the MODEL arm SKIPs -- loudly, never silently
+      # -- and the DETERMINISTIC arm gates the whole pipe on all three targets: the loop, per-step
+      # validation, the one-step-one-line rendering contract, correction of malformed proposals, all
+      # four bounds, typing at a live console, and persistence across a power cycle.
+      - name: Drive a bounded console session on aarch64, riscv64 and x86-64
+        run: ./scripts/console-agent-e2e.sh
+
+  comparative-bench:
+    name: Aletheia against a real Linux kernel, same host, same emulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU for x86-64, plus mtools and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools perl python3 curl
+      - name: Install Rust nightly + the UEFI target
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup component add rust-src --toolchain nightly-2026-08-09
+          rustup target add x86_64-unknown-uefi --toolchain nightly-2026-08-09
+      # REQ-PERF-001, ADR-056. The Aletheia leg always runs and is what gates this job: it boots the
+      # image, measures time-to-prompt and the host CPU an IDLE guest costs, which is the number that
+      # regressed to 91.8% before anyone noticed. The Linux leg needs Docker and network access and
+      # SKIPs loudly without them, so the comparison degrades to a self-measurement rather than
+      # failing the pipeline on a CDN.
+      - name: Boot both, measure time-to-prompt, idle CPU, payload size and TCB
+        run: ./scripts/comparative-bench.sh
+
   traceability:
     name: Requirement traceability (delivered ⇒ evidence)
     runs-on: ubuntu-latest

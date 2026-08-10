@@ -273,6 +273,17 @@ impl super::agent::ConsoleAgent for LlamaCppProvider {
         }
         let v: serde_json::Value =
             serde_json::from_str(&resp).map_err(|_| ModelError::InvalidOutput)?;
+        // What the call actually cost, from the backend's own accounting (REQ-AI-010). Reported per
+        // call rather than per turn because a turn may be several calls, and "the turn was slow" is
+        // not a diagnosis — a re-prefilled prompt and a long generation are different problems with
+        // different fixes, and these two numbers tell them apart.
+        if let Some(u) = v.get("usage") {
+            eprintln!(
+                "model-call: prompt {} tok, completion {} tok",
+                u["prompt_tokens"].as_u64().unwrap_or(0),
+                u["completion_tokens"].as_u64().unwrap_or(0)
+            );
+        }
         let message = &v["choices"][0]["message"];
         // A tool call wins over prose. A model that both narrates and calls has still called, and
         // reading the narration as an answer would silently drop the command it chose.
