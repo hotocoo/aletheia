@@ -86,28 +86,38 @@ ai/
 
 ### Which model, and how you change it
 
-The model is a property of the **system**, not a constant in the source. Aletheia ships a registry of
-pinned manifests — repo, exact file, quant, **measured** sha256, context, sampling, and the
-structured-output strategy — embedded in the binary so it cannot disagree with what it was built
-from. The **weights are never committed**; `aletheiad model pull` fetches them into the local Hugging
-Face cache on demand.
+The model is a property of the **system**, not a constant in the source — and the catalog is
+**discovered, not declared**. Aletheia scans the local model cache (honoring `HF_HUB_CACHE` /
+`HF_HOME`) and lists what is really on the machine:
+
+```console
+$ aletheiad model list
+   id                         quant           size  state
+   bge-small-en-v1.5          -             64 MiB  present, unpinned
+*  lfm2.5                     Q4_K_M      1596 MiB  present, pinned, default
+   minicpm                    Q8_0        1100 MiB  present, pinned
+   qwen3.6-40b-gr…o-max-mtp   -          22583 MiB  present, unpinned
+   aletheia-lm                -                  -  not yet trained
+```
+
+Nothing in the source names those first and fourth rows; they are simply there. **Manifests
+(`models/*.toml`) characterize models, they do not enumerate them** — a manifest carries only what a
+directory listing cannot: the checksum a file should have, sampling parameters that were *measured*,
+whether the chat template forces a `<think>` phase, and which structured-output strategy actually
+works. A model with no manifest is still listed and still runnable, marked **`unpinned`** so it is
+clear its parameters are defaults rather than findings.
 
 ```bash
-aletheiad model list          # every model this OS knows about; * marks the running selection
-aletheiad model use lfm2.5    # switch, persisted under $HOME/.aletheia — survives a reboot
-aletheiad model status        # what is selected, whether its weights are here, what is being served
-aletheiad model pull          # provision the selected model's weights
+aletheiad model list          # what this machine actually has; * marks the running selection
+aletheiad model use lfm2.5    # switch — a unique prefix is enough; persisted under $HOME/.aletheia
+aletheiad model status        # selected model, weights, checksum verification, what is being served
+aletheiad model pull          # fetch the selected model's weights (never committed to the repo)
 aletheiad model bench         # run the whole operation surface through it (below)
 ```
 
-| id | model | notes |
-|----|-------|-------|
-| `lfm2.5` | **LFM2.5-2.6B (Q4_K_M)** | the default resident model |
-| `minicpm` | MiniCPM5-1B-Thinking (Q8_0) | the previous default, kept so earlier measurements keep their baseline |
-| `aletheia-lm` | **Aletheia's own model** | registered *before* its weights exist — see below |
-
-`aletheia-lm` is deliberately selectable while it is still being pretrained. Selecting it says
-`NOT YET TRAINED` and names the environment variable that will point at the finished weights; it does
+`aletheia-lm` — **this OS's own model** — is characterized before its weights exist, so the switch
+can be lined up now. Selecting it says `NOT YET TRAINED` and names the environment variable to point
+at the finished weights; a file at that path flips it to runnable with no edit to any source. It does
 **not** quietly fall back to another model. When no model is available at all, the **deterministic
 interpreter** takes over — the OS is fully functional with no resident model, and that interpreter is
 also the test oracle.
@@ -115,7 +125,13 @@ also the test oracle.
 Model quirks live in the manifest, not in the provider: MiniCPM is a *thinking* model whose forced
 `<think>` phase collides with a strict grammar (so it runs in no-think mode), while LFM2.5 returns
 **empty output** under that same grammar and is constrained by JSON schema instead. One model's
-workaround is not every model's.
+workaround is not every model's — which is also why an *uncharacterized* model gets the schema path
+rather than the grammar.
+
+`model status` verifies the pinned checksum by streaming the file, and reports `verified`,
+`MISMATCH`, `not pinned` or `unreadable` as four distinct outcomes — "I did not check" and "it does
+not match" are different facts. It runs there rather than in front of every interpretation, because
+hashing gigabytes takes seconds and a check that makes the OS slow is a check somebody turns off.
 
 ### Does the model actually drive the OS?
 

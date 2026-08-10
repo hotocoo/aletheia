@@ -15,12 +15,18 @@ model-agnostic, the plan is validated, the model never executes. Two things were
 needed a compiler. And whether the resident model can actually plan Aletheia's operations at all —
 a question that had never been asked, so it had never been answered.
 
-* **ALET-P2-042 — the model becomes a system property.** A registry of pinned manifests
-  (`models/*.toml`, embedded with `include_str!` so a binary cannot disagree with what it was built
-  from), a persisted selection, and `aletheiad model list | use | status | pull | bench`.
-  **LFM2.5-2.6B (Q4_K_M) is the new default**, with a sha256 and size that were *measured* rather
-  than copied from a listing. MiniCPM is retained, not deleted — a benchmark whose baseline has been
-  deleted is not a baseline. **ADR-052.**
+* **ALET-P2-042 — the model becomes a system property, and the catalog is DISCOVERED.** Aletheia
+  scans the local model cache and lists what is really on the machine — including models no manifest
+  and no line of source has ever named, marked `unpinned` so it is clear their parameters are
+  defaults rather than findings. Manifests (`models/*.toml`) *characterize*; they do not enumerate.
+  Selection is persisted, a unique prefix is enough to type, and `aletheiad model list | use |
+  status | pull | bench` is the surface. **LFM2.5-2.6B (Q4_K_M) is the new default**, with a sha256
+  and size that were *measured* — and now **verified**: `model status` streams the file and reports
+  `verified` / `MISMATCH` / `not pinned` / `unreadable` as four distinct outcomes. MiniCPM is
+  retained, not deleted — a benchmark whose baseline has been deleted is not a baseline. **ADR-052.**
+  *(The first cut of this got it wrong: it replaced two `const`s with a hardcoded list of three
+  manifests and called that a registry. That is the same defect one level up — a guess about
+  somebody else's disk — and it was rewritten to scan.)*
 * **Aletheia's own model is registered before it exists.** `aletheiad model use aletheia-lm` works
   today and reports `NOT YET TRAINED`, naming the variable that will point at the finished weights.
   The switch is ready the moment pretraining is, and selecting it early cannot silently serve

@@ -9,13 +9,11 @@ use super::config::AiConfig;
 use super::llama::endpoint_host_port;
 use std::path::{Path, PathBuf};
 
-/// Default Hugging Face hub cache root (`~/.cache/huggingface/hub`).
+/// Default Hugging Face hub cache root. Delegates to the registry's resolver so the directory this
+/// module reads and the directory the catalog scans cannot diverge — two answers to "where is the
+/// cache" is how a model appears in `model list` and then fails to load.
 pub fn default_hf_hub() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    Path::new(&home)
-        .join(".cache")
-        .join("huggingface")
-        .join("hub")
+    super::registry::hf_hub_root()
 }
 
 /// HF cache directory name for a repo id: `org/name` → `models--org--name`.
@@ -70,6 +68,11 @@ pub fn resolve_model_path(cfg: &AiConfig) -> Option<PathBuf> {
     if let Some(p) = &cfg.model_path {
         return Some(PathBuf::from(p));
     }
+    // The catalog already FOUND this model on this machine — that path is the truth about what will
+    // be loaded, and re-deriving it from the repo id could disagree with what `model list` showed.
+    if let Some(p) = cfg.entry.as_ref().and_then(|e| e.path.clone()) {
+        return Some(p);
+    }
     // A model with no repo id (one produced locally, ADR-052) is not in any cache: it is present
     // only when its path was named. Returning None here is what makes `model status` say
     // "not present" instead of resolving some other repo's weights by accident.
@@ -78,6 +81,90 @@ pub fn resolve_model_path(cfg: &AiConfig) -> Option<PathBuf> {
     }
     let file = cfg.entry.as_ref().map(|e| e.file.as_str()).unwrap_or("");
     resolve_in_cache_file(&default_hf_hub(), &cfg.model_ref, file)
+}
+
+/// What checking a model's pinned checksum concluded (ADR-052 follow-on).
+///
+/// Three outcomes rather than a bool, because "I did not check" and "it does not match" are
+/// different facts and collapsing them is how an unverified model comes to be reported as a verified
+/// one. `Unpinned` is a legitimate state — a model produced locally has no published artifact to pin
+/// — and it is said out loud rather than counted as a pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Integrity {
+    /// The file's SHA-256 equals the manifest's.
+    Verified,
+    /// The file's SHA-256 differs. Carries what was found, so the operator can tell a corrupted
+    /// download from a different quant sitting under the expected name.
+    Mismatch { expected: String, found: String },
+    /// The manifest pins no checksum (a locally produced model), so there is nothing to check.
+    Unpinned,
+    /// The file could not be read.
+    Unreadable(String),
+}
+
+impl Integrity {
+    /// True ONLY for a checked, matching file. `Unpinned` is deliberately not `ok`: a caller that
+    /// wants to admit unpinned models must say so, rather than getting it by default.
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Integrity::Verified)
+    }
+    /// One line for `model status`.
+    pub fn describe(&self) -> String {
+        match self {
+            Integrity::Verified => "verified (sha256 matches the pinned manifest)".into(),
+            Integrity::Mismatch { expected, found } => format!(
+                "MISMATCH — the manifest pins {}…, this file hashes to {}…",
+                &expected[..expected.len().min(16)],
+                &found[..found.len().min(16)]
+            ),
+            Integrity::Unpinned => "not pinned (no published artifact to check against)".into(),
+            Integrity::Unreadable(why) => format!("could not be read: {why}"),
+        }
+    }
+}
+
+/// Hash the resolved weights and compare against the manifest's pinned SHA-256.
+///
+/// ADR-052 shipped manifests that RECORD a checksum without anything verifying it, and named that
+/// as its own open question. This closes it. The file is streamed rather than read whole: these are
+/// gigabyte-scale artifacts, and a verification step that needs 1.6 GB of resident memory to run is
+/// one that gets skipped on exactly the machines that most need it.
+///
+/// This is deliberately NOT called on the hot path. Hashing a multi-gigabyte file costs seconds, so
+/// it belongs where an operator asks a question (`model status`, `model pull`) rather than in front
+/// of every interpretation — a check that made the OS slow would be a check someone turns off.
+pub fn verify_integrity(cfg: &AiConfig) -> Integrity {
+    let Some(expected) = cfg.entry.as_ref().map(|e| e.sha256.clone()) else {
+        return Integrity::Unpinned;
+    };
+    if expected.is_empty() {
+        return Integrity::Unpinned;
+    }
+    let Some(path) = resolve_model_path(cfg) else {
+        return Integrity::Unreadable("no weights are present".into());
+    };
+    match sha256_file(&path) {
+        Err(e) => Integrity::Unreadable(e),
+        Ok(found) if found.eq_ignore_ascii_case(&expected) => Integrity::Verified,
+        Ok(found) => Integrity::Mismatch { expected, found },
+    }
+}
+
+/// SHA-256 of a file, streamed in fixed-size chunks.
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(crate::crypto::hex(&hasher.finalize()))
 }
 
 /// Best-effort: launch a hosted `llama-server` for the configured model. Hosted-dev convenience

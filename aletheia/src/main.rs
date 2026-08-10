@@ -93,27 +93,65 @@ fn model_cmd(args: &[String]) {
     }
 }
 
-/// Every model this OS knows about, with the selected one marked. `*` is the running selection;
-/// `(default)` is what an unswitched machine would run.
+/// Every model this machine can run — DISCOVERED from the local model cache, not from a list
+/// compiled into the binary — plus any model Aletheia has characterized that is not here yet. `*`
+/// marks the running selection.
 fn model_list(dir: &std::path::Path) {
     let selected = aletheia::ai::config::AiConfig::resolve(Some(dir))
         .entry
         .map(|e| e.id);
-    for e in aletheia::ai::registry::builtin() {
+    let all = aletheia::ai::registry::catalog();
+    if all.is_empty() {
+        println!(
+            "no models found in {}",
+            aletheia::ai::registry::hf_hub_root().display()
+        );
+        println!(
+            "pull one, or set MODEL_PATH — the OS runs on the deterministic interpreter meanwhile"
+        );
+        return;
+    }
+    println!("   {:<26} {:<10} {:>9}  state", "id", "quant", "size");
+    for e in &all {
         let mark = if Some(&e.id) == selected.as_ref() {
             "*"
         } else {
             " "
         };
-        let tags = match (e.default, e.is_ready()) {
-            (true, true) => " (default)",
-            (true, false) => " (default, not yet trained)",
-            (false, true) => "",
-            (false, false) => " (not yet trained)",
+        let size = if e.size_bytes > 0 {
+            format!("{} MiB", e.size_bytes / (1024 * 1024))
+        } else {
+            "-".to_string()
         };
-        println!("{mark} {:<14} {}{}", e.id, e.name, tags);
+        // A model name can be enormous (community GGUF repos routinely run past 60 characters), and
+        // one long row must not push every other column out of alignment. The id is ELIDED in the
+        // middle rather than truncated at the end: the tail is what distinguishes two quants of the
+        // same family, so cutting it off would produce two rows that look identical. A unique
+        // prefix still selects, so a shortened display never costs the operator the ability to type
+        // it.
+        let shown = if e.id.chars().count() > 26 {
+            let head: String = e.id.chars().take(14).collect();
+            let tail: String =
+                e.id.chars()
+                    .skip(e.id.chars().count().saturating_sub(9))
+                    .collect();
+            format!("{head}…{tail}")
+        } else {
+            e.id.clone()
+        };
+        println!(
+            "{mark}  {:<26} {:<10} {:>9}  {}{}",
+            shown,
+            if e.quant.is_empty() { "-" } else { &e.quant },
+            size,
+            e.tag(),
+            if e.default { ", default" } else { "" }
+        );
     }
-    println!("\nselect one with: aletheiad model use <id>");
+    println!(
+        "\nscanned {}\nselect one with: aletheiad model use <id>   (a unique prefix is enough)",
+        aletheia::ai::registry::hf_hub_root().display()
+    );
 }
 
 /// Switch the machine's model. Persists the choice, then IMMEDIATELY reports whether the chosen
@@ -145,7 +183,16 @@ fn model_status(dir: &std::path::Path) {
         aletheia::ai::registry::selection_path(dir).display()
     );
     match aletheia::ai::runtime::resolve_model_path(&cfg) {
-        Some(p) if p.exists() => println!("weights:   present — {}", p.display()),
+        Some(p) if p.exists() => {
+            println!("weights:   present — {}", p.display());
+            // Hashing gigabytes takes seconds, so it happens HERE — where an operator asked a
+            // question — and never in front of an interpretation. A check that made the OS slow
+            // would be a check somebody turns off.
+            println!(
+                "integrity: {}",
+                aletheia::ai::runtime::verify_integrity(&cfg).describe()
+            );
+        }
         Some(p) => println!("weights:   MISSING — expected at {}", p.display()),
         // A model still in training is not "missing weights someone forgot to fetch": it is a model
         // that does not exist yet, and saying so names the actual next step instead of sending the

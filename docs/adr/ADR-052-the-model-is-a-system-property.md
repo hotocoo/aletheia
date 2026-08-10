@@ -35,26 +35,46 @@ Aletheia actually offers. That question had never been asked, so it had never be
 
 ## Decision
 
-### 1. A registry of pinned manifests, embedded in the binary
+### 1. The catalog is DISCOVERED; manifests only characterize
 
-`models/*.toml`, one per model, carrying everything needed to *find*, *serve*, *verify* and *report*
-it: repo, exact file, quant, measured sha256, size, context, sampling parameters, the structured
-output strategy, and `serve_id` (below). They are compiled in with `include_str!`, so a binary can
-never disagree with the manifests it was built from, and `aletheiad` on a machine with no checkout
-still knows its own model set.
+Aletheia scans the local model cache and reports the models that are really there — their real
+files, their real quants, their real sizes. It does **not** ship a list of models it will admit.
 
-The set is closed on purpose. An operator chooses among models Aletheia has *pinned* — with a
-checksum it can be held to — rather than naming an arbitrary hub path the OS has made no claim
-about. `MODEL_REF` / `MODEL_PATH` remain the escape hatch for anything outside the set, and the
-configuration says plainly when it has been used (`(unregistered)`).
+This distinction is the whole decision, and getting it wrong the first time is instructive: the first
+draft of this work replaced two `const`s with a hardcoded set of three manifests compiled in with
+`include_str!`, and called that a registry. It is the same defect one level up. A machine that had
+pulled a model Aletheia's source had never heard of could not run it; a machine that had *not* pulled
+a listed one would be offered it anyway. Both are a guess about somebody else's disk, and neither is
+a fact about this machine.
 
-Three entries ship:
+So: **discovery answers "what exists", manifests answer "what do we know about it".** A manifest
+carries only what a directory listing cannot — the checksum a file is supposed to have, sampling
+parameters that were *measured* rather than assumed, whether the chat template forces a `<think>`
+phase, and which structured-output strategy actually works for that model. Where a manifest matches a
+discovered model, its facts are overlaid; the file, size and path stay as found, because the truth
+about what is on the disk is the disk.
 
-| id | what it is |
-|----|-----------|
-| `lfm2.5` | **LFM2.5-2.6B (Q4_K_M)** — the new default resident model |
-| `minicpm` | the previous default, retained so earlier measurements keep their baseline |
-| `aletheia-lm` | Aletheia's own model, **registered before its weights exist** |
+A model with no manifest is still listed and still selectable — as **`unpinned`**, said out loud,
+because an unpinned model is one whose parameters Aletheia is guessing at. An uncharacterized model
+gets `json-schema` structured output rather than the stricter grammar, since the grammar fails by
+producing *empty output* on a model whose template it does not suit, which is indistinguishable from
+a model that cannot plan.
+
+A manifest with no matching model is listed too. That is how `aletheia-lm` — this OS's own model,
+still pretraining — is selectable before its weights exist, and how it becomes runnable the moment
+they land: the manifest names an environment variable, and a file at that path flips the entry to
+present without editing any source.
+
+The cache root honors `HF_HUB_CACHE` / `HF_HOME`, because a machine that has moved its cache moved it
+for a reason, and a scanner that ignored that would report an empty catalog on a full disk.
+
+Ids are derived from the repo (`LiquidAI/LFM2.5-2.6B-GGUF` → `lfm2.5-2.6b`), a manifest may declare a
+shorter alias (`lfm2.5`), and **a unique prefix selects** — community GGUF repo names routinely run
+past sixty characters, and a switch nobody can type is not a switch. An *ambiguous* prefix refuses
+rather than picking.
+
+`MODEL_REF` / `MODEL_PATH` remain the escape hatch for weights outside the cache entirely, and the
+configuration says plainly when one has been used (`(unregistered)`).
 
 ### 2. Selection is persisted, and resolution is an order
 
@@ -174,7 +194,13 @@ downstream stage (INV-014).
 **One machine, one quant, one backend.** These numbers are from one workstation running one Q4_K_M
 GGUF under llama.cpp. They are a floor for reproducing the setup, not a benchmark of the model.
 
-**A checksum is recorded, not enforced.** The manifests pin a measured sha256; nothing yet verifies
-the resolved file against it at load time. That is the natural next row.
+**A checksum is verified on demand, not on every load.** `model status` and `model pull` stream the
+resolved file and compare it against the pin, reporting `verified` / `MISMATCH` / `not pinned` /
+`unreadable` as four distinct outcomes — "I did not check" and "it does not match" are different
+facts, and collapsing them is how an unverified model comes to be reported as a verified one.
+Hashing a gigabyte-scale artifact costs seconds, so it deliberately does **not** run in front of
+every interpretation: a check that made the OS slow would be a check someone turns off. What is
+therefore *not* claimed is load-time enforcement — a file that changed between `model status` and the
+next request would not be caught.
 
 `docs/MATURITY.md` governs every claim above.
