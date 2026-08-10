@@ -2671,8 +2671,8 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 21 memory + 66 virtual-memory + 24 EL0 user-mode + 20 risk-advisor + 21 virtio-blk + 22 SMP invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 21 memory + Sv39 vm + U-mode + 20 risk-advisor + 22 SMP invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 virtual-memory + 24 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 24 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 
