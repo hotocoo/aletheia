@@ -32,6 +32,9 @@ pub struct LlamaCppProvider {
     temperature: f32,
     top_p: f32,
     thinking: bool,
+    /// How generation is constrained to the Plan shape: `gbnf-grammar` or `json-schema`. See
+    /// `prompt::plan_json_schema` for why one strategy is not enough.
+    structured: String,
 }
 
 impl LlamaCppProvider {
@@ -45,6 +48,7 @@ impl LlamaCppProvider {
             temperature: 0.3,
             top_p: 0.95,
             thinking: false,
+            structured: "gbnf-grammar".into(),
         }
     }
 
@@ -57,6 +61,7 @@ impl LlamaCppProvider {
             p.temperature = e.temperature;
             p.top_p = e.top_p;
             p.thinking = e.thinking;
+            p.structured = e.structured_output.clone();
             p.label = format!("llama.cpp:{}", e.id);
         }
         p
@@ -84,11 +89,29 @@ impl LlamaCppProvider {
             ],
             "temperature": self.temperature,
             "top_p": self.top_p,
-            "n_predict": 512,
+            // 2048, and the number was measured. A plan is ~50 tokens, so 512 looked generous — but
+            // under a schema-constrained decode the model may emit a long run of permitted
+            // whitespace before it commits to the object, and `capability.grant` (the widest
+            // argument list) reproducibly exhausted 512 that way. What came back was an EMPTY
+            // completion with `finish_reason: length`, which the provider reports as InvalidOutput:
+            // a truncation that presents as "the model cannot plan this operation". Raising the
+            // budget fixed it at the same temperature, prompt and schema — so the budget was the
+            // whole defect. A cap is still needed; it just has to be past where the decode settles.
+            "n_predict": 2048,
             "cache_prompt": true,
-            "grammar": prompt::plan_grammar(),
             "stream": false
         });
+        match self.structured.as_str() {
+            "json-schema" => {
+                body["response_format"] = json!({
+                    "type": "json_schema",
+                    "json_schema": { "name": "aletheia_plan", "schema": prompt::plan_json_schema() }
+                });
+            }
+            // `gbnf-grammar` and anything unrecognized: the grammar is the stricter constraint and
+            // therefore the safer default for a model whose manifest did not say.
+            _ => body["grammar"] = json!(prompt::plan_grammar()),
+        }
         // A forced-thinking model must be asked to stop: a strict JSON grammar collides with the
         // `<think>` phase and yields empty output (observed on MiniCPM, model card + live test).
         // The flag is sent ONLY for models the registry marks as thinking, because a backend serving
@@ -220,12 +243,27 @@ fn http(
     timeout_ms: u64,
 ) -> std::io::Result<(u16, String)> {
     let addr = format!("{host}:{port}");
-    let sockaddr = addr
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| std::io::Error::other("no addr"))?;
     let connect_timeout = Duration::from_millis(timeout_ms.min(2000));
-    let mut stream = TcpStream::connect_timeout(&sockaddr, connect_timeout)?;
+    // EVERY resolved address is tried, not just the first. `localhost` resolves to `::1` ahead of
+    // `127.0.0.1` on this platform, and a server bound to IPv4 only — which `llama-server` is by
+    // default — is then unreachable through a client that takes `next()` and gives up. The symptom
+    // is indistinguishable from "no model is running": the probe fails, the Core falls back to the
+    // deterministic interpreter, and nothing anywhere says the model was there the whole time.
+    let mut stream = None;
+    let mut last_err = None;
+    for sockaddr in addr.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&sockaddr, connect_timeout) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let mut stream = match stream {
+        Some(s) => s,
+        None => return Err(last_err.unwrap_or_else(|| std::io::Error::other("no addr"))),
+    };
     stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)))?;
     stream.set_write_timeout(Some(Duration::from_millis(timeout_ms)))?;
     let payload = body.unwrap_or("");

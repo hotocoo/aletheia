@@ -32,9 +32,17 @@ context           = 8192
 # LFM2.5 is NOT a forced-thinking model, so no `enable_thinking` override is sent. The response path
 # still strips a `<think>` block if one appears — see aletheia/src/ai/mod.rs::prompt.
 thinking          = false
-temperature       = 0.3
-top_p             = 0.95
-structured_output = "gbnf-grammar"  # constrains generation to the Aletheia Plan schema
+# Zero, because a plan is not creative writing. At 0.3 the benchmark was not reproducible: the same
+# `capability.grant` intent planned correctly on one run and produced unusable output on the next,
+# and an interpreter whose answer depends on the roll is one whose failures cannot be investigated.
+# Greedy decoding makes a wrong plan a bug someone can chase rather than a coin that came up tails.
+temperature       = 0.0
+top_p             = 1.0
+# SCHEMA, not grammar — and this was measured, not chosen. Under the GBNF grammar LFM2.5 returns an
+# EMPTY completion for every operation: its chat template emits `<|tool_call_start|>` first, the
+# grammar has no rule for that token, and generation dies at token zero with no error anywhere. The
+# JSON-schema path constrains the same Plan shape and leaves the template's control tokens alone.
+structured_output = "json-schema"
 
 [provision]
 # Weights are NOT in git. Provision them into the local HF cache with either:
