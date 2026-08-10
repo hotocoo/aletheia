@@ -21,6 +21,21 @@
 # only when a backend really is serving the selected model, and SKIPs — never silently passes — when
 # it is not.
 #
+# RUNNING THE MODEL ARM. It is operator-started, and that is worth writing down here rather than in
+# somebody's shell history: nothing in this repository launches an inference server on its own
+# (`runtime::spawn_llama_server` is a helper with no callers), so a checkout on a fresh machine gets
+# the deterministic arm and a SKIP. To get the model arm:
+#
+#     llama-server -m "$(aletheiad model status | sed -n 's/^weights: *present — //p')" \
+#                  -c 8192 --port 8099 --host 127.0.0.1 --jinja
+#     MODEL_ENDPOINT=http://127.0.0.1:8099 ./scripts/console-ai-e2e.sh
+#
+# `--jinja` is not optional: without it `llama-server` never parses the model's tool call, and the
+# planner sees a response with no call — a correct answer that reads as no answer. The port is
+# explicit because the default `:8080` is a PORT, not a model, and on the workstation this was
+# written on another project's service already held it; `model bench` and this gate both refuse
+# rather than measure whatever answers.
+#
 # What this does NOT claim: there is still no inference engine in kernel space. `kernel-core` remains
 # `no_std` with no network and no model. Every model call happens on the host, and what crosses into
 # the guest is a validated line of ASCII, indistinguishable from one a person typed.
