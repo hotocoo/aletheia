@@ -44,3 +44,22 @@ structured_output = "gbnf-grammar"
 #   aletheiad model use aletheia-lm
 #   aletheiad model status          # must print `ready`, naming the resolved path
 # Until then this entry is selectable and honest about being empty.
+#
+# WALKED END TO END on 2026-08-10 against a mid-pretraining checkpoint, and the path that works is
+# NOT a GGUF. `aletheia_tok_v3` is a byte-level BPE with a whitespace-crossing (`xw`) split regex,
+# and llama.cpp silently substitutes a default pretokenizer for regexes it does not recognise —
+# a token-boundary mismatch that reads exactly like an undertrained model. So the checkpoint is
+# served from MLX by `dl/src/aletheia_lm/serve.py`, which speaks the only three things this OS
+# actually requires of `llama_cpp` (see `src/ai/llama.rs`): `/v1/models` advertising an id that
+# contains `serve_id`, non-streaming `/v1/chat/completions`, and a `usage` block.
+#
+#   PYTHONPATH=src python3 -m aletheia_lm.serve --port 8081     # in the dl repo
+#   export ALETHEIA_LM_MODEL=.../checkpoints/step_005500        # a DIRECTORY resolves fine
+#   export MODEL_ENDPOINT=http://localhost:8081                 # AiConfig::resolve override
+#   aletheiad model use aletheia-lm                             # -> `serving: yes — aletheia-lm`
+#
+# `model bench` over that seam planned 0/6 operations (`InvalidOutput`, median 10.9 s), which is the
+# CORRECT result for a base model 5,500 steps into a 500,000-step run: the call connected, was
+# timed, and was rejected on content rather than falling back to the deterministic interpreter.
+# Record: `dl/docs/SERVING-SEAM.md`. GGUF stays the right answer for an OS that must run without a
+# Python process, and the check that makes it safe is id-level tokenizer parity, never eyeballed text.
