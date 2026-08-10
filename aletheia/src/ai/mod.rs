@@ -29,6 +29,7 @@
 //! - `console`  — planning for the KERNEL CONSOLE's command table, the second operation family
 //!   (ADR-053); the model proposes commands, a host driver types them, and the kernel stays
 //!   `no_std` with no inference engine under it
+pub mod agent;
 pub mod bench;
 pub mod console;
 pub mod llama;

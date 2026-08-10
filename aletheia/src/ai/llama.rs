@@ -226,6 +226,73 @@ impl LlamaCppProvider {
     }
 }
 
+/// The multi-turn console agent (REQ-AI-007, ADR-054). Same transport, same sampling, same menu —
+/// two differences, and both of them are the loop.
+///
+/// **`tool_choice` is `auto`, not `required`.** That single word is how the model says it is done: a
+/// response with no tool call is not a failure here, it is the answer. Under `required` the model
+/// cannot stop, and a loop whose only exit is the budget is a loop that always spends the budget.
+///
+/// **The user message is the transcript**, not the request — every line already typed and everything
+/// the machine printed back, framed as data (`agent::transcript_prompt`).
+impl super::agent::ConsoleAgent for LlamaCppProvider {
+    fn name(&self) -> &str {
+        &self.label
+    }
+
+    fn next_move(&self, session: &super::agent::Session) -> Result<super::agent::Move, ModelError> {
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": super::agent::system_prompt() },
+                { "role": "user", "content": super::agent::transcript_prompt(session) }
+            ],
+            "tools": super::console::tool_definitions(),
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "n_predict": 2048,
+            "cache_prompt": true,
+            "stream": false
+        });
+        if self.thinking {
+            body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+        }
+        let body = body.to_string();
+        let (status, resp) = http(
+            &self.host,
+            self.port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&body),
+            GEN_TIMEOUT_MS,
+        )
+        .map_err(|_| ModelError::Runtime)?;
+        if status != 200 {
+            return Err(ModelError::Runtime);
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&resp).map_err(|_| ModelError::InvalidOutput)?;
+        let message = &v["choices"][0]["message"];
+        // A tool call wins over prose. A model that both narrates and calls has still called, and
+        // reading the narration as an answer would silently drop the command it chose.
+        if let Ok(raw) = super::console::plan_from_tool_calls(message) {
+            let plan: crate::intent_action::Plan =
+                serde_json::from_str(&raw).map_err(|_| ModelError::InvalidOutput)?;
+            if let Some(step) = plan.steps.into_iter().next() {
+                return Ok(super::agent::Move::Command(step));
+            }
+        }
+        // No call: the content IS the answer — but only if there is one. An empty completion is the
+        // truncation signature (`finish_reason: length` with nothing in it), and calling that an
+        // answer would end a session with a blank line and a success code.
+        match message["content"].as_str().map(str::trim) {
+            Some(text) if !text.is_empty() => Ok(super::agent::Move::Answer(text.to_string())),
+            _ => Err(ModelError::InvalidOutput),
+        }
+    }
+}
+
 impl ModelRuntime for LlamaCppProvider {
     fn name(&self) -> &str {
         &self.label
