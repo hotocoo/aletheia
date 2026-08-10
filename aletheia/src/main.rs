@@ -74,38 +74,80 @@ fn console_cmd(args: &[String]) {
     match args.get(2).map(|s| s.as_str()) {
         Some("ops") => console_ops_list(),
         Some("cases") => console_cases(),
+        Some("agent-cases") => console_agent_cases(),
         Some("bench") => console_bench(dirp),
         Some("plan") => {
-            // The request is every word that is neither a flag nor a flag's VALUE. Filtering only
-            // on the leading `--` silently swallowed `--context-file /tmp/ctx` into the request,
-            // and the model was then asked to plan a sentence with a path in the middle of it.
-            const TAKES_VALUE: &[&str] =
-                &["--interpreter", "--context", "--context-file", "--data"];
-            let mut request_words: Vec<String> = Vec::new();
-            let mut skip_next = false;
-            for a in args.iter().skip(3) {
-                if skip_next {
-                    skip_next = false;
-                    continue;
-                }
-                if a.starts_with("--") {
-                    skip_next = TAKES_VALUE.contains(&a.as_str());
-                    continue;
-                }
-                request_words.push(a.clone());
-            }
-            let request = request_words.join(" ");
+            let request = console_request(args);
             if request.trim().is_empty() {
                 eprintln!("usage: aletheiad console plan [--approve] [--interpreter model|deterministic] <request>");
                 std::process::exit(2);
             }
             console_plan(dirp, &request, args);
         }
+        Some("agent") => {
+            let request = console_request(args);
+            if request.trim().is_empty() {
+                eprintln!(
+                    "usage: aletheiad console agent --transcript FILE [--approve] [--budget N]\n\
+                     \x20                          [--context-file BRIEF] [--observation-file CAPTURE]\n\
+                     \x20                          [--interpreter model|deterministic] <request>"
+                );
+                std::process::exit(2);
+            }
+            console_agent(dirp, &request, args);
+        }
         _ => {
-            eprintln!("usage: aletheiad console <ops|plan|bench>");
+            eprintln!("usage: aletheiad console <ops|cases|plan|agent|bench>");
             std::process::exit(2);
         }
     }
+}
+
+/// The agent cases, as tab-separated records, for the same reason `console cases` exists: the gate
+/// drives the table the tests hold, rather than keeping its own copy of it in shell.
+///
+/// Fields: natural request, scripted request, the line that must be typed, what the live console
+/// says when it runs, what the control arm's answer must contain, approved.
+fn console_agent_cases() {
+    for c in aletheia::ai::agent::AGENT_CASES {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            c.natural, c.scripted, c.must_type, c.console_says, c.answer_contains, c.approved
+        );
+    }
+}
+
+/// The request is every word that is neither a flag nor a flag's VALUE. Filtering only on the
+/// leading `--` silently swallowed `--context-file /tmp/ctx` into the request, and the model was
+/// then asked to plan a sentence with a path in the middle of it.
+///
+/// The list of value-taking flags is shared by `plan` and `agent` for that same reason: two copies
+/// of it would drift, and the drift presents as a path appearing in the middle of an operator's
+/// sentence, which reads as the model being confused.
+fn console_request(args: &[String]) -> String {
+    const TAKES_VALUE: &[&str] = &[
+        "--interpreter",
+        "--context",
+        "--context-file",
+        "--data",
+        "--transcript",
+        "--observation-file",
+        "--budget",
+    ];
+    let mut words: Vec<String> = Vec::new();
+    let mut skip_next = false;
+    for a in args.iter().skip(3) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a.starts_with("--") {
+            skip_next = TAKES_VALUE.contains(&a.as_str());
+            continue;
+        }
+        words.push(a.clone());
+    }
+    words.join(" ")
 }
 
 /// Every command the model may propose, with its arguments and its risk — the same table the prompt
@@ -219,6 +261,140 @@ fn console_plan(dir: &std::path::Path, request: &str, args: &[String]) {
         }
         Err(e) => {
             eprintln!("refused: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Which agent drove a session — chosen the same way, and said the same way, as the single-step
+/// interpreter, because a silent fallback is how a live model and no model at all came to look
+/// identical once already (ADR-052).
+fn console_agent_interpreter(
+    dir: &std::path::Path,
+    args: &[String],
+) -> Box<dyn aletheia::ai::agent::ConsoleAgent> {
+    let forced = arg_value(args, "--interpreter").unwrap_or_else(|| "auto".into());
+    if forced == "deterministic" {
+        eprintln!("agent: deterministic-agent (forced)");
+        return Box::new(aletheia::ai::agent::DeterministicAgent);
+    }
+    let cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
+    if cfg.wants_local_model() {
+        let p = aletheia::ai::llama::LlamaCppProvider::from_config(&cfg).for_console();
+        if aletheia::ai::provider::ModelProvider::healthy(&p) {
+            eprintln!(
+                "agent: {} at {}",
+                aletheia::ai::agent::ConsoleAgent::name(&p),
+                cfg.endpoint
+            );
+            return Box::new(p);
+        }
+        if forced == "model" {
+            eprintln!(
+                "agent: no model answers {} — refusing, because `--interpreter model` was asked for",
+                cfg.endpoint
+            );
+            std::process::exit(3);
+        }
+        eprintln!(
+            "agent: deterministic-agent (nothing answers {})",
+            cfg.endpoint
+        );
+    } else {
+        eprintln!("agent: deterministic-agent (AI_PROVIDER={})", cfg.provider);
+    }
+    Box::new(aletheia::ai::agent::DeterministicAgent)
+}
+
+/// `aletheiad console agent` — one turn of the loop (ADR-054).
+///
+/// The command is deliberately ONE TURN rather than a loop of its own, because the thing that types
+/// at the console is not this process. The driver — a gate script, or an operator — owns the serial
+/// port; Aletheia owns the decision. So the state lives in a file between calls and the contract is
+/// an exit code:
+///
+/// * **0** — stdout holds exactly one console line. Type it, capture the reply, call again with
+///   `--observation-file`.
+/// * **10** — the session answered. stdout is EMPTY; the answer is on stderr, because stdout on this
+///   command means "type this" and an answer typed at a console is a syntax error at best.
+/// * **1** — refused, terminally. The transcript on disk says why.
+///
+/// That stdout discipline is the same one `console plan` has, and it is what makes both usable from
+/// a shell without a parser.
+fn console_agent(dir: &std::path::Path, request: &str, args: &[String]) {
+    use aletheia::ai::agent::{self, Advance, Session};
+
+    let path = match arg_value(args, "--transcript") {
+        Some(p) => p,
+        None => {
+            eprintln!("agent: --transcript FILE is required — the session's state lives there");
+            std::process::exit(2);
+        }
+    };
+    let budget: usize = arg_value(args, "--budget")
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(agent::DEFAULT_BUDGET);
+    let approved = args.iter().any(|a| a == "--approve");
+
+    // Resume, or open. A transcript that exists belongs to a request; continuing it with a different
+    // one would answer a question with another question's evidence.
+    let mut session = match std::fs::read_to_string(&path) {
+        Ok(text) if !text.trim().is_empty() => match serde_json::from_str::<Session>(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("agent: {path} is not a session transcript: {e}");
+                std::process::exit(2);
+            }
+        },
+        _ => Session::new(request, &console_context(args), budget, approved),
+    };
+    if session.request != request {
+        eprintln!("refused: {}", agent::AgentRefusal::RequestChanged);
+        std::process::exit(1);
+    }
+
+    // The reply to the line typed last turn, if the driver brought one.
+    if let Some(obs) = arg_value(args, "--observation-file") {
+        match std::fs::read_to_string(&obs) {
+            Ok(text) => {
+                if let Err(r) = session.observe(&text) {
+                    eprintln!("refused: {r}");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("agent: cannot read {obs}: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let driver = console_agent_interpreter(dir, args);
+    let outcome = agent::advance(&mut session, driver.as_ref());
+    // The transcript is written whatever happened — including on a refusal, which is the case where
+    // somebody most wants to read it.
+    if let Err(e) = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&session).unwrap_or_default(),
+    ) {
+        eprintln!("agent: cannot write {path}: {e}");
+        std::process::exit(2);
+    }
+    match outcome {
+        Ok(Advance::Type(line)) => {
+            eprintln!(
+                "step {} of {}",
+                session.turns.len(),
+                session.turns.len() + session.budget
+            );
+            println!("{line}");
+        }
+        Ok(Advance::Done(answer)) => {
+            eprintln!("answer: {answer}");
+            std::process::exit(10);
+        }
+        Err(r) => {
+            eprintln!("refused: {r}");
             std::process::exit(1);
         }
     }

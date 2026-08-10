@@ -127,6 +127,19 @@ pub enum Refusal {
     Approval { op: String },
 }
 
+impl Refusal {
+    /// Can a caller usefully hand this refusal back to whoever produced the step and ask again?
+    ///
+    /// The split is between MALFORMING and OVERREACHING, and it is the whole safety content of the
+    /// agent loop's retry (ADR-054). Everything true here says "you wrote it wrong", the refusal
+    /// text says how, and a second attempt is a different attempt. `Approval` is the one that is
+    /// not: the step was well-formed and the authority was absent, so asking again changes nothing
+    /// except how many times the model was invited to try to do it.
+    pub fn is_recoverable(&self) -> bool {
+        !matches!(self, Refusal::Approval { .. })
+    }
+}
+
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {

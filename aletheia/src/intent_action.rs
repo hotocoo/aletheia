@@ -41,7 +41,10 @@ pub struct Intent {
     pub verb: Verb,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// `PartialEq` but NOT `Eq`: a step's arguments are a `serde_json::Value`, which carries floats and
+// therefore has no total equality. Two steps compare by structure, which is what the agent loop's
+// no-progress check and every test here need.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Step {
     pub op: String,
     pub args: serde_json::Value,
