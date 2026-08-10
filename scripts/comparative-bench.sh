@@ -40,6 +40,9 @@ KERNEL_URL="${KERNEL_URL:-https://dl-cdn.alpinelinux.org/alpine/$ALPINE_VER/rele
 IDLE_SAMPLES="${IDLE_SAMPLES:-6}"
 IDLE_INTERVAL="${IDLE_INTERVAL:-2}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-180}"
+# One boot is not a measurement; see boot_median. Three is enough to see a distribution and cheap
+# enough to run on every push.
+BOOT_SAMPLES="${BOOT_SAMPLES:-3}"
 
 fail=0
 hr() { printf '========================================================================\n'; }
@@ -63,6 +66,29 @@ LX_BOOT_MS=""; LX_IDLE=""; LX_BYTES=""; LX_STATUS="SKIP"
 # stdin is held open on a FIFO for the whole measurement. Without it QEMU sees EOF, the console reads
 # end-of-input, and the thing being measured stops existing halfway through measuring it.
 # ---------------------------------------------------------------------------------------------
+# Boot the same guest BOOT_SAMPLES times and report the MEDIAN time to a prompt.
+#
+# One boot is not a measurement, and the first version of this script found that out the honest way:
+# it reported Aletheia 4068 ms against Linux 2053 ms, and the commentary was written around Linux
+# winning. Run again on the same host, same binaries: 3080 against 3070. The two distributions
+# overlap, and a single sample had been read as a result. Everything under `-accel tcg` on a
+# workstation that is also running a browser and a language model moves like this, which is exactly
+# why the idle number was a median from the start.
+boot_median() {
+  local label="$1" marker="$2"; shift 2
+  local -a samples=()
+  local i
+  for i in $(seq 1 "$BOOT_SAMPLES"); do
+    boot_and_measure "$label-$i" "$marker" "$@" || return 1
+    samples+=("$BOOT_MS")
+    # Only the last run's idle number is kept: idle is idle, and it is already a median over samples.
+  done
+  BOOT_MS="$(printf '%s\n' "${samples[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')"
+  BOOT_ALL="$(printf '%s ' "${samples[@]}")"
+  printf '    boot to a prompt: median %s ms over %s runs (%s)\n' "$BOOT_MS" "$BOOT_SAMPLES" "$BOOT_ALL"
+  return 0
+}
+
 boot_and_measure() {
   local label="$1" marker="$2"; shift 2
   local -a argv=("$@")
@@ -146,7 +172,7 @@ cp "$OVMF_VARS_F" "$WORK/al-vars.fd"
 dd if=/dev/zero of="$WORK/al-s.img" bs=1048576 count=1 2>/dev/null
 dd if=/dev/zero of="$WORK/al-p.img" bs=1048576 count=1 2>/dev/null
 
-if boot_and_measure aletheia "aletheia> " \
+if boot_median aletheia "aletheia> " \
     qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -nographic \
     -drive "if=pflash,format=raw,unit=0,file=$OVMF_CODE_F,readonly=on" \
     -drive "if=pflash,format=raw,unit=1,file=$WORK/al-vars.fd" \
@@ -186,7 +212,7 @@ else
       LX_BYTES=$(( $(wc -c < "$WORK/vmlinuz") + $(wc -c < "$WORK/initramfs.gz") ))
       echo "    bootable payload: vmlinuz + initramfs — $LX_BYTES bytes"
       echo "    kernel: $(file "$WORK/vmlinuz" | sed -n 's/.*version \([^ ]*\).*/\1/p')"
-      if boot_and_measure linux "LINUX-BENCH-PROMPT-READY" \
+      if boot_median linux "LINUX-BENCH-PROMPT-READY" \
           qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64 -nographic -no-reboot \
           -kernel "$WORK/vmlinuz" -initrd "$WORK/initramfs.gz" \
           -append "console=ttyS0 quiet rdinit=/init"; then
@@ -198,6 +224,44 @@ else
       echo "  FAIL: the kernel did not download"; fail=1
     fi
   fi
+fi
+
+# ---------------------------------------------------------------------------------------------
+# Redox — the other Rust operating system that ships a bootable x86-64 image, on the same emulator.
+#
+# Included because "compare against other Rust OSes" is otherwise a table of adjectives. Redox is
+# the only one of the obvious set that can be DOWNLOADED and BOOTED without building a toolchain
+# first, so it is the only one that gets a measured column; the rest are in the attribute table
+# below, where nothing is claimed that was not read from their own documentation.
+#
+# OPT-IN, because the image is ~70 MB compressed and this script otherwise runs in CI on every push:
+#   WITH_REDOX=1 ./scripts/comparative-bench.sh
+# ---------------------------------------------------------------------------------------------
+RX_BOOT_MS=""; RX_IDLE=""; RX_BYTES=""
+if [ "${WITH_REDOX:-0}" = "1" ]; then
+  hr; echo "==> Redox OS (same host, same emulator, same flags)"; hr
+  RX_URL="${REDOX_URL:-https://static.redox-os.org/img/x86_64/redox_server_x86_64_2026-07-27_475_harddrive.img.zst}"
+  if ! command -v zstd >/dev/null 2>&1; then
+    echo "  Redox leg needs zstd to decompress the image — SKIPPED (never a silent pass)."
+  elif ! curl -sL --max-time 900 -o "$WORK/redox.img.zst" "$RX_URL" || [ ! -s "$WORK/redox.img.zst" ]; then
+    echo "  Redox image did not download — SKIPPED (never a silent pass)."
+  else
+    zstd -qdf "$WORK/redox.img.zst" -o "$WORK/redox.img" 2>/dev/null
+    RX_BYTES="$(wc -c < "$WORK/redox.img" | tr -d ' ')"
+    echo "    bootable payload: whole disk image — $RX_BYTES bytes"
+    # Redox's own marker: it prints a login prompt on the serial console. Matched on `login:` rather
+    # than a shell prompt because the image boots to a getty, and forcing it further would be
+    # measuring how well this script can drive somebody else's OS.
+    if boot_median redox "login:" \
+        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -nographic -no-reboot \
+        -drive "format=raw,file=$WORK/redox.img"; then
+      RX_BOOT_MS="$BOOT_MS"; RX_IDLE="$IDLE_CPU"
+    else
+      echo "  Redox did not reach a login prompt on this host — reported, not hidden."
+    fi
+  fi
+else
+  hr; echo "==> Redox OS — not run (set WITH_REDOX=1; the image is ~70 MB)"; hr
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -216,25 +280,59 @@ echo "     number is not measured here and is cited only for scale.)"
 
 # ---------------------------------------------------------------------------------------------
 hr; echo "RESULTS — same host, same emulator, same emulation mode, same end state"; hr
-printf '%-28s | %-18s | %-18s\n' "" "Aletheia (x86-64)" "Linux 6.12-lts"
-printf '%-28s-+-%-18s-+-%-18s\n' "----------------------------" "------------------" "------------------"
-printf '%-28s | %-18s | %-18s\n' "boot to interactive shell" "${AL_BOOT_MS:-FAIL} ms" "${LX_BOOT_MS:-SKIP} ms"
-printf '%-28s | %-18s | %-18s\n' "idle host CPU at prompt" "${AL_IDLE:-FAIL} %" "${LX_IDLE:-SKIP} %"
-printf '%-28s | %-18s | %-18s\n' "bootable payload" "${AL_BYTES:-FAIL} B" "${LX_BYTES:-SKIP} B"
-printf '%-28s | %-18s | %-18s\n' "privileged lines of code" "$KLOC (Rust)" "~40M (C, cited)"
+printf '%-28s | %-18s | %-18s | %-18s\n' "" "Aletheia (x86-64)" "Linux 6.12-lts" "Redox OS"
+printf '%-28s-+-%-18s-+-%-18s-+-%-18s\n' "----------------------------" "------------------" "------------------" "------------------"
+printf '%-28s | %-18s | %-18s | %-18s\n' "boot to a prompt" "${AL_BOOT_MS:-FAIL} ms" "${LX_BOOT_MS:-SKIP} ms" "${RX_BOOT_MS:-SKIP} ms"
+printf '%-28s | %-18s | %-18s | %-18s\n' "idle host CPU at prompt" "${AL_IDLE:-FAIL} %" "${LX_IDLE:-SKIP} %" "${RX_IDLE:-SKIP} %"
+printf '%-28s | %-18s | %-18s | %-18s\n' "bootable payload" "${AL_BYTES:-FAIL} B" "${LX_BYTES:-SKIP} B" "${RX_BYTES:-SKIP} B"
+printf '%-28s | %-18s | %-18s | %-18s\n' "privileged lines of code" "$KLOC (Rust)" "~40M (C, cited)" "n/a"
 hr
+cat <<'RUSTOS'
+OTHER RUST OPERATING SYSTEMS — attributes, not numbers.
+
+Redox is the only one of these that ships a bootable x86-64 image you can download and run, which is
+why it is the only one with a measured column above (and only when WITH_REDOX=1). For the rest, a
+number would have to come from somebody else's benchmark on somebody else's hardware, which is the
+exact thing this script exists to refuse. What is comparable without running them is what they have
+DECIDED, and that is stated here with no claim of superiority attached:
+
+  Redox      microkernel, Rust, capability-ish (scheme/URL namespaces), POSIX-compatible userspace,
+             self-hosting, x86-64/aarch64/riscv64. Much further along than Aletheia in userspace.
+  seL4       microkernel, C, capability-based, and FORMALLY VERIFIED — functional correctness proved
+             against its spec on selected configurations. Nothing in Aletheia is verified in that
+             sense, and no amount of testing is the same claim.
+  Theseus    Rust, "intralingual" design: safety enforced by the language and a single address space
+             rather than by hardware boundaries. A different bet from Aletheia's, which uses the MMU
+             and ring 3 and does not assume the compiler is the only thing between tasks.
+  Hubris     Rust, memory-protected, no dynamic allocation, statically-defined task set at build
+             time. Deployed in real hardware. A deliberately smaller problem than a general OS.
+  Redshirt / rust-vmm / others — components rather than comparable systems.
+
+WHERE ALETHEIA IS ACTUALLY DIFFERENT, stated as a design claim rather than a benchmark result:
+the capability check and the intent->action pipeline are the SAME path for a human at the console and
+for a model driving it (ADR-053/054/055). The model does not get an API around the OS; it gets the
+operator's surface with the operator's authority, validated against the kernel's own command table,
+and it cannot type a line a person could not have typed. Whether that is worth anything is not
+something a boot-time number can answer.
+RUSTOS
 cat <<'NOTE'
 HOW TO READ THIS.
 
-  boot to a prompt              LINUX WINS THIS, and the first run of this script is what said so --
-                                the text here previously predicted the opposite, which is why the
-                                number is measured rather than assumed. Most of the gap is not the
-                                kernels at all: Aletheia boots through OVMF, a full UEFI firmware
-                                implementation that initialises the platform and hands over, while
-                                the Linux leg is loaded by QEMU directly with `-kernel` and skips
-                                firmware entirely. That is a real difference in what an operator
-                                waits for, and it is Aletheia's to own, but it is a boot-PATH
-                                difference rather than evidence that the kernel is slow.
+  boot to a prompt              NO WINNER IS CLAIMED, and the history of this line is the reason.
+                                The text here first predicted Aletheia would win; the first run said
+                                Linux, 2053 ms against 4068; the second run on the same binaries said
+                                3070 against 3080. One sample had been read as a result, twice, in
+                                opposite directions. It is now a median over BOOT_SAMPLES runs, and
+                                the individual samples are printed so the spread is visible rather
+                                than hidden behind the median. Under TCG on a workstation that is
+                                also running other things, treat a difference smaller than the spread
+                                as no difference.
+
+                                One structural asymmetry IS real and is Aletheia's to own: it boots
+                                through OVMF, a full UEFI firmware implementation, while the Linux
+                                leg is loaded directly by QEMU with `-kernel` and skips firmware
+                                entirely. That is a boot-PATH difference, not evidence about either
+                                kernel's speed.
 
   bootable payload              Aletheia wins by a wide margin, and the win is mostly the size
                                 difference rather than a design victory: Linux ships drivers for

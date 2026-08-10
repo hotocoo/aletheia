@@ -1599,8 +1599,24 @@ fn run_preemptive() -> (bool, bool) {
             clean = false; // timer never fired (countdown drained) or an unexpected return
             break;
         }
-        if seen[slot] && progress <= last_progress[slot] {
-            progress_ok = false; // counter did not advance across the involuntary switch
+        // What this invariant is FOR is state preservation: the counter a task built up in `rbx`
+        // must still be there when the timer takes the CPU away and gives it back. Going BACKWARDS
+        // is the failure — it means a resume handed the task a frame that was not its own.
+        //
+        // Requiring a STRICT advance every slice asserted something else as well: that the task got
+        // enough CPU to execute at least one `inc` before IRQ0 arrived. That is a statement about
+        // the HOST, not about Aletheia. `pit::rearm()` above already removed most of it by starting
+        // the slice budget when the task starts rather than letting it inherit whatever was left of
+        // a free-running 10 ms period — but a TCG vCPU thread can still be descheduled by the host
+        // between `rearm` and the `iret` into ring 3, and the period then elapses in wall-clock with
+        // the guest not running. Observed: this leg passed, failed, then passed twice on identical
+        // code, with the difference being what else the workstation was doing.
+        //
+        // So the per-slice check is the one that cannot be flaky and cannot be vacuous — never
+        // backwards — and the "it really did run" half is asserted ONCE at the end, over the whole
+        // run, where a slice that got no CPU is absorbed by the slices that did.
+        if seen[slot] && progress < last_progress[slot] {
+            progress_ok = false; // state was LOST across the involuntary switch
         }
         seen[slot] = true;
         last_progress[slot] = progress;
@@ -1611,7 +1627,11 @@ fn run_preemptive() -> (bool, bool) {
     cleanup_tasks(&roots, &mut code, &mut stack);
 
     let fair = clean && counts.iter().all(|&c| c > 0);
-    (fair, progress_ok && clean)
+    // The other half of the progress claim, asserted over the whole run rather than per slice: every
+    // task must have got somewhere. A task whose counter is still 0 after six slices either never
+    // ran or never kept anything, and both of those are the failure this invariant is named for.
+    let advanced = last_progress.iter().all(|&p| p > 0);
+    (fair, progress_ok && advanced && clean)
 }
 
 /// Real blocking IPC on x86-64 (REQ-IPC-010) — the aarch64/RISC-V twin: a receiver that `recv`s an

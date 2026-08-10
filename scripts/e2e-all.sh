@@ -68,7 +68,7 @@ vbox_out="$(bash "$ROOT/scripts/vm-e2e-vbox.sh" 2>&1)"; vbox_rc=$?
 printf '%s
 ' "$vbox_out"
 if printf '%s' "$vbox_out" | grep -q "VM-E2E-VBOX: SKIP"; then
-  vbox_res="SKIP (VirtualBox not installed / no nested virtualization)"
+  vbox_res="SKIP (VirtualBox absent, or a host that cannot virtualize x86-64 — the script says which)"
 elif [ "$vbox_rc" -eq 0 ]; then vbox_res="PASS"; else vbox_res="FAIL"; fi
 
 hr; echo "E2E SUMMARY"; hr

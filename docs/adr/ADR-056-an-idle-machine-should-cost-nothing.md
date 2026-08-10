@@ -99,17 +99,33 @@ marker and `exec`s a shell — a distro booting into a service manager would be 
 
 | | Aletheia (x86-64) | Linux 6.12-lts |
 |---|---|---|
-| boot to interactive shell | 4068 ms | **2053 ms** |
-| idle host CPU at prompt | **0.9 %** | 1.1 % |
-| bootable payload | **522 752 B** | 13 895 207 B |
-| privileged lines of code | **22 083 (Rust)**, 302 `unsafe` occurrences | ~40 M (C, cited for scale, not measured) |
+| boot to a prompt (median of 3) | 3079 ms *(3058, 4082, 3079)* | 3048 ms *(2040, 3048, 3072)* |
+| idle host CPU at prompt | **1.2 %** | 1.7 % |
+| bootable payload | **523 776 B** | 13 895 205 B |
+| privileged lines of code | **22 557 (Rust)**, 302 `unsafe` occurrences (57 in the shared core) | ~40 M (C, cited for scale, not measured) |
 
-**Linux boots faster, and this ADR records that the script's own commentary predicted the opposite
-before the first run corrected it.** Most of that gap is not the kernels: Aletheia boots through
-OVMF, a full UEFI firmware implementation, while the Linux leg is loaded directly by QEMU with
-`-kernel` and skips firmware entirely. That is a real difference in what an operator waits for and it
-is Aletheia's to own, but it is a boot-*path* difference rather than evidence that the kernel is
-slow.
+**No boot-time winner is claimed, and the way that number behaved is the most instructive result
+here.** The script's own commentary first predicted Aletheia would win. The first run said Linux, by
+2053 ms to 4068, and the commentary was rewritten around Linux winning. The second run, same host and
+same binaries, said 3070 to 3080. A single sample had been read as a result twice, in opposite
+directions, and both readings reached a commit message before the third run caught it.
+
+Boot time is therefore a **median over `BOOT_SAMPLES` runs, with every individual sample printed** so
+the spread is visible rather than hidden behind the median — the same treatment idle CPU had from the
+start, which is why idle never produced a wrong story. At 3079 against 3048 with those spreads, this
+benchmark does not distinguish the two.
+
+One structural asymmetry is real and is Aletheia's to own: it boots through OVMF, a full UEFI
+firmware implementation, while the Linux leg is loaded directly by QEMU with `-kernel` and skips
+firmware entirely. That is a boot-*path* difference rather than evidence about either kernel's speed.
+
+**Other Rust operating systems** get an attribute table rather than a column: Redox is the only one
+that ships a downloadable bootable x86-64 image, so it is the only one that can be measured here
+(`WITH_REDOX=1`), and on this host it did not reach a login prompt inside the boot timeout — reported
+in the script's output rather than dropped. seL4, Theseus and Hubris are described by what they have
+*decided* (formal verification, intralingual safety, static task sets), with no performance number
+attached, because a number from somebody else's benchmark on somebody else's hardware is precisely
+what this script exists to refuse.
 
 The two columns worth arguing about are the last two. **Idle CPU** is a fair fight — identical work
 (none), identical emulator — and parity with Linux is the claim. **Privileged lines of code** is the
