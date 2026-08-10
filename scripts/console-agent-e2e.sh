@@ -78,7 +78,14 @@ prompt_count() {
   printf '%s' "${n:-0}"
 }
 
+# Some targets need something done between power cycles that is not part of the argv. x86-64 under
+# OVMF is the case that forced this: the firmware WRITES its NVRAM, so a second boot from the same
+# vars file is not a second boot of the same machine, it is a boot of whatever the first one left
+# behind. A leg sets PRE_OPEN to the name of a function; everything else leaves it empty.
+PRE_OPEN=""
+
 session_open() {
+  [ -n "$PRE_OPEN" ] && "$PRE_OPEN"
   SESSION_LOG="$(mktemp)"
   SESSION_FIFO="$(mktemp -u)"
   mkfifo "$SESSION_FIFO"
@@ -155,7 +162,16 @@ run_case() {
   local transcript obs err
   transcript="$(mktemp -u)"; obs="$(mktemp)"; err="$(mktemp)"
   local -a typed=()
-  local turn=0 line rc answer="" saw_console_says=0 bad=0
+  local turn=0 line rc answer="" bad=0 reached=""
+
+  # A case may be reachable more than one way. The two columns are `|`-separated and INDEX-ALIGNED:
+  # alternative i is proved by typing MT[i] AND seeing SAYS[i] on the live console. Checking the two
+  # independently would let a session pass by typing one alternative and printing another's reply.
+  local -a MT=() SAYS=() SEEN=()
+  IFS='|' read -r -a MT <<< "$must_type"
+  IFS='|' read -r -a SAYS <<< "$console_says"
+  local i
+  for i in "${!MT[@]}"; do SEEN[$i]=0; done
 
   echo "--> \"$request\""
   while [ "$turn" -lt "$DRIVER_MAX_TURNS" ]; do
@@ -164,13 +180,19 @@ run_case() {
     [ "$approved" = "true" ] && argv+=(--approve)
     [ "$turn" -gt 0 ] && argv+=(--observation-file "$obs")
     line="$("${argv[@]}" "$request" 2>"$err")"; rc=$?
+    # Proposals Aletheia refused and re-asked. Nothing was typed for these, so they are shown
+    # BEFORE the step they preceded -- a turn that quietly cost three model calls is a turn nobody
+    # can debug from a log that only records the one that worked.
+    sed -n 's/^corrected: /        ~ re-asked: /p' "$err"
     case "$rc" in
       0)
         [ -z "$line" ] && { echo "  FAIL [$label/$arm] exit 0 with no line to type"; bad=1; break; }
         echo "    step $((turn + 1)): $line"
         session_type "$line"
         typed+=("$line")
-        grep -qF "$console_says" <<<"$CAPTURED" && saw_console_says=1
+        for i in "${!SAYS[@]}"; do
+          grep -qF "${SAYS[$i]}" <<<"$CAPTURED" && SEEN[$i]=1
+        done
         capture_to_observation "$line" "$obs"
         sed 's/^/        | /' "$obs"
         ;;
@@ -193,13 +215,22 @@ run_case() {
       echo "  FAIL [$label/$arm] the session never answered within $DRIVER_MAX_TURNS turns — the budget did not stop it"
       bad=1
     fi
-    # The claim: the last, dependent command really was typed at the machine.
-    if ! printf '%s\n' "${typed[@]:-}" | grep -qxF "$must_type"; then
-      echo "  FAIL [$label/$arm] the session never typed: $must_type"
+    # The claim: SOME dependent command really was typed at the machine, and the machine answered it.
+    # Both halves of one alternative, or the alternative is not proved.
+    reached=""
+    for i in "${!MT[@]}"; do
+      if printf '%s\n' "${typed[@]:-}" | grep -qxF "${MT[$i]}" && [ "${SEEN[$i]}" -eq 1 ]; then
+        reached="${MT[$i]}"; break
+      fi
+    done
+    if [ -z "$reached" ]; then
+      echo "  FAIL [$label/$arm] no way of reaching the answer was both typed and confirmed by the console"
+      for i in "${!MT[@]}"; do
+        printf '    alternative: %-24s typed=%s console-said=%s\n' "${MT[$i]}" \
+          "$(printf '%s\n' "${typed[@]:-}" | grep -qxF "${MT[$i]}" && echo yes || echo no)" \
+          "$([ "${SEEN[$i]}" -eq 1 ] && echo yes || echo no)"
+      done
       printf '    typed: %s\n' "${typed[@]:-<nothing>}"
-      bad=1
-    elif [ "$saw_console_says" -eq 0 ]; then
-      echo "  FAIL [$label/$arm] the live console never printed: $console_says"
       bad=1
     fi
     # And the answer's content — control arm only. See the header.
@@ -208,7 +239,7 @@ run_case() {
       bad=1
     fi
   fi
-  [ "$bad" -eq 0 ] && echo "    OK — reached \`$must_type\` and answered"
+  [ "$bad" -eq 0 ] && echo "    OK — reached \`$reached\` and answered"
   rm -f "$transcript" "$obs" "$err"
   return "$bad"
 }
@@ -363,38 +394,115 @@ model_available() {
   [ "$rc" -ne 2 ]
 }
 
-hr; echo "==> building the hosted agent and the interactive kernel"; hr
+hr; echo "==> building the hosted agent"; hr
 ( cd "$ROOT/aletheia" && cargo build --release ) || { echo "FAIL: aletheiad did not build"; exit 1; }
-( cd "$ROOT/kernel" && cargo build --features interactive ) || { echo "FAIL: kernel did not build"; exit 1; }
 
-# TWO disks: the console picks the SECOND virtio-blk device as its persistent medium and uses the
-# first as scratch. Booted with one, every read-only case still passes and nothing survives a reboot.
-SCRATCH="$ROOT/kernel/target/console-agent-scratch.img"
-PERSIST="$ROOT/kernel/target/console-agent-persistent.img"
+# TWO disks per target: the console picks the SECOND virtio-blk device as its persistent medium and
+# uses the first as scratch. Booted with one, every read-only case still passes and nothing survives
+# a reboot -- which would make the reboot leg pass for the wrong reason.
+SCRATCH=""; PERSIST=""
 fresh_disks() {
   rm -f "$SCRATCH" "$PERSIST"
   dd if=/dev/zero of="$SCRATCH" bs=1048576 count=1 2>/dev/null
   dd if=/dev/zero of="$PERSIST" bs=1048576 count=1 2>/dev/null
 }
-fresh_disks
-ELF="$ROOT/kernel/target/aarch64-unknown-none-softfloat/debug/aletheia-kernel"
-QEMU=(qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic
-  -semihosting-config enable=on,target=native -kernel "$ELF"
-  -global virtio-mmio.force-legacy=false
-  -drive "if=none,format=raw,file=$SCRATCH,id=blk0" -device virtio-blk-device,drive=blk0
-  -drive "if=none,format=raw,file=$PERSIST,id=blk1" -device virtio-blk-device,drive=blk1)
 
-run_arm "aarch64" deterministic "${QEMU[@]}"
-RESULTS+=("aarch64 / deterministic : $([ $? -eq 0 ] && echo PASS || echo FAIL)")
+# Both arms of one target, with a fresh medium for each. Split out because the three legs differ only
+# in how a machine is started, and a leg that also had to remember to re-make its disks between arms
+# is a leg where the second arm silently inherits the first arm's namespace.
+run_target() {
+  local label="$1"; shift
+  local -a argv=("$@")
+  fresh_disks
+  run_arm "$label" deterministic "${argv[@]}"
+  RESULTS+=("$label / deterministic : $([ $? -eq 0 ] && echo PASS || echo FAIL)")
+  fresh_disks
+  if model_available; then
+    run_arm "$label" model "${argv[@]}"
+    RESULTS+=("$label / model         : $([ $? -eq 0 ] && echo PASS || echo FAIL)")
+  else
+    RESULTS+=("$label / model         : SKIP (no backend is serving the selected model)")
+    echo "SKIP: the model arm needs the selected model actually being served — see \`aletheiad model status\`"
+  fi
+}
 
-fresh_disks
-if model_available; then
-  run_arm "aarch64" model "${QEMU[@]}"
-  RESULTS+=("aarch64 / model         : $([ $? -eq 0 ] && echo PASS || echo FAIL)")
-else
-  RESULTS+=("aarch64 / model         : SKIP (no backend is serving the selected model)")
-  echo "SKIP: the model arm needs the selected model actually being served — see \`aletheiad model status\`"
-fi
+# ---------------------------------------------------------------------------------------------
+# aarch64 and RISC-V: a direct `-kernel` boot, serial on stdio, virtio over MMIO. The SAME dispatcher
+# runs on both -- `kernel_core::shell` is shared -- which is exactly why running the model against
+# only one of them proved nothing about the other (ALET-P2-047).
+# ---------------------------------------------------------------------------------------------
+mmio_target() {
+  local label="$1" dir="$2" triple="$3" bin="$4"; shift 4
+  local -a qemu=("$@")
+  hr; echo "==> $label: building the kernel WITH the interactive console"; hr
+  ( cd "$ROOT/$dir" && cargo build --features interactive ) \
+    || { echo "FAIL: $label kernel did not build"; fail=1; RESULTS+=("$label : FAIL (build)"); return 1; }
+  SCRATCH="$ROOT/$dir/target/console-agent-scratch.img"
+  PERSIST="$ROOT/$dir/target/console-agent-persistent.img"
+  PRE_OPEN=""
+  run_target "$label" "${qemu[@]}" -kernel "$ROOT/$dir/target/$triple/debug/$bin" \
+    -global virtio-mmio.force-legacy=false \
+    -drive "if=none,format=raw,file=$SCRATCH,id=blk0" -device virtio-blk-device,drive=blk0 \
+    -drive "if=none,format=raw,file=$PERSIST,id=blk1" -device virtio-blk-device,drive=blk1
+}
+
+mmio_target "aarch64" kernel aarch64-unknown-none-softfloat aletheia-kernel \
+  qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+  -semihosting-config enable=on,target=native
+
+mmio_target "riscv64" kernel-riscv64 riscv64gc-unknown-none-elf aletheia-kernel-riscv64 \
+  qemu-system-riscv64 -machine virt -cpu rv64 -smp 4 -m 128M -nographic -bios default
+
+# ---------------------------------------------------------------------------------------------
+# x86-64: a UEFI disk image under OVMF, virtio over PCI. SKIPs -- never silently passes -- when the
+# host has no firmware to boot it with.
+# ---------------------------------------------------------------------------------------------
+x86_target() {
+  local label="x86-64" code="" vars=""
+  for c in "${OVMF_CODE:-}" /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+           /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+           /usr/share/edk2/x64/OVMF_CODE.4m.fd; do
+    [ -n "$c" ] && [ -f "$c" ] && { code="$c"; break; }
+  done
+  for v in "${OVMF_VARS:-}" /opt/homebrew/share/qemu/edk2-i386-vars.fd \
+           /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+           /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
+    [ -n "$v" ] && [ -f "$v" ] && { vars="$v"; break; }
+  done
+  if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v mformat >/dev/null 2>&1 \
+     || [ -z "$code" ] || [ -z "$vars" ]; then
+    echo "  x86-64 agent leg unavailable on this host (needs qemu-system-x86_64 + mtools + OVMF) — SKIPPED (never a silent pass)."
+    RESULTS+=("x86-64 / deterministic : SKIP (no OVMF/mtools on this host)")
+    RESULTS+=("x86-64 / model         : SKIP (no OVMF/mtools on this host)")
+    return 0
+  fi
+
+  hr; echo "==> $label: building the UEFI image WITH the interactive console"; hr
+  local img="$ROOT/kernel-x86_64/build/aletheia-x86_64-interactive.img"
+  CARGO_FEATURES=interactive IMG="$img" bash "$ROOT/kernel-x86_64/scripts/build-image-linux.sh" \
+    || { echo "FAIL: $label image did not build"; fail=1; RESULTS+=("x86-64 : FAIL (build)"); return 1; }
+
+  local work; work="$(mktemp -d)"
+  SCRATCH="$work/scratch.img"
+  PERSIST="$work/persist.img"
+  # OVMF WRITES its NVRAM. Every boot gets a fresh copy of the template; the DISKS are kept, which
+  # is what makes the reboot leg a real power cycle of the same machine rather than a new one.
+  OVMF_VARS_TEMPLATE="$vars" OVMF_VARS_LIVE="$work/vars.fd"
+  refresh_ovmf_vars() { cp "$OVMF_VARS_TEMPLATE" "$OVMF_VARS_LIVE"; }
+  PRE_OPEN=refresh_ovmf_vars
+
+  run_target "$label" qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -nographic \
+    -drive "if=pflash,format=raw,unit=0,file=$code,readonly=on" \
+    -drive "if=pflash,format=raw,unit=1,file=$work/vars.fd" \
+    -drive "format=raw,file=$img" \
+    -drive "if=none,format=raw,file=$SCRATCH,id=blk0" -device virtio-blk-pci,drive=blk0 \
+    -drive "if=none,format=raw,file=$PERSIST,id=blk1" -device virtio-blk-pci,drive=blk1 \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot
+  PRE_OPEN=""
+  rm -rf "$work"
+}
+
+x86_target
 
 hr; printf '%s\n' "${RESULTS[@]}"; hr
 [ "$fail" -eq 0 ] && echo "console-agent-e2e: PASS" || echo "console-agent-e2e: FAIL"
