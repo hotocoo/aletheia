@@ -172,30 +172,126 @@ Every entity is authorized (`entity.read`) **before** it enters context; a subje
 gets no world context. Semantic/vector and document knowledge are optional interfaces — **no
 embedding server or vector database is required** for normal OS operation.
 
-## Run it
+## Boot it and use it
+
+### 0. Which path works on your machine
+
+The one thing that trips people up first, so it is first — check with `uname -m`:
+
+| Your machine | Use | Why |
+|---|---|---|
+| **Apple Silicon Mac** (`arm64`) | **QEMU** — below | VirtualBox virtualizes the *host* architecture: it installs and answers `--version` on arm64, then fails at `startvm` for an x86-64 guest. |
+| **Intel Mac / Windows / Linux** (`x86_64`) | QEMU **or** VirtualBox | VirtualBox is the no-QEMU path — see [Run it as an OS, in Oracle VirtualBox](#run-it-as-an-os-in-oracle-virtualbox). |
+
+What you need:
+
+```bash
+brew install qemu mtools zstd                 # macOS (+ Xcode CLT)
+sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 \
+     ovmf mtools dosfstools zstd              # Debian/Ubuntu
+```
+
+Rust nightly is pinned; the toolchain file installs it for you on first build. If a build says
+`can't find crate for core`, a Homebrew `cargo` is shadowing rustup's —
+`export PATH="$HOME/.cargo/bin:$PATH"` fixes the session (every script in `scripts/` already does it).
+
+### 1. Boot the OS and type at it
+
+```bash
+./scripts/run-interactive.sh aarch64     # or: riscv64, x86_64
+```
+
+The machine boots, runs its invariant suites in kernel space, and hands you a prompt — a real OS on a
+real (virtual) machine, not a simulator of one:
+
+```text
+aletheia> help
+aletheia> write manifesto the OS you can sit in front of
+aletheia> ls
+aletheia> grep front manifesto
+aletheia> cp manifesto backup
+aletheia> wc backup
+aletheia> halt
+```
+
+27 commands over the namespace (`ls`, `cat`, `write`, `append`, `cp`, `mv`, `grep`, `hexdump`,
+`find`, `wc`, `df`, `mem`, `reboot`, `halt`, …; type `help`), a real line editor — arrows,
+`Home`/`End`, `Delete`, history on the up arrow, `Tab` completion over the names that exist. The disk
+persists between runs at `kernel*/target/interactive-persistent.img`: boot again and `ls` still shows
+what you wrote; delete that file for an empty namespace. **`Ctrl-A X` quits QEMU.**
+
+Try all three CPU targets — it is the same `kernel-core` dispatcher on each.
+[docs/BOOT.md](docs/BOOT.md) is the per-target boot reference (images, firmware, troubleshooting).
+
+### 2. Let the model drive that console
+
+The model does not get an API around the OS. It gets **the operator's surface with the operator's
+authority**, and it cannot type a line you could not have typed. Get the weights and serve them —
+**`--jinja` is not optional**, without it `llama-server` never parses a tool call and a correct answer
+reads as no answer at all:
+
+```bash
+cd aletheia && cargo build --release && cd ..
+./aletheia/target/release/aletheiad model status   # what is selected, and whether it is present
+./aletheia/target/release/aletheiad model pull     # ~1.6 GB into the local HF cache
+
+llama-server -m "$(./aletheia/target/release/aletheiad model status | sed -n 's/^weights: *present — //p')" \
+             -c 8192 --port 8099 --host 127.0.0.1 --jinja
+```
+
+Ask it for one console line, then type that line at the prompt from step 1:
+
+```bash
+export MODEL_ENDPOINT=http://127.0.0.1:8099
+printf '  objects:\n    30 manifesto\n    12 poem\n' > /tmp/brief.txt
+
+./aletheia/target/release/aletheiad console plan --interpreter model \
+  --context-file /tmp/brief.txt "show me the poem"
+```
+
+It prints one console line and nothing else, validated against the kernel's own command table. Or ask
+it for a whole session, feeding the console's reply back as the observation:
+
+```bash
+T=/tmp/session.json
+./aletheia/target/release/aletheiad console agent --transcript $T --interpreter model \
+  --context-file /tmp/brief.txt --approve \
+  "make a copy of manifesto called backup, then tell me how big the copy is"
+
+echo "manifesto -> backup (30 bytes)" > /tmp/obs.txt
+./aletheia/target/release/aletheiad console agent --transcript $T --interpreter model \
+  --context-file /tmp/brief.txt --approve --observation-file /tmp/obs.txt \
+  "make a copy of manifesto called backup, then tell me how big the copy is"
+```
+
+Exit `0` with a line on stdout means *type this and come back*; exit `10` means it is done and
+`answer:` on stderr is the answer. `corrected:` lines on stderr are proposals Aletheia refused and
+re-asked — those never reached the machine. The bounds hold whatever the model proposes: a
+destructive op without `--approve` is refused with **nothing on stdout** for a driver to type, and
+stopping the machine is refused **even with** `--approve`.
+
+### 3. Use the hosted Core
+
+The System Core runs on the dev host behind the same Service API / IPC boundary applications use:
 
 ```bash
 cd aletheia
-cargo test                       # full conformance + unit suite (deterministic; no model needed)
 cargo run                        # aletheiad demo: runs UC-001..004 as a CLIENT over the service boundary
 cargo run -- serve               # long-running Core Alpha behind the Unix-socket IPC boundary
 
-# Optional: use the real local model as the primary AI provider (hosted dev)
-cargo run -- model list          # what is registered, and which one is selected
-cargo run -- model pull          # provision the SELECTED model's weights into the HF cache (once)
-llama-server -m "$(python3 -c 'import glob,os;print(glob.glob(os.path.expanduser("~/.cache/huggingface/hub/models--LiquidAI--LFM2.5-2.6B-GGUF/snapshots/*/*.gguf"))[0])')" -c 8192 --port 8080
+cargo run -- model list          # what this machine actually has; * marks the running selection
+cargo run -- model use lfm2.5    # switch (unique prefix is enough); persisted under $HOME/.aletheia
 cargo run -- model status        # confirms the backend is serving the model you selected
-cargo run -- model bench         # every registered operation through the real model; exits non-zero on any failure
-MODEL_ENDPOINT=http://localhost:8080 cargo run   # provider becomes healthy → model interprets intents
-
-./scripts/vm-e2e.sh              # build + boot the aarch64 microkernel in QEMU + assert invariants (P4)
-./scripts/vm-e2e-riscv.sh        # ...the RISC-V target        ./scripts/vm-e2e-x86.sh   # ...the x86-64 target
-./scripts/vm-e2e-vbox.sh         # the SAME x86-64 image on a SECOND hypervisor: Oracle VirtualBox (ADR-046)
-./scripts/e2e-all.sh             # all three CPU targets + the VirtualBox rung, one aggregate pass/fail
-./scripts/conformance.sh         # every target proves the SAME core semantic contract
-./scripts/check-traceability.sh  # every "delivered" requirement maps to evidence that EXISTS
-./scripts/check-ci-parity.sh     # ...and that CI actually RUNS it (every arch boot-gated, both pipelines agree)
+cargo run -- model bench         # every registered operation through the real model; non-zero on any failure
+MODEL_ENDPOINT=http://127.0.0.1:8099 cargo run   # provider healthy → the model interprets intents
 ```
+
+With no model available at all the **deterministic interpreter** takes over and the OS stays fully
+functional — nothing above requires a resident model.
+
+[docs/TRY-IT.md](docs/TRY-IT.md) is the long-form operator walkthrough of steps 1–2, and
+[docs/MATURITY.md](docs/MATURITY.md) grades every subsystem and says plainly that nothing here is
+production-ready.
 
 ### Run it as an OS, in Oracle VirtualBox
 
@@ -247,6 +343,22 @@ Resolution is an order, not a merge: **environment** beats the **persisted selec
 the manifest marked `default`. Setting `MODEL_REF` detaches the configuration from the registry — the
 model is then reported as `(unregistered)` and `model bench` refuses to run, because a model whose
 identity Aletheia cannot verify must not be measured under a registry name.
+
+### Verify it yourself
+
+Booting and using it is the point above; none of it needs these. When you want to check rather than
+believe, every number this repository quotes has a gate behind it:
+
+```bash
+cd aletheia && cargo test        # full conformance + unit suite (deterministic; no model needed)
+./scripts/e2e-all.sh             # all three CPU targets + the VirtualBox rung, one aggregate pass/fail
+./scripts/console-e2e.sh         # boot, type, halt, reboot, read it back — three targets
+./scripts/comparative-bench.sh   # Aletheia against a real Linux kernel on the SAME emulator
+```
+
+[docs/TRY-IT.md](docs/TRY-IT.md) §3 lists the rest (per-target VM gates, the model-driven console
+gate, conformance, and the three claim-checking gates that assert the evidence exists and that CI
+actually runs it).
 
 ## Research
 
