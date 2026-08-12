@@ -2,7 +2,7 @@
 //! Do not edit by hand: the hash below is what makes a blob whose feature *meanings* have moved a
 //! named refusal at load time instead of a silently rotated set of columns.
 //!
-//! Corpus: borg2011. Feature contract: a9e2674a721ded3db87b8aa2da0c09f02dcebd56ea1c6f4df50b62e35a457403
+//! Corpus: borg2019. Feature contract: a9e2674a721ded3db87b8aa2da0c09f02dcebd56ea1c6f4df50b62e35a457403
 
 /// Number of features the kernel must supply to [`crate::mlrisk::RiskAdvisor::advise`].
 pub const N_FEATURES: usize = 20;

@@ -402,6 +402,17 @@ fn fixture_rows() -> Vec<FixtureRow> {
         .collect()
 }
 
+/// The committed fixture's feature vectors alone — REAL rows from the trainer's held-out split.
+///
+/// Exposed because a benchmark built from synthetic vectors measures the generator, not the
+/// workload: uniformly sampling inside the feature box produces a population the forest scores
+/// almost identically, so a scheduler A/B over it reports "the model changes nothing" no matter how
+/// good the model is. These rows carry the real joint distribution between features, which is the
+/// only thing that produces a realistic mix of verdicts.
+pub fn parity_inputs() -> Vec<[i32; N_FEATURES]> {
+    fixture_rows().into_iter().map(|r| r.x).collect()
+}
+
 /// The number of fixture lines that *should* have parsed — so a fixture whose rows silently stopped
 /// being readable fails rather than shrinking the evidence.
 fn fixture_line_count() -> usize {

@@ -1,11 +1,57 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-10 21:39 +08 (risk-advisor VM-gate wave)
+**As of:** 2026-08-12 09:28 +08 (borg2019 model install + risk-advisor stress gate)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
+
+## The 2019 model, and the forest under load (2026-08-12 09:28 +08) — a benchmark that found a kernel defect
+
+The blob every image carries is now the `borg2019` model (32.7 M held-out rows, PR-AUC 0.99543,
+1 368 measured compares per advice), and the wave that installed it added the measurement the
+previous one did not have: **what an advice costs on the real machine, and what it actually changes
+about a schedule** (REQ-ML-002).
+
+* **A bound is arithmetic; this is a measurement.** `kernel_core::mlrisk_stress` is generic over
+  `Hal`, so each target times `advise` with its own clock and prints ps/advice and advices/s —
+  ~34 us on aarch64, ~35 us on riscv64-TCG, ~47 us on x86-64+OVMF, ~4.9 us on a release host. Those
+  numbers are **reported and never gated**: an emulator's nanoseconds are not a pass/fail condition.
+* **Eight scale-invariant checks ARE gated, on all three targets.** The verdict census accounts for
+  every advice; the range guard stays silent on rows drawn from inside the shipped range table and
+  fires on out-of-box arrivals; the same load reproduces the same margins and the same census
+  exactly; the advised schedule is a **permutation** of the model-free one — no task invented,
+  dropped or starved — under an all-tied workload, a priority-banded one, and over the trainer's own
+  held-out rows; and a workload the model abstains on drains in **exactly** the model-free order.
+  That last one is the ADR-056 fallback, previously proved on eight fixture rows and now on 128 tasks
+  per boot and 8 000 on the host.
+* **The census separates the two abstain causes, because they are not the same thing.** The
+  conformal band means "both labels are plausible"; the range guard means "this input is outside the
+  box the forest was fitted in". The 2019 blob's conformal band shipped **inverted** (`lo > hi`), so
+  it can never fire — a defect recorded in `aletheia-ml/docs/MODEL-CARD.md` and now a named refusal
+  at calibration time in the trainer. The previous 2011 blob's band was live at 11.7 percent of
+  in-box rows, which is how we know the mechanism works and this blob's band is simply empty. The
+  range guard is live either way: 43 percent of in-corpus rows, and 98.4 percent of rows from a
+  corpus eight years older.
+* **The benchmark found a real kernel defect, which is the point of building it.** Its first aarch64
+  boot panicked with `memory allocation of 104 bytes failed`. The cause was not the model:
+  `PriorityScheduler::effective_priority` allocated a fresh `BTreeSet` on **every priority
+  comparison**, and `schedule_next` is a linear scan, so draining *n* tasks cost O(n^2) allocations
+  against a bump allocator that never reclaims. A 128-task benchmark consumed **7 742 384 B of the
+  8 MiB heap** and starved the rest of boot. The fix is a donation fast path — with nothing waiting
+  on any endpoint no task can donate, so effective priority *is* base priority and no set is needed.
+  Heap for the same benchmark: **873 392 B** (8.9x less); the advised all-tied drain went from
+  12.67 ms to 6.78 ms; semantics identical, all kernel-core tests unchanged.
+* **Gated, everywhere.** `scripts/vm-e2e.sh`, `scripts/vm-e2e-riscv.sh` and
+  `kernel-x86_64/scripts/smoke-test.sh` now additionally require `ALL 8 STRESS INVARIANTS HOLD` and
+  an anchored match on `abstaining workload: <n> tasks, 0 positions move`. All three gates PASS.
+  `kernel-core` hosted suite **326 passed** (29 suites); `quality-gate.sh` PASS;
+  `check-traceability.sh` PASS at 101 requirements; `check-register.sh` PASS.
+
+**Still open, unchanged and named:** real-task feature extraction. The forest is verified, bounded,
+measured under load and proved advisory on every boot — and on a running machine it still advises
+about no one, because nothing yet derives the 20-feature vector from a live task (ADR-056).
 
 ## The risk-advisor VM gate (2026-08-10 21:39 +08) — the forest is on the boot path of all three targets
 

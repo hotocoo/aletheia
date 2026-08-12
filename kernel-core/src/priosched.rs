@@ -220,7 +220,24 @@ impl PriorityScheduler {
     /// A task's **effective** priority: the max of its base and the effective priorities of every task
     /// (transitively) blocked on an endpoint it holds — priority donation. Cycles (a deadlock) are
     /// broken by a visited set so donation terminates rather than recursing forever.
+    /// # Allocation
+    ///
+    /// Donation needs a visited set to break cycles, and a `BTreeSet` allocates. This function is
+    /// called once per Ready task per scheduling decision, so `schedule_next` calls it O(n) times
+    /// and draining a run queue calls it O(n²) times. On a kernel target the allocator is a bump
+    /// allocator that **never frees** (`kernel/src/heap.rs`), which turned that into 7.7 MB of an
+    /// 8 MiB heap consumed by a 128-task drain — enough to OOM the rest of boot. It was the
+    /// `mlrisk_stress` gate that made that visible.
+    ///
+    /// So the set is allocated only when donation is actually possible: with nothing waiting on any
+    /// endpoint, no task can be donating to any other and a task's effective priority is exactly its
+    /// base. That is the common case by a wide margin — a task blocked on an endpoint is the
+    /// exception, not the rule — and the answer is identical either way, so this is a fast path
+    /// rather than an approximation.
     pub fn effective_priority(&self, task: TaskId) -> Priority {
+        if self.waiters.values().all(|w| w.is_empty()) {
+            return self.base.get(&task).copied().unwrap_or(Priority(0));
+        }
         let mut visited = BTreeSet::new();
         self.effective_inner(task, &mut visited)
     }

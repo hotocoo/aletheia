@@ -70,6 +70,11 @@ echo "$OUT" | grep -q "S->M boundary OK"              || { echo "FAIL: SBI bound
 echo "$OUT" | grep -q "ALL 13 INVARIANTS HOLD"        || { echo "FAIL: invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 11 CAPABILITY-LIFETIME INVARIANTS HOLD" || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
 echo "$OUT" | grep -q "ALL 20 RISK-ADVISOR INVARIANTS HOLD" || { echo "FAIL: risk-advisor invariants marker missing (REQ-ML-001, ADR-056)"; fail=1; }
+# The forest under load: cost measured on this machine, and the properties that must hold at
+# any scale. A model that is only verified on 256 fixture rows is verified at a scale no scheduler
+# ever runs at (REQ-ML-002, ADR-056).
+echo "$OUT" | grep -q "ALL 8 STRESS INVARIANTS HOLD" || { echo "FAIL: risk-advisor stress markers missing (REQ-ML-002, ADR-056)"; fail=1; }
+echo "$OUT" | grep -qE "abstaining workload: [0-9]+ tasks, 0 positions move" || { echo "FAIL: an abstaining model moved a scheduling position (ADR-056 fallback broken)"; fail=1; }
 echo "$OUT" | grep -q "ALL 21 MEMORY INVARIANTS HOLD"  || { echo "FAIL: memory-management marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 66 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 24 USER-MODE BOUNDARY INVARIANTS HOLD" || { echo "FAIL: user-mode marker missing"; fail=1; }
