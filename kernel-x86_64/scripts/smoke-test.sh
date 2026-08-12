@@ -92,6 +92,8 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 22 MEMORY INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 11 CAPABILITY-LIFETIME INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 20 RISK-ADVISOR INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 8 STRESS INVARIANTS HOLD' "$LOG" \
+   && grep -qE 'abstaining workload: [0-9]+ tasks, 0 positions move' "$LOG" \
    && grep -q 'ALL 72 VIRTUAL-MEMORY INVARIANTS HOLD' "$LOG" \
    && grep -q 'kernel map built @' "$LOG" \
    && grep -q 'kernel map ACTIVE' "$LOG" \

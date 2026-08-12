@@ -59,6 +59,18 @@ shape — not a convention — enforces them.
    class-conditional (Mondrian) conformal band, both labels are plausible; outside the per-feature
    box seen in training, the input is a question the blob was never asked. Either way the kernel
    declines and its deterministic policy stands.
+
+   **Two causes means two failure modes, and one of them has occurred.** The blob installed in
+   2026-08 (`borg2019`) shipped an **inverted** conformal band — `lo` above `hi`, an empty interval —
+   so that half of this clause is dead for that model: measured band-abstain rate 0.000. Nothing in
+   the kernel catches it, and deliberately so: `load` validates what makes a blob *evaluable*, and an
+   empty interval evaluates perfectly well. The catch belongs in the trainer, at the moment the band
+   is computed, and now lives there as a named refusal (`aletheia-ml`, `calibrate.check_band`). The
+   range guard is unaffected and is the cause that fires in practice — 43 % of in-corpus rows, 98.4 %
+   of rows drawn from a corpus eight years older. Anyone reading this clause as a live safety
+   guarantee should check which of the two causes the installed blob actually has:
+   `aletheia-ml/docs/MODEL-CARD.md` states it, and the boot line
+   `[mlrisk-stress] in-box census: … (N from the conformal band)` measures it on the running machine.
 5. **Absence and corruption are named, never silent.** `RiskAdvisor::load` returns a specific
    `ModelError` for wrong magic, unsupported version, feature-count mismatch, feature-contract-hash
    mismatch, wrong fixed-point scale, an empty forest, a truncated or over-long table, and any child

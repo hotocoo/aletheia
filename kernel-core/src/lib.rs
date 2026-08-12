@@ -40,6 +40,7 @@ pub mod layout;
 pub mod memattr;
 pub mod mlrisk;
 pub mod mlrisk_contract;
+pub mod mlrisk_stress;
 pub mod persist;
 pub mod priosched;
 pub mod ptreclaim;

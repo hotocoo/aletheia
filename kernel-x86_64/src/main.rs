@@ -448,6 +448,92 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // The forest under LOAD, on this machine, with this machine's own clock: what an advice costs,
+    // and what the advice actually changes about a schedule. Timings are REPORTED; only the
+    // scale-invariant properties gate the boot (REQ-ML-002, ADR-056).
+    match kernel_core::mlrisk::RiskAdvisor::load(kernel_core::mlrisk::BUNDLED_MODEL) {
+        Ok(model) => {
+            let advices = kernel_core::mlrisk_stress::BOOT_ADVICES;
+            let tasks = kernel_core::mlrisk_stress::BOOT_TASKS;
+            match kernel_core::mlrisk_stress::stress_suite(
+                advices,
+                tasks,
+                |a, t| kernel_core::mlrisk_stress::measure::<ActiveHal>(&model, a, t),
+                |a| {
+                    kernel_core::mlrisk_stress::advice_stress::<ActiveHal>(
+                        &model,
+                        a,
+                        0,
+                        kernel_core::mlrisk_stress::HOT_SEED,
+                    )
+                },
+                |n, passed, name| {
+                    if passed {
+                        kprintln!("  [pass {:>2}] {}", n, name);
+                    } else {
+                        kprintln!("  [FAIL {:>2}] {}", n, name);
+                    }
+                },
+            ) {
+                Ok((r, n)) => {
+                    kprintln!(
+                        "[mlrisk-stress] {} advices in {} ns => {} ps/advice, {} advices/s",
+                        r.hot.advices,
+                        r.hot.ns_total,
+                        r.hot.ps_per_advice,
+                        r.hot.per_second()
+                    );
+                    kprintln!(
+                        "[mlrisk-stress] in-box census: {} low / {} elevated / {} abstain ({} from the conformal band)",
+                        r.hot.low,
+                        r.hot.elevated,
+                        r.hot.abstain,
+                        r.hot.band_abstain
+                    );
+                    kprintln!(
+                        "[mlrisk-stress] out-of-box arrivals: {} of {} => {} abstain",
+                        r.mixed.out_of_range,
+                        r.mixed.advices,
+                        r.mixed.abstain
+                    );
+                    kprintln!(
+                        "[mlrisk-stress] schedule all-tied: {} tasks, {} decisive, {} positions move, plain {} ns vs advised {} ns",
+                        r.tied.tasks,
+                        r.tied.decisive,
+                        r.tied.divergences,
+                        r.tied.plain_ns,
+                        r.tied.advised_ns
+                    );
+                    kprintln!(
+                        "[mlrisk-stress] schedule 8 bands: {} tasks, {} decisive, {} positions move, plain {} ns vs advised {} ns",
+                        r.banded.tasks,
+                        r.banded.decisive,
+                        r.banded.divergences,
+                        r.banded.plain_ns,
+                        r.banded.advised_ns
+                    );
+                    kprintln!(
+                        "[mlrisk-stress] abstaining workload: {} tasks, {} positions move (must be 0)",
+                        r.quiet.tasks,
+                        r.quiet.divergences
+                    );
+                    kprintln!("[mlrisk-stress] ALL {} STRESS INVARIANTS HOLD", n);
+                }
+                Err((idx, name)) => {
+                    kprintln!(
+                        "[mlrisk-stress] FAILED at stress invariant {}: {}",
+                        idx,
+                        name
+                    );
+                    ActiveHal::exit(170 + idx as i32);
+                }
+            }
+        }
+        // The load-time refusal above already said which check refused the blob; a kernel with no
+        // model has nothing to stress, and that is not a failure of this gate.
+        Err(_) => kprintln!("[mlrisk-stress] SKIPPED: no verified model to stress"),
+    }
+
     // SMP: discover the APs from the ACPI MADT, wake them with INIT-SIPI-SIPI through the
     // real-mode trampoline, and prove the 13-invariant cross-core substrate (REQ-SMP-002 parity
     // with aarch64/RISC-V). MUST run before the ring-3 suite: that suite repoints IRQ0 at its own
