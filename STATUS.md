@@ -65,7 +65,8 @@ and the closure is a gate, not a paragraph.
   whatever attests the image and a running kernel cannot be holding a model its own artifact hash
   does not account for. Embedding is not trusting: every target calls `RiskAdvisor::load` **at boot**
   and prints what it got — `[mlrisk] bundled forest: 119 trees, 6367 nodes, worst case 714 compares
-  per advice` — or the named `ModelError` that refused it. A refusal is printed, never inferred from
+  per advice` (that is the borg2011 blob this wave shipped; superseded 2026-08-12 by borg2019 —
+  171 trees, 26 469 nodes, 1 368 compares — see the wave above) — or the named `ModelError` that refused it. A refusal is printed, never inferred from
   silence.
 * **One suite, three targets, twenty invariants.** `mlrisk::mlrisk_suite` is arch-independent in the
   same sense as `selftest::run`: the invariants and their names are defined once and each target
