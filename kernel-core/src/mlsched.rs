@@ -13,12 +13,16 @@
 //! forest, and records the answer; every dispatch and every task death is fed back into the history
 //! the *next* advice reads.
 //!
-//! **Named, and still open:** each target's `usermode.rs` still spawns its ring-3 tasks through its
-//! own bespoke rotation rather than through [`crate::priosched::PriorityScheduler`] — the follow-on
-//! [`crate::sched`] has documented since it landed. So the advisor is consulted for every admission
-//! the priority-scheduler path carries, and a real user-mode task spawn does not yet reach it. That
-//! is a wiring gap in the targets, not a gap in this module, and it is said here rather than left
-//! for a reader to discover from the absence of a call site.
+//! **A real user-mode task reaches it.** The aarch64 and RISC-V targets each run two genuine ring-3
+//! / U-mode tasks — own address spaces, own trap frames, real context switches — admitted through
+//! [`resident::admit`] and dispatched by [`crate::priosched::PriorityScheduler`], with the dispatch
+//! and the exit fed back (`run_advised_scheduler` in each target's `usermode.rs`, gated as three
+//! boot invariants per target). The task is described with the memory it actually mapped, not with a
+//! plausible-looking constant.
+//!
+//! **Still open, and named:** the x86-64 target has the same seam available and is NOT wired to it,
+//! because its ring-3 gate is red on a defect that predates this work (`trapframe`, invariant 28) and
+//! wiring behind a red gate proves nothing. The two targets whose gates are green are wired.
 //!
 //! **Continuity is measured, not asserted.** [`AdviceStats`] carries the counters a console can
 //! print: how many advices have been given, the verdict census, the longest historical gap between
