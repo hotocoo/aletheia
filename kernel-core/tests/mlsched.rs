@@ -307,3 +307,57 @@ fn the_advice_carries_the_margin_it_came_from() {
         Verdict::Abstain => {}
     }
 }
+
+/// The falsifiability claim, as a test rather than a sentence: a historical gap cannot grow while the
+/// advisor is quiet, and the silence can. An advisor consulted in a burst at boot and never again
+/// keeps reporting its small historical gaps forever, so `max_gap_secs` alone would let a machine go
+/// on claiming a model it had stopped consulting. `silence_secs` is measured against the machine's
+/// own clock and grows with it.
+#[test]
+fn silence_grows_while_the_historical_gap_cannot() {
+    let mut svc = RiskService::without_model(SUITE_MACHINE);
+    let mut sched = PriorityScheduler::default();
+    svc.admit(&mut sched, TaskId(1), Priority(5), 0, &task(1, 0, 1));
+    svc.admit(&mut sched, TaskId(2), Priority(5), 5, &task(1, 1, 1));
+    assert_eq!(svc.stats().max_gap_secs, 5);
+    assert_eq!(svc.stats().silence_secs(), 0);
+
+    // The machine runs on, admitting nothing. Only one of the two numbers notices.
+    for t in 1..=9u64 {
+        svc.tick(5 + t * 100);
+    }
+    let s = svc.stats();
+    assert_eq!(
+        s.max_gap_secs, 5,
+        "a historical gap must not grow while nothing is asked"
+    );
+    assert_eq!(s.last_tick_secs, 905);
+    assert_eq!(
+        s.silence_secs(),
+        900,
+        "silence must grow with the machine's own clock"
+    );
+
+    // A fresh consultation closes the silence and updates the history in one step.
+    svc.admit(&mut sched, TaskId(3), Priority(5), 905, &task(1, 2, 1));
+    let s = svc.stats();
+    assert_eq!(s.silence_secs(), 0);
+    assert_eq!(
+        s.max_gap_secs, 900,
+        "the gap that just closed is now the longest one"
+    );
+}
+
+/// Before the first consultation there is nothing to be silent about, and the counter says zero
+/// rather than the machine's uptime — an advisor that has never been asked has not fallen quiet.
+#[test]
+fn there_is_no_silence_before_the_first_advice() {
+    let mut svc = RiskService::without_model(SUITE_MACHINE);
+    for t in 1..=5u64 {
+        svc.tick(t * 300);
+    }
+    let s = svc.stats();
+    assert_eq!(s.advices, 0);
+    assert_eq!(s.last_tick_secs, 1_500);
+    assert_eq!(s.silence_secs(), 0);
+}

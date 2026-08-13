@@ -228,9 +228,10 @@ advices: 4096 (180 low / 3543 elevated / 373 abstain, 0 of those in the conforma
 decisive: 90.8% — 373 out-of-box arrival(s) declined
 watching: 4096 dispatch(es), 2457 finished / 820 failed / 819 evicted, 4096 housekeeping tick(s)
 continuity: first advice at 0s, last at 28665s (span 28665s), longest gap 7s
+silence: 0s since the last advice, as of the machine's clock at 28665s
 ```
 
-Those five lines are `mlstat`'s own renderer (`shell::report_risk_advisor`) — one implementation, so
+Those six lines are `mlstat`'s own renderer (`shell::report_risk_advisor`) — one implementation, so
 the boot banner and the console command cannot say different things — and the boot prints them by
 calling it. The console command is separately gated: `console: mlstat reports the resident risk
 advisor's live counters` is one of the 42 console invariants every target re-proves in QEMU.

@@ -525,10 +525,18 @@ pub fn mlsched_suite(
                 &suite_task(1, i as u32, 1),
             );
         }
+        // Then the machine keeps running without admitting anything: ticks advance the clock, and
+        // the SILENCE grows even though the historical gap cannot. That asymmetry is the point --
+        // a max gap only ever closes when the next advice arrives, so an advisor that fell quiet
+        // would keep reporting the small gaps it managed while it was busy.
+        svc.tick(1_805);
         let s = svc.stats();
         check!(
-            s.max_gap_secs == 889 && s.span_secs() == 905 && s.first_advice_secs == 0,
-            "mlsched: the longest gap between consultations is measured, so residency is falsifiable"
+            s.max_gap_secs == 889
+                && s.span_secs() == 905
+                && s.first_advice_secs == 0
+                && s.silence_secs() == 900,
+            "mlsched: the gap between consultations and the silence since the last one are both measured"
         );
     }
 
