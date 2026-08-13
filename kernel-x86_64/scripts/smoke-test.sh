@@ -90,7 +90,7 @@ echo "QEMU exit code: $RC (expect 33)"
 
 if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 22 MEMORY INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 11 CAPABILITY-LIFETIME INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 20 RISK-ADVISOR INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 8 STRESS INVARIANTS HOLD' "$LOG" \
    && grep -qE 'abstaining workload: [0-9]+ tasks, 0 positions move' "$LOG" \
@@ -99,7 +99,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'kernel map ACTIVE' "$LOG" \
    && grep -q 'live W\^X audit: .* 0 violations' "$LOG" \
    && grep -q 'SMP INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 34 RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 36 RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
    && grep -q 'TERMINATED (Fault(UserNotMapped)); system continues' "$LOG" \
    && grep -q 'ALL 15 FILESYSTEM INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 21 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
@@ -107,7 +107,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 5 NETWORK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 9 DMA-BOUNDARY INVARIANTS HOLD' "$LOG" \
 && grep -q 'ALL 9 INPUT-RING INVARIANTS HOLD' "$LOG" \
-&& grep -q 'ALL 40 CONSOLE INVARIANTS HOLD' "$LOG" \
+&& grep -q 'ALL 41 CONSOLE INVARIANTS HOLD' "$LOG" \
    && grep -q 'PERSISTENT MEDIUM: boot #1, 0 entities verified' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
   # ---- SECOND BOOT against the SAME persistent disk: the OS must REMEMBER (REQ-STOR-003) ----

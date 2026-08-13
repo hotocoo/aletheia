@@ -54,6 +54,8 @@ pub const DATA_START: usize = JOURNAL_START + MAX_ENTRIES;
 /// Why a storage operation failed. Every failure is surfaced, never swallowed into silent corruption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageError {
+    /// The caller lacked capability authority for the device operation.
+    Unauthorized,
     /// A block index is outside the device.
     OutOfRange,
     /// A buffer was not exactly [`BLOCK_SIZE`].

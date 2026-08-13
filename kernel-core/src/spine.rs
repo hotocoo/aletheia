@@ -700,4 +700,4 @@ pub use crate::storage::{BlockDevice, Journal, MemBlockDevice, StorageError, BLO
 
 // Capability-authorized device access (REQ-DRV-002, ADR-023) — no ambient device authority; gates
 // I/O to a `BlockDevice` on the same `CapEngine`.
-pub use crate::device::{DeviceError, DeviceGuard};
+pub use crate::device::{AuthorizedDevice, DeviceError, DeviceGuard};

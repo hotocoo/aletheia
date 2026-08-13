@@ -7,7 +7,7 @@
 //! pipeline uses. Contract-honest (ADR-010): written outside-in, boot-verified; an *unexpected*
 //! trap stays fatal (`exit 102`) so a real bug can never masquerade as a pass.
 //!
-//! WHAT IT PROVES (22 invariants, identical in spirit to the other two targets):
+//! WHAT IT PROVES (29 invariants, identical in spirit to the other two targets):
 //!   1-2  cap-gated `ecall` syscall — no capability ⇒ denied, zero effect; granted ⇒ one event.
 //!   3    hardware isolation — a U-mode load of a supervisor-only (no-`U`) page faults, contained.
 //!   4-5  per-process address spaces — A reaches its own page; B cannot reach A's VA (own `satp`).
@@ -20,6 +20,10 @@
 //!         the woken receiver resumes and reports the body (see run_blocking_ipc).
 //!   20-22 priority inheritance (REQ-IPC-009) — a blocked HIGH donates to the LOW endpoint holder so
 //!         the boosted LOW is dispatched over a Ready MEDIUM (see run_priority_ipc).
+//!   28-29 process-info service — `process.inspect` denies without a capability and returns live
+//!         supervisor counters when authorized.
+//!   23-27 supervisor continuation — policy classification, undeclared-fault termination, teardown,
+//!         non-runnable dead task, and a later U-mode task still running.
 //!
 //! RISC-V SPECIFICS vs aarch64: `sscratch` holds the *current task's frame pointer* while it runs
 //! (the trap entry swaps it into `sp` in one `csrrw`); `x0` is hardwired zero so there is no
@@ -38,18 +42,15 @@ use core::ptr::{addr_of, addr_of_mut};
 // this module performs only the context-switch MECHANISM (run_one_shot + satp address-space switch).
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
+use kernel_core::syscall::{
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND,
+    SYS_YIELD,
+};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's Sv39 `vm.rs` performs the real page mapping into each space.
 use kernel_core::grant::{GrantTable, ShareMode};
 // REQ-IPC-009/010: shared priority-inheritance scheduler for the blocking-IPC dispatch decision.
 use kernel_core::priosched::{Endpoint, Priority, PriorityScheduler};
-
-// --- Syscall ABI (fail-closed): number in a7, arg in a0, result in a0 -----------------------
-const SYS_EMIT: u64 = 1;
-const SYS_YIELD: u64 = 2;
-const SYS_EXIT: u64 = 3;
-const SYS_SEND: u64 = 4;
-const SYS_RECV: u64 = 5;
 
 // --- User virtual addresses (deliberately in the empty level-2 slot 1, past the peripheral GiB
 //     and below RAM at 0x8000_0000 — so they are unmapped by the identity map and prove real
@@ -307,6 +308,17 @@ _stub_recv_exit_s:
 .global _stub_recv_exit_e
 _stub_recv_exit_e:
 
+# Read-only process-info syscall, then EXIT carrying returned a0.
+.global _stub_process_info_exit_s
+_stub_process_info_exit_s:
+    li   a7, 7                    # SYS_PROCESS_INFO
+    ecall
+    li   a7, 3                    # SYS_EXIT (a0 unchanged = packed counters)
+    ecall
+1:  j    1b
+.global _stub_process_info_exit_e
+_stub_process_info_exit_e:
+
 .global _stub_sched_s
 _stub_sched_s:
     mv   a0, s2
@@ -353,6 +365,8 @@ extern "C" {
     fn _stub_recv_e();
     fn _stub_recv_exit_s();
     fn _stub_recv_exit_e();
+    fn _stub_process_info_exit_s();
+    fn _stub_process_info_exit_e();
     fn _stub_sched_s();
     fn _stub_sched_e();
     fn _stub_spin_s();
@@ -386,6 +400,7 @@ struct Trial {
     fault_va: usize, // outcome: stval of the armed fault
 }
 static mut CURRENT: Option<Trial> = None;
+static mut PROCESS_INFO_RESULT: u64 = u64::MAX;
 
 fn current() -> Option<&'static mut Trial> {
     // SAFETY: single-core, no preemption of the kernel itself (SIE stays 0 in S-mode); the trap
@@ -484,6 +499,9 @@ extern "C" fn _user_trap_rust(frame: *mut TrapFrame) {
 /// pipeline uses. EMIT/SEND/RECV authorize against the current trial's granted capabilities;
 /// YIELD/EXIT report to the scheduler. Unknown numbers fail closed (`u64::MAX`).
 fn el0_syscall(num: u64, arg: u64) -> u64 {
+    if Syscall::decode(num).is_none() {
+        return u64::MAX;
+    }
     match num {
         SYS_EMIT | SYS_SEND | SYS_RECV => {
             let t = match current() {
@@ -536,6 +554,28 @@ fn el0_syscall(num: u64, arg: u64) -> u64 {
         SYS_EXIT => {
             sched_report(arg, true);
             0
+        }
+        SYS_PROCESS_INFO => {
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(
+                Syscall::ProcessInfo.capability().unwrap_or("process.inspect"),
+                &Target::default(),
+                &t.caps,
+            ) {
+                Decision::Allow => {
+                    t.allowed = true;
+                    let response = pack_process_info(supervisor().terminated(), supervisor().escalations());
+                    unsafe { *addr_of_mut!(PROCESS_INFO_RESULT) = response };
+                    response
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
         }
         _ => u64::MAX,
     }
@@ -698,6 +738,66 @@ fn run_one_shot(frame: &mut TrapFrame) {
     unsafe { resume_frame(frame as *mut TrapFrame) };
 }
 
+/// Kill one genuinely faulting U-mode task, reclaim its private pages and address space, then
+/// return its supervisor id. Proves fault containment plus teardown on RISC-V, not only policy.
+fn run_unexpected_fault() -> u64 {
+    let root_main = vm::active_root();
+    let root = match vm::build_identity() {
+        Some(root) => root,
+        None => return 0,
+    };
+    let code = match map_user_code(root, USER_CODE_VA, stub(_stub_read_s, _stub_read_e)) {
+        Some(frame) => frame,
+        None => {
+            vm::destroy_space(root);
+            return 0;
+        }
+    };
+    let stack = match map_user_data(root, USER_STACK_VA) {
+        Some(frame) => frame,
+        None => {
+            vm::unmap_page(root, USER_CODE_VA);
+            frames::free_as(code, Owner::USER);
+            vm::destroy_space(root);
+            return 0;
+        }
+    };
+    unsafe { *addr_of_mut!(CURRENT_TASK) += 1 };
+    let id = unsafe { *addr_of!(CURRENT_TASK) };
+    let engine = CapEngine::new(0xBADC_0002, 1000);
+    unsafe {
+        *addr_of_mut!(CURRENT) = Some(Trial {
+            engine,
+            store: Store::new(),
+            caps: Vec::new(),
+            action: "event.emit",
+            armed: false,
+            allowed: false,
+            isolation_held: false,
+            fault_va: 0,
+        });
+    }
+    let mut frame = make_frame(
+        USER_CODE_VA,
+        USER_STACK_TOP,
+        addr_of!(KERNEL_CTX) as u64,
+        0,
+        0,
+    );
+    unsafe {
+        vm::switch_address_space(root);
+        run_one_shot(&mut frame);
+        vm::switch_address_space(root_main);
+    }
+    let _trial = unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("fault trial present");
+    vm::unmap_page(root, USER_STACK_VA);
+    frames::free_as(stack, Owner::USER);
+    vm::unmap_page(root, USER_CODE_VA);
+    frames::free_as(code, Owner::USER);
+    vm::destroy_space(root);
+    id
+}
+
 // --- Invariants 1-2: cap-gated syscall ------------------------------------------------------
 fn run_syscall(grant: bool) -> (bool, usize) {
     let root_main = vm::active_root();
@@ -738,6 +838,58 @@ fn run_syscall(grant: bool) -> (bool, usize) {
     };
     unsafe { *addr_of_mut!(CURRENT) = None };
     (allowed, events)
+}
+
+/// Run one read-only process-info syscall and carry response through `SYS_EXIT`.
+fn run_process_info(grant: bool) -> (u64, bool) {
+    let root_main = vm::active_root();
+    let root = vm::build_identity().expect("process-info root");
+    map_user_code(
+        root,
+        USER_CODE_VA,
+        stub(_stub_process_info_exit_s, _stub_process_info_exit_e),
+    )
+    .expect("process-info code");
+    map_user_data(root, USER_STACK_VA).expect("process-info stack");
+
+    let mut engine = CapEngine::new(0xA5A5, 1000);
+    let mut caps = Vec::new();
+    if grant {
+        caps.push(engine.mint(
+            "u-process",
+            "process.inspect",
+            Scope::All,
+            Constraints::none(),
+        ));
+    }
+    unsafe {
+        *addr_of_mut!(CURRENT) = Some(Trial {
+            engine,
+            store: Store::new(),
+            caps,
+            action: "process.inspect",
+            armed: false,
+            allowed: false,
+            isolation_held: false,
+            fault_va: 0,
+        });
+        *addr_of_mut!(PROCESS_INFO_RESULT) = u64::MAX;
+        (*addr_of_mut!(SCHED)).last_magic = 0;
+        (*addr_of_mut!(SCHED)).exited = false;
+    }
+    let mut f = make_frame(USER_CODE_VA, USER_STACK_TOP, 0, 0, 0);
+    unsafe {
+        vm::switch_address_space(root);
+        run_one_shot(&mut f);
+        vm::switch_address_space(root_main);
+    }
+    let result = unsafe { *addr_of!(PROCESS_INFO_RESULT) };
+    let allowed = unsafe { (*addr_of_mut!(CURRENT)).take() }
+        .expect("process-info trial present")
+        .allowed;
+    vm::unmap_page(root, USER_STACK_VA);
+    vm::unmap_page(root, USER_CODE_VA);
+    (result, allowed)
 }
 
 // --- Invariant 3: U-mode read of kernel memory faults (isolation) ---------------------------
@@ -1337,7 +1489,7 @@ fn run_shared_memory() -> (bool, bool, bool) {
 }
 
 // -------------------------------------------------------------------------------------------
-// Selftest — 16 U-mode boundary invariants, riscv64-only. `Ok(n)` all passed; `Err((idx,name))`
+// Selftest — 29 U-mode boundary invariants, riscv64-only. `Ok(n)` all passed; `Err((idx,name))`
 // = failure (the caller exits the VM with 80+idx). An unexpected/unarmed trap is fatal (exit 102).
 // -------------------------------------------------------------------------------------------
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
@@ -1469,10 +1621,9 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "u-mode: HIGH resumes as highest-priority and receives the body across address spaces"
     );
 
-    // The task supervisor's policy is compiled into THIS kernel and its handler is wired (REQ-REL-002,
-    // ADR-042). The end-to-end kill-and-continue proof — taking an undeclared user fault and then running
-    // another task — currently exists on x86-64 only; these invariants assert what is true here: the
-    // policy behaves, and the unexpected-fault path routes through it rather than exiting directly.
+    // The task supervisor's policy and end-to-end kill/reclaim/continue path are live in THIS kernel
+    // (REQ-REL-002, ADR-042). An undeclared U-mode fault must kill one task, reclaim its space, and leave
+    // the machine able to admit another task.
     {
         use kernel_core::faultclass::{classify, from_x86_error_code, verdict};
         use kernel_core::sched::TaskId;
@@ -1497,6 +1648,42 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             "supervisor: no task was terminated during this boot (every fault here was a declared trial)"
         );
     }
+
+    {
+        let before = supervisor().terminated();
+        let dead = run_unexpected_fault();
+        check!(
+            dead != 0 && supervisor().terminated() == before + 1,
+            "supervisor: undeclared U-mode fault terminates exactly one task and boot continues"
+        );
+        check!(
+            !supervisor().may_run(kernel_core::sched::TaskId(dead))
+                && matches!(
+                    supervisor().reason(kernel_core::sched::TaskId(dead)),
+                    Some(kernel_core::supervisor::TerminationReason::Fault(_))
+                ),
+            "supervisor: terminated U-mode task is never runnable and records fault reason"
+        );
+        let (held, _va) = run_isolation();
+        check!(
+            held,
+            "supervisor: later U-mode task runs after faulted address-space teardown"
+        );
+    }
+
+    let (_denied_info, denied_allowed) = run_process_info(false);
+    check!(
+        !denied_allowed,
+        "process-info: no process.inspect capability is denied at the U-mode boundary"
+    );
+    let (granted_info, granted_allowed) = run_process_info(true);
+    let (terminated, escalations) = kernel_core::syscall::unpack_process_info(granted_info);
+    check!(
+        granted_allowed
+            && (terminated as usize, escalations as usize)
+            == (supervisor().terminated(), supervisor().escalations()),
+        "process-info: capability-bound U-mode query returns live supervisor counters"
+    );
 
     Ok(n)
 }

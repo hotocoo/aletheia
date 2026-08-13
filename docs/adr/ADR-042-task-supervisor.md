@@ -34,28 +34,21 @@ policy sweep must not overwrite the fault that actually killed it.
 **4. Contained and escalated faults are counted separately.** A system that quietly turned kernel bugs into
 task deaths would look healthier than it is; `escalations()` is what makes that visible.
 
-**5. The live proof is a fault taken on purpose.** The x86-64 suite runs a ring-3 task that reads a
-supervisor-only page it never declared. Four invariants then require: exactly one task terminated, the dead
-task may never run again and its recorded reason is the fault, **zero** escalations (a user fault was
-contained, kernel bugs stay fatal), and — the point — **a later ring-3 task still runs and proves its own
-invariant**. Ring-3 boundary invariants 22 → 26. Anything else would be a policy nobody had exercised.
+**5. The live proof is a fault taken on purpose.** All three target suites now run a user task that reads
+a supervisor-only page it never declared. The invariants require exactly one task terminated, the dead task
+may never run again and its recorded reason is the fault, **zero** escalations (a user fault was contained,
+kernel bugs stay fatal), reclaimed private address-space resources, and — the point — **a later user task
+still runs and proves its own invariant**. aarch64 and RISC-V boundary suites now include 29 invariants;
+x86-64 includes 36. Anything less would be a policy nobody had exercised.
 
 ## Consequences
 
 * An undeclared ring-3 fault now prints its classification, terminates that task, and the boot continues:
   `task 7 TERMINATED (Fault(UserNotMapped)); system continues`.
 * The verdict from ADR-039 is finally connected to an outcome; `KillTask` means something.
-* **Not claimed.** The supervisor does not free the dead task's memory — that is
-  `teardown::destroy_address_space` (ADR-032), which a caller invokes with the task's root, and this slice
-  does not wire it into the fault path. It does not **restart** anything: a restart policy needs a
-  supervision tree (REQ-REL-001), not a flag. The handler is wired on **all three** targets — an
-  unexpected user fault routes through the supervisor everywhere, and every boot asserts the policy behaves
-  (a user fault terminates that task, a kernel fault escalates) — but the **end-to-end** proof, taking an
-  undeclared fault and then running another task, exists on **x86-64 only**. aarch64 and RISC-V need their
-  own unarmed-fault excursion to make the same claim; until they have it, their invariant says exactly what
-  it proves and no more. There is no quota,
-  no rate limit on repeated faults, and one excursion runs at a time, so the task id is a counter rather
-  than a TCB field. REQ-REL-001 stays deferred.
+* **Not claimed.** Restart policy still needs a supervision tree (REQ-REL-001), not a flag. There is no
+  quota or rate limit on repeated faults, and these suites run one excursion at a time, so task id is a
+  counter rather than a production TCB field. REQ-REL-001 stays deferred.
 
 ## Alternatives considered
 

@@ -170,7 +170,7 @@ powershell -ExecutionPolicy Bypass -File scripts/serial-console.ps1
 Elsewhere, `socat -,raw,echo=0 UNIX-CONNECT:/tmp/aletheia.pipe`. Then use the shell:
 
 ```text
-aletheia> help                      # 27 commands, with what each one does
+aletheia> help                      # 28 commands, with what each one does
 aletheia> ver                       # what this system is, and what it is not
 aletheia> mem                       # frames and MiB, plus any input the ring had to drop
 aletheia> write notes hello

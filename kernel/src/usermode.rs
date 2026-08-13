@@ -36,6 +36,10 @@ use core::ptr::{addr_of, addr_of_mut};
 // this module performs only the context-switch MECHANISM (resume_frame + address-space switch).
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
+use kernel_core::syscall::{
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND,
+    SYS_YIELD,
+};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's `vm.rs` performs the real page mapping into each address space.
 use kernel_core::grant::{GrantTable, ShareMode};
@@ -218,15 +222,9 @@ impl TrapFrame {
 #[no_mangle]
 static mut KERNEL_CTX: [u64; 13] = [0; 13];
 
-/// Syscall numbers the EL0 boundary understands. Anything else is denied (fail closed).
-const SYS_EMIT: u64 = 1;
-const SYS_YIELD: u64 = 2;
-const SYS_EXIT: u64 = 3;
 /// Capability-secure kernel IPC: send a message body to the kernel endpoint / receive one from it.
 /// Both are authorized by the SAME `CapEngine` (`ipc.send` / `ipc.recv` capabilities) — the message
 /// crosses process boundaries only through the kernel, never shared memory.
-const SYS_SEND: u64 = 4;
-const SYS_RECV: u64 = 5;
 
 /// Virtual addresses for one process's pages — past the identity-mapped RAM (so they are unmapped
 /// until we map them, proving they are real EL0-only mappings, not identity RAM).
@@ -257,6 +255,7 @@ struct Trial {
 }
 
 static mut CURRENT: Option<Trial> = None;
+static mut PROCESS_INFO_RESULT: u64 = u64::MAX;
 
 /// SAFETY: single-threaded; `CURRENT` is set immediately before an excursion and mutated only by
 /// the handler that excursion drives. No concurrent access exists.
@@ -324,6 +323,9 @@ static mut TCBS: [Tcb; NTASK] = [Tcb::new(); NTASK];
 /// `SYS_EXIT` report to the scheduler (carrying the task's register-magic as `arg`).
 #[no_mangle]
 pub extern "C" fn el0_trap(num: u64, arg: u64) -> u64 {
+    if Syscall::decode(num).is_none() {
+        return u64::MAX;
+    }
     match num {
         SYS_EMIT => {
             let t = match current() {
@@ -349,6 +351,28 @@ pub extern "C" fn el0_trap(num: u64, arg: u64) -> u64 {
         SYS_EXIT => {
             sched_report(arg, true);
             0
+        }
+        SYS_PROCESS_INFO => {
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(
+                Syscall::ProcessInfo.capability().unwrap_or("process.inspect"),
+                &Target::default(),
+                &t.caps,
+            ) {
+                Decision::Allow => {
+                    t.allowed = true;
+                    let response = pack_process_info(supervisor().terminated(), supervisor().escalations());
+                    unsafe { *addr_of_mut!(PROCESS_INFO_RESULT) = response };
+                    response
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
         }
         SYS_SEND => {
             // Authorize with the SAME CapEngine, then deposit `arg` into the kernel endpoint.
@@ -703,6 +727,9 @@ const STUB_READ_THEN_SYSCALL: [u32; 3] = [0xF940_0001, 0xD400_0001, 0x1400_0000]
 /// first `svc` blocks; when the sender wakes it the kernel writes the body into x0 and resumes here
 /// at the `movz`, so the EXIT reports the received body.
 const STUB_RECV_THEN_EXIT: [u32; 4] = [0xD400_0001, 0xD280_0068, 0xD400_0001, 0x1400_0000];
+/// EL0 process-info stub: query counters, then exit carrying the returned x0 value.
+const STUB_PROCESS_INFO_THEN_EXIT: [u32; 5] =
+    [0xD280_00E8, 0xD400_0001, 0xD280_0068, 0xD400_0001, 0x1400_0000];
 
 /// Run one EL0 syscall excursion. `grant` decides whether the process holds the `event.emit`
 /// capability. Returns `(authorized, event_count_after)`.
@@ -743,6 +770,53 @@ fn run_syscall(grant: bool) -> (bool, usize) {
     // SAFETY: excursion complete; take the trial.
     let t = unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("trial present");
     (t.allowed, t.store.event_count())
+}
+
+/// Run one read-only process-info syscall. `grant` controls `process.inspect`; the return value is
+/// forwarded through `SYS_EXIT`, proving the service response crossed the real EL0 boundary.
+fn run_process_info(grant: bool) -> (u64, bool) {
+    let root = vm::active_root();
+    let mut engine = CapEngine::new(0xA5A5, 1000);
+    let mut caps = Vec::new();
+    if grant {
+        caps.push(engine.mint(
+            "el0-process",
+            "process.inspect",
+            Scope::All,
+            Constraints::none(),
+        ));
+    }
+    unsafe {
+        *addr_of_mut!(CURRENT) = Some(Trial {
+            engine,
+            store: Store::new(),
+            caps,
+            action: "process.inspect",
+            armed: false,
+            allowed: false,
+            isolation_held: false,
+            fault_va: 0,
+        });
+        *addr_of_mut!(PROCESS_INFO_RESULT) = u64::MAX;
+        (*addr_of_mut!(SCHED)).last_magic = 0;
+        (*addr_of_mut!(SCHED)).exited = false;
+    }
+    let code = match map_user_code(root, USER_CODE_VA, &STUB_PROCESS_INFO_THEN_EXIT) {
+        Some(f) => f,
+        None => return (u64::MAX, false),
+    };
+    let stack = match map_user_stack(root, USER_STACK_VA) {
+        Some(f) => f,
+        None => {
+            drop_user_page(root, USER_CODE_VA, code);
+            return (u64::MAX, false);
+        }
+    };
+    run_one_shot(USER_CODE_VA, USER_STACK_TOP, 0, SYS_PROCESS_INFO);
+    drop_user_page(root, USER_STACK_VA, stack);
+    drop_user_page(root, USER_CODE_VA, code);
+    let trial = unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("process-info trial present");
+    (unsafe { *addr_of!(PROCESS_INFO_RESULT) }, trial.allowed)
 }
 
 /// Run the isolation excursion: hand the EL0 stub a kernel-only address and prove it cannot read
@@ -817,6 +891,47 @@ fn run_in_space(
     }
     // SAFETY: excursion complete, no other access to CURRENT exists.
     unsafe { (*addr_of_mut!(CURRENT)).take() }.expect("trial present")
+}
+
+/// Kill one genuinely faulting EL0 task, reclaim its private pages and address space, then return
+/// its supervisor id. This proves fault containment plus teardown before another task is admitted.
+fn run_unexpected_fault() -> u64 {
+    let root_main = vm::active_root();
+    let root = match vm::build_identity() {
+        Some(root) => root,
+        None => return 0,
+    };
+    let code = match map_user_code(root, USER_CODE_VA, &STUB_READ_X0) {
+        Some(frame) => frame,
+        None => {
+            vm::destroy_space(root);
+            return 0;
+        }
+    };
+    let stack = match map_user_stack(root, USER_STACK_VA) {
+        Some(frame) => frame,
+        None => {
+            drop_user_page(root, USER_CODE_VA, code);
+            vm::destroy_space(root);
+            return 0;
+        }
+    };
+    let fault_va = addr_of!(KERNEL_CTX) as u64;
+    unsafe { *addr_of_mut!(CURRENT_TASK) += 1 };
+    let id = unsafe { *addr_of!(CURRENT_TASK) };
+    let _trial = run_in_space(
+        root,
+        root_main,
+        fault_va,
+        0,
+        CapEngine::new(0xBADC_0001, 1000),
+        Vec::new(),
+        false,
+    );
+    drop_user_page(root, USER_STACK_VA, stack);
+    drop_user_page(root, USER_CODE_VA, code);
+    vm::destroy_space(root);
+    id
 }
 
 /// Prove **per-process address-space isolation**: two EL0 processes in separate TTBR0 spaces,
@@ -1629,7 +1744,8 @@ fn run_shared_memory() -> (bool, bool, bool) {
     (cap_gated, shared_across_spaces, revoke_unmaps)
 }
 
-/// Prove the EL0 boundary + multitasking invariants live. `Ok(n)` all passed; `Err((idx,name))`.
+/// Prove the EL0 boundary + multitasking + process-info invariants live. `Ok(n)` all passed;
+/// `Err((idx,name))` identifies first failure.
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     install_vectors();
     let mut n: u32 = 0;
@@ -1776,10 +1892,9 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "el0: HIGH resumes as highest-priority and receives the body across address spaces"
     );
 
-    // The task supervisor's policy is compiled into THIS kernel and its handler is wired (REQ-REL-002,
-    // ADR-042). The end-to-end kill-and-continue proof — taking an undeclared user fault and then running
-    // another task — currently exists on x86-64 only; these invariants assert what is true here: the
-    // policy behaves, and the unexpected-fault path routes through it rather than exiting directly.
+    // The task supervisor's policy and end-to-end kill/reclaim/continue path are live in THIS kernel
+    // (REQ-REL-002, ADR-042). An undeclared EL0 fault must kill one task, reclaim its space, and leave
+    // the machine able to admit another task.
     {
         use kernel_core::faultclass::{classify, from_x86_error_code, verdict};
         use kernel_core::sched::TaskId;
@@ -1804,6 +1919,42 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             "supervisor: no task was terminated during this boot (every fault here was a declared trial)"
         );
     }
+
+    {
+        let before = supervisor().terminated();
+        let dead = run_unexpected_fault();
+        check!(
+            dead != 0 && supervisor().terminated() == before + 1,
+            "supervisor: undeclared EL0 fault terminates exactly one task and boot continues"
+        );
+        check!(
+            !supervisor().may_run(kernel_core::sched::TaskId(dead))
+                && matches!(
+                    supervisor().reason(kernel_core::sched::TaskId(dead)),
+                    Some(kernel_core::supervisor::TerminationReason::Fault(_))
+                ),
+            "supervisor: terminated EL0 task is never runnable and records fault reason"
+        );
+        let (held, _va) = run_isolation();
+        check!(
+            held,
+            "supervisor: later EL0 task runs after faulted address-space teardown"
+        );
+    }
+
+    let (_denied_info, denied_allowed) = run_process_info(false);
+    check!(
+        !denied_allowed,
+        "process-info: no process.inspect capability is denied at the EL0 boundary"
+    );
+    let (granted_info, granted_allowed) = run_process_info(true);
+    let (terminated, escalations) = kernel_core::syscall::unpack_process_info(granted_info);
+    check!(
+        granted_allowed
+            && (terminated as usize, escalations as usize)
+            == (supervisor().terminated(), supervisor().escalations()),
+        "process-info: capability-bound EL0 query returns live supervisor counters"
+    );
 
     Ok(n)
 }

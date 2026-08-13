@@ -6,7 +6,7 @@
 
 use kernel_core::device::{DeviceError, DeviceGuard};
 use kernel_core::spine::{CapEngine, Constraints, Scope};
-use kernel_core::storage::{MemBlockDevice, BLOCK_SIZE};
+use kernel_core::storage::{BlockDevice, MemBlockDevice, StorageError, BLOCK_SIZE};
 
 const READ: &str = "dev.blk.read";
 const WRITE: &str = "dev.blk.write";
@@ -98,4 +98,40 @@ fn wildcard_capability_authorizes_both() {
         .read_block(&engine, &[cap], IDX, &mut buf)
         .expect("read via wildcard");
     assert_eq!(buf, full(0x42));
+}
+
+#[test]
+fn authorized_device_maps_denial_and_preserves_separate_flush_authority() {
+    const FLUSH: &str = "dev.blk.flush";
+    let mut engine = CapEngine::new(0xD005, 1000);
+    let read_cap = engine.mint("client", READ, Scope::All, Constraints::none());
+    let mut guard = DeviceGuard::new_with_actions(MemBlockDevice::new(8), READ, WRITE, FLUSH);
+    let read_only = [read_cap];
+    let mut device = guard.authorized_device(&engine, &read_only);
+    let mut buf = [0u8; BLOCK_SIZE];
+
+    assert_eq!(device.read_block(IDX, &mut buf), Ok(()));
+    assert_eq!(
+        device.write_block(IDX, &full(0xAA)),
+        Err(StorageError::Unauthorized)
+    );
+    assert_eq!(device.flush(), Err(StorageError::Unauthorized));
+}
+
+#[test]
+fn authorized_device_forwards_allowed_io_to_real_device() {
+    const FLUSH: &str = "dev.blk.flush";
+    let mut engine = CapEngine::new(0xD006, 1000);
+    let read_cap = engine.mint("client", READ, Scope::All, Constraints::none());
+    let write_cap = engine.mint("client", WRITE, Scope::All, Constraints::none());
+    let flush_cap = engine.mint("client", FLUSH, Scope::All, Constraints::none());
+    let caps = [read_cap, write_cap, flush_cap];
+    let mut guard = DeviceGuard::new_with_actions(MemBlockDevice::new(8), READ, WRITE, FLUSH);
+    let mut device = guard.authorized_device(&engine, &caps);
+
+    device.write_block(IDX, &full(0xC5)).expect("write allowed");
+    device.flush().expect("flush allowed");
+    let mut buf = [0u8; BLOCK_SIZE];
+    device.read_block(IDX, &mut buf).expect("read allowed");
+    assert_eq!(buf, full(0xC5));
 }

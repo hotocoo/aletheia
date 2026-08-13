@@ -103,6 +103,9 @@ CONTRACT=(
   "capstore: a child widened in the image is refused (attenuation re-checked on load)"
   "capstore: an image whose counter could re-mint a stored id is refused"
   "capstore: every single-bit corruption of the image is refused"
+  "capstore: an authenticated image still authorizes with its trusted key"
+  "capstore: an authenticated image rejects a wrong key before load"
+  "capstore: an authenticated image rejects tamper before load"
   # What a scancode MEANS (REQ-CON-003, ADR-049). The DEVICE is x86-64's alone — the QEMU `virt`
   # machine has no PS/2 controller — but the decoder is arch-independent and its output alphabet is
   # the console's shared contract. A target that decoded a byte the line editor refuses would be a
@@ -170,8 +173,8 @@ CONTRACT=(
   "net: an ICMP echo request is answered with a matching reply (both checksums verified)"
   "net: a second echo is matched on its own sequence (replies are read, not assumed)"
   # The task supervisor's POLICY (REQ-REL-002, ADR-042) — every target compiles it in and routes its
-  # unexpected-user-fault path through it. The end-to-end kill-and-continue proof (take an undeclared fault,
-  # then run another task) is an x86-64 arch extension for now; this is the part that must not vary.
+  # unexpected-user-fault path through it. All three targets now take an undeclared fault, reclaim its
+  # address space, then run another task; this is the part that must not vary.
   "supervisor: the policy is live in this kernel"
   # The DMA boundary (REQ-DRV-006, ADR-043). What the KERNEL may tell a device about is policy, not a
   # hardware property, so it must be identical everywhere — and "deny by default" is the rule that matters.
@@ -215,6 +218,7 @@ CONTRACT=(
   "console: touch leaves an existing object's bytes alone"
   "console: a bad count is refused rather than replaced with a default"
   "console: every command that needs an argument refuses to run without one"
+  "console: faults reports supervisor counters"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
 )

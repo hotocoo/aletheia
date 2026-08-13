@@ -39,6 +39,10 @@ use core::ptr::{addr_of, addr_of_mut};
 // this module performs only the context-switch MECHANISM (resume_frame + CR3 address-space switch).
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
+use kernel_core::syscall::{
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_REGCHECK,
+    SYS_SEND, SYS_YIELD,
+};
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's PML4 `vm.rs` performs the real page mapping into each space.
 use kernel_core::grant::{GrantTable, ShareMode};
@@ -159,6 +163,7 @@ isr_syscall_entry:
     mov     rsi, [rbx + 40]          // arg  = saved rdi
     and     rsp, -16                 // 16-align before a System V call
     call    x86_syscall
+    mov     [rbx + 0], rax           // return value -> saved RAX, restored by resume_frame
     jmp     resume_return
 
 // ---- isr_timer_entry (IRQ0): acknowledge + mark preempted, then resume the scheduler ----------
@@ -290,6 +295,18 @@ stub_recv_exit_start:
 .global stub_recv_exit_end
 stub_recv_exit_end:
 
+// Read-only process-info syscall, then EXIT carrying returned rdi.
+.global stub_process_info_exit_start
+stub_process_info_exit_start:
+    mov     eax, 7                   // SYS_PROCESS_INFO
+    int     0x80
+    mov     rdi, rax                 // SYS_EXIT takes its report value in rdi
+    mov     eax, 3                   // SYS_EXIT (rdi = packed counters)
+    int     0x80
+17: jmp     17b
+.global stub_process_info_exit_end
+stub_process_info_exit_end:
+
 // ---- adversarial ring-3 entry stubs (ALET-P1-011) ---------------------------------------------
 // These do not ask the kernel for anything. They ATTACK the entry paths: one executes an
 // instruction that does not exist, the other an instruction ring 3 is not allowed to execute. Each
@@ -358,6 +375,8 @@ extern "sysv64" {
     static stub_spin_end: u8;
     static stub_recv_exit_start: u8;
     static stub_recv_exit_end: u8;
+    static stub_process_info_exit_start: u8;
+    static stub_process_info_exit_end: u8;
     static isr_ud_entry: u8;
     static isr_gp_entry: u8;
     static stub_ud_start: u8;
@@ -451,19 +470,12 @@ impl TrapFrame {
     }
 }
 
-/// Syscall numbers the ring-3 boundary understands. Anything else is denied (fail closed).
-const SYS_EMIT: u64 = 1;
-const SYS_YIELD: u64 = 2;
-const SYS_EXIT: u64 = 3;
 /// Capability-secure kernel IPC (gap register Issue 2): send/receive a message body through the
 /// kernel endpoint, each authorized by the same `CapEngine` (`ipc.send` / `ipc.recv`).
-const SYS_SEND: u64 = 4;
-const SYS_RECV: u64 = 5;
 /// ALET-P1-009 (`fuzz` half): the trapping task asks the kernel to compare its ENTIRE saved
 /// register file against the sentinels the frame was primed with. Not a real OS service — a
 /// deliberate probe of the trap assembly, and the only syscall whose implementation reads the
 /// `TrapFrame` rather than its two dispatched arguments.
-const SYS_REGCHECK: u64 = 6;
 
 /// The sentinel a register-fuzz frame carries in `regs[i]`.
 ///
@@ -528,6 +540,7 @@ struct Trial {
 }
 
 static mut CURRENT: Option<Trial> = None;
+static mut PROCESS_INFO_RESULT: u64 = u64::MAX;
 
 /// The task supervisor (REQ-REL-002, ADR-042). An UNEXPECTED ring-3 fault used to end the boot; now it
 /// terminates that task and the system continues, which is what a supervisor is for.
@@ -602,6 +615,9 @@ static mut TCBS: [Tcb; NTASK] = [Tcb::new(); NTASK];
 /// The capability-gated syscall AND the scheduler hooks, over one path.
 #[no_mangle]
 pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
+    if Syscall::decode(num).is_none() {
+        return u64::MAX;
+    }
     match num {
         SYS_EMIT => {
             let t = match current() {
@@ -664,6 +680,28 @@ pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
         SYS_EXIT => {
             sched_report(arg, true);
             0
+        }
+        SYS_PROCESS_INFO => {
+            let t = match current() {
+                Some(t) => t,
+                None => return u64::MAX,
+            };
+            match t.engine.evaluate(
+                Syscall::ProcessInfo.capability().unwrap_or("process.inspect"),
+                &Target::default(),
+                &t.caps,
+            ) {
+                Decision::Allow => {
+                    t.allowed = true;
+                    let response = pack_process_info(supervisor().terminated(), supervisor().escalations());
+                    unsafe { *addr_of_mut!(PROCESS_INFO_RESULT) = response };
+                    response
+                }
+                _ => {
+                    t.allowed = false;
+                    u64::MAX
+                }
+            }
         }
         SYS_SEND => {
             let t = match current() {
@@ -984,6 +1022,7 @@ fn run_syscall(grant: bool) -> (bool, usize) {
         isolation_held: false,
         fault_va: 0,
     });
+    unsafe { *addr_of_mut!(PROCESS_INFO_RESULT) = u64::MAX; }
 
     let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
     f.regs[RAX] = SYS_EMIT;
@@ -1000,6 +1039,61 @@ fn run_syscall(grant: bool) -> (bool, usize) {
     free_leaf(root, USER_CODE_VA, code);
     let t = take_trial();
     (t.allowed, t.store.event_count())
+}
+
+/// Run one read-only process-info syscall and carry response through `SYS_EXIT`.
+fn run_process_info(grant: bool) -> (u64, bool) {
+    let root_main = vm::active_root();
+    let root = match vm::build_space() {
+        Some(root) => root,
+        None => return (u64::MAX, false),
+    };
+    let code = vm::map_stub_frame(
+        root,
+        USER_CODE_VA,
+        stub_bytes!(stub_process_info_exit_start, stub_process_info_exit_end),
+    );
+    let stack = vm::map_user(root, USER_STACK_VA, true);
+    if code.is_none() || stack.is_none() {
+        free_leaf(root, USER_STACK_VA, stack);
+        free_leaf(root, USER_CODE_VA, code);
+        return (u64::MAX, false);
+    }
+
+    let mut engine = CapEngine::new(0xA5A5, 1000);
+    let mut caps = Vec::new();
+    if grant {
+        caps.push(engine.mint(
+            "ring3-process",
+            "process.inspect",
+            Scope::All,
+            Constraints::none(),
+        ));
+    }
+    set_trial(Trial {
+        engine,
+        store: Store::new(),
+        caps,
+        action: "process.inspect",
+        armed: false,
+        expect_fault_va: 0,
+        allowed: false,
+        isolation_held: false,
+        fault_va: 0,
+    });
+    let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+    f.regs[RAX] = SYS_PROCESS_INFO;
+    f.regs[RDI] = 0;
+    unsafe {
+        vm::switch_to(root);
+        resume_frame(&mut f as *mut TrapFrame);
+        vm::switch_to(root_main);
+    }
+    let result = unsafe { *addr_of!(PROCESS_INFO_RESULT) };
+    let allowed = take_trial().allowed;
+    free_leaf(root, USER_STACK_VA, stack);
+    free_leaf(root, USER_CODE_VA, code);
+    (result, allowed)
 }
 
 /// Prove hardware isolation: a ring-3 read of a supervisor-only page faults and is contained (not
@@ -2270,6 +2364,20 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             "entry: after #UD and #GP were both contained, a later ring-3 task still runs to completion"
         );
     }
+
+    let (_denied_info, denied_allowed) = run_process_info(false);
+    check!(
+        !denied_allowed,
+        "process-info: no process.inspect capability is denied at the ring-3 boundary"
+    );
+    let (granted_info, granted_allowed) = run_process_info(true);
+    let (terminated, escalations) = kernel_core::syscall::unpack_process_info(granted_info);
+    check!(
+        granted_allowed
+            && (terminated as usize, escalations as usize)
+            == (supervisor().terminated(), supervisor().escalations()),
+        "process-info: capability-bound ring-3 query returns live supervisor counters"
+    );
 
     Ok(n)
 }

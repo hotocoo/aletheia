@@ -633,6 +633,60 @@ pub enum Outcome {
     Halt,
 }
 
+/// Authority classes for commands that can inspect or change machine state.
+///
+/// The console is kernel code, but kernel code must not turn into ambient authority for a future
+/// untrusted shell task. Targets provide this decision from their subject/capability context. The
+/// default is deny, so a new target cannot accidentally expose storage or reset authority merely by
+/// implementing the machine-facts methods below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellAction {
+    /// Read machine metadata or filesystem contents.
+    Inspect,
+    /// Create, replace, rename, or remove filesystem objects.
+    Write,
+    /// Commit pending device writes.
+    Flush,
+    /// Restart the machine.
+    Reboot,
+    /// Stop the machine.
+    Halt,
+}
+
+impl ShellAction {
+    /// Stable capability action name checked by the kernel authority engine.
+    pub const fn capability(self) -> &'static str {
+        match self {
+            ShellAction::Inspect => "console.inspect",
+            ShellAction::Write => "console.write",
+            ShellAction::Flush => "console.flush",
+            ShellAction::Reboot => "system.reboot",
+            ShellAction::Halt => "system.halt",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        self.capability()
+    }
+}
+
+/// Check one console action against explicit kernel capabilities.
+///
+/// This helper keeps target seams small: target code owns the subject's engine and offered tokens,
+/// while command-to-capability mapping stays in this shared dispatcher. Unknown or revoked tokens
+/// fail closed through [`CapEngine::evaluate`].
+pub fn authorize_with_capabilities(
+    engine: &crate::spine::CapEngine,
+    offered: &[crate::spine::CapToken],
+    action: ShellAction,
+) -> bool {
+    engine.evaluate(
+        action.capability(),
+        &crate::spine::Target::default(),
+        offered,
+    ) == crate::spine::Decision::Allow
+}
+
 /// The facts a command may ask of the running target. Everything here is already established by the
 /// boot the console runs after; the trait exists so the dispatcher never names an architecture.
 pub trait ShellHost {
@@ -646,6 +700,15 @@ pub trait ShellHost {
     fn total_frames(&self) -> usize;
     /// Current CPU privilege level, backend-defined (as `Hal::current_privilege`).
     fn privilege(&self) -> u64;
+    /// User tasks contained by the supervisor since boot. Targets return their live supervisor
+    /// counter; the default keeps lightweight hosted stands fail-closed and honest.
+    fn supervisor_terminated(&self) -> usize {
+        0
+    }
+    /// Faults escalated because the kernel, translation model, or fault report was not trustworthy.
+    fn supervisor_escalations(&self) -> usize {
+        0
+    }
     /// Console bytes the target refused because the input ring was full (REQ-CON-002). A polled
     /// target reports 0. Surfaced rather than hidden: input loss the operator cannot see is input
     /// loss they will blame on the command they typed.
@@ -684,6 +747,11 @@ pub trait ShellHost {
     fn reboot(&self) -> bool {
         false
     }
+    /// Authorize one command class. Fail closed: targets must explicitly bind the console to a
+    /// subject/capability set before exposing machine or filesystem authority.
+    fn authorize(&self, _action: ShellAction) -> bool {
+        false
+    }
 }
 
 /// The prompt. A constant because the live suite asserts on it.
@@ -697,6 +765,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("arch", "active target backend and privilege level"),
     ("uptime", "time since boot"),
     ("mem", "physical memory, in frames and bytes"),
+    ("faults", "supervisor containment and escalation counters"),
     ("lsblk", "the console's block device geometry"),
     ("df", "filesystem space, in blocks"),
     ("ls", "every named object"),
@@ -743,10 +812,20 @@ fn fs_error(e: FsError) -> String {
 
 fn storage_error(e: StorageError) -> &'static str {
     match e {
+        StorageError::Unauthorized => "capability denied for device operation",
         StorageError::OutOfRange => "block index off the device",
         StorageError::BadBlockSize => "a buffer was not one block",
         StorageError::TooLarge => "the transaction is too large for the journal",
         StorageError::Device => "the device reported a failure",
+    }
+}
+
+fn authorize<H: ShellHost>(host: &H, action: ShellAction, out: &mut dyn FnMut(&str)) -> bool {
+    if host.authorize(action) {
+        true
+    } else {
+        out(&format!("permission denied: {}", action.label()));
+        false
     }
 }
 
@@ -785,6 +864,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "ver" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             out(VERSION);
             out(&format!(
                 "target {}, {} processor(s), privilege level {}",
@@ -797,13 +879,21 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             out("this console runs in kernel space over the kernel's own objects; it is not a");
             out("user-mode shell over a syscall ABI, and nothing here is production-ready.");
         }
-        "arch" => out(&format!(
-            "{} (privilege level {}, {} processor(s))",
-            host.arch(),
-            host.privilege(),
-            host.cpu_count()
-        )),
+        "arch" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            out(&format!(
+                "{} (privilege level {}, {} processor(s))",
+                host.arch(),
+                host.privilege(),
+                host.cpu_count()
+            ));
+        }
         "uptime" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             let ns = host.uptime_ns();
             let secs = ns / 1_000_000_000;
             out(&format!(
@@ -815,6 +905,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             ));
         }
         "mem" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             let (free, total) = (host.free_frames(), host.total_frames());
             let bytes = host.frame_bytes();
             out(&format!(
@@ -834,7 +927,20 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 host.input_dropped()
             ));
         }
+        "faults" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            out(&format!(
+                "supervisor: {} user task(s) contained, {} fault(s) escalated",
+                host.supervisor_terminated(),
+                host.supervisor_escalations()
+            ));
+        }
         "lsblk" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             let n = dev.num_blocks();
             out(&format!(
                 "{} blocks of {} bytes = {} KiB",
@@ -843,23 +949,36 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 (n * BLOCK_SIZE) / 1024
             ));
         }
-        "df" => match fs.free_blocks(dev) {
-            Ok(free) => out(&format!(
-                "{} free data blocks of {} bytes each",
-                free, BLOCK_SIZE
-            )),
-            Err(e) => out(&fs_error(e)),
-        },
-        "ls" => match fs.list(dev) {
-            Ok(entries) if entries.is_empty() => out("(no objects)"),
-            Ok(entries) => {
-                for e in entries {
-                    out(&format!("{:>8}  {}", e.len, e.name));
-                }
+        "df" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
             }
-            Err(e) => out(&fs_error(e)),
-        },
+            match fs.free_blocks(dev) {
+                Ok(free) => out(&format!(
+                    "{} free data blocks of {} bytes each",
+                    free, BLOCK_SIZE
+                )),
+                Err(e) => out(&fs_error(e)),
+            }
+        }
+        "ls" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            match fs.list(dev) {
+                Ok(entries) if entries.is_empty() => out("(no objects)"),
+                Ok(entries) => {
+                    for e in entries {
+                        out(&format!("{:>8}  {}", e.len, e.name));
+                    }
+                }
+                Err(e) => out(&fs_error(e)),
+            }
+        }
         "stat" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             if rest.is_empty() {
                 out("usage: stat NAME");
             } else {
@@ -876,6 +995,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "cat" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             if rest.is_empty() {
                 out("usage: cat NAME");
             } else {
@@ -892,6 +1014,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "write" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
             let (name, text) = split_first(rest);
             if name.is_empty() {
                 out("usage: write NAME TEXT");
@@ -905,6 +1030,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "rm" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
             if rest.is_empty() {
                 out("usage: rm NAME");
             } else {
@@ -915,6 +1043,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "find" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             if rest.is_empty() {
                 out("usage: find PREFIX");
             } else {
@@ -934,6 +1065,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "head" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             let (name, count) = split_first(rest);
             if name.is_empty() {
                 out("usage: head NAME [N]");
@@ -962,6 +1096,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "wc" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             if rest.is_empty() {
                 out("usage: wc NAME");
             } else {
@@ -984,6 +1121,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "grep" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             let (needle, name) = split_first(rest);
             if needle.is_empty() || name.is_empty() {
                 out("usage: grep TEXT NAME");
@@ -1009,6 +1149,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "hexdump" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
             let (name, count) = split_first(rest);
             if name.is_empty() {
                 out("usage: hexdump NAME [N]");
@@ -1056,6 +1199,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "append" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
             let (name, text) = split_first(rest);
             if name.is_empty() {
                 out("usage: append NAME TEXT");
@@ -1089,6 +1235,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "touch" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
             if rest.is_empty() {
                 out("usage: touch NAME");
             } else {
@@ -1106,6 +1255,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "cp" | "mv" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
             let (src, dst) = split_first(rest);
             if src.is_empty() || dst.is_empty() {
                 out(&format!("usage: {} SRC DST", verb));
@@ -1138,10 +1290,15 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 }
             }
         }
-        "sync" => match dev.flush() {
-            Ok(()) => out("device flushed"),
-            Err(e) => out(&format!("storage: {}", storage_error(e))),
-        },
+        "sync" => {
+            if !authorize(host, ShellAction::Flush, out) {
+                return Outcome::Continue;
+            }
+            match dev.flush() {
+                Ok(()) => out("device flushed"),
+                Err(e) => out(&format!("storage: {}", storage_error(e))),
+            }
+        }
         "history" => {
             if history.is_empty() {
                 out("(nothing yet)");
@@ -1157,12 +1314,18 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         // that ignores them shows the sequence's effect as nothing rather than as garbage.
         "clear" => out("\x1b[2J\x1b[H"),
         "reboot" => {
+            if !authorize(host, ShellAction::Reboot, out) {
+                return Outcome::Continue;
+            }
             out("rebooting.");
             if !host.reboot() {
                 out("reboot: this target has no reset path — use `halt`");
             }
         }
         "halt" => {
+            if !authorize(host, ShellAction::Halt, out) {
+                return Outcome::Continue;
+            }
             out("halting.");
             return Outcome::Halt;
         }
@@ -1518,6 +1681,17 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
     check!(
         "console: the prompt returns after every command",
         log.matches(PROMPT).count() == 4
+    );
+
+    // 16. Fault containment is operator-visible. The counters come from the target's real
+    // supervisor, not a shell-local cache, so a contained fault cannot disappear between the trap
+    // path and the command surface.
+    let (log, _) = transcript("faults\r", host, &mut fs, dev);
+    check!(
+        "console: faults reports supervisor counters",
+        log.contains("supervisor:")
+            && log.contains("user task(s) contained")
+            && log.contains("fault(s) escalated")
     );
 
     // ---- the editor as an EDITOR (REQ-CON-004, ADR-050) ------------------------------------------

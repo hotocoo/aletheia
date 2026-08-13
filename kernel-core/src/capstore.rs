@@ -39,19 +39,17 @@
 //!
 //! # Not claimed
 //!
-//! The image is checksummed, not authenticated: the checksum catches corruption and truncation, and
-//! a byte-flip sweep proves it, but an attacker who can write the block can also write a matching
-//! checksum. Signing it requires a key whose own lifetime is exactly ALET-P1-028 (key management),
-//! still open — so the honest posture is that this module makes a persisted registry *self-
-//! consistent and non-amplifying*, and does not make it *authentic*. Any tamper that stays within
-//! the lattice — narrowing a capability, deleting one, marking one revoked — is accepted, because
-//! all three are things the holder's own authority already permits.
+//! The legacy image is checksummed, not authenticated: the checksum catches corruption and
+//! truncation, but an attacker who can write the block can also write a matching checksum. The
+//! [`save_authenticated`] / [`load_authenticated`] pair adds HMAC-SHA256 when a caller supplies a
+//! trusted key. Key custody, rotation, and secure boot delivery remain outside this module.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::capalg::{attenuates, Authority};
+use crate::fs::{Filesystem, FsError};
 use crate::spine::{content_hash, CapEngine, Constraints, EntityType, Scope, StoredCapability};
 
 /// Image magic — `ALCS`, "Aletheia capability store".
@@ -59,12 +57,20 @@ const MAGIC: &[u8; 4] = b"ALCS";
 /// On-disk format version. A load refuses any other value outright; a capability store is not a
 /// place to be lenient about a format it does not recognize.
 pub const VERSION: u32 = 1;
+/// Filesystem object carrying the capability image. It is replaced atomically, never appended.
+pub const STORE_OBJECT: &str = "cap.store";
 
 /// Why a persisted registry was refused. Every variant is a REFUSAL of the whole image — there is
 /// no partial load, because the parts a partial load would drop (the revocation list, a parent
 /// record) are the parts that make the rest safe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapStoreError {
+    /// The filesystem object does not exist yet.
+    Absent,
+    /// The encoded image cannot fit one atomic filesystem transaction.
+    TooLarge,
+    /// The namespace or device refused access to the image.
+    Fs(FsError),
     /// The image ends inside a record, or declares more records than its bytes can hold.
     Truncated,
     /// Not a capability store.
@@ -95,6 +101,8 @@ pub enum CapStoreError {
     IdReusable,
     /// There were bytes after the checksum. The image is not exactly what it claims to be.
     TrailingBytes,
+    /// The authenticated envelope's HMAC did not verify under the supplied trusted key.
+    Authentication,
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +237,40 @@ pub fn save(engine: &CapEngine) -> Vec<u8> {
         .collect();
     let revoked: Vec<u64> = revoked.iter().copied().collect();
     encode(engine.now(), secret, next_id, &records, &revoked)
+}
+
+/// Serialize and authenticate a capability engine with HMAC-SHA256.
+///
+/// The authenticated envelope is the legacy checksummed image followed by a 32-byte HMAC tag.
+/// Keeping the checksum inside the authenticated bytes preserves existing corruption diagnostics
+/// after authentication succeeds while making medium writers unable to alter authority without the
+/// key. The key is caller-owned; this function does not pretend to establish its provenance.
+pub fn save_authenticated(engine: &CapEngine, key: &[u8; 32]) -> Vec<u8> {
+    let mut image = save(engine);
+    let tag = crate::crypto::hmac_sha256(key, &image);
+    image.extend_from_slice(&tag);
+    image
+}
+
+/// Load an authenticated capability image. Authentication runs before parsing or admitting any
+/// capability record, so a wrong key and a tampered image cannot reach the authority lattice.
+pub fn load_authenticated(
+    bytes: &[u8],
+    key: &[u8; 32],
+    now: u64,
+) -> Result<CapEngine, CapStoreError> {
+    if bytes.len() < 32 {
+        return Err(CapStoreError::Truncated);
+    }
+    let split = bytes.len() - 32;
+    let (image, tag_bytes) = bytes.split_at(split);
+    let mut supplied = [0u8; 32];
+    supplied.copy_from_slice(tag_bytes);
+    let expected = crate::crypto::hmac_sha256(key, image);
+    if !crate::crypto::ct_eq_32(&expected, &supplied) {
+        return Err(CapStoreError::Authentication);
+    }
+    load(image, now)
 }
 
 /// The records and counters an engine would save, so a caller can perturb one and re-encode it.
@@ -482,6 +524,62 @@ pub fn load(bytes: &[u8], now: u64) -> Result<CapEngine, CapStoreError> {
     ))
 }
 
+fn fs_error(error: FsError) -> CapStoreError {
+    match error {
+        FsError::NotFound => CapStoreError::Absent,
+        FsError::TooLarge => CapStoreError::TooLarge,
+        other => CapStoreError::Fs(other),
+    }
+}
+
+/// Save capability state into one filesystem object. [`Filesystem::replace`] makes the image
+/// crash-atomic: a torn update leaves old authority image or new one, never half an image.
+///
+/// This persists a self-consistent, checksummed image. It does NOT authenticate whoever can write
+/// the medium, and therefore must not be used as boot trust without an authenticated key policy.
+pub fn save_to_fs<D: crate::storage::BlockDevice>(
+    fs: &mut Filesystem,
+    dev: &mut D,
+    engine: &CapEngine,
+) -> Result<(), CapStoreError> {
+    fs.replace(dev, STORE_OBJECT, &save(engine))
+        .map_err(fs_error)
+}
+
+/// Save an authenticated image as one atomically replaced filesystem object.
+pub fn save_authenticated_to_fs<D: crate::storage::BlockDevice>(
+    fs: &mut Filesystem,
+    dev: &mut D,
+    engine: &CapEngine,
+    key: &[u8; 32],
+) -> Result<(), CapStoreError> {
+    fs.replace(dev, STORE_OBJECT, &save_authenticated(engine, key))
+        .map_err(fs_error)
+}
+
+/// Load and validate capability state from its filesystem object. Missing state is [`Absent`]; any
+/// malformed, tampered, widened, orphaned, cyclic, expired-by-clock, or checksum-invalid image is
+/// refused by [`load`] as a whole.
+pub fn load_from_fs<D: crate::storage::BlockDevice>(
+    fs: &Filesystem,
+    dev: &D,
+    now: u64,
+) -> Result<CapEngine, CapStoreError> {
+    let image = fs.read(dev, STORE_OBJECT).map_err(fs_error)?;
+    load(&image, now)
+}
+
+/// Load and authenticate the capability image stored in one filesystem object.
+pub fn load_authenticated_from_fs<D: crate::storage::BlockDevice>(
+    fs: &Filesystem,
+    dev: &D,
+    key: &[u8; 32],
+    now: u64,
+) -> Result<CapEngine, CapStoreError> {
+    let image = fs.read(dev, STORE_OBJECT).map_err(fs_error)?;
+    load_authenticated(&image, key, now)
+}
+
 // ---------------------------------------------------------------------------
 // The in-kernel invariant suite
 // ---------------------------------------------------------------------------
@@ -489,7 +587,7 @@ pub fn load(bytes: &[u8], now: u64) -> Result<CapEngine, CapStoreError> {
 /// The capability-lifetime invariants, in the same shape every other kernel suite uses: each check
 /// reports through `report(index, passed, name)` and the first failure stops the run. Arch
 /// independent — it touches no device — so all three targets and the hosted tests prove the same
-/// nine behaviors.
+/// fourteen behaviors, including authenticated-image admission.
 pub fn capstore_suite(
     mut report: impl FnMut(u32, bool, &'static str),
 ) -> Result<u32, (u32, &'static str)> {
@@ -546,6 +644,34 @@ pub fn capstore_suite(
                 == crate::spine::Decision::Allow)
             .unwrap_or(false),
         "capstore: a capability minted before the reboot still authorizes after it"
+    );
+
+    // 1a — authentication is checked before the image can become authority. The key is supplied by
+    // the caller here; custody and delivery are deliberately separate boot-chain requirements.
+    let auth_key = [0xA5u8; 32];
+    let authenticated = save_authenticated(&e, &auth_key);
+    check!(
+        load_authenticated(&authenticated, &auth_key, 1000)
+            .map(|r| r.evaluate("entity.derive", &doc_target, &[child])
+                == crate::spine::Decision::Allow)
+            .unwrap_or(false),
+        "capstore: an authenticated image still authorizes with its trusted key"
+    );
+    check!(
+        matches!(
+            load_authenticated(&authenticated, &[0x5Au8; 32], 1000),
+            Err(CapStoreError::Authentication)
+        ),
+        "capstore: an authenticated image rejects a wrong key before load"
+    );
+    let mut tampered = authenticated.clone();
+    tampered[0] ^= 1;
+    check!(
+        matches!(
+            load_authenticated(&tampered, &auth_key, 1000),
+            Err(CapStoreError::Authentication)
+        ),
+        "capstore: an authenticated image rejects tamper before load"
     );
 
     // 2 — revocation survives it too. This is the one that matters: a registry restored without its

@@ -7,7 +7,9 @@
 //! malformed would prove nothing about the check it was aimed at.
 
 use kernel_core::capstore::*;
+use kernel_core::fs::Filesystem;
 use kernel_core::spine::{CapEngine, Constraints, Decision, EntityType, Scope, Target};
+use kernel_core::storage::MemBlockDevice;
 
 fn engine() -> (
     CapEngine,
@@ -40,6 +42,91 @@ fn doc() -> Target {
         id: None,
         etype: Some(EntityType::Document),
     }
+}
+
+#[test]
+fn capability_image_round_trips_through_atomic_filesystem_object() {
+    let (engine, _root, child) = engine();
+    let mut disk = MemBlockDevice::new(256);
+    Filesystem::format(&mut disk).unwrap();
+    let mut fs = Filesystem::mount(&mut disk).unwrap();
+
+    save_to_fs(&mut fs, &mut disk, &engine).expect("capability image saves");
+    let mounted = Filesystem::mount(&mut disk).unwrap();
+    let back = load_from_fs(&mounted, &disk, 1000).expect("capability image loads");
+    assert_eq!(
+        back.evaluate("entity.derive", &doc(), &[child]),
+        Decision::Allow
+    );
+}
+
+#[test]
+fn capability_image_corruption_on_medium_is_refused() {
+    let (engine, _root, _child) = engine();
+    let mut disk = MemBlockDevice::new(256);
+    Filesystem::format(&mut disk).unwrap();
+    let mut fs = Filesystem::mount(&mut disk).unwrap();
+    save_to_fs(&mut fs, &mut disk, &engine).unwrap();
+
+    let mut image = fs.read(&disk, STORE_OBJECT).unwrap();
+    image[0] ^= 1;
+    fs.replace(&mut disk, STORE_OBJECT, &image).unwrap();
+    let mounted = Filesystem::mount(&mut disk).unwrap();
+    assert!(matches!(
+        load_from_fs(&mounted, &disk, 1000),
+        Err(CapStoreError::Checksum)
+    ));
+}
+
+#[test]
+fn authenticated_capability_image_requires_trusted_key() {
+    let (engine, _root, child) = engine();
+    let key = [0x42u8; 32];
+    let wrong = [0x24u8; 32];
+    let image = save_authenticated(&engine, &key);
+
+    let back = load_authenticated(&image, &key, 1000).expect("trusted image loads");
+    assert_eq!(
+        back.evaluate("entity.derive", &doc(), &[child]),
+        Decision::Allow
+    );
+    assert_eq!(
+        load_authenticated(&image, &wrong, 1000).err(),
+        Some(CapStoreError::Authentication)
+    );
+}
+
+#[test]
+fn authenticated_capability_tamper_is_rejected_before_image_parse() {
+    let (engine, _root, _child) = engine();
+    let key = [0x11u8; 32];
+    let mut image = save_authenticated(&engine, &key);
+    image[0] ^= 1;
+    assert_eq!(
+        load_authenticated(&image, &key, 1000).err(),
+        Some(CapStoreError::Authentication)
+    );
+}
+
+#[test]
+fn authenticated_capability_image_round_trips_through_atomic_filesystem_object() {
+    let (engine, _root, child) = engine();
+    let key = [0xa5u8; 32];
+    let mut disk = MemBlockDevice::new(256);
+    Filesystem::format(&mut disk).unwrap();
+    let mut fs = Filesystem::mount(&mut disk).unwrap();
+
+    save_authenticated_to_fs(&mut fs, &mut disk, &engine, &key).unwrap();
+    let mounted = Filesystem::mount(&mut disk).unwrap();
+    let back = load_authenticated_from_fs(&mounted, &disk, &key, 1000).unwrap();
+    assert_eq!(
+        back.evaluate("entity.derive", &doc(), &[child]),
+        Decision::Allow
+    );
+    assert_eq!(
+        load_authenticated_from_fs(&mounted, &disk, &[0x5au8; 32], 1000).err(),
+        Some(CapStoreError::Authentication)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -482,5 +569,5 @@ fn the_in_kernel_suite_holds_on_the_host_and_reports_every_check_once() {
     }
     // Pinned: the boot gates grep for this number, so a suite that silently shrank would still
     // print a green line.
-    assert_eq!(count, 11);
+    assert_eq!(count, 14);
 }
