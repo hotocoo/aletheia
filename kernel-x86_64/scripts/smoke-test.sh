@@ -99,7 +99,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'kernel map ACTIVE' "$LOG" \
    && grep -q 'live W\^X audit: .* 0 violations' "$LOG" \
    && grep -q 'SMP INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 36 RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 39 RING-3 BOUNDARY INVARIANTS HOLD' "$LOG" \
    && grep -q 'TERMINATED (Fault(UserNotMapped)); system continues' "$LOG" \
    && grep -q 'ALL 15 FILESYSTEM INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 21 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \

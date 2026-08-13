@@ -20,9 +20,9 @@
 //! boot invariants per target). The task is described with the memory it actually mapped, not with a
 //! plausible-looking constant.
 //!
-//! **Still open, and named:** the x86-64 target has the same seam available and is NOT wired to it,
-//! because its ring-3 gate is red on a defect that predates this work (`trapframe`, invariant 28) and
-//! wiring behind a red gate proves nothing. The two targets whose gates are green are wired.
+//! All three targets are wired: aarch64, RISC-V and x86-64. The x86-64 one landed last and
+//! deliberately so — its ring-3 gate was red on a defect predating this work, and wiring a model into
+//! a target whose user-mode gate cannot pass proves nothing about either.
 //!
 //! **Continuity is measured, not asserted.** [`AdviceStats`] carries the counters a console can
 //! print: how many advices have been given, the verdict census, the longest historical gap between

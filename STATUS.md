@@ -70,9 +70,18 @@ corpus that has one is trained.
   advice reads. Each task is described with the memory it **actually mapped**, not a plausible
   constant. Three gated boot invariants per target; both EL0 and U-mode suites go 29 → 32.
 
-**Still open and named:** x86-64 is not wired to that seam. Its ring-3 gate is red on a defect that
-predates this work (`trapframe`, invariant 28), and wiring behind a red gate proves nothing. That
-defect is the next wave.
+* **x86-64 is wired too, and its ring-3 gate is green for the first time in this repository's
+  history of that invariant.** It was left until last on purpose: wiring a model into a target whose
+  user-mode gate cannot pass proves nothing about either. The blocking defect turned out to be one
+  line — `SYS_REGCHECK` returned a conventional `0`, that return value lands in the task's `rax`, and
+  `rax`'s sentinel **is** `SYS_REGCHECK`. So the stub's second `int 0x80` dispatched syscall 0, the
+  check count stuck at 1, and the **restore** half of ALET-P1-009 had never once been exercised on
+  x86-64 — the invariant was not flaky, it was measuring nothing. The handler now echoes the call
+  number, and the reason is written next to it so nobody "cleans it up" back to a zero.
+
+**All three targets now consult the model about real user-mode tasks.** Ring-3 / EL0 / U-mode suites
+are 39 / 32 / 32; `scripts/e2e-all.sh` PASS (VirtualBox rung SKIPs: this host is arm64 and cannot
+virtualize x86-64), `scripts/console-e2e.sh` PASS on all three.
 
 **Pre-existing and NOT caused by this wave:** `scripts/vm-e2e-x86.sh` fails at ring-3 invariant 28
 (`trapframe: the task trapped, was resumed, and trapped AGAIN`). Verified by stashing this wave's

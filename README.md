@@ -202,7 +202,7 @@ uptime; every admission on the priority-scheduler path goes through it, every di
 death is fed back into the history the *next* advice reads, and the cell-pressure census ages on every
 console line even when nothing is being admitted.
 
-**And a real user-mode task reaches it.** On aarch64 and RISC-V, two genuine ring-3 / U-mode tasks —
+**And a real user-mode task reaches it.** On all three targets, two genuine ring-3 / U-mode tasks —
 own address spaces, own trap frames, real context switches — are admitted through the resident
 advisor and dispatched by `PriorityScheduler`, with each dispatch and each exit fed back. Each task
 is described with the memory it actually mapped, not a plausible-looking constant. Three boot
@@ -211,9 +211,12 @@ live spawn reaches the model`. The interleaving is deliberately *not* asserted: 
 equals, and demanding a fixed order would be asserting the advisor had no effect. That every task
 gets every slice and exits is what is asserted.
 
-**Still open, and named:** the x86-64 target is not wired to that seam. Its ring-3 gate is red on a
-defect that predates this work (`trapframe`, invariant 28), and wiring behind a red gate proves
-nothing.
+x86-64 was wired last, deliberately: its ring-3 gate was red on a defect predating this work, and
+wiring a model into a target whose user-mode gate cannot pass proves nothing about either. Fixing it
+found something worth stating — `SYS_REGCHECK` returned a conventional `0`, that return value lands in
+the task's `rax`, and `rax`'s sentinel *is* `SYS_REGCHECK`. The stub's second `int 0x80` therefore
+dispatched syscall 0, and the **restore** half of that invariant had never once been exercised on
+x86-64. The invariant was not flaky; it was measuring nothing.
 
 The boot commissions it against live state and reports what it did:
 
