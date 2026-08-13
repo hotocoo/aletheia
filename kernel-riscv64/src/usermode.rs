@@ -1063,6 +1063,125 @@ fn run_scheduler() -> (bool, bool, bool) {
     (order_ok, magic_ok, spaces_distinct)
 }
 
+/// Run two **real U-mode tasks** — own address spaces, own trap frames, real `sret` context switches
+/// — admitted through the machine's **resident risk advisor** and dispatched by the shared
+/// `PriorityScheduler` (REQ-ML-003, ADR-056).
+///
+/// The RISC-V counterpart of the aarch64 scenario, and it exists for the same reason: until it did,
+/// the forest was resident and consulted for every admission on the priority-scheduler path, but this
+/// target span its U-mode tasks through `RoundRobin` in [`run_scheduler`], so a *real user-mode task*
+/// never reached it.
+///
+/// The mechanism is untouched — the same `run_one_shot` + `satp` switch [`run_scheduler`] exercises.
+/// What differs: each task is described to the advisor at admission with the memory it actually
+/// mapped, dispatch comes from `PriorityScheduler::schedule_next`, and both the dispatch and the exit
+/// are fed back into what the NEXT advice reads.
+///
+/// Returns `(both_ran_and_exited, every_slice_presented_its_own_magic, both_were_advised)`.
+fn run_advised_scheduler() -> (bool, bool, bool) {
+    use crate::hal::{ActiveHal, Hal};
+    use kernel_core::mlsched::resident;
+    use kernel_core::priosched::{Priority, PriorityScheduler};
+    use kernel_core::taskfeat::{JobId, Outcome, TaskSubmission, UserId};
+
+    let root_main = vm::active_root();
+    let magics = [0x333u64, 0x444u64];
+    let mut roots = [0usize; NTASK];
+    for r in roots.iter_mut() {
+        let root = vm::build_identity().expect("advised sched root");
+        map_user_code(root, USER_CODE_VA, stub(_stub_sched_s, _stub_sched_e))
+            .expect("advised sched code");
+        map_user_data(root, USER_STACK_VA).expect("advised sched stack");
+        *r = root;
+    }
+    let mut tcb = [
+        make_frame(USER_CODE_VA, USER_STACK_TOP, 0, magics[0], 0),
+        make_frame(USER_CODE_VA, USER_STACK_TOP, 0, magics[1], 0),
+    ];
+
+    let advices_before = resident::stats().map(|s| s.advices).unwrap_or(0);
+
+    // Admission: each task is described with what it ACTUALLY holds on this machine — one code page
+    // and one stack page — rather than with a plausible-looking constant. A feature vector that does
+    // not describe this task is exactly the failure `taskfeat.rs` exists to prevent.
+    let mut policy = PriorityScheduler::default();
+    let now_secs = ActiveHal::ticks_to_ns(ActiveHal::timer_ticks()) / 1_000_000_000;
+    for i in 0..NTASK {
+        let submission = TaskSubmission {
+            sched_class: 2,
+            priority: 5,
+            cpu_millis: 500,
+            memory_pages: 2,
+            // No per-task disk request this kernel can measure, and it says so rather than reporting
+            // a zero it never observed.
+            disk_pages: None,
+            diff_machine: false,
+            task_index: i as u32,
+            job: JobId(1),
+            user: UserId(0),
+        };
+        resident::admit(
+            &mut policy,
+            TaskId(i as u64),
+            Priority(5),
+            now_secs,
+            &submission,
+        );
+    }
+
+    let mut order: Vec<usize> = Vec::new();
+    let mut magic_ok = true;
+    let mut guard = 0usize;
+    let mut exits = 0usize;
+
+    while let Some(TaskId(id)) = policy.schedule_next() {
+        let i = id as usize;
+        unsafe {
+            *addr_of_mut!(CURRENT) = None;
+            let s = &mut *addr_of_mut!(SCHED);
+            s.exited = false;
+            s.last_magic = 0;
+        }
+        // SAFETY: each `roots[i]` replicates the kernel identity map; switching per slice is safe.
+        unsafe {
+            vm::switch_address_space(roots[i]);
+            run_one_shot(&mut tcb[i]);
+            vm::switch_address_space(root_main);
+        }
+        resident::observe_schedule();
+        order.push(i);
+        let (magic, exited) = unsafe {
+            let s = &*addr_of!(SCHED);
+            (s.last_magic, s.exited)
+        };
+        if magic != magics[i] {
+            magic_ok = false;
+        }
+        if exited {
+            policy.finish(TaskId(id));
+            resident::observe_outcome(JobId(1), UserId(0), Outcome::Finished);
+            exits += 1;
+        }
+        guard += 1;
+        if guard > 4 * NTASK {
+            break;
+        }
+    }
+
+    // The interleaving is deliberately NOT asserted: advice may reorder equals, and demanding a fixed
+    // order would be asserting that the advisor had no effect. That every task gets every slice and
+    // exits IS asserted — nothing invented, dropped or starved.
+    let slices = [
+        order.iter().filter(|s| **s == 0).count(),
+        order.iter().filter(|s| **s == 1).count(),
+    ];
+    let ran_ok = order.len() == 8 && slices[0] == 4 && slices[1] == 4 && exits == NTASK;
+    let both_advised = resident::stats()
+        .map(|s| s.advices == advices_before + NTASK as u64)
+        .unwrap_or(false);
+    (ran_ok, magic_ok, both_advised)
+}
+
 // --- Invariants 9-10: timer preemption ------------------------------------------------------
 fn run_preemptive() -> (bool, bool) {
     let root_main = vm::active_root();
@@ -1548,6 +1667,23 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         distinct,
         "u-mode: the two scheduled tasks occupy distinct satp address spaces"
+    );
+
+    // The resident risk advisor is consulted about REAL U-mode tasks, not only about the
+    // commissioning workload (REQ-ML-003, ADR-056). Same address spaces, same trap frames, same
+    // `run_one_shot` + satp switch as the round-robin run above.
+    let (advised_ran, advised_magic, both_advised) = run_advised_scheduler();
+    check!(
+        advised_ran,
+        "u-mode: two REAL U-mode tasks admitted through the resident advisor each get every slice and exit"
+    );
+    check!(
+        advised_magic,
+        "u-mode: the full register file survives each context switch under the advised scheduler too"
+    );
+    check!(
+        both_advised,
+        "u-mode: the advisor was consulted once per real user-mode task — a live spawn reaches the model"
     );
 
     let (fair, prog) = run_preemptive();

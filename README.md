@@ -202,11 +202,18 @@ uptime; every admission on the priority-scheduler path goes through it, every di
 death is fed back into the history the *next* advice reads, and the cell-pressure census ages on every
 console line even when nothing is being admitted.
 
-**Named, and still open:** each target's `usermode.rs` still spawns its ring-3 tasks through its own
-bespoke rotation rather than through `PriorityScheduler` — the follow-on `kernel-core/src/sched.rs`
-has documented since it landed. So a real user-mode task spawn does not yet reach the advisor. That
-is a wiring gap in the targets, and it is said here rather than left for a reader to infer from the
-absence of a call site.
+**And a real user-mode task reaches it.** On aarch64 and RISC-V, two genuine ring-3 / U-mode tasks —
+own address spaces, own trap frames, real context switches — are admitted through the resident
+advisor and dispatched by `PriorityScheduler`, with each dispatch and each exit fed back. Each task
+is described with the memory it actually mapped, not a plausible-looking constant. Three boot
+invariants per target gate it, including `the advisor was consulted once per real user-mode task — a
+live spawn reaches the model`. The interleaving is deliberately *not* asserted: advice may reorder
+equals, and demanding a fixed order would be asserting the advisor had no effect. That every task
+gets every slice and exits is what is asserted.
+
+**Still open, and named:** the x86-64 target is not wired to that seam. Its ring-3 gate is red on a
+defect that predates this work (`trapframe`, invariant 28), and wiring behind a red gate proves
+nothing.
 
 The boot commissions it against live state and reports what it did:
 

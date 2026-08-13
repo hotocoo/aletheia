@@ -62,11 +62,17 @@ and the advisor would correctly abstain about the entire machine. Aletheia repor
 unobservable, which is true of it today, and the column can only start meaning something when a
 corpus that has one is trained.
 
-**Still open, named, and not closed by this wave:** each target's `usermode.rs` still spawns its ring-3
-tasks through its own bespoke rotation rather than through `PriorityScheduler` — the follow-on
-`kernel-core/src/sched.rs` has documented since it landed. So the advisor is consulted for every
-admission the priority-scheduler path carries, and a real user-mode task spawn does not yet reach it.
-That is a wiring gap in the three targets, not a gap in the advisor.
+* **A real user-mode task now reaches the model.** The gap named above was closed in the same wave:
+  `run_advised_scheduler` in the aarch64 and RISC-V `usermode.rs` runs two genuine ring-3 / U-mode
+  tasks — own address spaces, own trap frames, real context switches, the same `resume_frame` /
+  `run_one_shot` mechanism the round-robin scenario exercises — admitted through `resident::admit`,
+  dispatched by `PriorityScheduler`, with each dispatch and each exit fed back into what the next
+  advice reads. Each task is described with the memory it **actually mapped**, not a plausible
+  constant. Three gated boot invariants per target; both EL0 and U-mode suites go 29 → 32.
+
+**Still open and named:** x86-64 is not wired to that seam. Its ring-3 gate is red on a defect that
+predates this work (`trapframe`, invariant 28), and wiring behind a red gate proves nothing. That
+defect is the next wave.
 
 **Pre-existing and NOT caused by this wave:** `scripts/vm-e2e-x86.sh` fails at ring-3 invariant 28
 (`trapframe: the task trapped, was resumed, and trapped AGAIN`). Verified by stashing this wave's
