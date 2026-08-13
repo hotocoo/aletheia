@@ -65,7 +65,7 @@ echo "vm exit code: $CODE"
 fail=0
 [ "$CODE" -eq 0 ] || { echo "FAIL: expected exit 0, got $CODE"; fail=1; }
 echo "$OUT" | grep -q "ALL 13 INVARIANTS HOLD"        || { echo "FAIL: spine invariants marker missing"; fail=1; }
-echo "$OUT" | grep -q "ALL 11 CAPABILITY-LIFETIME INVARIANTS HOLD" || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
+echo "$OUT" | grep -q "ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD" || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
 echo "$OUT" | grep -q "ALL 20 RISK-ADVISOR INVARIANTS HOLD" || { echo "FAIL: risk-advisor invariants marker missing (REQ-ML-001, ADR-056)"; fail=1; }
 # The forest under load: cost measured on this machine, and the properties that must hold at
 # any scale. A model that is only verified on 256 fixture rows is verified at a scale no scheduler
@@ -74,7 +74,7 @@ echo "$OUT" | grep -q "ALL 8 STRESS INVARIANTS HOLD" || { echo "FAIL: risk-advis
 echo "$OUT" | grep -qE "abstaining workload: [0-9]+ tasks, 0 positions move" || { echo "FAIL: an abstaining model moved a scheduling position (ADR-056 fallback broken)"; fail=1; }
 echo "$OUT" | grep -q "ALL 21 MEMORY INVARIANTS HOLD"        || { echo "FAIL: memory invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 66 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory invariants marker missing"; fail=1; }
-echo "$OUT" | grep -q "ALL 24 EL0-BOUNDARY INVARIANTS HOLD"  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
+echo "$OUT" | grep -q "ALL 29 EL0-BOUNDARY INVARIANTS HOLD"  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "VIRTIO-BLK INVARIANTS HOLD"    || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
 echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
 echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
@@ -84,7 +84,7 @@ echo "$OUT" | grep -q "ALL 5 NETWORK INVARIANTS HOLD" || { echo "FAIL: network i
 echo "$OUT" | grep -q "ALL 9 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
-echo "$OUT" | grep -q "ALL 40 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
+echo "$OUT" | grep -q "ALL 41 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
 

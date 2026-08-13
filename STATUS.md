@@ -7,6 +7,37 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
 
+## Current implementation wave — command authority, durable capability image, and user-fault continuation (2026-08-13)
+
+* **Console authority is no longer a boolean hook.** All three target hosts mint explicit `CapEngine`
+  capabilities for console/system actions; shared shell dispatch maps each action to a stable capability
+  name and revocation tests prove attenuation fails closed.
+* **Filesystem I/O is capability-bound end to end.** Interactive sessions mount through `DeviceGuard`'s
+  `AuthorizedDevice`, which re-checks read, write, and flush authority beneath the shell dispatcher. A
+  read-only capability cannot reach writes or durability barriers. `kernel-core`: **335 tests passed**;
+  all three interactive target builds and `scripts/console-e2e.sh` pass.
+* **Operator fault visibility is live.** New `faults` command reads contained-task and escalated-fault
+  counters from each target's actual supervisor; console surface is now 28 commands / 41 invariants.
+* **User-mode syscall numbers now have one source of truth.** `kernel-core::syscall` owns the six-number
+  ABI and fail-closed decoder; aarch64, RISC-V, and x86-64 handlers validate through it before dispatch.
+  Effects remain target-owned; filesystem/process syscalls are not claimed yet.
+* **Capability images now have an atomic medium seam.** `capstore::save_to_fs` / `load_from_fs` replace
+  one `cap.store` object through `Filesystem::replace`; round-trip and on-medium corruption refusal are
+  tested. Key-backed HMAC-SHA256 `save_authenticated_to_fs` / `load_authenticated_from_fs` now refuse
+  wrong-key and tampered images before parsing. Key custody, rotation, secure-boot delivery, and
+  combined transaction remain open; ALET-P1-034 stays open for that boundary.
+* **Capability image authentication is now implemented at kernel-core boundary.** HMAC-SHA256 tags
+  cover the checksummed image; live suite count is now 14, with wrong-key and pre-parse tamper refusal.
+* **Fault continuation + first user-facing service now run on all three targets.** aarch64 and RISC-V
+  suites take an undeclared user fault, route it through `Supervisor`, tear down its private address
+  space, then run another user task. All targets now expose capability-bound `process.inspect` through
+  their real trap path; live user-mode gates are **29 invariants** on aarch64/RISC-V and **36** on
+  x86-64. FS syscalls still await target-safe user-memory copying.
+
+**Still not production-ready.** Authenticated boot/update rollback, IOMMU/SMMU DMA containment,
+interrupt-driven I/O, supervision trees/restart policy, quotas/rate limits, broad hardware qualification,
+and scale soak/fault injection remain open in `docs/MATURITY.md` and the gap register.
+
 ## The 2019 model, and the forest under load (2026-08-12 09:28 +08) — a benchmark that found a kernel defect
 
 The blob every image carries is now the `borg2019` model (32.7 M held-out rows, PR-AUC 0.99543,

@@ -6,7 +6,10 @@
 //! the inputs a careless user actually produces (a bare verb, a missing argument, a name that is all
 //! whitespace, a paste far past the line bound).
 use kernel_core::fs::{Filesystem, MAX_FILE_BYTES};
-use kernel_core::shell::{self, Edit, LineEditor, Outcome, Session, ShellHost, COMMANDS, MAX_LINE};
+use kernel_core::shell::{
+    self, Edit, LineEditor, Outcome, Session, ShellAction, ShellHost, COMMANDS, MAX_LINE,
+};
+use kernel_core::spine::{CapEngine, Constraints, Scope};
 use kernel_core::storage::MemBlockDevice;
 
 /// A host stand-in for a target's facts. Fixed values, so an assertion about output is about the
@@ -28,6 +31,38 @@ impl ShellHost for TestHost {
     }
     fn privilege(&self) -> u64 {
         1
+    }
+    fn supervisor_terminated(&self) -> usize {
+        3
+    }
+    fn supervisor_escalations(&self) -> usize {
+        2
+    }
+    fn authorize(&self, _action: ShellAction) -> bool {
+        true
+    }
+}
+
+struct DenyWritesHost;
+
+impl ShellHost for DenyWritesHost {
+    fn arch(&self) -> &str {
+        "test-host"
+    }
+    fn uptime_ns(&self) -> u64 {
+        0
+    }
+    fn free_frames(&self) -> usize {
+        1
+    }
+    fn total_frames(&self) -> usize {
+        1
+    }
+    fn privilege(&self) -> u64 {
+        1
+    }
+    fn authorize(&self, action: ShellAction) -> bool {
+        !matches!(action, ShellAction::Write | ShellAction::Halt)
     }
 }
 
@@ -164,6 +199,102 @@ fn an_unknown_command_is_refused_by_name_and_the_session_continues() {
     let log = run("nope\rhelp\r");
     assert!(log.contains("unknown command 'nope'"));
     assert!(log.contains("commands:"), "the session kept going");
+}
+
+#[test]
+fn faults_reports_supervisor_counters_through_inspect_authority() {
+    let log = run("faults\r");
+    assert!(log.contains("3 user task(s) contained, 2 fault(s) escalated"));
+}
+
+#[test]
+fn denied_write_is_refused_before_filesystem_io() {
+    let host = DenyWritesHost;
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let mut log = String::new();
+    assert_eq!(
+        shell::execute(
+            "write secret value",
+            &host,
+            &mut fs,
+            &mut dev,
+            &[],
+            &mut |s| log.push_str(s),
+        ),
+        Outcome::Continue
+    );
+    assert!(log.contains("permission denied: console.write"));
+    assert_eq!(fs.list(&dev).unwrap().len(), 0);
+}
+
+#[test]
+fn denied_halt_cannot_stop_session() {
+    let host = DenyWritesHost;
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let mut log = String::new();
+    let outcome = shell::execute("halt", &host, &mut fs, &mut dev, &[], &mut |s| {
+        log.push_str(s)
+    });
+    assert_eq!(outcome, Outcome::Continue);
+    assert!(log.contains("permission denied: system.halt"));
+    assert!(!log.contains("halting."));
+}
+
+#[test]
+fn console_actions_use_real_capabilities_and_revoke_fails_closed() {
+    let mut engine = CapEngine::new(0xCAFE, 0);
+    let console = engine.mint(
+        "human:console",
+        "console.*",
+        Scope::All,
+        Constraints::none(),
+    );
+    let system = engine.mint("human:console", "system.*", Scope::All, Constraints::none());
+    let offered = [console, system];
+
+    assert!(shell::authorize_with_capabilities(
+        &engine,
+        &offered,
+        ShellAction::Inspect
+    ));
+    assert!(shell::authorize_with_capabilities(
+        &engine,
+        &offered,
+        ShellAction::Write
+    ));
+    assert!(shell::authorize_with_capabilities(
+        &engine,
+        &offered,
+        ShellAction::Halt
+    ));
+
+    engine.revoke(console);
+    assert!(!shell::authorize_with_capabilities(
+        &engine,
+        &offered,
+        ShellAction::Inspect
+    ));
+    assert!(!shell::authorize_with_capabilities(
+        &engine,
+        &offered,
+        ShellAction::Write
+    ));
+    assert!(shell::authorize_with_capabilities(
+        &engine,
+        &offered,
+        ShellAction::Halt
+    ));
+
+    engine.revoke(system);
+    assert!(!shell::authorize_with_capabilities(
+        &engine,
+        &offered,
+        ShellAction::Halt
+    ));
 }
 
 #[test]

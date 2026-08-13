@@ -27,6 +27,7 @@ extern crate alloc;
 pub mod capalg;
 pub mod capstore;
 pub mod conring;
+pub mod crypto;
 pub mod deadva;
 pub mod device;
 pub mod dma;
@@ -54,11 +55,13 @@ pub mod spine;
 pub mod storage;
 pub mod supervisor;
 pub mod sync;
+pub mod syscall;
 pub mod teardown;
 pub mod virtioblk;
 pub mod virtionet;
 pub mod virtq;
 pub mod vmaddr;
+pub mod usermem;
 
 /// The arch-independent hardware primitives the Aletheia kernel needs from a target backend. Every
 /// target implements this for its own `…Hal` struct; the kernel is written against the trait, never

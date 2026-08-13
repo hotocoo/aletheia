@@ -3,8 +3,9 @@
 //! The Aletheia principle — no ambient authority — extends to hardware: a client may touch a device
 //! only by presenting a capability the SAME [`CapEngine`] authorizes, never because it happens to run
 //! in the kernel. [`DeviceGuard`] wraps any [`BlockDevice`] and gates every read/write/flush on a
-//! capability, so device I/O is authorized exactly like an entity write or an IPC send. Read and write
-//! are separate authorities, so an attenuated read-only capability genuinely cannot write.
+//! capabilities, so device I/O is authorized exactly like an entity write or an IPC send. Read,
+//! write, and flush are separate authorities, so an attenuated read-only capability genuinely cannot
+//! mutate storage.
 //!
 //! This is the arch-independent authority layer, hosted-proved over the real
 //! [`crate::storage::MemBlockDevice`] — deny/allow decides actual bytes, not an empty registry. The
@@ -32,15 +33,27 @@ pub struct DeviceGuard<D: BlockDevice> {
     device: D,
     read_action: String,
     write_action: String,
+    flush_action: String,
 }
 
 impl<D: BlockDevice> DeviceGuard<D> {
     /// Wrap `device`, gating reads behind `read_action` and writes/flush behind `write_action`.
     pub fn new(device: D, read_action: &str, write_action: &str) -> Self {
+        Self::new_with_actions(device, read_action, write_action, write_action)
+    }
+
+    /// Wrap `device` with independent read, write, and flush authorities.
+    pub fn new_with_actions(
+        device: D,
+        read_action: &str,
+        write_action: &str,
+        flush_action: &str,
+    ) -> Self {
         DeviceGuard {
             device,
             read_action: read_action.to_string(),
             write_action: write_action.to_string(),
+            flush_action: flush_action.to_string(),
         }
     }
 
@@ -77,9 +90,9 @@ impl<D: BlockDevice> DeviceGuard<D> {
         self.device.write_block(idx, buf).map_err(DeviceError::Io)
     }
 
-    /// Capability-gated durability barrier (write authority).
+    /// Capability-gated durability barrier. Fail-closed: without `flush_action` the device is not touched.
     pub fn flush(&mut self, engine: &CapEngine, offered: &[CapToken]) -> Result<(), DeviceError> {
-        if !Self::authorized(engine, &self.write_action, offered) {
+        if !Self::authorized(engine, &self.flush_action, offered) {
             return Err(DeviceError::Denied);
         }
         self.device.flush().map_err(DeviceError::Io)
@@ -88,5 +101,57 @@ impl<D: BlockDevice> DeviceGuard<D> {
     /// Number of blocks (device geometry is not sensitive; not gated).
     pub fn num_blocks(&self) -> usize {
         self.device.num_blocks()
+    }
+
+    /// Borrow this guard as a normal `BlockDevice` whose every operation uses `engine` and
+    /// `offered`. Higher layers retain their normal device API without receiving ambient hardware access.
+    pub fn authorized_device<'a>(
+        &'a mut self,
+        engine: &'a CapEngine,
+        offered: &'a [CapToken],
+    ) -> AuthorizedDevice<'a, D> {
+        AuthorizedDevice {
+            guard: self,
+            engine,
+            offered,
+        }
+    }
+}
+
+/// Capability-bound `BlockDevice` view over a [`DeviceGuard`].
+pub struct AuthorizedDevice<'a, D: BlockDevice> {
+    guard: &'a mut DeviceGuard<D>,
+    engine: &'a CapEngine,
+    offered: &'a [CapToken],
+}
+
+impl<D: BlockDevice> BlockDevice for AuthorizedDevice<'_, D> {
+    fn num_blocks(&self) -> usize {
+        self.guard.num_blocks()
+    }
+
+    fn read_block(&self, idx: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+        self.guard
+            .read_block(self.engine, self.offered, idx, buf)
+            .map_err(device_error)
+    }
+
+    fn write_block(&mut self, idx: usize, buf: &[u8]) -> Result<(), StorageError> {
+        self.guard
+            .write_block(self.engine, self.offered, idx, buf)
+            .map_err(device_error)
+    }
+
+    fn flush(&mut self) -> Result<(), StorageError> {
+        self.guard
+            .flush(self.engine, self.offered)
+            .map_err(device_error)
+    }
+}
+
+fn device_error(error: DeviceError) -> StorageError {
+    match error {
+        DeviceError::Denied => StorageError::Unauthorized,
+        DeviceError::Io(error) => error,
     }
 }

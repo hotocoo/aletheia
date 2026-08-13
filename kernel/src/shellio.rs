@@ -3,10 +3,12 @@
 //! `kernel_core::shell` owns the editor, the commands, the refusals and the loop. What is genuinely
 //! this target's is only: where a typed byte comes from (PL011 RX), how a line is printed, what the
 //! machine's facts are (frame allocator, generic timer, current EL), and how to stop.
+use kernel_core::device::DeviceGuard;
 use kernel_core::fs;
 #[cfg(feature = "interactive")]
 use kernel_core::fs::Filesystem;
 use kernel_core::shell::{self, ShellHost};
+use kernel_core::spine::{CapEngine, CapToken, Constraints, Scope};
 #[cfg(feature = "interactive")]
 use kernel_core::storage::BlockDevice;
 use kernel_core::storage::MemBlockDevice;
@@ -18,7 +20,30 @@ use crate::hal::ActiveHal;
 use crate::uart;
 
 /// This target's answers to the questions a command may ask.
-pub struct Host;
+pub struct Host {
+    authority: CapEngine,
+    offered: [CapToken; 2],
+}
+
+impl Host {
+    /// Construct initial console subject with explicit, attenuable authority. This is still a root
+    /// console by policy, but command effects now require real capability evaluation rather than a
+    /// boolean ambient-privilege hook.
+    fn privileged() -> Self {
+        let mut authority = CapEngine::new(0xA11E_7A01, 0);
+        let console = authority.mint(
+            "human:console",
+            "console.*",
+            Scope::All,
+            Constraints::none(),
+        );
+        let system = authority.mint("human:console", "system.*", Scope::All, Constraints::none());
+        Host {
+            authority,
+            offered: [console, system],
+        }
+    }
+}
 
 impl ShellHost for Host {
     fn arch(&self) -> &str {
@@ -35,6 +60,15 @@ impl ShellHost for Host {
     }
     fn privilege(&self) -> u64 {
         ActiveHal::current_privilege()
+    }
+    fn supervisor_terminated(&self) -> usize {
+        crate::usermode::supervisor().terminated()
+    }
+    fn supervisor_escalations(&self) -> usize {
+        crate::usermode::supervisor().escalations()
+    }
+    fn authorize(&self, action: shell::ShellAction) -> bool {
+        shell::authorize_with_capabilities(&self.authority, &self.offered, action)
     }
     #[cfg(feature = "interactive")]
     fn input_dropped(&self) -> u64 {
@@ -82,7 +116,15 @@ const SCRATCH_BLOCKS: usize = fs::FILE_DATA_START + 64;
 /// `(index, name)` → the caller exits `250 + index`.
 pub fn selftest() -> Result<u32, (u32, &'static str)> {
     let mut disk = MemBlockDevice::new(SCRATCH_BLOCKS);
-    shell::console_suite(&Host, &mut disk, &mut |n, passed, name| {
+    let host = Host::privileged();
+    let mut guard = DeviceGuard::new_with_actions(
+        &mut disk,
+        "console.inspect",
+        "console.write",
+        "console.flush",
+    );
+    let mut device = guard.authorized_device(&host.authority, &host.offered);
+    shell::console_suite(&host, &mut device, &mut |n, passed, name| {
         if passed {
             kprintln!("  [pass {:>2}] {}", n, name);
         } else {
@@ -111,7 +153,11 @@ fn mount_or_format<D: BlockDevice>(dev: &mut D) -> Option<Filesystem> {
 
 #[cfg(feature = "interactive")]
 fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
-    let Some(mut fs) = mount_or_format(dev) else {
+    let host = Host::privileged();
+    let mut guard =
+        DeviceGuard::new_with_actions(dev, "console.inspect", "console.write", "console.flush");
+    let mut device = guard.authorized_device(&host.authority, &host.offered);
+    let Some(mut fs) = mount_or_format(&mut device) else {
         kprintln!("[console] FATAL: no usable namespace");
         ActiveHal::exit(251)
     };
@@ -119,7 +165,13 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
     // the handler moves it into the ring, and the loop reads the ring instead of spinning on a
     // register that is empty almost every time.
     crate::conirq::init();
-    shell::run_loop(&Host, &mut fs, dev, &mut crate::conirq::pop, &mut emit);
+    shell::run_loop(
+        &host,
+        &mut fs,
+        &mut device,
+        &mut crate::conirq::pop,
+        &mut emit,
+    );
     ActiveHal::exit(0)
 }
 
