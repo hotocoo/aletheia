@@ -107,7 +107,10 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 5 NETWORK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 9 DMA-BOUNDARY INVARIANTS HOLD' "$LOG" \
 && grep -q 'ALL 9 INPUT-RING INVARIANTS HOLD' "$LOG" \
-&& grep -q 'ALL 41 CONSOLE INVARIANTS HOLD' "$LOG" \
+&& grep -q 'ALL 42 CONSOLE INVARIANTS HOLD' "$LOG" \
+&& grep -q 'ALL 12 LIVE-ADVISORY INVARIANTS HOLD' "$LOG" \
+&& grep -q '\[mlsched\] RESIDENT:' "$LOG" \
+&& grep -q 'advised drain is a permutation of the model-free one' "$LOG" \
    && grep -q 'PERSISTENT MEDIUM: boot #1, 0 entities verified' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
   # ---- SECOND BOOT against the SAME persistent disk: the OS must REMEMBER (REQ-STOR-003) ----

@@ -687,13 +687,16 @@ pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
                 None => return u64::MAX,
             };
             match t.engine.evaluate(
-                Syscall::ProcessInfo.capability().unwrap_or("process.inspect"),
+                Syscall::ProcessInfo
+                    .capability()
+                    .unwrap_or("process.inspect"),
                 &Target::default(),
                 &t.caps,
             ) {
                 Decision::Allow => {
                     t.allowed = true;
-                    let response = pack_process_info(supervisor().terminated(), supervisor().escalations());
+                    let response =
+                        pack_process_info(supervisor().terminated(), supervisor().escalations());
                     unsafe { *addr_of_mut!(PROCESS_INFO_RESULT) = response };
                     response
                 }
@@ -1022,7 +1025,9 @@ fn run_syscall(grant: bool) -> (bool, usize) {
         isolation_held: false,
         fault_va: 0,
     });
-    unsafe { *addr_of_mut!(PROCESS_INFO_RESULT) = u64::MAX; }
+    unsafe {
+        *addr_of_mut!(PROCESS_INFO_RESULT) = u64::MAX;
+    }
 
     let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
     f.regs[RAX] = SYS_EMIT;
@@ -2375,7 +2380,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         granted_allowed
             && (terminated as usize, escalations as usize)
-            == (supervisor().terminated(), supervisor().escalations()),
+                == (supervisor().terminated(), supervisor().escalations()),
         "process-info: capability-bound ring-3 query returns live supervisor counters"
     );
 

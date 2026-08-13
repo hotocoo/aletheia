@@ -84,7 +84,16 @@ echo "$OUT" | grep -q "ALL 5 NETWORK INVARIANTS HOLD" || { echo "FAIL: network i
 echo "$OUT" | grep -q "ALL 9 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
-echo "$OUT" | grep -q "ALL 41 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
+echo "$OUT" | grep -q "ALL 42 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
+# The advisor must be RESIDENT and CONSULTED on this booted machine, not merely verified
+# (REQ-ML-003, ADR-056): the live-path invariants hold, a model is actually resident, the
+# commissioning workload really went through it, and the advised drain was a permutation of the
+# model-free one -- advice reordered equals and did nothing else.
+echo "$OUT" | grep -q "ALL 12 LIVE-ADVISORY INVARIANTS HOLD" || { echo "FAIL: live-advisory invariants marker missing (REQ-ML-003)"; fail=1; }
+echo "$OUT" | grep -q "\[mlsched\] RESIDENT:"            || { echo "FAIL: no model took up residence (REQ-ML-003)"; fail=1; }
+echo "$OUT" | grep -qE "\[mlsched\] commissioning: [0-9]+ tasks admitted over [0-9]+ s" || { echo "FAIL: the resident advisor was never consulted by a workload (REQ-ML-003)"; fail=1; }
+echo "$OUT" | grep -q "advised drain is a permutation of the model-free one" || { echo "FAIL: the advised drain was not proved a permutation of the model-free one (INV-014)"; fail=1; }
+echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlstat did not report a resident advisor (REQ-ML-003)"; fail=1; }
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
 

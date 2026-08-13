@@ -42,6 +42,7 @@ pub mod memattr;
 pub mod mlrisk;
 pub mod mlrisk_contract;
 pub mod mlrisk_stress;
+pub mod mlsched;
 pub mod persist;
 pub mod priosched;
 pub mod ptreclaim;
@@ -56,12 +57,13 @@ pub mod storage;
 pub mod supervisor;
 pub mod sync;
 pub mod syscall;
+pub mod taskfeat;
 pub mod teardown;
+pub mod usermem;
 pub mod virtioblk;
 pub mod virtionet;
 pub mod virtq;
 pub mod vmaddr;
-pub mod usermem;
 
 /// The arch-independent hardware primitives the Aletheia kernel needs from a target backend. Every
 /// target implements this for its own `…Hal` struct; the kernel is written against the trait, never

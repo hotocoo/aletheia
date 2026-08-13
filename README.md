@@ -152,6 +152,219 @@ This benchmark covers the hosted Core's **six operations**. It does **not** driv
 (`kernel-core/src/shell.rs`), which runs in kernel space with no inference engine underneath it and
 has its own gate, `scripts/console-e2e.sh`.
 
+## The machine learning that runs *inside* the kernel
+
+Two different things in this repository are called a model, and conflating them is the easiest way to
+be wrong about what Aletheia does.
+
+The **language** model above interprets intent and proposes plans, in user space, holding no
+authority. The second one is a **frozen gradient-boosted decision forest compiled to integer
+comparisons**, it lives in the microkernel, and it is consulted by the scheduler for the whole life
+of the machine. It answers one tabular question a few million times an hour — *is this task going to
+die if I admit it?* — which is the wrong question to ask a language model at any price: four orders of
+magnitude too slow, needing floating point this kernel does not have, and not reproducible run to run.
+
+* Trainer, corpus, calibration and exporter: [`aletheia-ml`](../aletheia-ml) (Google Borg 2019 cluster
+  trace, 32.7 M held-out rows).
+* In the kernel: `kernel-core/src/mlrisk.rs` (verify + evaluate), `taskfeat.rs` (derive the features
+  from a live task), `mlsched.rs` (residency, counters, the live admission path).
+* Shipped blob: `kernel-core/models/aletheia_risk.altm`, embedded with `include_bytes!` — 171 trees,
+  26 469 nodes, worst case **1 368 integer compares per advice**, no allocation after load, no
+  floating point anywhere.
+
+### Proof 1 — the model is built into the OS, and verified by it
+
+The blob is part of the image, so a running kernel cannot be holding a model the image hash does not
+account for. Embedding is not trusting: **every target verifies it at boot** and prints what it got,
+or the named `ModelError` that refused it. Wrong magic, wrong version, wrong feature count, a feature
+contract that does not match the one this kernel was compiled against, a child index out of range, a
+truncated tail — each is a refusal by name, and a model the kernel cannot verify is a model the kernel
+does not run.
+
+From a real QEMU boot (`scripts/vm-e2e.sh`, aarch64; the RISC-V gate prints the same):
+
+```text
+[mlrisk] bundled forest: 171 trees, 26469 nodes, worst case 1368 compares per advice
+[mlrisk] ALL 20 RISK-ADVISOR INVARIANTS HOLD
+[mlrisk-stress] ALL 8 STRESS INVARIANTS HOLD
+[mlsched] RESIDENT: 171 trees, 26469 nodes, worst case 1368 compares per advice
+[mlsched] ALL 12 LIVE-ADVISORY INVARIANTS HOLD
+```
+
+Twenty of those invariants check the model against the trainer — every fixed-point margin and every
+three-way verdict reproduced **exactly** on the committed parity fixture, in kernel space, on the CPU.
+
+### Proof 2 — it is resident and consulted while the machine runs, not just at boot
+
+A blob loaded inside a boot selftest and dropped on the way to the shell is an *installed* model, not
+a running one. `kernel-core/src/mlsched.rs` holds one verified forest behind one lock for the whole
+uptime; every admission on the priority-scheduler path goes through it, every dispatch and every task
+death is fed back into the history the *next* advice reads, and the cell-pressure census ages on every
+console line even when nothing is being admitted.
+
+**Named, and still open:** each target's `usermode.rs` still spawns its ring-3 tasks through its own
+bespoke rotation rather than through `PriorityScheduler` — the follow-on `kernel-core/src/sched.rs`
+has documented since it landed. So a real user-mode task spawn does not yet reach the advisor. That
+is a wiring gap in the targets, and it is said here rather than left for a reader to infer from the
+absence of a call site.
+
+The boot commissions it against live state and reports what it did:
+
+```text
+[mlsched] commissioning: 4096 tasks admitted over 28665 s of machine time (95 cell bins)
+[mlsched] live census: 4096 advices — 180 low / 3543 elevated / 373 abstain (0 in band), 373 out-of-box
+[mlsched] watching: 4096 dispatches, 2457 finished / 820 failed / 819 evicted, 4096 ticks
+[mlsched] continuity: span 28665 s, longest gap between advices 7 s
+[mlsched] advised drain is a permutation of the model-free one: 4096 tasks in, 4096 tasks out
+```
+
+And residency is a question you can ask the running machine yourself, at any later moment in a
+session, rather than a claim this file makes on its behalf — `mlstat` at the console reads the live
+counters:
+
+```text
+risk advisor: RESIDENT — 171 trees, 26469 nodes, worst case 1368 compares per advice
+advices: 4096 (180 low / 3543 elevated / 373 abstain, 0 of those in the conformal band)
+decisive: 90.8% — 373 out-of-box arrival(s) declined
+watching: 4096 dispatch(es), 2457 finished / 820 failed / 819 evicted, 4096 housekeeping tick(s)
+continuity: first advice at 0s, last at 28665s (span 28665s), longest gap 7s
+```
+
+Those five lines are `mlstat`'s own renderer (`shell::report_risk_advisor`) — one implementation, so
+the boot banner and the console command cannot say different things — and the boot prints them by
+calling it. The console command is separately gated: `console: mlstat reports the resident risk
+advisor's live counters` is one of the 42 console invariants every target re-proves in QEMU.
+
+`silence` is the line that makes "continuously active" **falsifiable**. A historical gap only ever
+closes when the *next* consultation arrives, so an advisor that fell silent an hour ago would still be
+reporting the small gaps it managed while it was busy; silence is measured against the machine's own
+clock at its most recent tick and grows with the machine. `mlstat` prints both.
+
+### Proof 3 — consulting it makes the scheduler measurably better
+
+Everything above proves the model *runs*. Whether it *helps* is a different question, and PR-AUC does
+not answer it — a scheduler does not run a classifier, it runs a queue. So `python -m aletheia_ml
+schedsim` replays held-out tasks through **the kernel's own selection rule**, twice, and changes
+exactly one thing between the arms.
+
+The comparison is deliberately unflattering to the model:
+
+* Both arms run `PriorityScheduler::schedule_next`: highest base priority first, FIFO among equals.
+  The advised arm differs in one respect only — among tasks of **equal** priority, a decisive `low`
+  is preferred over a decisive `elevated`. Priority is never traded for risk, an abstention moves
+  nobody, no task is dropped, delayed past its band, or denied admission.
+* Verdicts come from the exported **integer** forest — the same margins, threshold and conformal band
+  the kernel compares against — not from XGBoost's float path.
+* The stream is the untouched chronological **test** split; nothing was fitted, calibrated or
+  thresholded on these rows.
+* The labels are the trace's own terminal events. The model does not mark its own homework.
+
+Metric: **head-of-line delay for tasks that survive** — the mean number of dispatch steps a task that
+would have completed spends waiting behind everything else, over a bounded 64-deep ready queue. Three
+independent 60 000-task windows of the held-out split:
+
+| window | base positive rate | `low` verdicts | of which survived | model-free wait | advised wait | change |
+|---|---|---|---|---|---|---|
+| seed 11 | 0.8149 | 1 478 | 98.71 % | 49.706 | 48.994 | **−1.43 %** |
+| seed 18 | 0.7477 | 194 | 94.85 % | 27.873 | 25.871 | **−7.19 %** |
+| seed 25 | 0.7828 | 1 009 | 63.23 % | 47.080 | 45.508 | **−3.34 %** |
+
+**3 of 3 windows improved; mean −3.99 % (min −1.43 %, max −7.19 %).** Dispatch counts were identical
+in every arm, and the doomed tasks' wait rose by 0.2–0.7 steps — the trade is visible rather than
+hidden. Artifact: `aletheia-ml/artifacts/borg2019/schedsim_kernel.json`.
+
+For completeness, the classifier numbers on the same untouched split (32 733 226 rows, 79.02 %
+positive): PR-AUC **0.9954** against a 0.7902 base rate (lift 1.26x), ROC-AUC **0.9827**, integer-path
+vs float-path decision agreement **1.000**.
+
+### Proof 4 — against the selection rule every major OS family actually ships
+
+"Better than *not* consulting the model" invites the obvious next question: better compared to a real
+operating system? `python -m aletheia_ml oscompare` answers it under terms set out before any number
+is produced.
+
+**Nothing here boots any of these systems, and nothing here measures one.** Booting them would not
+answer the question anyway — comparing scheduling *policy* means feeding the same arrivals, with the
+same service demands, to each policy, and no two kernels are ever handed the same workload on the same
+hardware at the same instant. So each system's **documented selection rule** — the function answering
+"which runnable thread runs next" — is implemented in one simulator and driven from one trace.
+
+Metric: **mean turnaround of tasks that survive** (dispatch steps from arrival to last slice), over
+three windows × 20 000 held-out Borg tasks with a 64-deep ready queue. Work that completes is the work
+a machine exists to do; the doomed tasks' turnaround is printed beside it so the trade stays visible.
+
+| policy | survivor | doomed | advised better by | what it is |
+|---|---|---|---|---|
+| `xnu-macos` | 81.175 | 69.513 | **25.20 %** | Darwin/XNU (macOS, iOS): base priority minus decayed CPU usage |
+| `redox-rr` | 73.899 | 73.012 | **17.83 %** | Redox: round-robin over runnable contexts |
+| `fifo` | 73.258 | 73.194 | **17.12 %** | arrival order, no policy at all |
+| `freebsd-ule` | 72.229 | 73.840 | **15.93 %** | FreeBSD ULE: interactivity + nice, current/next queue swap |
+| `linux-cfs` | 68.477 | 75.042 | **11.33 %** | Linux ≤ 6.5 (Debian 12, RHEL 8/9, Ubuntu ≤ 24.04): smallest virtual runtime |
+| `linux-bore` | 68.156 | 75.031 | **10.91 %** | CachyOS / Zen / Liquorix BORE: EEVDF plus a burst penalty |
+| `zircon-fair` | 68.055 | 75.202 | **10.78 %** | Fuchsia Zircon: weight-proportional virtual finish time |
+| `linux-eevdf` | 68.055 | 75.202 | **10.78 %** | Linux 6.6+ (Fedora, Arch, Ubuntu 24.10+, Debian 13): earliest eligible virtual deadline |
+| `linux-muqss` | 64.560 | 76.269 | **5.95 %** | MuQSS / BFS (-ck, Liquorix): earliest virtual deadline, no fairness accounting |
+| `windows-nt` | 64.295 | 76.702 | **5.56 %** | Windows NT/10/11: 32 levels, RR within level, anti-starvation boost |
+| `sel4-prio-rr` | 61.643 | 77.517 | **1.50 %** | seL4: strict priority, round-robin within a priority, no aging |
+| `linux-rt-fifo` | 61.643 | 77.517 | **1.50 %** | PREEMPT_RT `SCHED_FIFO` (RHEL for Real Time, audio distros) |
+| `aletheia-free` | 61.643 | 77.517 | **1.50 %** | Aletheia with no model resident |
+| `solaris-ts` | 61.621 | 77.522 | **1.46 %** | Solaris / illumos timeshare: `ts_dptbl`, quantum expiry drops priority |
+| `aletheia-advised` | **60.720** | 77.883 | — | Aletheia, forest resident: the same rule, plus low-over-elevated **among equals** |
+
+Total dispatched work was identical in all fifteen arms, so no policy "won" by doing less.
+
+**Now read that table the way this repository requires, because it does not say what a marketing
+version of it would.**
+
+* **Only 1.50 points of the whole spread come from the machine learning.** That is the
+  `aletheia-advised` vs `aletheia-free` gap, and it is the only column the model is responsible for.
+  Everything else is *strict priority scheduling*, which is not an Aletheia invention and which any
+  kernel can adopt — as `sel4-prio-rr` and `linux-rt-fifo` do, landing on the identical number.
+* **The gain is bought, not free.** Doomed tasks wait longer in every priority-aware arm (77.9 steps
+  against Redox's 73.0). The fair schedulers are not losing because they are worse; they are doing
+  precisely what they were designed to do — refuse to starve anybody — and this workload's surviving
+  tasks happen to correlate with Borg priority.
+* **Three arms are handicapped by the workload, and it is not their fault.** XNU's usage decay, ULE's
+  interactivity score and Solaris' long-wait boost are all driven by threads *sleeping*. Borg tasks in
+  this trace are CPU-bound and never sleep, so those designs degenerate here towards usage-penalised
+  round-robin. `xnu-macos` finishing last is a statement about this workload, not about macOS.
+* **`zircon-fair` and `linux-eevdf` are identical because their published selection rules are.**
+  Fuchsia's fair scheduler picks by weight-proportional virtual finish time; that is EEVDF's rule. No
+  attempt was made to invent a difference.
+* **This is a comparison of pick functions, not of operating systems.** No preemption latency, cache
+  or NUMA effects, wakeup placement, load balancing, cgroups or energy model. A modern scheduler is
+  far more than its pick function, and the omitted parts are where the decades went.
+
+The defensible claim is the narrow one the model was built for: **none of the other fourteen rules
+know which arrivals are going to die.** Every kernel in that table schedules a task that will be
+evicted in ninety seconds exactly like one that will run to completion, because nothing in the kernel
+can tell them apart. Aletheia's forest can, on data it has never seen — and 1.50 % is what that
+knowledge is worth to this queue under this metric. Small, real, and measured rather than asserted.
+
+Artifact: `aletheia-ml/artifacts/borg2019/oscompare_kernel.json`. Reproduce with
+`python -m aletheia_ml oscompare --rows 20000 --repeats 3`.
+
+### What it is not allowed to do
+
+The forest is **advisory by construction** (INV-014), and the invariants are written to make that
+falsifiable rather than aspirational:
+
+* it returns an ordering *hint* — never a plan, an action, a capability, or an admission verdict;
+* every invariant and capability check holds identically whether it is loaded, absent, or wrong;
+* with no model resident, scheduling is **bit-identical** to the model-free kernel — asserted, not
+  assumed, on the host and on every boot;
+* it **abstains** rather than guesses, inside the conformal band or outside the feature box it was
+  fitted in;
+* absence is *named*: a refused blob prints which check refused it, and the machine keeps running
+  model-free rather than quietly behaving as though it were advised.
+
+**Known and named:** the shipped borg2019 blob's `disk_request` training range is literally `[0, 0]` —
+that corpus carries no per-task disk signal — so a kernel supplying a real disk fraction would place
+*every* task outside the training box and the advisor would correctly abstain about the entire
+machine. Aletheia therefore reports the field as unobservable (`missing_info`), which is true of it
+today, and the column will only start carrying information when a corpus that has one is trained.
+This was found by the live derivation landing, not by reading the paper.
+
 ### Context Engine — Context Fabric, not RAG
 
 Aletheia understands its own world and provides the **smallest useful, authorized** context per task

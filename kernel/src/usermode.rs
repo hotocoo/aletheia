@@ -37,8 +37,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND,
-    SYS_YIELD,
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's `vm.rs` performs the real page mapping into each address space.
@@ -358,13 +357,16 @@ pub extern "C" fn el0_trap(num: u64, arg: u64) -> u64 {
                 None => return u64::MAX,
             };
             match t.engine.evaluate(
-                Syscall::ProcessInfo.capability().unwrap_or("process.inspect"),
+                Syscall::ProcessInfo
+                    .capability()
+                    .unwrap_or("process.inspect"),
                 &Target::default(),
                 &t.caps,
             ) {
                 Decision::Allow => {
                     t.allowed = true;
-                    let response = pack_process_info(supervisor().terminated(), supervisor().escalations());
+                    let response =
+                        pack_process_info(supervisor().terminated(), supervisor().escalations());
                     unsafe { *addr_of_mut!(PROCESS_INFO_RESULT) = response };
                     response
                 }
@@ -728,8 +730,13 @@ const STUB_READ_THEN_SYSCALL: [u32; 3] = [0xF940_0001, 0xD400_0001, 0x1400_0000]
 /// at the `movz`, so the EXIT reports the received body.
 const STUB_RECV_THEN_EXIT: [u32; 4] = [0xD400_0001, 0xD280_0068, 0xD400_0001, 0x1400_0000];
 /// EL0 process-info stub: query counters, then exit carrying the returned x0 value.
-const STUB_PROCESS_INFO_THEN_EXIT: [u32; 5] =
-    [0xD280_00E8, 0xD400_0001, 0xD280_0068, 0xD400_0001, 0x1400_0000];
+const STUB_PROCESS_INFO_THEN_EXIT: [u32; 5] = [
+    0xD280_00E8,
+    0xD400_0001,
+    0xD280_0068,
+    0xD400_0001,
+    0x1400_0000,
+];
 
 /// Run one EL0 syscall excursion. `grant` decides whether the process holds the `event.emit`
 /// capability. Returns `(authorized, event_count_after)`.
@@ -1952,7 +1959,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         granted_allowed
             && (terminated as usize, escalations as usize)
-            == (supervisor().terminated(), supervisor().escalations()),
+                == (supervisor().terminated(), supervisor().escalations()),
         "process-info: capability-bound EL0 query returns live supervisor counters"
     );
 
