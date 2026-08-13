@@ -1,13 +1,80 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-12 09:28 +08 (borg2019 model install + risk-advisor stress gate)
+**As of:** 2026-08-13 (live feature derivation + resident advisor + cross-OS scheduler benchmark)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
 
-## Current implementation wave — command authority, durable capability image, and user-fault continuation (2026-08-13)
+## Current implementation wave — the model stops being installed and starts being consulted (2026-08-13)
+
+`docs/MATURITY.md` had said it plainly since the risk forest landed: *"NOTHING in the kernel derives
+the 20-feature vector from a live task yet, so on a running machine it currently advises about no
+one."* A model that is verified, bounded, measured under load and asked about nobody is an installed
+model. This wave closes that, and closes it as gates rather than as paragraphs.
+
+* **A live task now has features (REQ-ML-003).** `kernel-core/src/taskfeat.rs` derives the twenty
+  contract features from live kernel state under the TRAINER'S OWN accounting rules, because a number
+  merely *called* `user_fails` produces margins that are deterministic, in-bounds and meaningless:
+  exclusive history (a task is never counted in its own features), cell pressure read from the
+  COMPLETED five-minute bin, the contract's fixed point, an unobservable field reported through
+  `missing_info` instead of as a zero measurement, and a bounded history so a month of uptime cannot
+  grow an unbounded map on a never-freeing kernel heap.
+* **The forest is resident, not visiting.** `kernel-core/src/mlsched.rs` holds one verified forest
+  behind one lock for the machine's whole uptime, owns the live history, and is the path a task takes
+  to `PriorityScheduler`; every dispatch and every task death feeds back into what the NEXT advice
+  reads, and the cell census ages on every console line even when nothing is being admitted.
+* **Twelve live-advisory invariants, on every boot of every target.** Including the one that matters:
+  with no model resident the live path schedules **bit-identically** to the model-free kernel, and
+  priority is never traded for risk. Each boot then commissions the advisor against 4096 real
+  admissions spanning 95 cell bins and proves the advised drain is a PERMUTATION of the model-free
+  one — no task invented, dropped or starved.
+* **`mlstat` makes residency a question you can ask the machine.** One renderer
+  (`shell::report_risk_advisor`), so the boot banner and the console cannot say different things. It
+  reports `silence` — seconds since the last consultation as of the machine's own clock — because a
+  historical max-gap can only *close* when the next advice arrives, so an advisor that fell silent an
+  hour ago would still be reporting the small gaps it managed while busy. Gated as console invariant
+  3 of 42.
+* **The advice is shown to HELP, and against what everyone else does (REQ-ML-004).** `schedsim`
+  replays the untouched test split through the kernel's own selection rule twice, changing exactly one
+  thing: head-of-line delay for surviving tasks fell in **3 of 3** independent 60 000-task windows,
+  mean **3.99 %** (min 1.43 %, max 7.19 %), dispatch counts identical. `oscompare` then implements the
+  documented selection rule of **fifteen arms** — Linux CFS / EEVDF / BORE / MuQSS / PREEMPT_RT,
+  Windows NT, Darwin/XNU, FreeBSD ULE, Solaris TS, Fuchsia Zircon, seL4, Redox, FIFO and both Aletheia
+  arms — over one trace with identical arrivals, queue depth and service demands. It publishes the
+  decomposition that keeps it honest: **of the advised arm's whole lead, only 1.50 points come from
+  the model**; the rest is strict priority scheduling, which any kernel could adopt, and the gain is
+  bought with longer waits for doomed tasks. Nothing was booted; these compare pick functions, not
+  operating systems.
+* **A second forest, for RAM (REQ-ML-005, deferred).** `aletheia-ml`'s `memrisk` trains on the
+  eviction event specifically — reclaim's expensive mistake is not the scheduler's — keeps the SAME
+  feature contract so no second hash can drift, and picks its threshold against a named asymmetric
+  cost (false reclaim 4.0, missed reclaim 1.0). On 696 877 untouched rows at a 0.2561 base rate:
+  PR-AUC **0.8818** (lift 3.44x), ROC-AUC 0.9392, precision 0.9867, recall 0.5957, expected cost
+  0.1117/task against 0.2561 (reclaim nothing), integer-vs-float agreement **1.000**. Marked
+  **deferred, not delivered**: `ptreclaim.rs` does not consult it.
+
+**A real finding, from running it rather than reading about it.** The shipped borg2019 blob's
+`disk_request` training range is literally `[0, 0]` — that corpus carries no per-task disk signal at
+all. A kernel supplying a real disk fraction would therefore place EVERY task outside the training box
+and the advisor would correctly abstain about the entire machine. Aletheia reports the field as
+unobservable, which is true of it today, and the column can only start meaning something when a
+corpus that has one is trained.
+
+**Still open, named, and not closed by this wave:** each target's `usermode.rs` still spawns its ring-3
+tasks through its own bespoke rotation rather than through `PriorityScheduler` — the follow-on
+`kernel-core/src/sched.rs` has documented since it landed. So the advisor is consulted for every
+admission the priority-scheduler path carries, and a real user-mode task spawn does not yet reach it.
+That is a wiring gap in the three targets, not a gap in the advisor.
+
+**Pre-existing and NOT caused by this wave:** `scripts/vm-e2e-x86.sh` fails at ring-3 invariant 28
+(`trapframe: the task trapped, was resumed, and trapped AGAIN`). Verified by stashing this wave's
+changes and re-running the gate on the clean tree: identical failure, identical invariant. The x86
+smoke test's new advisor assertions are therefore unverified on that target until the trapframe defect
+is fixed. `scripts/vm-e2e.sh` (aarch64) and `scripts/vm-e2e-riscv.sh` both PASS.
+
+## Previous wave — command authority, durable capability image, and user-fault continuation (2026-08-13)
 
 * **Console authority is no longer a boolean hook.** All three target hosts mint explicit `CapEngine`
   capabilities for console/system actions; shared shell dispatch maps each action to a stable capability
@@ -80,9 +147,10 @@ about a schedule** (REQ-ML-002).
   `kernel-core` hosted suite **326 passed** (29 suites); `quality-gate.sh` PASS;
   `check-traceability.sh` PASS at 101 requirements; `check-register.sh` PASS.
 
-**Still open, unchanged and named:** real-task feature extraction. The forest is verified, bounded,
-measured under load and proved advisory on every boot — and on a running machine it still advises
-about no one, because nothing yet derives the 20-feature vector from a live task (ADR-056).
+**Was still open at the time of that wave, and is CLOSED by the 2026-08-13 wave above:** real-task
+feature extraction. `kernel-core/src/taskfeat.rs` now derives the 20-feature vector from live kernel
+state and `mlsched.rs` holds the forest resident, so the sentence that used to stand here — "on a
+running machine it still advises about no one" — is no longer true (REQ-ML-003, ADR-056).
 
 ## The risk-advisor VM gate (2026-08-10 21:39 +08) — the forest is on the boot path of all three targets
 

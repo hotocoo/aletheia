@@ -292,6 +292,96 @@ pub extern "C" fn kmain() -> ! {
         Err(_) => kprintln!("[mlrisk-stress] SKIPPED: no verified model to stress"),
     }
 
+    // The advisor takes up residence (REQ-ML-003, ADR-056). Everything above proved the *model*;
+    // this proves the *machine consults it*. One verified forest is installed for the rest of this
+    // boot, a commissioning workload is admitted through it — real feature derivation from live task
+    // state, real margins, the real scheduler — and the counters it leaves behind are the ones
+    // `mlstat` reports to a human at any later moment in the session.
+    kprintln!("");
+    kprintln!("--- resident risk advisor (the model the machine consults while it runs) ---");
+    if kernel_core::mlsched::resident::install(
+        kernel_core::mlrisk::BUNDLED_MODEL,
+        kernel_core::mlsched::SUITE_MACHINE,
+    ) {
+        match kernel_core::mlsched::resident::shape() {
+            Some((trees, nodes, compares)) => kprintln!(
+                "[mlsched] RESIDENT: {} trees, {} nodes, worst case {} compares per advice",
+                trees,
+                nodes,
+                compares
+            ),
+            None => kprintln!("[mlsched] RESIDENT: shape unavailable"),
+        }
+    } else {
+        // Named absence, never a silent model-free boot that looks like an advised one.
+        kprintln!(
+            "[mlsched] NO RESIDENT MODEL: {:?}",
+            kernel_core::mlsched::resident::model_error()
+        );
+    }
+    match kernel_core::mlsched::mlsched_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[mlsched] ALL {} LIVE-ADVISORY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[mlsched] FAILED at live-advisory invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(190 + idx as i32);
+        }
+    }
+    {
+        let c = kernel_core::mlsched::commission(4_096, 7);
+        kprintln!(
+            "[mlsched] commissioning: {} tasks admitted over {} s of machine time ({} cell bins)",
+            c.admitted,
+            c.span_secs,
+            c.bins
+        );
+        kprintln!(
+            "[mlsched] live census: {} advices — {} low / {} elevated / {} abstain ({} in band), {} out-of-box",
+            c.stats.advices,
+            c.stats.low,
+            c.stats.elevated,
+            c.stats.abstain,
+            c.stats.band_abstain,
+            c.stats.out_of_range
+        );
+        kprintln!(
+            "[mlsched] watching: {} dispatches, {} finished / {} failed / {} evicted, {} ticks",
+            c.stats.schedules,
+            c.stats.finished,
+            c.stats.failed,
+            c.stats.evicted,
+            c.stats.ticks
+        );
+        kprintln!(
+            "[mlsched] continuity: span {} s, longest gap between advices {} s",
+            c.stats.span_secs(),
+            c.stats.max_gap_secs
+        );
+        // The claim that keeps this from being a demo: advice reordered equals and did nothing else.
+        if !c.permutation {
+            kprintln!(
+                "[mlsched] FAILED: the advised drain was not a permutation of the model-free one"
+            );
+            ActiveHal::exit(189);
+        }
+        kprintln!(
+            "[mlsched] advised drain is a permutation of the model-free one: {} tasks in, {} tasks out",
+            c.admitted,
+            c.admitted
+        );
+        kprintln!("[mlsched] the same numbers, as the console's `mlstat` renders them:");
+        kernel_core::shell::report_risk_advisor(&mut |line: &str| kprintln!("  {}", line));
+    }
+
     // Physical-memory invariants (riscv64 backend; separate from the shared spine suite).
     kprintln!("");
     kprintln!("--- memory-management selftests (physical frames) ---");

@@ -766,6 +766,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("uptime", "time since boot"),
     ("mem", "physical memory, in frames and bytes"),
     ("faults", "supervisor containment and escalation counters"),
+    (
+        "mlstat",
+        "the resident risk advisor: what it is, and what it has done since boot",
+    ),
     ("lsblk", "the console's block device geometry"),
     ("df", "filesystem space, in blocks"),
     ("ls", "every named object"),
@@ -839,6 +843,63 @@ fn split_first(line: &str) -> (&str, &str) {
     }
 }
 
+/// Everything `mlstat` prints, as a function a boot can call before there is a console.
+///
+/// The console command and the boot banner must never be able to say different things about the
+/// resident advisor, so there is exactly one place that renders it (REQ-ML-003, ADR-056). Every
+/// value is read live from the advisor at the moment of the call.
+pub fn report_risk_advisor(out: &mut dyn FnMut(&str)) {
+    match crate::mlsched::resident::stats() {
+        None => out("risk advisor: none installed on this machine"),
+        Some(s) => {
+            match crate::mlsched::resident::shape() {
+                        Some((trees, nodes, compares)) => out(&format!(
+                            "risk advisor: RESIDENT — {} trees, {} nodes, worst case {} compares per advice",
+                            trees, nodes, compares
+                        )),
+                        // Named absence: a machine running without advice says which check refused
+                        // the model, never merely omits the line.
+                        None => match crate::mlsched::resident::model_error() {
+                            Some(e) => out(&format!("risk advisor: REFUSED — {:?}", e)),
+                            None => out("risk advisor: installed with no model (control arm)"),
+                        },
+                    }
+            out(&format!(
+                        "advices: {} ({} low / {} elevated / {} abstain, {} of those in the conformal band)",
+                        s.advices, s.low, s.elevated, s.abstain, s.band_abstain
+                    ));
+            out(&format!(
+                "decisive: {}.{}% — {} out-of-box arrival(s) declined",
+                s.decisive_permille() / 10,
+                s.decisive_permille() % 10,
+                s.out_of_range
+            ));
+            out(&format!(
+                        "watching: {} dispatch(es), {} finished / {} failed / {} evicted, {} housekeeping tick(s)",
+                        s.schedules, s.finished, s.failed, s.evicted, s.ticks
+                    ));
+            // The falsifiable one. A model consulted in a burst at boot and never since has
+            // a longest gap equal to its uptime, and this line says so.
+            out(&format!(
+                "continuity: first advice at {}s, last at {}s (span {}s), longest gap {}s",
+                s.first_advice_secs,
+                s.last_advice_secs,
+                s.span_secs(),
+                s.max_gap_secs
+            ));
+            // The falsifiable line: a historical gap closes only when the NEXT advice
+            // arrives, so an advisor that fell silent keeps reporting the small gaps it
+            // managed while busy. Silence is measured against the machine's own clock and
+            // grows with it.
+            out(&format!(
+                "silence: {}s since the last advice, as of the machine's clock at {}s",
+                s.silence_secs(),
+                s.last_tick_secs
+            ));
+        }
+    }
+}
+
 /// Run one line. Returns whether the session continues; every output goes through `out`, one call
 /// per line WITHOUT its newline (the caller owns line endings, which differ between a raw serial
 /// terminal and a test that collects strings).
@@ -852,6 +913,13 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
     history: &[String],
     out: &mut dyn FnMut(&str),
 ) -> Outcome {
+    // The resident advisor ages with the machine, not with the boot (REQ-ML-003, ADR-056). Every
+    // line a human types is a moment the machine is still up, so it is also a moment the cell census
+    // must move on: this is what makes `mlstat`'s tick count and continuity span grow through a
+    // session instead of freezing at whatever the boot left behind. It is housekeeping only — no
+    // advice is given here, and `advices` deliberately does not move.
+    crate::mlsched::resident::tick(host.uptime_ns() / 1_000_000_000);
+
     let (verb, rest) = split_first(line);
     if verb.is_empty() {
         return Outcome::Continue;
@@ -936,6 +1004,15 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 host.supervisor_terminated(),
                 host.supervisor_escalations()
             ));
+        }
+        // The command that makes "the model is running" a question a human can ask the machine
+        // instead of a claim a README makes on its behalf (REQ-ML-003, ADR-056). Everything printed
+        // is read live from the resident advisor at the moment the line is typed.
+        "mlstat" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            report_risk_advisor(out);
         }
         "lsblk" => {
             if !authorize(host, ShellAction::Inspect, out) {
@@ -1566,6 +1643,17 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
     check!(
         "console: return executes the line and halt ends the session",
         log.contains("halting.") && outcome == Outcome::Halt
+    );
+
+    // 3. `mlstat` answers about the advisor that is resident RIGHT NOW. A console that printed a
+    //    boot-time snapshot would let a machine keep claiming a model it had stopped consulting.
+    let (log, _) = transcript("mlstat\r", host, &mut fs, dev);
+    check!(
+        "console: mlstat reports the resident risk advisor's live counters",
+        log.contains("risk advisor:")
+            && (log.contains("RESIDENT")
+                || log.contains("none installed")
+                || log.contains("REFUSED"))
     );
 
     // 3. Backspace removes the last byte, so a typo is correctable rather than fatal.

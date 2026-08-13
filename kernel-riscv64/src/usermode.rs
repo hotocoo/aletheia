@@ -43,8 +43,7 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND,
-    SYS_YIELD,
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's Sv39 `vm.rs` performs the real page mapping into each space.
@@ -561,13 +560,16 @@ fn el0_syscall(num: u64, arg: u64) -> u64 {
                 None => return u64::MAX,
             };
             match t.engine.evaluate(
-                Syscall::ProcessInfo.capability().unwrap_or("process.inspect"),
+                Syscall::ProcessInfo
+                    .capability()
+                    .unwrap_or("process.inspect"),
                 &Target::default(),
                 &t.caps,
             ) {
                 Decision::Allow => {
                     t.allowed = true;
-                    let response = pack_process_info(supervisor().terminated(), supervisor().escalations());
+                    let response =
+                        pack_process_info(supervisor().terminated(), supervisor().escalations());
                     unsafe { *addr_of_mut!(PROCESS_INFO_RESULT) = response };
                     response
                 }
@@ -1681,7 +1683,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         granted_allowed
             && (terminated as usize, escalations as usize)
-            == (supervisor().terminated(), supervisor().escalations()),
+                == (supervisor().terminated(), supervisor().escalations()),
         "process-info: capability-bound U-mode query returns live supervisor counters"
     );
 

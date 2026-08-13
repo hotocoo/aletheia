@@ -102,10 +102,9 @@ fn parse(usage: &'static str, doc: &'static str) -> ConsoleOp {
 fn risk_of(name: &str) -> Risk {
     match name {
         "write" | "append" | "touch" | "cp" | "mv" | "rm" | "reboot" | "halt" => Risk::Destructive,
-        "help" | "ver" | "arch" | "uptime" | "mem" | "lsblk" | "df" | "ls" | "find" | "stat"
-        | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync" | "history" | "echo" | "clear" => {
-            Risk::Safe
-        }
+        "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
+        | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
+        | "history" | "echo" | "clear" => Risk::Safe,
         // Unknown to this file: fail closed. An unclassified command is refused by the validator
         // below rather than being planned as harmless.
         _ => Risk::Destructive,
@@ -304,6 +303,8 @@ mod tests {
                     | "arch"
                     | "uptime"
                     | "mem"
+                    | "faults"
+                    | "mlstat"
                     | "lsblk"
                     | "df"
                     | "ls"
