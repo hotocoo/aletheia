@@ -671,7 +671,15 @@ pub extern "sysv64" fn x86_syscall(num: u64, arg: u64) -> u64 {
                     && f.rsp <= USER_STACK_TOP;
                 *addr_of_mut!(REGFUZZ_FRAME_SANE) = sane;
             }
-            0
+            // Echo the call number back, and do it deliberately: the return value lands in the
+            // task's `rax`, and `rax`'s sentinel IS `SYS_REGCHECK` (see `regfuzz_sentinel`). This
+            // syscall exists to be issued TWICE from the same unmodified register file — once on the
+            // way in, proving the save direction, and once after a full resume, proving the restore
+            // direction — so a conventional `0` here would overwrite the one register the second call
+            // needs in order to *be* a second call. It did exactly that: the stub's second
+            // `int 0x80` dispatched syscall 0, the check count stuck at 1, and the restore half of
+            // ALET-P1-009 was never actually exercised on this target.
+            SYS_REGCHECK
         }
         SYS_YIELD => {
             sched_report(arg, false);
@@ -1630,6 +1638,130 @@ fn run_scheduler() -> (bool, bool, bool) {
     (order_ok && both_done, magic_ok, spaces_distinct)
 }
 
+/// Run two **real ring-3 tasks** — own address spaces, own trap frames, real `iretq` context
+/// switches — admitted through the machine's **resident risk advisor** and dispatched by the shared
+/// `PriorityScheduler` (REQ-ML-003, ADR-056).
+///
+/// The x86-64 counterpart of the aarch64 and RISC-V scenarios. It landed last, and deliberately so:
+/// this target's ring-3 gate was red on the `trapframe` defect (the `SYS_REGCHECK` return value
+/// overwriting the one register the second check needed in order to *be* a second check), and wiring
+/// a model into a target whose user-mode gate cannot pass would have proved nothing about either.
+///
+/// The mechanism is untouched — the same `resume_frame` + CR3 switch [`run_scheduler`] exercises.
+/// What differs: each task is described to the advisor at admission with the memory it actually
+/// mapped, dispatch comes from `PriorityScheduler::schedule_next`, and both the dispatch and the exit
+/// are fed back into what the NEXT advice reads.
+///
+/// Returns `(both_ran_and_exited, every_slice_presented_its_own_magic, both_were_advised)`.
+fn run_advised_scheduler() -> (bool, bool, bool) {
+    use crate::hal::{ActiveHal, Hal};
+    use kernel_core::mlsched::resident;
+    use kernel_core::priosched::{Priority, PriorityScheduler};
+    use kernel_core::taskfeat::{JobId, Outcome, TaskSubmission, UserId};
+
+    let root_main = vm::active_root();
+    let magics: [u64; NTASK] = [0xC3C3, 0xD4D4];
+    let mut code: [Option<frames::Frame>; NTASK] = [None, None];
+    let mut stack: [Option<frames::Frame>; NTASK] = [None, None];
+    let roots = match setup_tasks(
+        &mut code,
+        &mut stack,
+        stub_bytes!(stub_coop_start, stub_coop_end),
+    ) {
+        Some(r) => r,
+        None => return (false, false, false),
+    };
+    // SAFETY: single-threaded; init the TCBs before any resume.
+    unsafe {
+        let tcbs = &mut *addr_of_mut!(TCBS);
+        for i in 0..NTASK {
+            let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+            f.regs[RBX] = magics[i];
+            tcbs[i] = Tcb {
+                frame: f,
+                done: false,
+            };
+        }
+    }
+
+    let advices_before = resident::stats().map(|s| s.advices).unwrap_or(0);
+
+    // Admission: each task is described with what it ACTUALLY holds on this machine — one code page
+    // and one stack page — rather than with a plausible-looking constant.
+    let mut policy = PriorityScheduler::default();
+    let now_secs = ActiveHal::ticks_to_ns(ActiveHal::timer_ticks()) / 1_000_000_000;
+    for i in 0..NTASK {
+        let submission = TaskSubmission {
+            sched_class: 2,
+            priority: 5,
+            cpu_millis: 500,
+            memory_pages: 2,
+            // No per-task disk request this kernel can measure, and it says so rather than reporting
+            // a zero it never observed.
+            disk_pages: None,
+            diff_machine: false,
+            task_index: i as u32,
+            job: JobId(1),
+            user: UserId(0),
+        };
+        resident::admit(
+            &mut policy,
+            TaskId(i as u64),
+            Priority(5),
+            now_secs,
+            &submission,
+        );
+    }
+
+    let mut order: Vec<(usize, u64)> = Vec::new();
+    while let Some(TaskId(id)) = policy.schedule_next() {
+        let slot = id as usize;
+        sched_report(0, false);
+        // SAFETY: identical to `run_scheduler` — switch into the task's space, resume until it
+        // yields or exits, restore the scheduler's space.
+        unsafe {
+            vm::switch_to(roots[slot]);
+            resume_frame(&mut (*addr_of_mut!(TCBS))[slot].frame as *mut TrapFrame);
+            vm::switch_to(root_main);
+        }
+        resident::observe_schedule();
+        let (mag, exited) = unsafe {
+            let s = &*addr_of!(SCHED);
+            (s.last_magic, s.exited)
+        };
+        order.push((slot, mag));
+        if exited {
+            // SAFETY: single-threaded write of run state.
+            unsafe { (*addr_of_mut!(TCBS))[slot].done = true };
+            policy.finish(TaskId(id));
+            resident::observe_outcome(JobId(1), UserId(0), Outcome::Finished);
+        }
+        if order.len() > 4 * NTASK {
+            break;
+        }
+    }
+
+    cleanup_tasks(&roots, &mut code, &mut stack);
+
+    // The interleaving is deliberately NOT asserted: advice may reorder equals, and demanding a fixed
+    // order would be asserting that the advisor had no effect. That every task gets every slice and
+    // exits IS asserted — nothing invented, dropped or starved.
+    let slices = [
+        order.iter().filter(|(s, _)| *s == 0).count(),
+        order.iter().filter(|(s, _)| *s == 1).count(),
+    ];
+    let both_done = unsafe {
+        let t = &*addr_of!(TCBS);
+        t[0].done && t[1].done
+    };
+    let ran_ok = both_done && order.len() == 8 && slices[0] == 4 && slices[1] == 4;
+    let magic_ok = order.iter().all(|(slot, mag)| *mag == magics[*slot]);
+    let both_advised = resident::stats()
+        .map(|s| s.advices == advices_before + NTASK as u64)
+        .unwrap_or(false);
+    (ran_ok, magic_ok, both_advised)
+}
+
 /// Prove **timer-driven (involuntary) preemption**: two ring-3 tasks that never yield (tight
 /// increment loops, IF set) are preempted by the PIT's IRQ0 and round-robined. Returns
 /// `(both_tasks_preempted_fairly, each_task_progressed_across_preemptions)`.
@@ -2165,6 +2297,23 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         spaces_distinct,
         "ring3: the two scheduled tasks occupy distinct PML4 address spaces"
+    );
+
+    // The resident risk advisor is consulted about REAL ring-3 tasks, not only about the
+    // commissioning workload (REQ-ML-003, ADR-056). Same address spaces, same trap frames, same
+    // `resume_frame` + CR3 switch as the round-robin run above.
+    let (advised_ran, advised_magic, both_advised) = run_advised_scheduler();
+    check!(
+        advised_ran,
+        "ring3: two REAL ring-3 tasks admitted through the resident advisor each get every slice and exit"
+    );
+    check!(
+        advised_magic,
+        "ring3: the full register file survives each context switch under the advised scheduler too"
+    );
+    check!(
+        both_advised,
+        "ring3: the advisor was consulted once per real user-mode task — a live spawn reaches the model"
     );
 
     // 9 & 10 — timer-driven (involuntary) preemption: two non-yielding ring-3 tasks are preempted
