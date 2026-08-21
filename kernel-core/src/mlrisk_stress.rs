@@ -81,6 +81,10 @@ pub struct AdviceStress {
     /// Abstentions attributable to the conformal band rather than to the range guard. Zero for a
     /// blob whose band shipped empty — which is a fact about that blob, not a failure here.
     pub band_abstain: usize,
+    /// Abstentions attributable to a DEGENERATE input — every feature the same value
+    /// (ALET-P3-006). The all-zero surface of the overload bench used to land here as a
+    /// guaranteed `Elevated`; now it is named.
+    pub degenerate_abstain: usize,
     /// Sum of every margin produced, wrapped. Two runs that disagree here did different work — this
     /// is what makes "deterministic under load" checkable without keeping every margin.
     pub checksum: i64,
@@ -137,7 +141,11 @@ pub fn advice_stress<H: Hal>(
             Verdict::Abstain => {
                 out.abstain += 1;
                 if !a.out_of_range {
-                    out.band_abstain += 1;
+                    if a.degenerate {
+                        out.degenerate_abstain += 1;
+                    } else {
+                        out.band_abstain += 1;
+                    }
                 }
             }
             Verdict::Elevated => out.elevated += 1,

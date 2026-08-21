@@ -501,6 +501,9 @@ fn fault_inject(advisor: &RiskAdvisor<'_>, per_pattern: usize) -> u8 {
         let mut elevated = 0u64;
         let mut abstain = 0u64;
         let mut oor = 0u64;
+        // ALET-P3-006: the zero pattern used to land here as a guaranteed Elevated; now its
+        // abstention cause is named, and the column proves which surface it fires on.
+        let mut deg = 0u64;
         let mut mmin = i64::MAX;
         let mut mmax = i64::MIN;
         let t0 = Instant::now();
@@ -515,6 +518,9 @@ fn fault_inject(advisor: &RiskAdvisor<'_>, per_pattern: usize) -> u8 {
             if a.out_of_range {
                 oor += 1;
             }
+            if a.degenerate {
+                deg += 1;
+            }
             if a.margin < mmin {
                 mmin = a.margin;
             }
@@ -524,8 +530,8 @@ fn fault_inject(advisor: &RiskAdvisor<'_>, per_pattern: usize) -> u8 {
         }
         let secs = t0.elapsed().as_secs_f64();
         println!(
-            "[fault_inject] {:<26} n={:<10}  L={} E={} A={} oor={} margin=[{},{}]  {:.2}s",
-            name, per_pattern, low, elevated, abstain, oor, mmin, mmax, secs
+            "[fault_inject] {:<26} n={:<10}  L={} E={} A={} oor={} deg={} margin=[{},{}]  {:.2}s",
+            name, per_pattern, low, elevated, abstain, oor, deg, mmin, mmax, secs
         );
         // The advisor must NEVER panic on any input. (If this fires, the test
         // runner dies with a SIGABRT and we never get here.) The wall-clock

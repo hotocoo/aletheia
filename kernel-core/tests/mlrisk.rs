@@ -267,7 +267,37 @@ fn the_in_kernel_suite_holds_on_the_host_and_reports_every_check_once() {
         assert!(passed);
     }
     // Pinned: the boot gates grep for this number.
-    assert_eq!(count, 20);
+    assert_eq!(count, 22);
+}
+
+/// ALET-P3-006, as a unit test rather than only as a bench observation: an all-constant input is
+/// not a description of a task, and before this fix it returned a guaranteed, bit-exact
+/// `Elevated` on every call — an extractor emitting constants could steer the scheduler by
+/// choosing the constant. The verdict is now withheld and the CAUSE is named.
+#[test]
+fn a_degenerate_input_abstains_by_name_instead_of_returning_a_constant_verdict() {
+    let m = advisor();
+
+    // All-zero is inside every feature range of this blob (the audit measured it: in-box,
+    // margin -1 781 991, decisive) — that is exactly the input that used to backdoor the
+    // scheduler, so it must now abstain with the degenerate cause set and the margin intact.
+    let zero = [0i32; N_FEATURES];
+    let a = m.advise(&zero);
+    assert!(!a.out_of_range, "all-zero must be in-box for this blob, or the test proves nothing");
+    assert!(a.degenerate, "an all-constant vector must be flagged degenerate");
+    assert_eq!(a.verdict, Verdict::Abstain);
+    assert_eq!(a.margin, m.margin(&zero), "the margin is still reported; only the verdict is withheld");
+
+    // An out-of-box CONSTANT keeps its more specific cause: the range guard, not degeneracy,
+    // is what fires — the census must not misattribute the two.
+    let mins = [i32::MIN; N_FEATURES];
+    let b = m.advise(&mins);
+    assert!(b.out_of_range && !b.degenerate && b.verdict == Verdict::Abstain);
+
+    // And no real held-out row is flagged: the rule catches constants, not ordinary inputs.
+    for r in fixture_rows() {
+        assert!(!m.advise(&r.x).degenerate, "a held-out row was flagged degenerate");
+    }
 }
 
 #[test]
