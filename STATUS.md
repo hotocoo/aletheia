@@ -68,6 +68,10 @@ under measurement is the register working, not failing.
   prove exact round-trip over empty/tiny/repetitive/overlapping-run/noise inputs, per-field
   corruption refusals, determinism, and the allocation bound. The checksum is FNV-1a: integrity
   against corruption, deliberately not authentication — authenticated paths layer their own HMAC.
+  Capability exports are sealed too: all four `capstore::*_to_fs` paths wrap their images, loads
+  verify a RAW image by its own magic before accepting it (a damaged envelope is named as
+  container damage rather than misread as a bad image), and the MAC still authenticates the
+  pre-compression image — tampering trips one layer or the other, refused by name either way.
 
 `kernel-core`: **374 tests passed**; `aletheia-ml`: 20 passed; verification numbers above are from
 the bench binary the audit shipped, re-run against the fixed tree.

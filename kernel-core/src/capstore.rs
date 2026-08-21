@@ -103,6 +103,10 @@ pub enum CapStoreError {
     TrailingBytes,
     /// The authenticated envelope's HMAC did not verify under the supplied trusted key.
     Authentication,
+    /// The stored object is an [`ACMP1`](crate::compress) compression envelope and failed one of
+    /// its named integrity checks. The MAC, where present, still authenticates the
+    /// PRE-compression image — this variant is about the envelope around it.
+    Compressed(crate::compress::DecompressError),
 }
 
 // ---------------------------------------------------------------------------
@@ -542,8 +546,10 @@ pub fn save_to_fs<D: crate::storage::BlockDevice>(
     dev: &mut D,
     engine: &CapEngine,
 ) -> Result<(), CapStoreError> {
-    fs.replace(dev, STORE_OBJECT, &save(engine))
-        .map_err(fs_error)
+    // Compressed at rest (ALET-P3-009): the envelope wraps the image; the image format is
+    // unchanged and every reader below detects envelope vs raw, so older objects stay readable.
+    let sealed = crate::compress::compress(&save(engine));
+    fs.replace(dev, STORE_OBJECT, &sealed).map_err(fs_error)
 }
 
 /// Save an authenticated image as one atomically replaced filesystem object.
@@ -553,8 +559,11 @@ pub fn save_authenticated_to_fs<D: crate::storage::BlockDevice>(
     engine: &CapEngine,
     key: &[u8; 32],
 ) -> Result<(), CapStoreError> {
-    fs.replace(dev, STORE_OBJECT, &save_authenticated(engine, key))
-        .map_err(fs_error)
+    // The HMAC authenticates the PRE-compression image; the envelope around it carries only an
+    // integrity checksum of its own. Tampering with the stored bytes trips one layer or the
+    // other — decompression first, authentication second — and is refused by name either way.
+    let sealed = crate::compress::compress(&save_authenticated(engine, key));
+    fs.replace(dev, STORE_OBJECT, &sealed).map_err(fs_error)
 }
 
 /// Load and validate capability state from its filesystem object. Missing state is [`Absent`]; any
@@ -565,7 +574,7 @@ pub fn load_from_fs<D: crate::storage::BlockDevice>(
     dev: &D,
     now: u64,
 ) -> Result<CapEngine, CapStoreError> {
-    let image = fs.read(dev, STORE_OBJECT).map_err(fs_error)?;
+    let image = read_detecting_envelope(fs, dev)?;
     load(&image, now)
 }
 
@@ -576,8 +585,30 @@ pub fn load_authenticated_from_fs<D: crate::storage::BlockDevice>(
     key: &[u8; 32],
     now: u64,
 ) -> Result<CapEngine, CapStoreError> {
-    let image = fs.read(dev, STORE_OBJECT).map_err(fs_error)?;
+    let image = read_detecting_envelope(fs, dev)?;
     load_authenticated(&image, key, now)
+}
+
+/// Read the store object, unwrapping an [`ACMP1`](crate::compress) envelope if one is present.
+/// A RAW object — anything written before compression existed, or by a path that stores verbatim
+/// — passes through untouched: detection, not assumption, so no older image is stranded.
+fn read_detecting_envelope<D: crate::storage::BlockDevice>(
+    fs: &Filesystem,
+    dev: &D,
+) -> Result<Vec<u8>, CapStoreError> {
+    let stored = fs.read(dev, STORE_OBJECT).map_err(fs_error)?;
+    if stored.len() >= crate::compress::HEADER_LEN && stored[0..4] == *b"ACMP" {
+        return crate::compress::decompress(&stored).map_err(CapStoreError::Compressed);
+    }
+    // Not an envelope. It must be a RAW image — and proving that by its OWN magic matters: a
+    // damaged envelope (whose magic broke detection) must be NAMED as a broken container rather
+    // than masquerade as a bad capability image and send the operator to the wrong layer.
+    if stored.len() >= 4 && stored[0..4] == *MAGIC {
+        return Ok(stored);
+    }
+    Err(CapStoreError::Compressed(
+        crate::compress::DecompressError::BadMagic,
+    ))
 }
 
 // ---------------------------------------------------------------------------
