@@ -55,7 +55,21 @@ under measurement is the register working, not failing.
   under that asymmetry (ALET-P3-004). With the band live again, `Abstain` is a real third way
   rather than a dead field.
 
-`kernel-core`: **368 tests passed**; `aletheia-ml`: 20 passed; verification numbers above are from
+* **Files at rest are compressed, and the boot path proves it.** A new
+  `kernel-core/src/compress.rs` — integer-only LZSS over a 4 KiB window (one storage block), in a
+  self-describing `ACMP1` envelope whose DECLARED original length bounds decoding before any
+  allocation (capped at `MAX_OUTPUT`, so a corrupt envelope cannot become a decompression bomb),
+  with a checksum over the reconstructed bytes and a RAW fallback so compression never makes an
+  object bigger. It entered through the boot path itself: `persist::save_compressed` /
+  `load_compressed` detect envelope vs raw record — an image written by an older kernel still
+  loads, detection not assumption — and `open_and_witness` now writes compressed images, so the
+  VM gate's cross-reboot proof exercises compression on real hardware every run. The
+  durable-store suite grew 9 → 10 invariants; hosted gates in `kernel-core/tests/compress.rs`
+  prove exact round-trip over empty/tiny/repetitive/overlapping-run/noise inputs, per-field
+  corruption refusals, determinism, and the allocation bound. The checksum is FNV-1a: integrity
+  against corruption, deliberately not authentication — authenticated paths layer their own HMAC.
+
+`kernel-core`: **374 tests passed**; `aletheia-ml`: 20 passed; verification numbers above are from
 the bench binary the audit shipped, re-run against the fixed tree.
 
 ## Previous implementation wave — the model stops being installed and starts being consulted (2026-08-13)

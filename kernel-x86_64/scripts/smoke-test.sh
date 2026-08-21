@@ -103,7 +103,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'TERMINATED (Fault(UserNotMapped)); system continues' "$LOG" \
    && grep -q 'ALL 15 FILESYSTEM INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 21 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 9 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 10 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 5 NETWORK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 9 DMA-BOUNDARY INVARIANTS HOLD' "$LOG" \
 && grep -q 'ALL 9 INPUT-RING INVARIANTS HOLD' "$LOG" \

@@ -78,6 +78,10 @@ pub enum PersistError {
     TooLarge,
     /// The filesystem or device refused the operation.
     Fs(FsError),
+    /// The stored object was neither a raw record nor a valid [`ACMP1`](crate::compress)
+    /// envelope, or the envelope failed one of its named integrity checks
+    /// ([`CompressedRecordError`]).
+    Compressed(CompressedRecordError),
 }
 
 impl From<FsError> for PersistError {
@@ -256,6 +260,46 @@ pub fn load<D: BlockDevice>(fs: &Filesystem, dev: &D) -> Result<Store, PersistEr
     decode(&bytes)
 }
 
+/// Why a compressed durable record was refused. The decompression failures are forwarded by name
+/// ([`PersistError::Decompress`]) so the console can say WHICH check failed rather than "bad image".
+/// An unrecognised object is its own variant: since [`save_compressed`] envelopes everything it
+/// writes and [`load_compressed`] accepts raw records too, reaching this variant means the object
+/// at [`STORE_OBJECT`] is neither format — corruption, or something else wrote here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompressedRecordError {
+    /// The stored object is neither an ACMP1 envelope nor a raw durable record.
+    UnrecognisedObject,
+    /// The envelope failed one of its named integrity checks.
+    Decompress(crate::compress::DecompressError),
+}
+
+/// Write `store` to the device COMPRESSED: the record is encoded exactly as [`save`] would, then
+/// sealed in an [`ACMP1`](crate::compress) envelope before the atomic filesystem transaction. The
+/// journal still sees whole blocks; compression changes only how many of them the object needs.
+/// Returns the ENVELOPE length — the bytes actually charged to the device.
+pub fn save_compressed<D: BlockDevice>(
+    fs: &mut Filesystem,
+    dev: &mut D,
+    store: &Store,
+) -> Result<usize, PersistError> {
+    let bytes = crate::compress::compress(&encode(store));
+    fs.replace(dev, STORE_OBJECT, &bytes)?;
+    Ok(bytes.len())
+}
+
+/// Read a store written by EITHER [`save_compressed`] or plain [`save`]: an `ACMP1` envelope is
+/// decompressed first, a raw record decodes as always. Backward compatibility is detection, not
+/// assumption — a machine that booted once on an older image must keep booting on it.
+pub fn load_compressed<D: BlockDevice>(fs: &Filesystem, dev: &D) -> Result<Store, PersistError> {
+    let bytes = fs.read(dev, STORE_OBJECT)?;
+    if bytes.len() >= crate::compress::HEADER_LEN && bytes[0..4] == *b"ACMP" {
+        let raw = crate::compress::decompress(&bytes)
+            .map_err(|e| PersistError::Compressed(CompressedRecordError::Decompress(e)))?;
+        return decode(&raw);
+    }
+    decode(&bytes).map_err(|_| PersistError::Compressed(CompressedRecordError::UnrecognisedObject))
+}
+
 /// The content of the boot-witness entity for boot number `n`. Kept in one place so the kernel that
 /// writes it and the reader that counts them agree on the wording.
 pub fn witness_content(n: u64) -> alloc::string::String {
@@ -304,15 +348,17 @@ pub fn open_and_witness<D: BlockDevice>(dev: &mut D) -> Result<(u64, usize), Per
         Err(e) => return Err(PersistError::from(e)),
     };
 
-    let mut store = match load(&fs, dev) {
+    let mut store = match load_compressed(&fs, dev) {
         Ok(s) => s,
+        // A first boot, or an image written by an OLDER kernel before compression existed:
+        // detection, not assumption — the raw record decodes exactly as it always did.
         Err(PersistError::Absent) => Store::new(),
         Err(e) => return Err(e),
     };
     let verified = store.entities().count();
     let boot = boot_count(&store) + 1;
     store.put(EntityType::Event, &witness_content(boot), "kernel::persist");
-    save(&mut fs, dev, &store)?;
+    save_compressed(&mut fs, dev, &store)?;
     Ok((boot, verified))
 }
 
@@ -418,7 +464,9 @@ pub fn selftest_on<D: BlockDevice, F: FnMut(usize, bool, &str)>(
     );
 
     // The cross-reboot contract, exercised twice on one medium: the second open must SEE the first.
-    const WITNESS: &str = "persist: the witness survives a remount and counts the boot";
+    // open_and_witness now writes COMPRESSED images, so this is compression in the real boot path.
+    const WITNESS: &str =
+        "persist: the witness survives a remount and counts the boot (compressed)";
     if Filesystem::format(dev).is_err() {
         log(n + 1, false, WITNESS);
         return Err((n + 1, WITNESS));
@@ -426,6 +474,45 @@ pub fn selftest_on<D: BlockDevice, F: FnMut(usize, bool, &str)>(
     let first = open_and_witness(dev);
     let second = open_and_witness(dev);
     check!(WITNESS, first == Ok((1, 0)) && second == Ok((2, 1)));
+
+    // Compression at rest, as an invariant rather than a hope: a compressed save must reload
+    // through the compressed path with identical entities, and — because adoption must never
+    // strand an older image — a RAW record written by the plain path must still load through the
+    // compressed reader. Detection, not assumption, proved on the same medium.
+    const CROUND: &str = "persist: a compressed image reloads identically and costs fewer blocks";
+    if Filesystem::format(dev).is_err() {
+        log(n + 1, false, CROUND);
+        return Err((n + 1, CROUND));
+    }
+    let mut fs = match Filesystem::mount(dev) {
+        Ok(f) => f,
+        Err(_) => {
+            log(n + 1, false, CROUND);
+            return Err((n + 1, CROUND));
+        }
+    };
+    let mut big = Store::new();
+    for i in 0..40 {
+        // Repetitive, store-shaped content: the kind of bytes compression exists for here.
+        big.put(
+            EntityType::Document,
+            &alloc::format!(
+                "witness entity {i} of the durable store, provenance kernel::persist",
+                i = i
+            ),
+            "test::compression",
+        );
+    }
+    let raw_len = save(&mut fs, dev, &big).map_err(|_| (n + 1, CROUND))?;
+    let raw_back = load_compressed(&fs, dev);
+    let env_len = save_compressed(&mut fs, dev, &big).map_err(|_| (n + 1, CROUND))?;
+    let back = load_compressed(&fs, dev);
+    check!(
+        CROUND,
+        matches!(&raw_back, Ok(s) if s.entities().count() == 40)
+            && matches!(&back, Ok(s) if s.entities().count() == 40)
+            && env_len < raw_len
+    );
 
     Ok(n)
 }
@@ -440,6 +527,6 @@ mod tests {
     fn the_suite_holds_on_a_ram_disk() {
         let mut dev = MemBlockDevice::new(FILE_DATA_START + 128);
         let n = selftest_on(&mut dev, |_, _, _| {}).expect("every persist invariant holds");
-        assert_eq!(n, 9);
+        assert_eq!(n, 10);
     }
 }
