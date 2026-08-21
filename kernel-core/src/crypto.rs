@@ -88,7 +88,9 @@ const ROUND: [u32; 64] = [
 
 #[inline]
 const fn rotate_right(x: u32, n: u32) -> u32 {
-    (x >> n) | (x << (32 - n))
+    // `rotate_right` is const-stable and intrinsified; the manual shift-or pair it replaces is
+    // the same function with one more instruction and a clippy lint on modern toolchains.
+    x.rotate_right(n)
 }
 
 fn compress(state: &mut [u32; 8], block: &[u8; 64]) {

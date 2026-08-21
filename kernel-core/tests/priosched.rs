@@ -455,9 +455,17 @@ fn equal_priority_tasks_drain_round_robin_by_requeue_age() {
     s.admit(t(2), MED);
     s.admit(t(3), MED);
     assert_eq!(s.schedule_next(), Some(t(1)));
-    assert_eq!(s.schedule_next(), Some(t(2)), "t(1) must requeue behind t(2)");
+    assert_eq!(
+        s.schedule_next(),
+        Some(t(2)),
+        "t(1) must requeue behind t(2)"
+    );
     assert_eq!(s.schedule_next(), Some(t(3)));
-    assert_eq!(s.schedule_next(), Some(t(1)), "the rotation wraps to the oldest");
+    assert_eq!(
+        s.schedule_next(),
+        Some(t(1)),
+        "the rotation wraps to the oldest"
+    );
 }
 
 /// Finishing a task that was never dispatched removes it from the rotation entirely.
@@ -494,7 +502,11 @@ fn donation_moves_selection_not_just_the_priority_readback() {
     s.admit(t(2), MED); // M
     s.admit(t(3), HIGH); // H
     s.acquire(&e, Endpoint(1), t(1), &[cap]).unwrap();
-    assert_eq!(s.schedule_next(), Some(t(3)), "H runs first on base priority");
+    assert_eq!(
+        s.schedule_next(),
+        Some(t(3)),
+        "H runs first on base priority"
+    );
     s.wait(&e, Endpoint(1), t(3), &[cap]).unwrap(); // H blocks on L's endpoint
     assert_eq!(
         s.schedule_next(),
@@ -502,7 +514,11 @@ fn donation_moves_selection_not_just_the_priority_readback() {
         "the boosted holder must outrank the unrelated medium task"
     );
     s.release(Endpoint(1), t(1)).unwrap();
-    assert_eq!(s.schedule_next(), Some(t(3)), "H is ready again and highest");
+    assert_eq!(
+        s.schedule_next(),
+        Some(t(3)),
+        "H is ready again and highest"
+    );
     s.finish(t(3)); // H leaves the rotation so the M-vs-L question is directly visible
     assert_eq!(
         s.schedule_next(),

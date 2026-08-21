@@ -185,7 +185,7 @@ From a real QEMU boot (`scripts/vm-e2e.sh`, aarch64; the RISC-V gate prints the 
 
 ```text
 [mlrisk] bundled forest: 171 trees, 26469 nodes, worst case 1368 compares per advice
-[mlrisk] ALL 20 RISK-ADVISOR INVARIANTS HOLD
+[mlrisk] ALL 22 RISK-ADVISOR INVARIANTS HOLD
 [mlrisk-stress] ALL 8 STRESS INVARIANTS HOLD
 [mlsched] RESIDENT: 171 trees, 26469 nodes, worst case 1368 compares per advice
 [mlsched] ALL 12 LIVE-ADVISORY INVARIANTS HOLD

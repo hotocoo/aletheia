@@ -174,13 +174,22 @@ fn snap_into_box(x: &mut [i32; N_FEATURES], advisor: &RiskAdvisor<'_>) {
 
 // --------- modes -----------------------------------------------------------
 
-fn advice_storm(advisor: &RiskAdvisor<'_>, total: usize, batch: usize) -> u8 {
+// One input surface: a name, and the closure that fills a feature vector for call `i`.
+type Surface<'a> = (
+    &'a str,
+    Box<dyn Fn(&mut [i32; N_FEATURES], &RiskAdvisor<'_>, u64)>,
+);
+// A fault-injection pattern: a name, and the function that writes the pathological input.
+type FaultPattern<'a> = (&'a str, fn(&mut [i32; N_FEATURES], u64));
+
+fn advice_storm(advisor: &RiskAdvisor<'_>, total: usize, _batch: usize) -> u8 {
     // 4 input distributions: uniform in-box, in-box biased to high-priority
     // features (synthetic "real workload"), all-zero (band edge), and an
     // OOD probe. Same model, 4 different surfaces — lets us see whether
     // verdict distribution is uniform across realistic vs adversarial inputs.
+    // (`batch` is accepted for CLI symmetry with the other modes and unused here.)
     let chunk = (total / 4).max(1);
-    let mut surfaces: Vec<(&str, Box<dyn Fn(&mut [i32; N_FEATURES], &RiskAdvisor<'_>, u64)>)> = vec![
+    let mut surfaces: Vec<Surface<'_>> = vec![
         (
             "uniform_in_box",
             Box::new(|x, a, i| {
@@ -238,7 +247,8 @@ fn advice_storm(advisor: &RiskAdvisor<'_>, total: usize, batch: usize) -> u8 {
     let t0 = Instant::now();
     let mut done = 0usize;
     let mut last_report = t0;
-    let mut per_surface: Vec<(u64, u64, u64, u64, i64, i64)> = vec![(0, 0, 0, 0, i64::MAX, i64::MIN); surfaces_n];
+    let mut per_surface: Vec<(u64, u64, u64, u64, i64, i64)> =
+        vec![(0, 0, 0, 0, i64::MAX, i64::MIN); surfaces_n];
 
     for i in 0..n {
         let sidx = (i / chunk) % surfaces_n;
@@ -299,11 +309,17 @@ fn advice_storm(advisor: &RiskAdvisor<'_>, total: usize, batch: usize) -> u8 {
 
     println!("[advice_storm] total = {} (4 surfaces x {})", n, chunk);
     println!("[advice_storm] elapsed = {:.3} s", secs);
-    println!("[advice_storm] per advice = {:.1} ns ({:.0} ps)", per_ns, per_ns * 1000.0);
+    println!(
+        "[advice_storm] per advice = {:.1} ns ({:.0} ps)",
+        per_ns,
+        per_ns * 1000.0
+    );
     println!("[advice_storm] throughput = {:.2e} adv/s", rate);
     println!(
         "[advice_storm] verdicts: low={} elevated={} abstain={} (in-band: {})",
-        totals_low, totals_elevated, totals_abstain,
+        totals_low,
+        totals_elevated,
+        totals_abstain,
         totals_abstain.saturating_sub(totals_oor)
     );
     println!("[advice_storm] out_of_range: {}", totals_oor);
@@ -373,7 +389,10 @@ fn schedule_storm(advisor: &RiskAdvisor<'_>, tasks: usize, bands: u8) -> u8 {
         let band = want_bands[pos];
         if band > last {
             // Priority regression — would be a property violation.
-            eprintln!("FATAL: priority regression at drain {}: last={} now={}", drained, last, band);
+            eprintln!(
+                "FATAL: priority regression at drain {}: last={} now={}",
+                drained, last, band
+            );
             return 6;
         }
         // Count positions moved against insertion order only as an observation.
@@ -382,20 +401,29 @@ fn schedule_storm(advisor: &RiskAdvisor<'_>, tasks: usize, bands: u8) -> u8 {
         last = band;
         sched.finish(t);
         drained += 1;
-        if drained % 100_000 == 0 {
+        if drained.is_multiple_of(100_000) {
             eprintln!("  drained {}/{}", drained, tasks);
         }
     }
     let drain_secs = t_drain0.elapsed().as_secs_f64();
     if drained != tasks {
-        eprintln!("FATAL: drain lost tasks: drained={} expected={}", drained, tasks);
+        eprintln!(
+            "FATAL: drain lost tasks: drained={} expected={}",
+            drained, tasks
+        );
         return 7;
     }
     let per_advice_us = admit_secs * 1e6 / tasks as f64;
     let per_task_us = drain_secs * 1e6 / tasks as f64;
     println!("[schedule_storm] tasks = {}", tasks);
-    println!("[schedule_storm] admit: {:.2} s ({:.2} µs/task)", admit_secs, per_advice_us);
-    println!("[schedule_storm] drain: {:.2} s ({:.2} µs/task)", drain_secs, per_task_us);
+    println!(
+        "[schedule_storm] admit: {:.2} s ({:.2} µs/task)",
+        admit_secs, per_advice_us
+    );
+    println!(
+        "[schedule_storm] drain: {:.2} s ({:.2} µs/task)",
+        drain_secs, per_task_us
+    );
     println!("[schedule_storm] total: {:.2} s", admit_secs + drain_secs);
     println!("[schedule_storm] priority monotonic: OK across {drained} drains");
     0
@@ -443,7 +471,10 @@ fn determinism(advisor: &RiskAdvisor<'_>, n: usize) -> u8 {
     let (l2, e2, a2, mmin2, mmax2, mfirst2) = run_once(advisor, n);
     let s1 = t1.elapsed().as_secs_f64();
 
-    println!("[determinism] pass 1: {:.3} s  low={} elevated={} abstain={}", s0, l1, e1, a1);
+    println!(
+        "[determinism] pass 1: {:.3} s  low={} elevated={} abstain={}",
+        s0, l1, e1, a1
+    );
     println!(
         "[determinism] pass 2: {:.3} s  low={} elevated={} abstain={}",
         s1, l2, e2, a2
@@ -468,7 +499,7 @@ fn fault_inject(advisor: &RiskAdvisor<'_>, per_pattern: usize) -> u8 {
     // and arithmetic wrap are exactly the kind of input the kernel might see
     // if a feature extractor handed back a sentinel value. Five patterns:
     let mut rc = 0u8;
-    let patterns: &[(&str, fn(&mut [i32; N_FEATURES], u64))] = &[
+    let patterns: &[FaultPattern<'_>] = &[
         ("all_i32_MIN", |x, _| {
             for s in x.iter_mut() {
                 *s = i32::MIN;
@@ -486,7 +517,11 @@ fn fault_inject(advisor: &RiskAdvisor<'_>, per_pattern: usize) -> u8 {
         }),
         ("first_half_MIN_second_MAX", |x, _| {
             for (i, s) in x.iter_mut().enumerate() {
-                *s = if i < N_FEATURES / 2 { i32::MIN } else { i32::MAX };
+                *s = if i < N_FEATURES / 2 {
+                    i32::MIN
+                } else {
+                    i32::MAX
+                };
             }
         }),
         ("zero", |x, _| {

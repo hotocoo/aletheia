@@ -221,9 +221,10 @@ impl TrapFrame {
 #[no_mangle]
 static mut KERNEL_CTX: [u64; 13] = [0; 13];
 
-/// Capability-secure kernel IPC: send a message body to the kernel endpoint / receive one from it.
-/// Both are authorized by the SAME `CapEngine` (`ipc.send` / `ipc.recv` capabilities) — the message
-/// crosses process boundaries only through the kernel, never shared memory.
+// Capability-secure kernel IPC: send a message body to the kernel endpoint / receive one from it.
+// Both are authorized by the SAME `CapEngine` (`ipc.send` / `ipc.recv` capabilities) — the message
+// crosses process boundaries only through the kernel, never shared memory. (A section note, kept
+// as a plain comment: as doc comments they were attributed to the constants below.)
 
 /// Virtual addresses for one process's pages — past the identity-mapped RAM (so they are unmapped
 /// until we map them, proving they are real EL0-only mappings, not identity RAM).

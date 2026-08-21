@@ -27,8 +27,10 @@
 //! The blob (`ALTM1`) is produced by the `aletheia-ml` repository, which owns the corpus, the
 //! training, the calibration, and the exporter; this module only *verifies and evaluates* it. Wrong
 //! magic, wrong version, wrong feature count, a feature contract that does not match the one this
-//! kernel was built against, a child index out of range, or a truncated tail are each a refusal at
-//! load time. A model the kernel cannot verify is a model the kernel does not run.
+//! kernel was built against, a child index out of range, a truncated tail, or an inverted
+//! conformal band — two header fields whose interval can never contain anything, dead on arrival
+//! (ALET-P3-008) — are each a refusal at load time. A model the kernel cannot verify is a model
+//! the kernel does not run.
 use alloc::vec::Vec;
 
 use crate::mlrisk_contract::{FEATURE_CONTRACT, N_FEATURES};
@@ -65,9 +67,25 @@ pub enum ModelError {
     /// A root or child index points outside the node table, or a split names a feature that is not
     /// in the contract.
     BadIndex,
+    /// The conformal band edges are inverted (`abstain_lo > abstain_hi`): the class-conditional
+    /// prediction sets never overlap, so the band-abstention path this format dedicates two header
+    /// fields to can NEVER fire (ALET-P3-008). The trainer refuses such a calibration at the moment
+    /// it is computed; the kernel refuses it again at load, because a blob off a disk has no
+    /// trainer watching. Loading it would run a model whose documented safety path is dead while
+    /// every boot line implied otherwise.
+    InvertedBand,
 }
 
 /// What the model has to say about one task. `Abstain` is a first-class answer, not a failure.
+///
+/// The three ways are NOT symmetric in practice, and code reading them must know that
+/// (ALET-P3-004): on the shipped blob, `Elevated` is the model's DEFAULT decision and `Low` is
+/// the rare outcome it actually believes in — across the overload audit's 1 000 000 000 uniform
+/// in-box advices, `Low` fired 811 times (8.11 × 10⁻⁷) while `Elevated` fired everywhere else.
+/// Branching on `Low` as if it were one of two equally likely opinions is writing logic for a
+/// ~1-per-second event as if it were a coin flip. The tiebreak in [`crate::priosched`] uses the
+/// verdict only between equals and only toward survival, which is safe under this asymmetry;
+/// anything new that reads a [`Verdict`] should say why it is safe under it too.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
     /// Below the operating threshold and outside the abstain band: likely to complete.
@@ -185,6 +203,15 @@ impl<'a> RiskAdvisor<'a> {
             return Err(ModelError::Truncated);
         }
 
+        // ALET-P3-008: the band is two header fields with one job — the abstention path ADR-056's
+        // safety argument rests on. An inverted pair (lo > hi) makes that path unreachable while
+        // every other check passes, which is exactly the failure a named refusal exists for. The
+        // trainer refuses it at calibration time; this refuses it again at load, because bytes off
+        // a disk arrive without their trainer.
+        let (abstain_lo, abstain_hi) = (rd_i64(bytes, 40), rd_i64(bytes, 48));
+        if abstain_lo > abstain_hi {
+            return Err(ModelError::InvertedBand);
+        }
         let me = RiskAdvisor {
             bytes,
             n_trees,
@@ -192,8 +219,8 @@ impl<'a> RiskAdvisor<'a> {
             leaf_frac_bits,
             base_margin: rd_i64(bytes, 24),
             threshold_margin: rd_i64(bytes, 32),
-            abstain_lo: rd_i64(bytes, 40),
-            abstain_hi: rd_i64(bytes, 48),
+            abstain_lo,
+            abstain_hi,
             ranges_off,
             roots_off,
             nodes_off,
@@ -319,14 +346,14 @@ impl<'a> RiskAdvisor<'a> {
         // the range guard with its own, more specific cause, which is what the census counts.
         let degenerate = !oor && features.iter().all(|&v| v == features[0]);
         let margin = self.margin(features);
-        let verdict = if oor || degenerate || (margin >= self.abstain_lo && margin <= self.abstain_hi)
-        {
-            Verdict::Abstain
-        } else if margin >= self.threshold_margin {
-            Verdict::Elevated
-        } else {
-            Verdict::Low
-        };
+        let verdict =
+            if oor || degenerate || (margin >= self.abstain_lo && margin <= self.abstain_hi) {
+                Verdict::Abstain
+            } else if margin >= self.threshold_margin {
+                Verdict::Elevated
+            } else {
+                Verdict::Low
+            };
         Advice {
             verdict,
             margin,
@@ -642,10 +669,7 @@ pub fn mlrisk_suite(
                 break;
             }
         }
-        check!(
-            ok,
-            "mlrisk: no held-out parity row is flagged degenerate"
-        );
+        check!(ok, "mlrisk: no held-out parity row is flagged degenerate");
     }
 
     // 8 — a minimal, well-formed blob LOADS and evaluates as built, so the refusals below are

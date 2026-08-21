@@ -470,13 +470,13 @@ impl TrapFrame {
     }
 }
 
-/// Capability-secure kernel IPC (gap register Issue 2): send/receive a message body through the
-/// kernel endpoint, each authorized by the same `CapEngine` (`ipc.send` / `ipc.recv`).
-/// ALET-P1-009 (`fuzz` half): the trapping task asks the kernel to compare its ENTIRE saved
-/// register file against the sentinels the frame was primed with. Not a real OS service — a
-/// deliberate probe of the trap assembly, and the only syscall whose implementation reads the
-/// `TrapFrame` rather than its two dispatched arguments.
-
+// Capability-secure kernel IPC (gap register Issue 2): send/receive a message body through the
+// kernel endpoint, each authorized by the same `CapEngine` (`ipc.send` / `ipc.recv`).
+// ALET-P1-009 (`fuzz` half): the trapping task asks the kernel to compare its ENTIRE saved
+// register file against the sentinels the frame was primed with. Not a real OS service — a
+// deliberate probe of the trap assembly, and the only syscall whose implementation reads the
+// `TrapFrame` rather than its two dispatched arguments. (A section note, kept as a plain comment:
+// as doc comments they were attributed to the sentinel constant below.)
 /// The sentinel a register-fuzz frame carries in `regs[i]`.
 ///
 /// Distinct per index, and none of them a small integer or a plausible address: a bug that zeroes a

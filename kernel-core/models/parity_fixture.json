@@ -24,8 +24,8 @@
   "cpu_x_mem"
  ],
  "threshold_margin_fixed": -2949195,
- "abstain_lo_margin_fixed": 5499949,
- "abstain_hi_margin_fixed": -1573142,
+ "abstain_lo_margin_fixed": -1423046,
+ "abstain_hi_margin_fixed": -897932,
  "feature_ranges": [
   [
    0,
@@ -413,7 +413,7 @@
     0
    ],
    "margin": -1421029,
-   "class": "elevated",
+   "class": "abstain",
    "out_of_range": false,
    "label": 1
   },
@@ -4809,7 +4809,7 @@
     2
    ],
    "margin": -1300946,
-   "class": "elevated",
+   "class": "abstain",
    "out_of_range": false,
    "label": 1
   },
@@ -7133,7 +7133,7 @@
     3
    ],
    "margin": -1224724,
-   "class": "elevated",
+   "class": "abstain",
    "out_of_range": false,
    "label": 0
   },
