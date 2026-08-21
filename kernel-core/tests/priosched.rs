@@ -525,11 +525,13 @@ fn the_advisory_tiebreak_among_equals_follows_adr_056_exactly() {
         verdict: v,
         margin: 0,
         out_of_range: false,
+        degenerate: false,
     };
     let abstain = Advice {
         verdict: Verdict::Abstain,
         margin: 0,
         out_of_range: false,
+        degenerate: false,
     };
 
     // Elevated leader, one Low challenger: the Low task goes first.

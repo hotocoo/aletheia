@@ -63,6 +63,10 @@ pub struct AdviceStats {
     /// Of those, the ones inside the conformal band (the model has an opinion but not a confident
     /// one), as distinct from the ones outside the training box.
     pub band_abstain: u64,
+    /// Of those, the ones withheld because the input was DEGENERATE — every feature carrying the
+    /// same value (ALET-P3-006). A nonzero count is a feature extractor emitting constants, which
+    /// is an operator-visible anomaly and not the model's judgement about anything.
+    pub degenerate_abstain: u64,
     /// Consultations whose input fell outside the per-feature box the forest was fitted in.
     pub out_of_range: u64,
     /// Dispatches observed (cell throughput fed back into the features).
@@ -221,11 +225,16 @@ impl<'a> RiskService<'a> {
                     Verdict::Elevated => self.stats.elevated += 1,
                     Verdict::Abstain => {
                         self.stats.abstain += 1;
-                        // Outside the box is a *range* abstention; inside the box it is the
-                        // conformal band. Separating them is the difference between "the model is
-                        // unsure" and "the model was asked about something it never saw".
+                        // Outside the box is a *range* abstention; inside the box it is either the
+                        // conformal band ("the model is unsure") or a degenerate constant input
+                        // ("the extractor gave the model nothing to have an opinion ABOUT") —
+                        // ALET-P3-006. Separating the three is what makes the census a diagnosis.
                         if !advice.out_of_range {
-                            self.stats.band_abstain += 1;
+                            if advice.degenerate {
+                                self.stats.degenerate_abstain += 1;
+                            } else {
+                                self.stats.band_abstain += 1;
+                            }
                         }
                     }
                 }

@@ -95,6 +95,13 @@ pub struct Advice {
     pub margin: i64,
     /// True when the input fell outside the per-feature box seen in training.
     pub out_of_range: bool,
+    /// True when the verdict was withheld because the INPUT was degenerate — every feature
+    /// carrying the same value (all-zero is the extreme), so the "vector" carries one number of
+    /// information and the forest's answer is a constant of that one number, not an opinion about
+    /// a task (ALET-P3-006). The margin is still reported; only the VERDICT is withheld. A
+    /// feature extractor that emits constants — buggy or hostile — must not be able to steer the
+    /// scheduler by choosing which constant to emit.
+    pub degenerate: bool,
 }
 
 /// A verified, borrowed view of an `ALTM1` blob. Holds no allocation of its own: the node table is
@@ -296,10 +303,24 @@ impl<'a> RiskAdvisor<'a> {
     }
 
     /// The full three-way verdict for one feature vector.
+    ///
+    /// Abstention has THREE causes and they are not the same thing (ALET-P3-006 added the third):
+    /// the range guard means "this input is outside the box the forest was fitted in"; the
+    /// conformal band means "both labels are plausible for this input"; a degenerate input means
+    /// "every feature carries the same value, so this is not a description of a task at all". A
+    /// degenerate vector is IN the box — all-zero is inside every range table that contains zero —
+    /// so neither existing guard speaks for it, and before ALET-P3-006 it produced a guaranteed,
+    /// bit-exact `Elevated` on every call: an extractor emitting constants could steer the
+    /// scheduler by choosing the constant. The cause is reported in [`Advice::degenerate`]; the
+    /// deterministic policy stands either way.
     pub fn advise(&self, features: &[i32; N_FEATURES]) -> Advice {
         let oor = self.out_of_range(features);
+        // Degenerate is only asked of IN-box vectors: an out-of-box constant is already refused by
+        // the range guard with its own, more specific cause, which is what the census counts.
+        let degenerate = !oor && features.iter().all(|&v| v == features[0]);
         let margin = self.margin(features);
-        let verdict = if oor || (margin >= self.abstain_lo && margin <= self.abstain_hi) {
+        let verdict = if oor || degenerate || (margin >= self.abstain_lo && margin <= self.abstain_hi)
+        {
             Verdict::Abstain
         } else if margin >= self.threshold_margin {
             Verdict::Elevated
@@ -310,6 +331,7 @@ impl<'a> RiskAdvisor<'a> {
             verdict,
             margin,
             out_of_range: oor,
+            degenerate,
         }
     }
 
@@ -596,6 +618,36 @@ pub fn mlrisk_suite(
         );
     }
 
+    // 8 — a DEGENERATE input abstains BY NAME (ALET-P3-006). Every feature carrying the same
+    // value is not a description of a task; all-zero is inside every range table that contains
+    // zero, so neither the range guard nor (on this blob) the band speaks for it, and before
+    // ALET-P3-006 it produced a guaranteed, bit-exact `Elevated` on every call — an extractor
+    // emitting constants could steer the scheduler by choosing the constant.
+    {
+        let zero = [0i32; N_FEATURES];
+        let a = model.advise(&zero);
+        check!(
+            !a.out_of_range && a.degenerate && a.verdict == Verdict::Abstain,
+            "mlrisk: an all-zero input abstains as DEGENERATE, not as a constant opinion"
+        );
+    }
+
+    // 9 — and a real held-out row is never flagged degenerate: the rule catches constants, not
+    // ordinary inputs, so the census it feeds is an anomaly signal and not noise.
+    {
+        let mut ok = true;
+        for r in rows.iter() {
+            if model.advise(&r.x).degenerate {
+                ok = false;
+                break;
+            }
+        }
+        check!(
+            ok,
+            "mlrisk: no held-out parity row is flagged degenerate"
+        );
+    }
+
     // 8 — a minimal, well-formed blob LOADS and evaluates as built, so the refusals below are
     // refusals of specific corruptions rather than of a blob that could never be accepted.
     {
@@ -622,7 +674,7 @@ pub fn mlrisk_suite(
         );
     }
 
-    // 9..16 — every way a blob can be wrong is a NAMED refusal (ADR-056 constraint 5).
+    // 10..17 — every way a blob can be wrong is a NAMED refusal (ADR-056 constraint 5).
     check!(
         RiskAdvisor::load(&[]).err() == Some(ModelError::TooShort)
             && RiskAdvisor::load(&[0u8; HEADER_LEN - 1]).err() == Some(ModelError::TooShort),

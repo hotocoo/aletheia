@@ -865,8 +865,8 @@ pub fn report_risk_advisor(out: &mut dyn FnMut(&str)) {
                         },
                     }
             out(&format!(
-                        "advices: {} ({} low / {} elevated / {} abstain, {} of those in the conformal band)",
-                        s.advices, s.low, s.elevated, s.abstain, s.band_abstain
+                        "advices: {} ({} low / {} elevated / {} abstain: {} band, {} degenerate input)",
+                        s.advices, s.low, s.elevated, s.abstain, s.band_abstain, s.degenerate_abstain
                     ));
             out(&format!(
                 "decisive: {}.{}% — {} out-of-box arrival(s) declined",
