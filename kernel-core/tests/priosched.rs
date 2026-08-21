@@ -436,3 +436,140 @@ fn an_unauthorized_acquire_or_wait_changes_no_scheduling_state() {
     );
     assert_eq!(s.effective_priority(t(1)), LOW);
 }
+
+// ---------------------------------------------------------------------------
+// ALET-P3-007 regression pins. The ready pool was a scanned `VecDeque` pruned
+// with `retain` — O(n) per dispatch, a quadratic drain, 200 000 admitted tasks
+// that never finished dispatching. It is now an ordered set; these tests pin
+// that it answers EXACTLY what the scanned pool answered, not merely something
+// similar: requeue age, finish-removal, donation re-keying in selection (not
+// just in the priority readback), and the ADR-056 advisory tiebreak among equals.
+// ---------------------------------------------------------------------------
+
+/// Requeue age: a task that has run rejoins BEHIND its equals — round-robin among equals is FIFO
+/// age, and the ordered pool must reproduce the tail-append the VecDeque performed.
+#[test]
+fn equal_priority_tasks_drain_round_robin_by_requeue_age() {
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit(t(1), MED);
+    s.admit(t(2), MED);
+    s.admit(t(3), MED);
+    assert_eq!(s.schedule_next(), Some(t(1)));
+    assert_eq!(s.schedule_next(), Some(t(2)), "t(1) must requeue behind t(2)");
+    assert_eq!(s.schedule_next(), Some(t(3)));
+    assert_eq!(s.schedule_next(), Some(t(1)), "the rotation wraps to the oldest");
+}
+
+/// Finishing a task that was never dispatched removes it from the rotation entirely.
+#[test]
+fn finishing_an_undispatched_task_removes_it_from_the_rotation() {
+    let mut s = PriorityScheduler::new(ACQ);
+    for id in 1..=4 {
+        s.admit(t(id), MED);
+    }
+    s.finish(t(2));
+    // Retire every dispatched task, so the run ends when the pool empties rather than when a
+    // running task wraps around: exactly three dispatches may come out, and never t(2).
+    let mut seen = alloc_vec::Vec::new();
+    while let Some(next) = s.schedule_next() {
+        seen.push(next);
+        s.finish(next);
+    }
+    assert_eq!(
+        seen,
+        alloc_vec::Vec::from([t(1), t(3), t(4)]),
+        "the finished task must never be dispatched"
+    );
+}
+
+/// Donation must move SELECTION, not only the `effective_priority` readback: while H is blocked on
+/// L's endpoint the boosted L wins over M immediately, and after the release L loses to M again.
+/// The first half is the classic inversion test; the second half pins the key coming back DOWN in
+/// the ordered pool, which a stale-key implementation would get wrong.
+#[test]
+fn donation_moves_selection_not_just_the_priority_readback() {
+    let (e, cap) = engine();
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit(t(1), LOW); // L
+    s.admit(t(2), MED); // M
+    s.admit(t(3), HIGH); // H
+    s.acquire(&e, Endpoint(1), t(1), &[cap]).unwrap();
+    assert_eq!(s.schedule_next(), Some(t(3)), "H runs first on base priority");
+    s.wait(&e, Endpoint(1), t(3), &[cap]).unwrap(); // H blocks on L's endpoint
+    assert_eq!(
+        s.schedule_next(),
+        Some(t(1)),
+        "the boosted holder must outrank the unrelated medium task"
+    );
+    s.release(Endpoint(1), t(1)).unwrap();
+    assert_eq!(s.schedule_next(), Some(t(3)), "H is ready again and highest");
+    s.finish(t(3)); // H leaves the rotation so the M-vs-L question is directly visible
+    assert_eq!(
+        s.schedule_next(),
+        Some(t(2)),
+        "after the handover L is back at LOW, so M outranks it"
+    );
+    s.finish(t(2)); // retire M too: a running task would otherwise keep the CPU
+    assert_eq!(s.schedule_next(), Some(t(1)), "L runs last of the three");
+}
+
+/// The ADR-056 advisory tiebreak pinned directly on the scheduler, among EQUAL priorities:
+/// an age-oldest decisive-`Elevated` leader is displaced by the OLDEST decisive-`Low` challenger;
+/// a `Low` or abstaining leader is displaced by nobody, because the tiebreak needs a decisive
+/// opinion about both sides.
+#[test]
+fn the_advisory_tiebreak_among_equals_follows_adr_056_exactly() {
+    use kernel_core::mlrisk::{Advice, Verdict};
+
+    let adv = |v: Verdict| Advice {
+        verdict: v,
+        margin: 0,
+        out_of_range: false,
+    };
+    let abstain = Advice {
+        verdict: Verdict::Abstain,
+        margin: 0,
+        out_of_range: false,
+    };
+
+    // Elevated leader, one Low challenger: the Low task goes first.
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit_with_advice(t(1), MED, adv(Verdict::Elevated));
+    s.admit_with_advice(t(2), MED, adv(Verdict::Low));
+    assert_eq!(s.schedule_next(), Some(t(2)));
+
+    // Low leader, Elevated challenger: the leader keeps the CPU.
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit_with_advice(t(1), MED, adv(Verdict::Low));
+    s.admit_with_advice(t(2), MED, adv(Verdict::Elevated));
+    assert_eq!(s.schedule_next(), Some(t(1)));
+
+    // Abstaining leader, Low challenger: no opinion about the leader ⇒ no displacement.
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit_with_advice(t(1), MED, abstain);
+    s.admit_with_advice(t(2), MED, adv(Verdict::Low));
+    assert_eq!(s.schedule_next(), Some(t(1)));
+
+    // Elevated, abstain, Low, Low: the FIRST Low in age order wins, not a later one.
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit_with_advice(t(1), MED, adv(Verdict::Elevated));
+    s.admit_with_advice(t(2), MED, abstain);
+    s.admit_with_advice(t(3), MED, adv(Verdict::Low));
+    s.admit_with_advice(t(4), MED, adv(Verdict::Low));
+    assert_eq!(s.schedule_next(), Some(t(3)));
+
+    // Two Elevateds then two Lows: still the oldest Low.
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit_with_advice(t(1), MED, adv(Verdict::Elevated));
+    s.admit_with_advice(t(2), MED, adv(Verdict::Elevated));
+    s.admit_with_advice(t(3), MED, adv(Verdict::Low));
+    s.admit_with_advice(t(4), MED, adv(Verdict::Low));
+    assert_eq!(s.schedule_next(), Some(t(3)));
+
+    // And none of this crosses a priority band: a Low verdict never lifts a task above a genuinely
+    // higher-priority neighbour.
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit_with_advice(t(1), HIGH, adv(Verdict::Elevated));
+    s.admit_with_advice(t(2), MED, adv(Verdict::Low));
+    assert_eq!(s.schedule_next(), Some(t(1)));
+}

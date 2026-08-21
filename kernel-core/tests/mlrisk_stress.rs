@@ -214,3 +214,86 @@ fn the_verdict_census_matches_what_the_advisor_says_row_by_row() {
         "a row built inside the range table must not trip the range guard"
     );
 }
+
+#[test]
+fn a_two_hundred_thousand_task_drain_completes_exactly_and_in_band_order() {
+    // ALET-P3-007. The ready pool was a scanned VecDeque pruned with `retain`: O(n) per dispatch,
+    // so draining n admitted tasks was O(n²). The overload bench admitted 200 000 tasks in 6 s and
+    // killed the drain at 349 s without one dispatch; the 8 000-task case above finished in 2 s and
+    // hid the curve, because a single N measures a cost, not a GROWTH RATE. The pool is now an
+    // ordered set (O(n log n) per drain), and this case runs at the N that found the defect, twice:
+    //
+    //   model-free — the drain must be EXACTLY the permutation the scanned pool produced: priority
+    //   bands non-increasing, admission order within a band. Any tiebreak drift fails here.
+    //
+    //   advised — the same 200 000 admissions through the resident forest: bands still
+    //   non-increasing (risk never outranks priority, INV-014) and every task drains exactly once.
+    //
+    // Completion itself is the performance assertion: with the quadratic pool this test did not
+    // finish. No timing is asserted — a slow machine passes, a quadratic pool does not.
+    use kernel_core::priosched::{Priority, PriorityScheduler};
+    use kernel_core::sched::TaskId;
+
+    const N: usize = 200_000;
+    const BANDS: u8 = 9;
+    let m = advisor();
+
+    // Model-free: exact expected permutation, checked O(1) per dispatch. Band b (1..=9) holds ids
+    // congruent to b-1 mod 9, admitted in ascending order, so within a band the drain is ascending.
+    let mut plain = PriorityScheduler::new("kernel.endpoint.acquire");
+    for i in 0..N {
+        let band = 1 + (i % BANDS as usize) as u8;
+        plain.admit(TaskId(i as u64 + 1), Priority(band));
+    }
+    // Band b holds ids b, b+9, b+18, … admitted ascending — so its drain order is ascending from b.
+    let mut next_in_band: std::vec::Vec<u64> = (0..=(BANDS as u64)).collect();
+    let mut drained = 0usize;
+    let t0 = Instant::now();
+    while let Some(t) = plain.schedule_next() {
+        let band = (1 + ((t.0 - 1) % BANDS as u64) as u8) as usize;
+        assert_eq!(
+            t.0, next_in_band[band],
+            "model-free drain left its band's FIFO age order at dispatch {}",
+            drained
+        );
+        next_in_band[band] += BANDS as u64;
+        plain.finish(t);
+        drained += 1;
+    }
+    let plain_ns = t0.elapsed().as_nanos();
+    assert_eq!(drained, N, "every admitted task must drain exactly once");
+
+    // Advised: same shape, verdicts from the installed forest. Bands must stay non-increasing.
+    let mut advised = PriorityScheduler::new("kernel.endpoint.acquire");
+    let mut x = [0i32; kernel_core::mlrisk_contract::N_FEATURES];
+    for i in 0..N {
+        for (f, slot) in x.iter_mut().enumerate() {
+            let (lo, hi) = m.feature_range(f);
+            *slot =
+                lo.saturating_add(((i as i64 * 2654435761) % (hi as i64 - lo as i64 + 1)) as i32);
+        }
+        let band = 1 + (i % BANDS as usize) as u8;
+        advised.admit_with_advice(TaskId(i as u64 + 1), Priority(band), m.advise(&x));
+    }
+    let mut last = u8::MAX;
+    let mut advised_drained = 0usize;
+    let t1 = Instant::now();
+    while let Some(t) = advised.schedule_next() {
+        let band = 1 + ((t.0 - 1) % BANDS as u64) as u8;
+        assert!(
+            band <= last,
+            "a lower-priority task ran before a higher-priority one: risk outranked priority"
+        );
+        last = band;
+        advised.finish(t);
+        advised_drained += 1;
+    }
+    let advised_ns = t1.elapsed().as_nanos();
+    assert_eq!(advised_drained, N);
+
+    println!(
+        "[mlrisk-stress] 200k drain (ALET-P3-007): model-free {} ms, advised {} ms",
+        plain_ns / 1_000_000,
+        advised_ns / 1_000_000
+    );
+}
