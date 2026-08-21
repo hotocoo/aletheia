@@ -10,8 +10,12 @@ plainly that **nothing here is production-ready** — read it before quoting any
 ## Current wave — the audit's five defects, four closed and one honestly not (2026-08-21)
 
 The 2026-08-17 wave ended with five defects a measurement had found and a register had named. This
-one closes four of them (**ALET-P3-004**, **ALET-P3-006**, **ALET-P3-007**, **ALET-P3-008**) and
-leaves the fifth (**ALET-P3-005**, trainer-side monotonicity re-assertion) open where it belongs.
+one closes all five — four by fixing them (**ALET-P3-004**, **ALET-P3-006**, **ALET-P3-007**,
+**ALET-P3-008**) and the fifth (**ALET-P3-005**) by withdrawing its premise under measurement and
+closing the real gap behind it: the contract constrains exactly five features, a rigorous tree-walk
+of the shipped blob finds ZERO monotonicity violations, and `export.py::assert_monotone` now
+hard-fails before any blob is written if that ever stops being true. A defect report that dissolves
+under measurement is the register working, not failing.
 
 * **The P0 drain is dead, twice.** `PriorityScheduler`'s ready pool was a scanned `VecDeque`
   pruned with `retain` per dispatch: O(N²) to drain, 200 K tasks admitted in 6 s and never
