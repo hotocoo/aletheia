@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod capalg;
 pub mod capstore;
+pub mod compress;
 pub mod conring;
 pub mod crypto;
 pub mod deadva;

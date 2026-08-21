@@ -150,7 +150,10 @@ fn a_corrupt_store_is_refused_rather_than_silently_replaced() {
         .expect("clear journal record");
     let mut blk = [0u8; BLOCK_SIZE];
     dev.read_block(entry.start, &mut blk).expect("read");
-    blk[40] ^= 0xFF; // the first entity's type byte, inside its metadata
+    // Byte 40 sits inside the object's COMPRESSED payload these days: the flip trips whichever
+    // integrity layer sees it first — the ACMP1 structural checks or the record's own hashes.
+    // Either way the demand is the same: REFUSED BY NAME, never silently replaced.
+    blk[40] ^= 0xFF;
     dev.write_block(entry.start, &blk).expect("write");
     let err = open_and_witness(&mut dev).expect_err("a damaged store must be refused");
     assert!(
@@ -161,6 +164,9 @@ fn a_corrupt_store_is_refused_rather_than_silently_replaced() {
                 | PersistError::BadFormat
                 | PersistError::UnknownEntityType
                 | PersistError::NotUtf8
+                | PersistError::Compressed(
+                    kernel_core::persist::CompressedRecordError::Decompress(_),
+                ),
         ),
         "unexpected error: {err:?}"
     );
