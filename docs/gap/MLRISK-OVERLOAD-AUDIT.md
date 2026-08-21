@@ -3,7 +3,8 @@
 **As of:** 2026-08-17 (first wave after the model stops being installed and starts being consulted)
 **Bench binary:** `kernel-core/examples/overload_bench.rs` (new — see "Reproduction" below)
 **Blob under test:** `kernel-core/models/aletheia_risk.altm` (171 trees, 26 469 nodes, 1 368 worst-case
-compares per advice, sha256 `84af4e8dd2c433ba86da47050b487ac8b3fdbd5b578476ba95ec941c6bd5d58c`)
+compares per advice, sha256 `84af4e8d…` as written; re-made at alpha 0.03 by the ALET-P3-008 fix —
+sha256 `3e4def46…`, same forest, live band — see Verification outcomes)
 **Sources of truth for the live numbers:** raw output from `cargo run --release --example overload_bench`
 on the host release build, captured against the blob as committed at HEAD.
 
@@ -347,8 +348,8 @@ OLOAD_ADVICES=1000000000 ./target/release/examples/overload_bench advice_storm
 # boundary sweep at 5 M samples per feature (1 min)
 ./target/release/examples/overload_bench boundary_sweep 5000000
 
-# schedule storm — RUN ONLY if the priority-scheduler drain has been fixed
-./target/release/examples/overload_bench schedule_storm 10000
+# schedule storm — completes in seconds since ALET-P3-007 (was: do not run before it)
+./target/release/examples/overload_bench schedule_storm 200000
 ```
 
 The bench binary reads `kernel-core/models/aletheia_risk.altm` via `BUNDLED_MODEL` (same path the
@@ -360,18 +361,37 @@ gate bench uses). All numbers in this document are reproducible from HEAD at the
 
 | ID | Sev | Disposition | Owner | Evidence |
 |----|-----|-------------|-------|----------|
-| ALET-P3-004 | P2 | open | `kernel-core/src/mlrisk.rs` | this doc, §"DEFECT-1" |
+| ALET-P3-004 | P2 | resolved | `kernel-core/src/mlrisk.rs` | this doc, §"DEFECT-1" — regime documented on `Verdict`; `Abstain` made a real third way again by the ALET-P3-008 recalibration |
 | ALET-P3-005 | P2 | open | `aletheia-ml/src/aletheia_ml/export.py` | this doc, §"DEFECT-2" |
-| ALET-P3-006 | P2 | open | `kernel-core/src/mlrisk.rs::advise` | this doc, §"DEFECT-3" |
-| ALET-P3-007 | P0 | open | `kernel-core/src/priosched.rs` | this doc, §"DEFECT-4" |
-| ALET-P3-008 | P2 | open | `kernel-core/src/mlrisk.rs::load` | this doc, §"DEFECT-5" |
+| ALET-P3-006 | P2 | resolved | `kernel-core/src/mlrisk.rs::advise` | this doc, §"DEFECT-3" — degenerate abstention shipped, gated at boot (invariants 8–9 of 22) and in the census end to end |
+| ALET-P3-007 | P0 | resolved | `kernel-core/src/priosched.rs` | this doc, §"DEFECT-4" — ordered ready pool; 200 K drain gate green |
+| ALET-P3-008 | P2 | resolved | `kernel-core/src/mlrisk.rs::load` + recalibration | this doc, §"DEFECT-5" — `ModelError::InvertedBand` refusal; blob re-made at alpha 0.03 with a live band |
 
-**Verification plan (when fixes land):** re-run `overload_bench` at the same parameters, expect
-DEFECT-1's `Low` count to either rise above ~1 K (if a richer set of low-risk rows is now reached) or
-be documented as the model's true one-bit regime; DEFECT-2's sweep to report monotone-asc ≥ 9 (one
-per constrained feature); DEFECT-3's all-zero surface to report `Abstain` with `degenerate = true`;
-DEFECT-4's schedule_storm to finish at 200 K in seconds; DEFECT-5's band-fire count to remain 0
-(because the blob still has the inverted band) and `load` to refuse at boot instead.
+**Verification outcomes (2026-08-21, fixes landed):**
+
+* **DEFECT-3 — verified.** `fault_inject` at 100 K per pattern: the `zero` pattern now reports
+  `A=100000 oor=0 deg=100000` at the same constant margin `-1 781 991` — the verdict is withheld
+  and the CAUSE is named; the four out-of-box patterns are unchanged (`oor=100000, deg=0`), so
+  the census did not misattribute anything. Gated further by boot invariants 8–9 of 22 and a
+  hosted unit test.
+* **DEFECT-4 — verified.** `schedule_storm 200000`: admit 0.77 s, drain 4.72 s, total 5.49 s,
+  priority monotonic across all 200 000 drains — against 349 s killed without producing one
+  dispatch when this audit was written. The hosted gate (`tests/mlrisk_stress.rs`) now runs that
+  N on every `cargo test`, model-free AND advised, with exact-permutation assertions.
+* **DEFECT-5 — verified, both ends.** `load` refuses an inverted band (`ModelError::InvertedBand`,
+  tested by swapping the shipped blob's band bytes); the SHIPPED blob is asserted well-formed.
+  The blob itself was re-made at `CONFORMAL_ALPHA = 0.03` (`scripts/band_alpha_sweep.py` in
+  `aletheia-ml` measured the grid: bands live for alpha <= 0.04, dead from ~0.045 up — LOWER is
+  the direction that widens the class sets). New band `[0.357747, 0.553282]` probability /
+  `[-1 423 046, -897 932]` fixed-point; measured ~1.0 % of a test shard abstains by band, and
+  exactly 3 of the 256 committed fixture rows fire it, deterministically. New blob sha256
+  `3e4def4641404bd951940098098bacf393379ee2e901bbac40746aac7320e340`; forest weights, feature
+  contract and operating threshold are unchanged.
+* **DEFECT-1 — resolved by documentation + the live band.** The `Low` asymmetry (811 in 1 B) is
+  now stated on `Verdict` itself where any reader must pass it; and with the band live,
+  `Abstain` is once more a reachable third way rather than a dead field, which was the operational
+  half of the complaint.
+* **DEFECT-2 — still open** (trainer-side export assertion); nothing in this wave touched it.
 
 **Not claimed:** that the OVERLOAD bench is the only way to find defects of this class. A targeted
 unit test on `Advice` for the all-zero case, or a targeted unit test on `effective_priority`'s

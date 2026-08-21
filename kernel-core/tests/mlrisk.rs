@@ -169,6 +169,24 @@ fn every_malformed_blob_is_a_named_refusal() {
         Some(ModelError::EmptyForest)
     );
 
+    // ALET-P3-008: an inverted conformal band (lo > hi) leaves every other check green while the
+    // abstention path it dedicates two header fields to can never fire. The trainer refuses such
+    // a calibration when it is computed; the kernel refuses it AGAIN here, because bytes off a
+    // disk arrive without their trainer.
+    let mut bad = BLOB.to_vec();
+    let lo = i64::from_le_bytes(bad[40..48].try_into().unwrap());
+    let hi = i64::from_le_bytes(bad[48..56].try_into().unwrap());
+    assert!(
+        lo <= hi,
+        "the SHIPPED blob must carry a well-formed band, or the next assertion proves nothing"
+    );
+    bad[40..48].copy_from_slice(&hi.to_le_bytes());
+    bad[48..56].copy_from_slice(&lo.to_le_bytes());
+    assert_eq!(
+        err_of(RiskAdvisor::load(&bad)),
+        Some(ModelError::InvertedBand)
+    );
+
     // A backwards child edge would let evaluation loop forever; refuse the blob instead of hanging.
     let nodes_off = 88 + 8 * N_FEATURES + 4 * advisor().trees();
     let mut bad = BLOB.to_vec();
@@ -283,10 +301,20 @@ fn a_degenerate_input_abstains_by_name_instead_of_returning_a_constant_verdict()
     // scheduler, so it must now abstain with the degenerate cause set and the margin intact.
     let zero = [0i32; N_FEATURES];
     let a = m.advise(&zero);
-    assert!(!a.out_of_range, "all-zero must be in-box for this blob, or the test proves nothing");
-    assert!(a.degenerate, "an all-constant vector must be flagged degenerate");
+    assert!(
+        !a.out_of_range,
+        "all-zero must be in-box for this blob, or the test proves nothing"
+    );
+    assert!(
+        a.degenerate,
+        "an all-constant vector must be flagged degenerate"
+    );
     assert_eq!(a.verdict, Verdict::Abstain);
-    assert_eq!(a.margin, m.margin(&zero), "the margin is still reported; only the verdict is withheld");
+    assert_eq!(
+        a.margin,
+        m.margin(&zero),
+        "the margin is still reported; only the verdict is withheld"
+    );
 
     // An out-of-box CONSTANT keeps its more specific cause: the range guard, not degeneracy,
     // is what fires — the census must not misattribute the two.
@@ -296,7 +324,10 @@ fn a_degenerate_input_abstains_by_name_instead_of_returning_a_constant_verdict()
 
     // And no real held-out row is flagged: the rule catches constants, not ordinary inputs.
     for r in fixture_rows() {
-        assert!(!m.advise(&r.x).degenerate, "a held-out row was flagged degenerate");
+        assert!(
+            !m.advise(&r.x).degenerate,
+            "a held-out row was flagged degenerate"
+        );
     }
 }
 

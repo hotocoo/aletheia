@@ -1,13 +1,60 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-17 (resident-model overload audit — five new P2/P0 defects surfaced at 1 B-advice scale)
+**As of:** 2026-08-21 (overload-audit fixes — the P0 quadratic drain, the degenerate-input backdoor, and the inverted band, closed at both ends of the repo boundary)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
 
-## Current implementation wave — the model stops being installed and starts being consulted (2026-08-13)
+## Current wave — the audit's five defects, four closed and one honestly not (2026-08-21)
+
+The 2026-08-17 wave ended with five defects a measurement had found and a register had named. This
+one closes four of them (**ALET-P3-004**, **ALET-P3-006**, **ALET-P3-007**, **ALET-P3-008**) and
+leaves the fifth (**ALET-P3-005**, trainer-side monotonicity re-assertion) open where it belongs.
+
+* **The P0 drain is dead, twice.** `PriorityScheduler`'s ready pool was a scanned `VecDeque`
+  pruned with `retain` per dispatch: O(N²) to drain, 200 K tasks admitted in 6 s and never
+  produced one dispatch in 349 s. The pool is now a `BTreeSet` keyed `(effective priority desc,
+  FIFO seq asc)` — selection is a first-element read, removal and donation re-keying are O(log n),
+  and every answer is pinned equal to the scanned implementation's (requeue age, finish-removal,
+  donation moving SELECTION, the full ADR-056 tiebreak table). `schedule_storm 200000`: admit
+  0.77 s, drain 4.72 s, priority monotonic throughout. The gate now runs that N on every
+  `cargo test`, model-free AND advised — and it earned its keep immediately: the port's FIRST
+  draft answered the advisory tiebreak with a band scan and hung at exactly this N (the shipped
+  blob marks essentially every task `Elevated`), so the per-band Low census replaced the scan.
+  A defect found at scale, fixed, and re-found by its own gate before landing.
+* **An all-zero task is not a task.** A feature vector whose features all carry one value — all-zero
+  is the extreme, and it sits inside this blob's range table — returned the constant margin
+  `-1 781 991` and a decisive `Elevated` on EVERY call: an extractor emitting constants could steer
+  the scheduler by choosing the constant. `advise` now withholds the verdict for such inputs and
+  names the cause (`Advice::degenerate`); the census separates range / band / degenerate from
+  `advise` through the stress harness and `RiskService` to the `mlstat` console line; two new boot
+  invariants (risk-advisor suite 20 → 22, every pinned gate updated) prove it on every target, and
+  the trainer's `classify` mirrors the rule so parity cannot drift.
+* **The inverted band is refused AND fixed.** `RiskAdvisor::load` now returns
+  `ModelError::InvertedBand` for a blob whose `abstain_lo > abstain_hi` — the two header fields
+  whose interval can never contain anything — tested by swapping the shipped blob's band bytes and
+  by asserting the shipped blob well-formed. And because a refusal with no fixed artifact would
+  have booted every machine model-free and called that safety, the blob itself was re-made:
+  `aletheia-ml/scripts/band_alpha_sweep.py` measured the alpha grid over the same isotonic
+  probabilities (bands live for alpha <= 0.04, dead from ~0.045 up — LOWER widens the class sets;
+  the trainer's own refusal message had the direction backwards and is corrected),
+  `CONFORMAL_ALPHA` moved 0.10 → 0.03, and the recalibrated blob ships a live band
+  (`[0.357747, 0.553282]` probability, `[-1 423 046, -897 932]` fixed-point; ~1.0 % of a test
+  shard abstains by band; exactly 3 of 256 committed fixture rows fire it, deterministically).
+  Forest weights, feature contract and operating threshold are unchanged; sha256
+  `3e4def46…`. MODEL-CARD §4 records the whole arc.
+* **The verdict regime is written where readers must pass it.** `Verdict`'s rustdoc now states the
+  measured asymmetry — `Low` fired 811 times in 1 000 000 000 uniform in-box advices, `Elevated`
+  is the default decision — and requires anything new that reads a verdict to say why it is safe
+  under that asymmetry (ALET-P3-004). With the band live again, `Abstain` is a real third way
+  rather than a dead field.
+
+`kernel-core`: **368 tests passed**; `aletheia-ml`: 20 passed; verification numbers above are from
+the bench binary the audit shipped, re-run against the fixed tree.
+
+## Previous implementation wave — the model stops being installed and starts being consulted (2026-08-13)
 
 `docs/MATURITY.md` had said it plainly since the risk forest landed: *"NOTHING in the kernel derives
 the 20-feature vector from a live task yet, so on a running machine it currently advises about no
