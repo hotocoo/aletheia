@@ -1,6 +1,6 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-13 (live feature derivation + resident advisor + cross-OS scheduler benchmark)
+**As of:** 2026-08-17 (resident-model overload audit — five new P2/P0 defects surfaced at 1 B-advice scale)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
@@ -88,6 +88,44 @@ virtualize x86-64), `scripts/console-e2e.sh` PASS on all three.
 changes and re-running the gate on the clean tree: identical failure, identical invariant. The x86
 smoke test's new advisor assertions are therefore unverified on that target until the trapframe defect
 is fixed. `scripts/vm-e2e.sh` (aarch64) and `scripts/vm-e2e-riscv.sh` both PASS.
+
+## Current wave — the resident model under load (2026-08-17)
+
+The wave above makes the model consulted; this one asks **what happens when it is consulted at scale
+the gate never reaches.** `kernel-core/examples/overload_bench.rs` runs the installed
+`aletheia_risk.altm` through 1 B advices across four input surfaces, 20 M deterministic repeats, 50 M
+pathological inputs and a 5 M-sample-per-feature boundary sweep — every number in
+`docs/gap/MLRISK-OVERLOAD-AUDIT.md` reproducible from a single host-side binary outside the test
+harness. Five defects surfaced that the gate's 2 M-advice cap could not. All five are open in the
+register (`docs/gap/ARCHITECTURE-GAPS4-REGISTER.md`, twenty-second update):
+
+* **ALET-P3-007 (P0) — schedule drain is O(N²).** `PriorityScheduler::schedule_next` and `finish` both
+  call `self.order.retain`, making a drain of N tasks quadratic. 200 K tasks admits in 6 s but does
+  not drain in 349 s of wall time. Same class of non-linear cost growth the MODEL-CARD §8 allocator
+  fix hid at N=128: it hid it again, at a different seam. Fix is `VecDeque` → `BTreeSet` keyed on
+  `(effective_priority, TaskId)`, plus a 200 K-task gate case.
+* **ALET-P3-004 (P2) — the three-way verdict is operationally a two-way.** Across 1 B uniform in-box
+  advices, `Low` fires **811** times — 8.11 × 10⁻⁷. Code reading the verdict has no signal for "the
+  model had no opinion" vs "the model decided Low".
+* **ALET-P3-005 (P2) — four of nine monotone-constrained features are silently dropped at export.**
+  XGBoost receives the constraint at training; the integer export does not re-assert it. Boundary
+  sweep at 5 M samples reports monotone-asc=5, monotone-desc=1, non-monotone=13 (of 20), so 4/9
+  constrained features are violated in the blob.
+* **ALET-P3-006 (P2) — all-zero feature vector is a guaranteed `Elevated` backdoor.** Constant margin
+  `-1 781 991`, decisive verdict on every call. The kernel treats this as an opinion when it is a
+  degenerate input.
+* **ALET-P3-008 (P2) — inverted conformal band still ships (MODEL-CARD §4).** Trainer-side
+  `check_band` catches it at training; the kernel-side `load` does not refuse an inverted-band blob,
+  so the kernel loads and runs it silently. Band-fires=0 at every scale from 2 M to 1 B.
+
+Per-advice cost held at **~3,500 ns / 285,000 adv/s** across every mode and every scale. Determinism
+held bit-identical at 20 M × 2 passes. No panics, no infinite loops, no slow paths through `advise`.
+Throughput at 1 B was stable: 2.75 × 10⁵ adv/s cold, 3.17 × 10⁵ warmed, 3.02 × 10⁵ settled. The
+model's hot path is fast and robust under stress; the four P2 defects and the P0 drain are correctness
+and contract defects, not throughput ones. **Not claimed:** that the bench is the only way to find
+defects of this class — a targeted unit test on `Advice` for the all-zero case, or a 200 K-task drain
+gate, would have caught the corresponding defects with no bench at all. The bench is what made us
+look; the test is what should keep us honest.
 
 ## Previous wave — command authority, durable capability image, and user-fault continuation (2026-08-13)
 

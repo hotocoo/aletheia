@@ -101,8 +101,13 @@ milestone work, carrying no false "done" claim).
 | ALET-P3-001 | P3 | open | centralized assembly/Rust boundary documentation |
 | ALET-P3-002 | P3 | open | unsafe/assembly audit ownership |
 | ALET-P3-003 | P3 | open | centralized architectural invariants doc |
+| ALET-P3-004 | P2 | open | `aletheia_risk` Low verdict rate is 8.11 × 10⁻⁷ — the three-way verdict is operationally a two-way {Elevated, Abstain}. Doc: `docs/gap/MLRISK-OVERLOAD-AUDIT.md` §DEFECT-1 (1 B-advice measurement on the installed blob). Owner: `kernel-core/src/mlrisk.rs` (`Advice` carries no signal for "model had no opinion vs model decided Low"); the fix is either a documented two-way regime or an additional `Advice` field |
+| ALET-P3-005 | P2 | open | four of nine monotone-constrained features (`+1`) have non-monotone margins in the exported blob. `boundary_sweep` at 5 M samples per feature reports monotone-asc=5, monotone-desc=1, non-monotone=13 (of 20); of the 9 constrained features, 4 are violated in the export. Doc: `docs/gap/MLRISK-OVERLOAD-AUDIT.md` §DEFECT-2. Owner: `aletheia-ml/src/aletheia_ml/export.py` — the constraint is given to XGBoost at train time but not re-asserted in the integer export |
+| ALET-P3-006 | P2 | open | all-zero feature vector is a constant margin `-1 781 991` and a guaranteed `Elevated` verdict on every call; the kernel treats this as a decisive opinion when it is a degenerate input. Doc: `docs/gap/MLRISK-OVERLOAD-AUDIT.md` §DEFECT-3 (50 M fault-inject + 250 M all-zero surface). Owner: `kernel-core/src/mlrisk.rs::advise` — add a third abstention cause (`degenerate`) alongside `out_of_range` and the conformal band |
+| ALET-P3-007 | P0 | open | `PriorityScheduler` drain is O(N²) via `self.order.retain` in `schedule_next` and `finish`; 200 K tasks admits in 6 s but does not drain in 349 s of wall time. Gate bench (8 K tasks) finishes the drain but does not detect the non-linear cost growth. Doc: `docs/gap/MLRISK-OVERLOAD-AUDIT.md` §DEFECT-4. Owner: `kernel-core/src/priosched.rs` — replace `VecDeque<TaskId>` + `retain` with a structure that supports pop-min-priority and arbitrary-remove in sub-linear time (BTreeSet keyed on `(effective_priority, TaskId)`), and extend the gate with a 200 K-task drain case so this never ships unfixed again |
+| ALET-P3-008 | P2 | open | inverted conformal band still ships (MODEL-CARD §4): `abstain_lo > abstain_hi` → band-fires=0 at every scale from 2 M to 1 B advices. The trainer-side `check_band` (MODEL-CARD §4) catches it at training but `kernel-core/src/mlrisk.rs::load` does NOT refuse an inverted-band blob, so the kernel loads and runs an inferentially-evaluable-but-never-band-firing model silently. Doc: `docs/gap/MLRISK-OVERLOAD-AUDIT.md` §DEFECT-5. Owner: `kernel-core/src/mlrisk.rs::load` (add `ModelError::InvertedBand` and refuse at boot); `kernel-core/src/mlrisk_stress.rs` (add a boot-time refusal test) |
 
-**Rollup (2026-08-10, twenty-first update):** 88 findings — **52 resolved**, 27 open, 9 deferred.
+**Rollup (2026-08-17, twenty-second update):** 93 findings — **52 resolved**, 32 open, 9 deferred.
 
 The console-agent wave closes **ALET-P2-047** in both halves and opens-and-closes **ALET-P2-048**.
 The first was the honest remainder of the previous wave: a planning path that emitted one command per
@@ -120,7 +125,33 @@ moves, never repeat a mutation, and assert a claim rather than a preference.
 What remains open in this area is **ALET-P2-046** — approval is still a CLI flag rather than the
 Core's human-in-the-loop surface — and it is stated here rather than folded into a row that closed.
 
-**Previous rollup (2026-08-10, twentieth update):** 87 findings — 50 resolved, 28 open, 9 deferred.
+**Rollup (2026-08-17, twenty-second update):** 93 findings — **52 resolved**, 32 open, 9 deferred.
+
+The five new rows are the resident-model overload wave (**ALET-P3-004** … **ALET-P3-008**), each
+documented in `docs/gap/MLRISK-OVERLOAD-AUDIT.md`. The bench that surfaced them —
+`kernel-core/examples/overload_bench.rs`, added in this wave — runs the installed
+`aletheia_risk.altm` through 1 B advices, 20 M deterministic repeats, 50 M pathological inputs and a
+5 M-sample-per-feature boundary sweep, all from a single host-side binary outside the test harness.
+The lesson shape is a fifth iteration of the ADR-052/053/055 one: **defects only a measurement at
+scale can expose, every one of them presenting as the model or the scheduler behaving correctly when
+inspected at a small N**. (a) The three-way verdict is operationally a two-way {Elevated, Abstain}:
+across 1 B uniform in-box advices, Low fired **811** times — 8.11 × 10⁻⁷ — and code reading the
+verdict has no signal for "the model had no opinion" vs "the model decided Low" (ALET-P3-004). (b)
+Of the 9 monotone-constrained features the trainer was told to enforce, only 5 are actually
+monotone-ascending in the integer export; 4 are violated. The constraint is given to XGBoost at
+training but not re-asserted on the blob (ALET-P3-005). (c) An all-zero feature vector is a constant
+margin of `-1 781 991` and a guaranteed `Elevated` verdict on every call — a degenerate input the
+kernel treats as a decisive opinion (ALET-P3-006). (d) `PriorityScheduler` drain is O(N²) via
+`order.retain`; 200 K tasks admits in 6 s but does not drain in 349 s of wall time, while the gate's
+8 K-task case finishes in 2 s. Same class of non-linear cost growth the MODEL-CARD §8 allocator fix
+hid by making the inner loop cheap at N=128 — it hid it again, at a different seam (ALET-P3-007).
+(e) The inverted conformal band (MODEL-CARD §4) is re-confirmed at every scale from 2 M to 1 B; the
+trainer-side `check_band` catches it at training, but `kernel-core/src/mlrisk.rs::load` does not
+refuse an inverted-band blob, so the kernel loads it and runs it silently (ALET-P3-008). The fix
+plan is named in the audit doc; the verification plan is to re-run the bench at the same parameters
+after each fix lands.
+
+**Previous rollup (2026-08-10, twenty-first update):** 88 findings — **52 resolved**, 27 open, 9 deferred.
 
 The four new rows are the console-planning wave (**ALET-P2-044**, **ALET-P2-045** closed;
 **ALET-P2-046**, **ALET-P2-047** opened). The first is the hole the previous wave's own benchmark
