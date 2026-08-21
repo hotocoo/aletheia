@@ -62,6 +62,7 @@ fn capability_image_round_trips_through_atomic_filesystem_object() {
 
 #[test]
 fn capability_image_corruption_on_medium_is_refused() {
+    // The object at rest is an ACMP1 envelope now; damaging its magic must be refused by name.
     let (engine, _root, _child) = engine();
     let mut disk = MemBlockDevice::new(256);
     Filesystem::format(&mut disk).unwrap();
@@ -74,7 +75,49 @@ fn capability_image_corruption_on_medium_is_refused() {
     let mounted = Filesystem::mount(&mut disk).unwrap();
     assert!(matches!(
         load_from_fs(&mounted, &disk, 1000),
-        Err(CapStoreError::Checksum)
+        Err(CapStoreError::Compressed(_)),
+    ));
+}
+
+#[test]
+fn a_raw_image_written_before_compression_still_loads() {
+    // Detection, not assumption: an image written by the pre-compression path — or by any older
+    // kernel — is a raw record, and every reader must keep accepting it. A flipped byte in THAT
+    // form is still the record checksum's catch.
+    let (engine, _root, child) = engine();
+    let mut disk = MemBlockDevice::new(256);
+    Filesystem::format(&mut disk).unwrap();
+    let mut fs = Filesystem::mount(&mut disk).unwrap();
+    fs.replace(&mut disk, STORE_OBJECT, &save(&engine)).unwrap();
+
+    let mounted = Filesystem::mount(&mut disk).unwrap();
+    let back = load_from_fs(&mounted, &disk, 1000).expect("a raw image must still load");
+    assert_eq!(
+        back.evaluate("entity.derive", &doc(), &[child]),
+        Decision::Allow
+    );
+
+    // A flip in the MIDDLE of the raw image (magic intact, so detection passes it through) is
+    // precisely the record checksum's catch; a flipped MAGIC byte would instead be named as a
+    // broken container by the envelope detector above.
+    let mut image = fs.read(&disk, STORE_OBJECT).unwrap();
+    let mid = image.len() / 2;
+    image[mid] ^= 1;
+    fs.replace(&mut disk, STORE_OBJECT, &image).unwrap();
+    let mounted = Filesystem::mount(&mut disk).unwrap();
+    assert!(matches!(
+        load_from_fs(&mounted, &disk, 1000),
+        Err(CapStoreError::Checksum),
+    ));
+
+    // And a raw image whose MAGIC rotted is named as container damage, not misread as an image.
+    let mut image = fs.read(&disk, STORE_OBJECT).unwrap();
+    image[0] ^= 1;
+    fs.replace(&mut disk, STORE_OBJECT, &image).unwrap();
+    let mounted = Filesystem::mount(&mut disk).unwrap();
+    assert!(matches!(
+        load_from_fs(&mounted, &disk, 1000),
+        Err(CapStoreError::Compressed(_)),
     ));
 }
 
@@ -127,6 +170,17 @@ fn authenticated_capability_image_round_trips_through_atomic_filesystem_object()
         load_authenticated_from_fs(&mounted, &disk, &[0x5au8; 32], 1000).err(),
         Some(CapStoreError::Authentication)
     );
+
+    // The stored form is an envelope around the authenticated image: damaging the ENVELOPE is a
+    // compression-layer refusal; the MAC still guards the image inside it.
+    let mut sealed = fs.read(&disk, STORE_OBJECT).unwrap();
+    sealed[0] ^= 1;
+    fs.replace(&mut disk, STORE_OBJECT, &sealed).unwrap();
+    let mounted = Filesystem::mount(&mut disk).unwrap();
+    assert!(matches!(
+        load_authenticated_from_fs(&mounted, &disk, &key, 1000),
+        Err(CapStoreError::Compressed(_)),
+    ));
 }
 
 // ---------------------------------------------------------------------------
