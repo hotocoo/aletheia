@@ -181,12 +181,17 @@ identical at 1 M and at 5 M — sampling was not the issue. The gate **doesn't r
 all on this kernel** (`kernel-core/tests/mlrisk_stress.rs::the_stress_suite_holds_on_the_host_at_scale`
 does not include a boundary sweep); the OVERLOAD bench is what exposed the assertion.
 
-**Root cause hypothesis (not yet investigated in code):** the constraint is a training-time argument to
-XGBoost (`monotone_constraints`). If it is not propagated through the post-training exporter that
-walks the tree table to verify leaf-monotonicity in the integer blob, the constraint is enforced on
-the float model but not on the export. The same class of bug has been seen before in this repo
-(gate-bench fix for the `PriorityScheduler::effective_priority` allocation: documented in MODEL-CARD
-§8 as "the same fast path, again, on a different seam").
+**RESOLVED 2026-08-21 — the alarm was false, and the gap it pointed at is now closed.** Two things
+were true at once. First, the premise was wrong: the "9 of 20 constrained features" figure is in
+THIS document, not in MODEL-CARD (which never states a count), and the contract
+(`aletheia-ml/src/aletheia_ml/config.py`) constrains exactly **five** — job_fails, user_fails,
+user_fail_rate, cell_fails_prev, cell_evicts_prev, each `+1`. The boundary sweep's five
+monotone-ascending features are exactly those five; nothing was dropped. Second, the underlying gap
+was real: no code re-asserted any of it between training and shipping. `export.py` now walks every
+tree of the exported integer table before the blob is written (`assert_monotone`) and hard-fails if
+any split on a constrained feature has crossing side subtrees — the exact characterization of tree
+monotonicity, not a sampling estimate like the sweep. The shipped blob passes with zero violations
+(recorded per-feature in `export_kernel.json`), byte-identically.
 
 **Proposed fix (advisory):** in `aletheia-ml/src/aletheia_ml/export.py`, walk every tree post-export
 and assert that for every split on a monotone-constrained feature, the left subtree (the one taken
@@ -362,7 +367,7 @@ gate bench uses). All numbers in this document are reproducible from HEAD at the
 | ID | Sev | Disposition | Owner | Evidence |
 |----|-----|-------------|-------|----------|
 | ALET-P3-004 | P2 | resolved | `kernel-core/src/mlrisk.rs` | this doc, §"DEFECT-1" — regime documented on `Verdict`; `Abstain` made a real third way again by the ALET-P3-008 recalibration |
-| ALET-P3-005 | P2 | open | `aletheia-ml/src/aletheia_ml/export.py` | this doc, §"DEFECT-2" |
+| ALET-P3-005 | P2 | resolved | `aletheia-ml/src/aletheia_ml/export.py` | this doc, §"DEFECT-2" — premise false (5 constrained, 0 violations), export-time `assert_monotone` gate added so the class of defect can never ship silently |
 | ALET-P3-006 | P2 | resolved | `kernel-core/src/mlrisk.rs::advise` | this doc, §"DEFECT-3" — degenerate abstention shipped, gated at boot (invariants 8–9 of 22) and in the census end to end |
 | ALET-P3-007 | P0 | resolved | `kernel-core/src/priosched.rs` | this doc, §"DEFECT-4" — ordered ready pool; 200 K drain gate green |
 | ALET-P3-008 | P2 | resolved | `kernel-core/src/mlrisk.rs::load` + recalibration | this doc, §"DEFECT-5" — `ModelError::InvertedBand` refusal; blob re-made at alpha 0.03 with a live band |
