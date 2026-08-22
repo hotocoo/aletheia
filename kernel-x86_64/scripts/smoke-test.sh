@@ -71,6 +71,7 @@ boot_once() {
     -drive if=none,format=raw,file="$PERSIST",id=blk1 \
     -device virtio-blk-pci,drive=blk1 \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    -device virtio-gpu-pci \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -serial file:"$log" -display none -no-reboot &
   local qpid=$!
@@ -105,6 +106,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 21 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 10 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 5 NETWORK INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 13 VIRTIO-GPU INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 9 DMA-BOUNDARY INVARIANTS HOLD' "$LOG" \
 && grep -q 'ALL 9 INPUT-RING INVARIANTS HOLD' "$LOG" \
 && grep -q 'ALL 42 CONSOLE INVARIANTS HOLD' "$LOG" \

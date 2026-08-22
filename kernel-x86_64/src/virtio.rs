@@ -18,6 +18,7 @@
 //! scratch disk and requires the invariant marker.
 use kernel_core::virtioblk::{self, InitReport, VirtioHal};
 use kernel_core::virtionet::{self, VirtioNet};
+use kernel_core::virtiogpu::{self, VirtioGpu};
 
 use crate::frames;
 use crate::pci::{self, Bdf, PciTransport};
@@ -178,5 +179,33 @@ pub fn network_device() -> Option<Result<Net, virtionet::NetError>> {
             bdf.function
         );
         Some(VirtioNet::init(transport))
+    }
+}
+
+/// This target's concrete GPU device (REQ-GFX-001): the shared driver, over PCI.
+pub type Gpu = VirtioGpu<X86Virtio, PciTransport>;
+
+/// Bring up a virtio-gpu function if one is attached. `None` = no GPU (the graceful-skip path),
+/// so a boot without `-device virtio-gpu-pci` still passes; the VM gate attaches one and requires
+/// the marker.
+pub fn graphics_device() -> Option<Result<Gpu, virtiogpu::GpuError>> {
+    // SAFETY: the BDF names a virtio GPU function; `PciTransport::new` resolves and MAPS its
+    // register regions (refusing RAM), and the frames handed to the device are identity-mapped.
+    unsafe {
+        let bdf = pci::find_virtio_gpu_nth(0)?;
+        let transport = match PciTransport::new(bdf) {
+            Ok(t) => t,
+            Err(e) => {
+                kprintln!("[gpu] transport setup failed: {}", e);
+                return Some(Err(virtiogpu::GpuError::Unsupported("transport")));
+            }
+        };
+        kprintln!(
+            "[gpu] virtio-gpu @ PCI {:02x}:{:02x}.{}",
+            bdf.bus,
+            bdf.device,
+            bdf.function
+        );
+        Some(VirtioGpu::init(transport))
     }
 }

@@ -114,6 +114,7 @@ SKIPPED=(
   'DURABLE-STORE INVARIANTS HOLD   (needs the virtio-blk scratch disk)'
   'PERSISTENT MEDIUM cross-reboot proof   (needs the virtio-blk persistent disk)'
   'NETWORK INVARIANTS HOLD   (this VM is provisioned with no NIC)'
+  'VIRTIO-GPU INVARIANTS HOLD   (VirtualBox emulates no virtio-gpu device)'
 )
 
 # --- build ------------------------------------------------------------------------------------
