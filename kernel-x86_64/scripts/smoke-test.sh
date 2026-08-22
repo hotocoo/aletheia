@@ -116,6 +116,17 @@ if [ "$RC" -eq 33 ] \
 && grep -q 'advised drain is a permutation of the model-free one' "$LOG" \
    && grep -q 'PERSISTENT MEDIUM: boot #1, 0 entities verified' "$LOG" \
    && grep -q 'e2e\] PASS' "$LOG"; then
+  # ---- STRUCTURED MARKER MAP (ALET-P2-007, REQ-QUAL-004, ADR-061): the whole family/count ----
+  # surface held against an expected map declared HERE — measured on this target. The per-family
+  # greps above stay as named diagnoses; this closes what they cannot see: a family vanishing from
+  # the boot, or a count changing without the gate being told. Extra families fail too.
+  # shellcheck disable=SC1091
+  source "$HERE/../scripts/lib-markers.sh"
+  X86_EXPECTED="cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 usermode=39 virtio=21 vm=72"
+  if ! markers_assert "$X86_EXPECTED" < "$LOG"; then
+    echo "SMOKE TEST: FAIL (structured marker map)"
+    exit 1
+  fi
   # ---- SECOND BOOT against the SAME persistent disk: the OS must REMEMBER (REQ-STOR-003) ----
   echo "==> rebooting the same image against the SAME persistent disk (cross-reboot proof)"
   LOG2="$WORK/serial2.log"
