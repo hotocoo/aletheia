@@ -99,6 +99,16 @@ echo "$OUT" | grep -q "\[mlsched\] RESIDENT:"            || { echo "FAIL: no mod
 echo "$OUT" | grep -qE "\[mlsched\] commissioning: [0-9]+ tasks admitted over [0-9]+ s" || { echo "FAIL: the resident advisor was never consulted by a workload (REQ-ML-003)"; fail=1; }
 echo "$OUT" | grep -q "advised drain is a permutation of the model-free one" || { echo "FAIL: the advised drain was not proved a permutation of the model-free one (INV-014)"; fail=1; }
 echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlstat did not report a resident advisor (REQ-ML-003)"; fail=1; }
+
+# ---- STRUCTURED MARKER MAP (ALET-P2-007, REQ-QUAL-004): the whole family/count surface, held ----
+# against an expected map declared HERE. The per-family greps above stay as named diagnoses; this
+# closes the two holes they cannot see: a family vanishing from the boot entirely, and a count
+# changing without the gate being told. Extra families fail too — new suites join this map
+# deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
+source "$ROOT/scripts/lib-markers.sh"
+AARCH64_EXPECTED="cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 usermode=32 virtio=21 vm=66"
+if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
+
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
 

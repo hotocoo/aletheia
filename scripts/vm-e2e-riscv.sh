@@ -101,6 +101,15 @@ echo "$OUT" | grep -q "\[mlsched\] RESIDENT:"            || { echo "FAIL: no mod
 echo "$OUT" | grep -qE "\[mlsched\] commissioning: [0-9]+ tasks admitted over [0-9]+ s" || { echo "FAIL: the resident advisor was never consulted by a workload (REQ-ML-003)"; fail=1; }
 echo "$OUT" | grep -q "advised drain is a permutation of the model-free one" || { echo "FAIL: the advised drain was not proved a permutation of the model-free one (INV-014)"; fail=1; }
 echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlstat did not report a resident advisor (REQ-ML-003)"; fail=1; }
+
+# ---- STRUCTURED MARKER MAP (ALET-P2-007, REQ-QUAL-004): the whole family/count surface, held ----
+# against an expected map declared HERE. Measured on this target; IDENTICAL to the aarch64 gate's
+# map by design — the same arch-independent suites must prove the same counts over either bus, and
+# a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
+source "$ROOT/scripts/lib-markers.sh"
+RISCV_EXPECTED="cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 usermode=32 virtio=21 vm=66"
+if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
+
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
 echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
 

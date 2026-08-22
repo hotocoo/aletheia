@@ -1,13 +1,37 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-22 (networking second slice — UDP datagrams, an ARP cache whose silence is counted, and DHCP discovery that cross-checks the driver's claimed address against the network's own OFFER, ADR-060)
+**As of:** 2026-08-22 (verification infrastructure — every VM gate holds the boot's whole family/count marker map against an expected table and emits a machine-readable GATE-MARKERS-V1 line, ADR-061; before that: networking second slice — UDP, ARP cache, DHCP discovery cross-checking the claimed address, ADR-060)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..059`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..061`.
 
-## Current wave — the machine asks the network where it lives (2026-08-22)
+## Current wave — the gates count themselves (2026-08-22, ADR-061)
+
+ALET-P2-007 closes. Every kernel suite already ended with a human sentence — `[net] ALL 9 NETWORK
+INVARIANTS HOLD` — and every gate grepped its sentences one by one. Prose greps answer "did THIS
+family still say N?", but nothing answered two bigger questions: did any family DISAPPEAR from the
+boot entirely, and did a count change without the gate being told? `scripts/lib-markers.sh` turns
+the boot log into a tag=count MAP and each of the three VM gates holds that map against an expected
+table declared IN THE GATE:
+
+* **Measured, not assumed:** the aarch64 and RISC-V maps came out IDENTICAL (19 families) — the same
+  arch-independent suites proving the same counts over either bus is now an ASSERTION, not an
+  expectation. The x86-64 map differs where that machine differs (mm=22, vm=72, usermode=39, plus
+  its own ps2=5), each difference pinned to measurement.
+* **Extra families fail too.** A new suite must join the expected map deliberately; silently
+  appearing invariants are how gates rot.
+* **The assertion was attacked before shipping:** wrong count, missing family, and unexpected
+  family each verified to FAIL with a named diff; success prints one machine-readable line
+  (`GATE-MARKERS-V1: ...`) CI can collect without parsing prose.
+* Portable bash (no associative arrays — macOS ships 3.2); all three gates re-run green with the
+  assertion live.
+
+**Stated scope:** the kernel's output format is unchanged (the sentences ARE the wire format); the
+structure lives where gating lives — in the gates.
+
+## Previous wave — the machine asks the network where it lives (2026-08-22)
 
 The networking stack's second slice (REQ-NET-003, ADR-060) closes three items the first slice
 honestly listed as missing — an ARP cache, UDP, and an honest answer to "what is this machine's
