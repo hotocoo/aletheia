@@ -1,4 +1,4 @@
-//! virtio-net + the smallest honest network stack: ARP and ICMP echo (REQ-NET-001/002, ADR-041).
+//! virtio-net + the smallest honest network stack (REQ-NET-001/002/003, ADR-041, ADR-060).
 //!
 //! Networking was the largest remaining "an OS does this" hole: architecture text and nothing else. This
 //! module is the first real slice — a device that sends and receives Ethernet frames, and just enough
@@ -20,13 +20,18 @@
 //!
 //! ## Scope, stated
 //!
-//! No TCP, no UDP, no DHCP, no routing, no fragmentation, no ARP cache: the guest address is the fixed
-//! `10.0.2.15` QEMU's gateway expects, and every reply is matched synchronously. Frames that are not the
-//! answer being waited for are **counted and dropped**, not queued — a real stack needs a receive path
-//! that hands frames to sockets, and that is the next slice rather than a hidden one. Completion is polled;
-//! there are no interrupts in this kernel yet.
+//! The second slice (ADR-060) added what the first honestly listed as missing: an ARP CACHE
+//! (`arpcache` — an answer you already asked for is remembered, bounded, LRU), UDP datagrams with a
+//! pseudo-header checksum that refuses to verify under re-addressing (`udpv4`), and DHCP DISCOVER →
+//! OFFER (`dhcp`), so the guest address is now CROSS-CHECKED against the network's own answer instead
+//! of being a constant nobody questioned. Still absent, on purpose: TCP, routing, fragmentation, a
+//! socket layer — every reply is still matched synchronously by the single waiter, frames that are not
+//! the answer being waited for are **counted and dropped**, not queued. Completion is polled; there
+//! are no interrupts in this kernel yet.
+use crate::arpcache::ArpCache;
 use crate::virtioblk::{Transport, VirtioHal};
 use crate::virtq::Virtqueue;
+use crate::{dhcp, udpv4};
 
 /// virtio device id for a network card.
 pub const VIRTIO_ID_NET: u32 = 1;
@@ -89,6 +94,12 @@ pub struct VirtioNet<H: VirtioHal, T: Transport> {
     /// One transmit buffer: this driver sends synchronously, one frame at a time.
     tx_buf: usize,
     mac: [u8; 6],
+    /// Answers to "who has this address?" already paid for on the wire (ADR-060). Bounded by
+    /// construction; consulted BEFORE any broadcast, refreshed on every use, LRU when full.
+    arp_cache: core::cell::RefCell<ArpCache>,
+    /// Broadcast ARP requests actually SENT. The cache's whole point is observable: a repeated
+    /// resolve must NOT raise this number, and the suite proves exactly that.
+    arp_wire_requests: core::cell::Cell<u32>,
     /// Frames received that were not what the caller was waiting for. Counted, never silently ignored: a
     /// nonzero count beside a failing wait distinguishes "the peer said nothing" from "the driver threw
     /// the answer away".
@@ -96,35 +107,18 @@ pub struct VirtioNet<H: VirtioHal, T: Transport> {
     _hal: core::marker::PhantomData<H>,
 }
 
-fn be16(b: &[u8], at: usize) -> u16 {
+pub(crate) fn be16(b: &[u8], at: usize) -> u16 {
     ((b[at] as u16) << 8) | b[at + 1] as u16
 }
 
-fn put_be16(b: &mut [u8], at: usize, v: u16) {
+pub(crate) fn put_be16(b: &mut [u8], at: usize, v: u16) {
     b[at] = (v >> 8) as u8;
     b[at + 1] = v as u8;
 }
 
-/// The internet checksum (RFC 1071): ones-complement sum of 16-bit big-endian words. Used for the IPv4
-/// header and the ICMP message. A wrong value means the peer drops the packet in silence, which is exactly
-/// why an echo reply arriving is evidence the packet was well formed.
-pub fn checksum(bytes: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        sum += be16(bytes, i) as u32;
-        i += 2;
-    }
-    if i < bytes.len() {
-        // A trailing odd byte contributes as the HIGH byte of a 16-bit word; dropping it would make two
-        // different payloads check the same.
-        sum += (bytes[i] as u32) << 8;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
-}
+/// The internet checksum (RFC 1071). ONE implementation lives in `udpv4`; ICMP re-uses it through this
+/// re-export so the two protocols cannot drift into two definitions of "well formed".
+pub use crate::udpv4::checksum;
 
 impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
     /// Bring the device up: negotiate, set up both queues, POST the receive buffers, then DRIVER_OK.
@@ -211,6 +205,8 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             rx_bufs,
             tx_buf,
             mac,
+            arp_cache: core::cell::RefCell::new(ArpCache::new()),
+            arp_wire_requests: core::cell::Cell::new(0),
             dropped: core::cell::Cell::new(0),
             _hal: core::marker::PhantomData,
         })
@@ -224,6 +220,12 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
     /// Frames received that were not the answer being waited for.
     pub fn dropped(&self) -> u64 {
         self.dropped.get()
+    }
+
+    /// Broadcast ARP requests actually put on the wire since init. A cache hit is free by THIS
+    /// number, not by a claim: the suite resolves twice and requires it to stay at 1.
+    pub fn arp_wire_requests(&self) -> u32 {
+        self.arp_wire_requests.get()
     }
 
     /// Would an address this driver never registered be refused as a descriptor? The suite asks this to
@@ -314,11 +316,15 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         Err(NetError::Timeout)
     }
 
-    /// Broadcast an ARP request for `target` and return the MAC that answers.
+    /// Return the MAC for `target`: from the cache when it is remembered (no wire traffic, no wait),
+    /// otherwise broadcast an ARP request and remember what answers.
     ///
     /// # Safety
     /// The device must be live.
     pub unsafe fn arp_resolve(&self, target: [u8; 4]) -> Result<[u8; 6], NetError> {
+        if let Some(mac) = self.arp_cache.borrow_mut().lookup(target) {
+            return Ok(mac);
+        }
         let mut frame = [0u8; ETH_HDR_LEN + 28];
         frame[0..6].copy_from_slice(&BROADCAST);
         frame[6..12].copy_from_slice(&self.mac);
@@ -336,8 +342,9 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             a[24..28].copy_from_slice(&target);
         }
         self.send(&frame)?;
+        self.arp_wire_requests.set(self.arp_wire_requests.get() + 1);
 
-        self.recv_until(20_000_000, |f| {
+        let mac = self.recv_until(20_000_000, |f| {
             if f.len() < ETH_HDR_LEN + 28 || be16(f, 12) != ETHERTYPE_ARP {
                 return None;
             }
@@ -349,7 +356,9 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             let mut mac = [0u8; 6];
             mac.copy_from_slice(&a[8..14]);
             Some(mac)
-        })
+        })?;
+        self.arp_cache.borrow_mut().insert(target, mac);
+        Ok(mac)
     }
 
     /// Send an ICMP echo request to `target` (at `target_mac`) and wait for the matching reply, returning
@@ -430,6 +439,120 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             Some((out, n))
         })
     }
+
+    /// Send one UDP datagram to `dport` at `target` and wait for a reply addressed to OUR port
+    /// (`sport`), verified end to end: IPv4 header checksum, then UDP checksum over the
+    /// pseudo-header — so a datagram re-addressed in flight cannot pass for a reply (ADR-060).
+    ///
+    /// Returns up to 512 payload bytes; a longer reply is truncated at the bound, never wrapped.
+    ///
+    /// # Safety
+    /// The device must be live.
+    pub unsafe fn udp_exchange(
+        &self,
+        target: [u8; 4],
+        target_mac: [u8; 6],
+        sport: u16,
+        dport: u16,
+        ident: u16,
+        payload: &[u8],
+    ) -> Result<([u8; 512], usize), NetError> {
+        let mut frame = [0u8; ETH_HDR_LEN + udpv4::IPV4_HDR_MIN + udpv4::UDP_HDR_LEN + 512];
+        frame[0..6].copy_from_slice(&target_mac);
+        frame[6..12].copy_from_slice(&self.mac);
+        put_be16(&mut frame, 12, ETHERTYPE_IPV4);
+        let wrote = udpv4::build_datagram(
+            &mut frame[ETH_HDR_LEN..],
+            ident,
+            GUEST_IP,
+            target,
+            sport,
+            dport,
+            payload,
+        )
+        .ok_or(NetError::TooLong)?;
+        let n = ETH_HDR_LEN + wrote.len();
+        self.send(&frame[..n])?;
+
+        self.recv_until(20_000_000, |f| {
+            if f.len() < ETH_HDR_LEN || be16(f, 12) != ETHERTYPE_IPV4 {
+                return None;
+            }
+            // The DEMULTIPLEXER, such as it is honestly: a frame is ICMP or UDP by its protocol
+            // byte, and a UDP frame is OURS only if every layer names us — source, destination,
+            // port pair, checksum. Everything else is counted and dropped by recv_until.
+            let ip = match udpv4::parse_ipv4(&f[ETH_HDR_LEN..]) {
+                Ok(ip) => ip,
+                Err(_) => return None,
+            };
+            if ip.src != target || ip.dst != GUEST_IP || ip.protocol != udpv4::PROTOCOL_UDP {
+                return None;
+            }
+            let u = match udpv4::parse_udp(&ip) {
+                Ok(u) => u,
+                Err(_) => return None,
+            };
+            if u.dport != sport {
+                return None; // a reply to some other exchange on this wire
+            }
+            let mut out = [0u8; 512];
+            let take = core::cmp::min(u.payload.len(), out.len());
+            out[..take].copy_from_slice(&u.payload[..take]);
+            Some((out, take))
+        })
+    }
+
+    /// Ask the network where THIS machine lives: broadcast a DHCPDISCOVER and return the OFFER bound
+    /// to `xid`. The OFFER is evidence, not a lease — nothing is REQUESTED or taken (ADR-060); the
+    /// driver keeps its static configuration and the suite cross-checks the two against each other.
+    ///
+    /// # Safety
+    /// The device must be live.
+    pub unsafe fn dhcp_discover(&self, xid: u32) -> Result<dhcp::Offer, NetError> {
+        let mut disc = [0u8; dhcp::BOOTP_MIN_LEN];
+        let question = dhcp::write_discover(&mut disc, self.mac, xid).ok_or(NetError::TooLong)?;
+
+        let mut frame =
+            [0u8; ETH_HDR_LEN + udpv4::IPV4_HDR_MIN + udpv4::UDP_HDR_LEN + dhcp::BOOTP_MIN_LEN];
+        frame[0..6].copy_from_slice(&BROADCAST); // the client has no peer MAC for a server yet
+        frame[6..12].copy_from_slice(&self.mac);
+        put_be16(&mut frame, 12, ETHERTYPE_IPV4);
+        let wrote = udpv4::build_datagram(
+            &mut frame[ETH_HDR_LEN..],
+            (xid >> 16) as u16,
+            GUEST_IP,
+            [255, 255, 255, 255], // limited broadcast: the question itself is addressless
+            dhcp::CLIENT_PORT,
+            dhcp::SERVER_PORT,
+            question,
+        )
+        .ok_or(NetError::TooLong)?;
+        let n = ETH_HDR_LEN + wrote.len();
+        self.send(&frame[..n])?;
+
+        self.recv_until(20_000_000, |f| {
+            if f.len() < ETH_HDR_LEN || be16(f, 12) != ETHERTYPE_IPV4 {
+                return None;
+            }
+            let ip = match udpv4::parse_ipv4(&f[ETH_HDR_LEN..]) {
+                Ok(ip) => ip,
+                Err(_) => return None,
+            };
+            if ip.protocol != udpv4::PROTOCOL_UDP {
+                return None;
+            }
+            let u = match udpv4::parse_udp(&ip) {
+                Ok(u) => u,
+                Err(_) => return None,
+            };
+            if u.dport != dhcp::CLIENT_PORT {
+                return None;
+            }
+            // A malformed offer is a DROPPED frame with a counted reason, not a kernel fault: the
+            // wire is untrusted, and one bad packet must not stop the machine from asking again.
+            dhcp::parse_offer(u.payload, xid).ok()
+        })
+    }
 }
 
 /// The network invariant suite (REQ-NET-001/002), reported through a caller-supplied logger like every
@@ -474,7 +597,7 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     );
     let gw_mac = gw.unwrap_or([0u8; 6]);
 
-    // 3 — ICMP echo: a real IPv4 packet with two correct checksums comes back as a reply carrying the same
+    // 4 — ICMP echo: a real IPv4 packet with two correct checksums comes back as a reply carrying the same
     //     identifier, sequence and payload. A wrong checksum would be dropped by the peer in silence.
     let payload = b"aletheia-echo-01";
     // SAFETY: as above.
@@ -484,13 +607,52 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
         matches!(&echo, Ok((buf, len)) if *len == payload.len() && buf[..*len] == payload[..])
     );
 
-    // 4 — a second echo is matched on ITS sequence, not the first one's: the driver reads the reply rather
+    // 5 — a second echo is matched on ITS sequence, not the first one's: the driver reads the reply rather
     //     than assuming the next frame is the answer.
     // SAFETY: as above.
     let echo2 = unsafe { dev.icmp_echo(GATEWAY_IP, gw_mac, 0xA1E7, 2, b"second") };
     check!(
         "net: a second echo is matched on its own sequence (replies are read, not assumed)",
         matches!(&echo2, Ok((buf, len)) if *len == 6 && &buf[..6] == b"second")
+    );
+
+    // 6 — the ARP cache is OBSERVABLE, not folklore: resolving the same address again must return the
+    //     same answer WITHOUT a second broadcast. The counter is the proof; a cache that "worked"
+    //     while the wire still saw a request would be a cache in name only.
+    // SAFETY: the device is live and owned here.
+    let gw_again = unsafe { dev.arp_resolve(GATEWAY_IP) };
+    check!(
+        "net: a repeated ARP resolve is answered from the cache and puts no second request on the wire",
+        matches!(gw_again, Ok(m) if m == gw_mac) && dev.arp_wire_requests() == 1
+    );
+
+    // 7 — UDP round trip via DHCP: a DISCOVER broadcast draws an OFFER whose transaction id matches,
+    //     whose checksums verified through the pseudo-header, and whose option walk found a real
+    //     address. This is the first datagram exchange this kernel has ever completed.
+    const XID: u32 = 0x4C3D_2E1F;
+    // SAFETY: as above.
+    let offer = unsafe { dev.dhcp_discover(XID) };
+    check!(
+        "net: a DHCP DISCOVER is answered by an OFFER bound to its transaction id (UDP round trip)",
+        matches!(&offer, Ok(o) if o.yiaddr != [0u8; 4])
+    );
+
+    // 8 — the address the network OFFERS is the address this driver CLAIMS. The constant was always
+    //     an assumption about the simulator; now it is cross-checked against the authority that
+    //     assigns addresses, so a change on either side fails this boot instead of going silent.
+    let offered = offer.unwrap_or_else(|_| dhcp::Offer::none());
+    check!(
+        "net: the address the network offers IS the address the driver claims",
+        offered.yiaddr == GUEST_IP
+    );
+
+    // 9 — a NEW transaction id draws its OWN answer: replies are matched per-exchange, never
+    //     inherited from a previous question's luck.
+    // SAFETY: as above.
+    let offer2 = unsafe { dev.dhcp_discover(XID ^ 0xFFFF_FFFF) };
+    check!(
+        "net: a second DISCOVER under a new transaction id draws its own fresh answer",
+        matches!(&offer2, Ok(o) if o.yiaddr == GUEST_IP)
     );
 
     Ok(n)

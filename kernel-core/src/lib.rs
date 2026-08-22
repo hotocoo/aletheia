@@ -24,6 +24,7 @@
 
 extern crate alloc;
 
+pub mod arpcache;
 pub mod capalg;
 pub mod capstore;
 pub mod compress;
@@ -31,6 +32,7 @@ pub mod conring;
 pub mod crypto;
 pub mod deadva;
 pub mod device;
+pub mod dhcp;
 pub mod dma;
 pub mod faultclass;
 pub mod fbcon;
@@ -62,6 +64,7 @@ pub mod sync;
 pub mod syscall;
 pub mod taskfeat;
 pub mod teardown;
+pub mod udpv4;
 pub mod usermem;
 pub mod virtioblk;
 pub mod virtiogpu;

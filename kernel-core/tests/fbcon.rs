@@ -13,6 +13,9 @@ use kernel_core::font8x8::{glyph, FONT8X8};
 /// A real allocation viewed as N consecutive 4 KiB "frames" — the same scatter-gather shape the
 /// device sees, over memory this test owns, kept page-aligned so the frame view is exact.
 struct Pages {
+    /// Owned. Never read through directly — it exists so the bytes the renderer writes have a
+    /// real home the test controls for the struct's whole lifetime.
+    #[expect(dead_code)]
     mem: alloc::vec::Vec<u8>,
     addrs: alloc::vec::Vec<usize>,
 }
@@ -21,7 +24,7 @@ impl Pages {
     fn new(n: usize) -> Self {
         let mut mem = alloc::vec![0u8; n * PAGE + PAGE];
         let base0 = mem.as_mut_ptr() as usize;
-        let base = (base0 + PAGE - 1) / PAGE * PAGE;
+        let base = base0.div_ceil(PAGE) * PAGE;
         let addrs = (0..n).map(|i| base + i * PAGE).collect();
         Pages { mem, addrs }
     }
@@ -202,7 +205,6 @@ fn the_last_newline_scrolls_the_top_line_away() {
     let mut con = TextConsole::new(640, 240).unwrap();
     con.clear(&mut surf);
     con.putc(&mut surf, b'A').unwrap();
-    let top_ink = ink_count(&surf, 0, 0);
     // Fill every row: 14 newlines put the cursor on the last row (15 rows of 16px), the 15th scrolls.
     for _ in 0..15 {
         con.putc(&mut surf, b'\n').unwrap();

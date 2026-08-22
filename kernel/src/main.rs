@@ -517,7 +517,7 @@ pub extern "C" fn kmain() -> ! {
     // the suite ARPs QEMU's gateway and pings it: the reply must carry the address asked about, and the
     // echo must come back with matching id, sequence and payload, its checksums verified.
     kprintln!("");
-    kprintln!("--- network selftests (virtio-net: ARP + ICMP echo against the gateway) ---");
+    kprintln!("--- network selftests (virtio-net: ARP-cache + ICMP echo + UDP-DHCP discovery against the gateway) ---");
     match virtio::network_device() {
         None => kprintln!("[net] no network device attached (skipped)"),
         Some(Err(e)) => {

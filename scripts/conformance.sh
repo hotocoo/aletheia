@@ -163,15 +163,21 @@ CONTRACT=(
   # all — the second was a real hole this wave found, since the boot identity maps covered page 0.
   "guard: the guard page has no leaf"
   "layout: VA 0 has NO translation in the live map (a kernel null dereference faults)"
-  # Networking (REQ-NET-001/002, ADR-041). The whole point is that something ANSWERS: a transmit-only
-  # driver is indistinguishable from a frame that vanished. Every target must resolve the gateway by ARP
-  # and get a verified ICMP echo reply back — "the network works" must not vary by CPU or by bus (two of
-  # the three run virtio-mmio, one runs virtio-pci).
+  # Networking (REQ-NET-001/002/003, ADR-041 + ADR-060). The whole point is that something ANSWERS: a
+  # transmit-only driver is indistinguishable from a frame that vanished. Every target must resolve the
+  # gateway by ARP and get a verified ICMP echo reply back — "the network works" must not vary by CPU
+  # or by bus (two of the three run virtio-mmio, one runs virtio-pci). The ADR-060 slice adds the UDP
+  # round trip through the network's own DHCP server, the cache that stops re-asking answered
+  # questions, and the cross-check of the driver's claimed address against the network's OFFER.
   "net: the device reported a unicast MAC address from its config space"
   "net: the DMA gate denies an unregistered descriptor address (rings and buffers are registered)"
   "net: an ARP request for the gateway is answered with its hardware address"
   "net: an ICMP echo request is answered with a matching reply (both checksums verified)"
   "net: a second echo is matched on its own sequence (replies are read, not assumed)"
+  "net: a repeated ARP resolve is answered from the cache and puts no second request on the wire"
+  "net: a DHCP DISCOVER is answered by an OFFER bound to its transaction id (UDP round trip)"
+  "net: the address the network offers IS the address the driver claims"
+  "net: a second DISCOVER under a new transaction id draws its own fresh answer"
   # The task supervisor's POLICY (REQ-REL-002, ADR-042) — every target compiles it in and routes its
   # unexpected-user-fault path through it. All three targets now take an undeclared fault, reclaim its
   # address space, then run another task; this is the part that must not vary.

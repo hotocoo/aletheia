@@ -11,3 +11,4 @@ aletheia/target/
 # Local tool metadata
 .serena/
 .understand-anything/
+.audit-tmp/
