@@ -562,7 +562,7 @@ pub extern "C" fn kmain() -> ! {
                 }
                 Err(e) => kprintln!("[gpu] display info error: {:?}", e),
             }
-            match kernel_core::virtiogpu::gpu_suite(gpu, |n, passed, name| {
+            match kernel_core::virtiogpu::gpu_suite(&mut gpu, |n, passed, name| {
                 if passed {
                     kprintln!("  [pass {:>2}] {}", n, name);
                 } else {
@@ -573,6 +573,21 @@ pub extern "C" fn kmain() -> ! {
                 Err((idx, name)) => {
                     kprintln!("[gpu] FAILED at gpu invariant {}: {}", idx, name);
                     semihosting::exit(301 + idx as i32);
+                }
+            }
+            // The framebuffer console renders into REAL backing pages and hands the whole frame
+            // to the display device — and proves DETACH revokes every page (REQ-GFX-002).
+            match kernel_core::virtiogpu::console_suite(&mut gpu, |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[fbcon] ALL {} FRAMEBUFFER-CONSOLE INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!("[fbcon] FAILED at fbconsole invariant {}: {}", idx, name);
+                    semihosting::exit(341 + idx as i32);
                 }
             }
         }

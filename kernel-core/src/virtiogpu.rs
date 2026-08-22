@@ -121,7 +121,18 @@ pub const MAX_RECT_EXTENT_PX: u32 = 16384;
 /// capacity claims: the table exists so every rect argument is validated BEFORE the device hears
 /// about it.
 const MAX_RESOURCES: usize = 8;
-pub const MAX_BACKING_ENTRIES: usize = 16;
+/// Backing pages per attach. The console surface (640x240 BGRA) is 150 single-frame entries in
+/// ONE attach command — 32 + 150*16 = 2432 bytes of request, inside one DMA frame. QEMU accepts
+/// up to 16384 entries; OUR bound is the command buffer, not the device.
+pub const MAX_BACKING_ENTRIES: usize = 160;
+
+/// The console surface this kernel ships (REQ-GFX-002): 640 x 240 BGRA pixels — 80 columns of 8px
+/// glyphs, 15 rows of 16px lines — 600 KiB, 150 backing pages.
+pub const CONSOLE_FB_WIDTH: u32 = 640;
+pub const CONSOLE_FB_HEIGHT: u32 = 240;
+/// Backing pages the console surface needs: width * height * 4 bytes, page-rounded.
+pub const CONSOLE_FB_PAGES: usize =
+    (CONSOLE_FB_WIDTH as usize * CONSOLE_FB_HEIGHT as usize * 4).div_ceil(crate::dma::PAGE);
 
 /// Why a graphics operation failed. Refusals are the DRIVER's own, issued before any device
 /// traffic and counted; Device errors carry the device's own response code.
@@ -364,6 +375,9 @@ struct Resource {
     width: u32,
     height: u32,
     attached: bool,
+    /// One DMA-registry handle per backing page, held so DETACH can REVOKE. A registration that
+    /// outlives its buffer is a gate vouching for memory that may already be reused (REQ-GFX-002).
+    backing: alloc::vec::Vec<crate::dma::Handle>,
 }
 
 /// A live virtio-gpu device: one control queue, two DMA-gated buffers, and the local table of
@@ -526,6 +540,11 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
         self.ctrl.dma_regions()
     }
 
+    /// LIVE DMA regions right now — the number detach's revocation must return to 3.
+    pub fn live_dma_regions(&self) -> usize {
+        self.ctrl.live_regions()
+    }
+
     fn refused(&self, why: &'static str) -> GpuError {
         self.local_refusals.set(self.local_refusals.get() + 1);
         GpuError::Refused(why)
@@ -619,6 +638,7 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
             width,
             height,
             attached: false,
+            backing: alloc::vec::Vec::new(),
         });
         Ok(())
     }
@@ -664,31 +684,50 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
         if frames.is_empty() || frames.len() > MAX_BACKING_ENTRIES {
             return Err(self.refused("a backing entry count outside the bound"));
         }
+        // Register every frame and KEEP ITS HANDLE: detach must be able to revoke. A failure
+        // mid-battery revokes what this call already claimed, so a refused attach leaves nothing
+        // registered — the same no-partial-state rule the chain publisher follows.
+        let mut handles: Vec<crate::dma::Handle> = Vec::with_capacity(frames.len());
         for f in frames {
-            let reg = self.ctrl.register_buffer(*f, PAGE, "virtio-gpu.backing");
-            if reg.is_err() {
-                return Err(self.refused("a backing frame was refused as a DMA region"));
+            match self.ctrl.register_buffer_h(*f, PAGE, "virtio-gpu.backing") {
+                Ok(h) => handles.push(h),
+                Err(_) => {
+                    for h in handles.drain(..) {
+                        self.ctrl.revoke_buffer(h);
+                    }
+                    return Err(self.refused("a backing frame was refused as a DMA region"));
+                }
             }
         }
         let entries: Vec<(u64, u32)> = frames.iter().map(|f| (*f as u64, PAGE as u32)).collect();
         let buf = core::slice::from_raw_parts_mut(self.cmd_buf as *mut u8, PAGE);
         let len = match encode_attach_backing(buf, rid, &entries) {
             Some(l) => l,
-            None => return Err(self.refused("backing entries do not fit the command buffer")),
+            None => {
+                for h in handles.drain(..) {
+                    self.ctrl.revoke_buffer(h);
+                }
+                return Err(self.refused("backing entries do not fit the command buffer"));
+            }
         };
         let (ty, _) = self.command(len)?;
         if ty != RESP_OK_NODATA {
+            for h in handles.drain(..) {
+                self.ctrl.revoke_buffer(h);
+            }
             return Err(GpuError::Device(ty));
         }
         if let Some(r) = self.slot_mut(rid) {
             r.attached = true;
+            r.backing = handles;
         }
         Ok(())
     }
 
-    /// Take a resource's backing away. The frames stay registered in the queue's DMA registry
-    /// (bounded by MAX_REGIONS) — revocation-on-detach is named follow-on work, stated in the
-    /// module docs rather than hidden.
+    /// Take a resource's backing away, and REVOKE every page's DMA registration while doing it
+    /// (REQ-GFX-002): after detach returns, the gate no longer vouches for frames the driver is
+    /// about to release — a device pointed at them again is refused at the descriptor, not
+    /// discovered in someone else's buffer.
     ///
     /// # Safety
     /// The device must be live.
@@ -706,8 +745,15 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
         if ty != RESP_OK_NODATA {
             return Err(GpuError::Device(ty));
         }
-        if let Some(r) = self.slot_mut(rid) {
-            r.attached = false;
+        let handles = match self.slot_mut(rid) {
+            None => return Err(self.refused("detach lost the resource mid-call")),
+            Some(r) => {
+                r.attached = false;
+                core::mem::take(&mut r.backing)
+            }
+        };
+        for h in handles {
+            self.ctrl.revoke_buffer(h);
         }
         Ok(())
     }
@@ -815,7 +861,7 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
 /// tests in `tests/virtiogpu.rs` only as a NUMBER — the proofs themselves run against the real
 /// device, in the VM.
 pub fn gpu_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
-    mut dev: VirtioGpu<H, T>,
+    dev: &mut VirtioGpu<H, T>,
     mut log: F,
 ) -> Result<usize, (usize, &'static str)> {
     let mut n = 0usize;
@@ -962,10 +1008,11 @@ pub fn gpu_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     // 8 — ATTACH_BACKING of sixteen DMA-gated pages is accepted (a 64 KiB backing, one entry per
     //     frame, exactly the multi-entry shape the protocol defines).
     // SAFETY: alloc_frame hands out identity-mapped frames this kernel owns exclusively.
-    let frames: Vec<usize> = (0..MAX_BACKING_ENTRIES)
-        .filter_map(|_| H::alloc_frame())
-        .collect();
-    let attached = if frames.len() == MAX_BACKING_ENTRIES {
+    // Sixteen pages — this invariant proves MULTI-entry attach works at all; the big scatter-
+    // gather backing is the console suite's business (150 pages).
+    const ATTACH_PAGES: usize = 16;
+    let frames: Vec<usize> = (0..ATTACH_PAGES).filter_map(|_| H::alloc_frame()).collect();
+    let attached = if frames.len() == ATTACH_PAGES {
         unsafe { dev.attach_backing(RESOURCE_UNDER_TEST, &frames) }.is_ok()
     } else {
         false
@@ -1020,6 +1067,121 @@ pub fn gpu_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
         unsafe { dev.probe_device_error(RESOURCE_UNDER_TEST) } == Ok(RESP_ERR_INVALID_RESOURCE_ID);
     check!("gpu: DETACH_BACKING plus UNREF end the lifecycle — the device itself confirms the resource is gone",
         detached && unreffed && forgotten && really_gone
+    );
+
+    Ok(n)
+}
+
+/// The framebuffer-console suite (REQ-GFX-002): render text into a REAL scatter-gather backing
+/// store, hand the whole frame to the display device, and prove DETACH revokes every page. Runs
+/// on the same device AFTER [`gpu_suite`], whose resource is destroyed and whose registry is back
+/// to ring + two buffers. Six invariants; marker `ALL 6 FRAMEBUFFER-CONSOLE INVARIANTS HOLD`.
+pub fn console_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
+    dev: &mut VirtioGpu<H, T>,
+    mut log: F,
+) -> Result<usize, (usize, &'static str)> {
+    let mut n = 0usize;
+    macro_rules! check {
+        ($name:expr, $cond:expr) => {{
+            n += 1;
+            let ok = $cond;
+            log(n, ok, $name);
+            if !ok {
+                return Err((n, $name));
+            }
+        }};
+    }
+
+    const CONSOLE_RID: u32 = 9;
+
+    // 1 — the console surface exists as a real resource, extents recorded.
+    // SAFETY: live device.
+    let created =
+        unsafe { dev.create_resource_2d(CONSOLE_RID, CONSOLE_FB_WIDTH, CONSOLE_FB_HEIGHT) };
+    check!(
+        "fbconsole: the 640x240 console resource is created and recorded",
+        created.is_ok()
+            && dev.resource_extents(CONSOLE_RID) == Some((CONSOLE_FB_WIDTH, CONSOLE_FB_HEIGHT))
+    );
+
+    // 2 — CONSOLE_FB_PAGES single-frame entries attach in ONE command; every page registers with
+    //     a held handle. The registry grows by exactly the backing — measured, not assumed.
+    // SAFETY: alloc_frame hands out identity-mapped frames this kernel owns exclusively.
+    let mut pages: Vec<usize> = Vec::with_capacity(CONSOLE_FB_PAGES);
+    for _ in 0..CONSOLE_FB_PAGES {
+        match H::alloc_frame() {
+            Some(f) => pages.push(f),
+            None => break,
+        }
+    }
+    let attached = if pages.len() == CONSOLE_FB_PAGES {
+        unsafe { dev.attach_backing(CONSOLE_RID, &pages) }.is_ok()
+    } else {
+        false
+    };
+    check!(
+        "fbconsole: 150 backing pages attach in ONE command and all register",
+        attached && dev.live_dma_regions() == 3 + CONSOLE_FB_PAGES
+    );
+
+    // 3 — RENDER, then read our own memory back: the ink-pixel count of cell (0,0) must equal
+    //     the FONT table's own popcount for 'A' (doubled per drawn row). The renderer is proved
+    //     against the very table it renders from, over hardware-owned backing frames.
+    let rendered = if let (Ok(mut surf), Ok(mut con)) = (
+        crate::fbcon::Surface::new(&pages, CONSOLE_FB_WIDTH, CONSOLE_FB_HEIGHT),
+        crate::fbcon::TextConsole::new(CONSOLE_FB_WIDTH, CONSOLE_FB_HEIGHT),
+    ) {
+        con.clear(&mut surf);
+        let printed = con.print(&mut surf, b"Aletheia OS");
+        let want: u32 = crate::font8x8::FONT8X8[65]
+            .iter()
+            .map(|r| r.count_ones())
+            .sum::<u32>()
+            * 2;
+        let mut got = 0u32;
+        for y in 0..crate::fbcon::CELL_H {
+            for x in 0..crate::fbcon::CELL_W {
+                if surf.get(x, y) == Ok(true) {
+                    got += 1;
+                }
+            }
+        }
+        let bg_dark = surf.get(CONSOLE_FB_WIDTH - 1, CONSOLE_FB_HEIGHT - 1) == Ok(false);
+        printed.is_ok() && want > 0 && got == want && bg_dark
+    } else {
+        false
+    };
+    check!(
+        "fbconsole: the rendered text is IN OUR MEMORY — font-exact pixel counts at known cells",
+        rendered
+    );
+
+    // 4 — the whole frame goes to the display: transfer AND flush of the full extent, accepted.
+    // SAFETY: live device.
+    let whole = Rect::covering(CONSOLE_FB_WIDTH, CONSOLE_FB_HEIGHT);
+    let moved = unsafe { dev.transfer_to_host_2d(CONSOLE_RID, whole) };
+    let flushed = unsafe { dev.resource_flush(CONSOLE_RID, whole) };
+    check!(
+        "fbconsole: TRANSFER plus FLUSH hand the whole rendered frame to the display",
+        moved.is_ok() && flushed.is_ok()
+    );
+
+    // 5 — DETACH REVOKES: after detach returns, the registry holds exactly ring + cmd + resp. The
+    //     limitation last wave named as follow-on is now closed by counter.
+    // SAFETY: live device.
+    let detached = unsafe { dev.detach_backing(CONSOLE_RID) };
+    check!(
+        "fbconsole: DETACH revokes every page's DMA registration (back to 3 live regions)",
+        detached.is_ok() && dev.live_dma_regions() == 3
+    );
+
+    // 6 — unref; the DEVICE confirms the surface is gone.
+    // SAFETY: live device.
+    let unreffed = unsafe { dev.unref_resource(CONSOLE_RID) };
+    let gone = unsafe { dev.probe_device_error(CONSOLE_RID) } == Ok(RESP_ERR_INVALID_RESOURCE_ID);
+    check!(
+        "fbconsole: UNREF destroys the surface — the device confirms INVALID_RESOURCE_ID",
+        unreffed.is_ok() && gone
     );
 
     Ok(n)

@@ -84,6 +84,8 @@ echo "$OUT" | grep -q "ALL 21 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virti
 echo "$OUT" | grep -q "ALL 5 NETWORK INVARIANTS HOLD" || { echo "FAIL: network invariants marker missing (REQ-NET-001; NIC attached, suite must run)"; fail=1; }
 # Graphics over the REAL device (REQ-GFX-001): display info + the whole 2D resource lifecycle.
 echo "$OUT" | grep -q "ALL 13 VIRTIO-GPU INVARIANTS HOLD" || { echo "FAIL: virtio-gpu invariants marker missing (REQ-GFX-001; GPU attached, suite must run)"; fail=1; }
+# The framebuffer console renders text into REAL backing pages and hands the frame over; detach revokes (REQ-GFX-002).
+echo "$OUT" | grep -q "ALL 6 FRAMEBUFFER-CONSOLE INVARIANTS HOLD" || { echo "FAIL: framebuffer-console invariants marker missing (REQ-GFX-002)"; fail=1; }
 echo "$OUT" | grep -q "ALL 10 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
