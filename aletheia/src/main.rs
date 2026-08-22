@@ -58,6 +58,7 @@ fn main() {
         "serve" => serve(&args),
         "model" => model_cmd(&args),
         "console" => console_cmd(&args),
+        "approvals" => approvals_cmd(&args),
         _ => demo(&args),
     }
 }
@@ -79,7 +80,11 @@ fn console_cmd(args: &[String]) {
         Some("plan") => {
             let request = console_request(args);
             if request.trim().is_empty() {
-                eprintln!("usage: aletheiad console plan [--approve] [--interpreter model|deterministic] <request>");
+                eprintln!(
+                    "usage: aletheiad console plan [--approve] [--interpreter model|deterministic] [--context-file BRIEF] <request>\n\
+                     \x20  a destructive request exits 7 with an approval id on stderr; answer it with\n\
+                     \x20  `aletheiad approvals grant|deny <id>` and re-run — a grant types its line once"
+                );
                 std::process::exit(2);
             }
             console_plan(dirp, &request, args);
@@ -258,24 +263,125 @@ fn console_context(args: &[String]) -> String {
 }
 
 fn console_plan(dir: &std::path::Path, request: &str, args: &[String]) {
+    use aletheia::ai::console::GovernedPlan;
     let approved = args.iter().any(|a| a == "--approve");
     let provider = console_interpreter(dir, args);
     let context = console_context(args);
-    match aletheia::ai::console::plan_lines(
+    // ALET-P2-046: a destructive line is not a refusal and not a flag — it is a QUESTION for a
+    // human, recorded where approvals live. Exit codes are the driver's contract:
+    //   0 stdout holds line(s) to type · 1 refused · 7 approval required (id on stderr).
+    match aletheia::ai::console::plan_lines_governed(
         provider.as_ref(),
         "human:operator",
         request,
         &context,
-        approved,
     ) {
-        Ok((lines, _raw)) => {
+        Err(e) => {
+            eprintln!("refused: {e}");
+            std::process::exit(1);
+        }
+        Ok(GovernedPlan::Lines(lines)) => {
             for line in lines {
                 println!("{line}");
             }
         }
+        Ok(GovernedPlan::NeedsApproval { line, risk }) => {
+            if approved {
+                // Inline consent: the human answered on the command line, before seeing the line.
+                // Said out loud rather than silently, because a flag that quietly changes meaning
+                // is how a benchmark arm and a governed operator came to look identical.
+                eprintln!("approval: granted inline (--approve) — no pending approval recorded");
+                println!("{line}");
+                return;
+            }
+            // The durable path. A fresh temp directory would record the question where no human
+            // can ever answer it — the exact failure `model_dir` exists to prevent — so console
+            // state always lives in the machine-level dir this command was already given.
+            let mut core = match aletheia::syscore::SysCore::open_default(dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("refused: `{line}` changes the machine and the approval store is \
+                               unavailable ({e}) — type nothing, ask nobody"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            // A grant from an earlier round is spent HERE, at the moment of typing, on this exact
+            // line — once. Anything else re-asks.
+            if let Ok(id) = core.take_console_approval("human:operator", &line) {
+                eprintln!("approval [{id}] spent on: {line}");
+                println!("{line}");
+                return;
+            }
+            match core.request_console_approval("human:operator", &line, risk) {
+                Ok(pa) => {
+                    eprintln!(
+                        "approval required [{}] — `{}` changes the machine and needs a human",
+                        pa.id, line
+                    );
+                    eprintln!("  answer it:  aletheiad approvals grant {}", pa.id);
+                    eprintln!("  or refuse:  aletheiad approvals deny {}", pa.id);
+                    eprintln!("  then re-run this command; a grant types its line exactly once.");
+                    std::process::exit(7);
+                }
+                Err(e) => {
+                    eprintln!("refused: cannot govern `{line}`: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+/// `aletheiad approvals <list|grant|deny>` — the human side of the console governance surface
+/// (ADR-015 applied to the console; ALET-P2-046). Reads and resolves the SAME approval records the
+/// pipeline and the console planner write, from the SAME machine-level directory, so an operator
+/// can answer a pending question from any shell on the machine.
+fn approvals_cmd(args: &[String]) {
+    let dir = model_dir(args);
+    let dirp = std::path::Path::new(&dir);
+    let mut core = match aletheia::syscore::SysCore::open_default(dirp) {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("refused: {e}");
+            eprintln!("approvals: cannot open the core at {dir}: {e}");
             std::process::exit(1);
+        }
+    };
+    match args.get(2).map(|s| s.as_str()) {
+        Some("list") => {
+            let mut all = core.approvals_snapshot();
+            all.sort_by_key(|a| a.requested_at);
+            if all.is_empty() {
+                println!("no approval records");
+                return;
+            }
+            for pa in all {
+                let bound = match &pa.intent.verb {
+                    aletheia::intent_action::Verb::Console { line } => format!("console:`{line}`"),
+                    other => format!("intent:{other:?}"),
+                };
+                println!("{} [{:?}] {} {} — {}", pa.id, pa.state, pa.subject, bound, pa.reason);
+            }
+        }
+        Some(verb @ ("grant" | "deny")) => {
+            let id = match args.get(3) {
+                Some(id) => id.clone(),
+                None => {
+                    eprintln!("usage: aletheiad approvals {verb} <approval-id>");
+                    std::process::exit(2);
+                }
+            };
+            match core.resolve_console_approval(&id, verb == "grant") {
+                Ok(pa) => println!("{} [{:?}]", pa.id, pa.state),
+                Err(e) => {
+                    eprintln!("approvals: {verb} failed: {}", e.message);
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: aletheiad approvals <list|grant|deny> [approval-id]");
+            std::process::exit(2);
         }
     }
 }

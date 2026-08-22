@@ -72,6 +72,9 @@ impl ModelRuntime for DeterministicRuntime {
             ),
             Verb::Delete { id } => step("entity.delete", json!({ "id": id })),
             Verb::Raw { .. } => return Err(ModelError::InvalidOutput),
+            // A console intent is not an entity operation for the core to invent — its whole
+            // content is the exact line, and execution is typing, which no interpreter does.
+            Verb::Console { .. } => return Err(ModelError::InvalidOutput),
         };
         Ok(serde_json::to_string(&plan).expect("plan serializes"))
     }

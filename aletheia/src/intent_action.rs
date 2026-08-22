@@ -33,6 +33,15 @@ pub enum Verb {
     Raw {
         text: String,
     },
+    /// Type this EXACT line at the machine's console (REQ-AI-006, ADR-053). The core never
+    /// executes one — execution is the operator's driver typing at a live serial line — so an
+    /// intent of this kind exists only to carry GOVERNANCE: it is what a pending approval for a
+    /// destructive console command binds to (ADR-015 applied to the console surface), and what a
+    /// grant is spent on when the line is finally typed. The pipeline refuses to run one directly;
+    /// see `SysCore::execute_step`, which names the refusal rather than guessing at semantics.
+    Console {
+        line: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

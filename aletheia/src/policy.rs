@@ -75,6 +75,11 @@ pub enum ApprovalState {
     Granted,
     Denied,
     Expired,
+    /// A GRANTED approval whose authorized effect has already happened once. Console approvals
+    /// (ADR-015 on the console surface) work this way: granting does not execute anything — the
+    /// operator's driver types the bound line and SPENDS the grant doing it. A consumed approval
+    /// is terminal, so one "yes" can never authorize a second line tomorrow.
+    Consumed,
 }
 
 /// A request for human approval, bound to the EXACT action it will authorize (SAD §10: approvals
@@ -154,6 +159,27 @@ impl ApprovalStore {
             _ => false,
         }
     }
+
+    /// Spend a GRANTED approval: the one transition out of `Granted`, and it goes only to
+    /// `Consumed`. Returns false for anything not exactly a granted, unspent record — so taking
+    /// the same grant twice is refused by construction, and a Pending/Denied/Expired record can
+    /// never be laundered into a typed line.
+    pub fn consume(&mut self, id: &Id) -> bool {
+        match self.approvals.get_mut(id) {
+            Some(a) if a.state == ApprovalState::Granted => {
+                a.state = ApprovalState::Consumed;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Every record, in insertion order. The console surface scans this to find the pending
+    /// approval that already exists for a line (an ask must be IDEMPOTENT — re-asking the same
+    /// request mints no duplicate) and the grant waiting to be spent on one.
+    pub fn snapshot(&self) -> Vec<PendingApproval> {
+        self.approvals.values().cloned().collect()
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +237,51 @@ mod tests {
         assert_eq!(store.list_pending(now()).len(), 0);
         // Idempotent: cannot re-resolve.
         assert!(!store.mark_state(&id, ApprovalState::Denied));
+    }
+
+    #[test]
+    fn a_grant_is_spent_exactly_once() {
+        let mut store = ApprovalStore::new();
+        let pa = PendingApproval::new(
+            "human:operator",
+            Intent {
+                subject: "human:operator".into(),
+                verb: Verb::Console {
+                    line: "rm notes".into(),
+                },
+            },
+            "destructive operation",
+        );
+        let id = pa.id.clone();
+        store.insert(pa);
+        // Pending cannot be spent — only a GRANT can.
+        assert!(!store.consume(&id), "a pending record is not a grant");
+        assert!(store.mark_state(&id, ApprovalState::Granted));
+        // An unspent grant consumes; a second consumption of the SAME record does not.
+        assert!(store.consume(&id));
+        assert!(!store.consume(&id), "a spent grant is terminal");
+        assert_eq!(store.snapshot()[0].state, ApprovalState::Consumed);
+        // And no other state launders into a typed line.
+        for state in [
+            ApprovalState::Pending,
+            ApprovalState::Denied,
+            ApprovalState::Expired,
+        ] {
+            let mut s = ApprovalStore::new();
+            let p = PendingApproval::new(
+                "human:operator",
+                Intent {
+                    subject: "human:operator".into(),
+                    verb: Verb::Console { line: "x".into() },
+                },
+                "r",
+            );
+            let pid = p.id.clone();
+            s.insert(p);
+            if state != ApprovalState::Pending {
+                assert!(s.mark_state(&pid, state));
+            }
+            assert!(!s.consume(&pid), "{state:?} must not be consumable");
+        }
     }
 }

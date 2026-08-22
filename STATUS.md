@@ -1,13 +1,62 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-22 (framebuffer console — text rendered into real backing pages, handed to the display pipeline, detach revoked)
+**As of:** 2026-08-22 (console governance — destructive lines become durable pending approvals bound to the exact line and spent once, ADR-059)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
 
-## Current wave — the console learns to draw (2026-08-22, second slice)
+## Current wave — the console asks before it destroys (2026-08-22, third slice)
+
+ALET-P2-046 closes: the console planner's approval was a CLI flag (`--approve`), and a flag is not
+governance — it is an answer given before the question existed. A destructive console command is now
+a QUESTION in the Core's own approval store, asked of a human, bound to the exact line, spendable
+exactly once (REQ-AI-006, ADR-059).
+
+* **The ask is durable and idempotent.** `SysCore::request_console_approval` records a
+  `PendingApproval` bound to a new first-class intent, `Verb::Console { line }` — the EXACT rendered,
+  validated ASCII the console would receive — through THE policy engine (`PolicyEngine::evaluate`, so
+  future approval rules apply here without a second implementation). Re-asking the same line finds
+  the same record; duplicates would let one line accumulate grants it did not earn.
+* **A human answers.** New CLI surface `aletheiad approvals list|grant|deny <id>` reads and resolves
+  the same records from the same machine-level directory. Denial is also a record (`Denied` is
+  terminal); asking again after a denial opens a NEW question, never re-opens the refused one.
+* **The grant is spent once, at typing time.** `take_console_approval` runs in the driver at the
+  moment of typing, moves Granted→Consumed atomically, and emits `ApprovalConsumed` — which replay
+  on open honors, so a spent grant stays spent across restart. One yes buys one typed line; the gate
+  proves a granted `rm poem` does NOT let `rm manifesto` through.
+* **Authority stated plainly, not faked.** These three operations are LOCAL-operator authority by
+  explicit documentation (aletheiad already owns its data directory) and are deliberately NOT
+  exposed over the service boundary, where they would hand untrusted clients self-authorization.
+  The pipeline refuses `Verb::Console` intents outright rather than guessing execution semantics;
+  the deterministic interpreter refuses them likewise; context building names no entity for them.
+* **Drivers get a contract, not prose.** Exit codes 0/1/7: stdout still means ONLY "type this", so
+  a driver piping stdout at a serial port can never type an unanswered question. `--approve` remains
+  for inline consent and now SAYS it recorded nothing.
+* **Proved twice over.** Host: `policy.rs` spend-once state machine + `aletheia/tests/
+  console_approvals.rs` (5 tests — durability across reopen, idempotence, exact binding,
+  denial-terminal/fresh-ask, consumption-survives-restart, and the two approval worlds refusing each
+  other's records). Gate: `scripts/console-ai-e2e.sh` replaced its refuse-only check with the FULL
+  dance per arm per target — ask(7) → Pending listed → deny → fresh ask → grant binds exactly its
+  line → typed once → machine executes it → Consumed recorded → spent grant types nothing — all in a
+  per-arm scratch data dir, because grading governance in the operator's real ~/.aletheia would
+  inherit stale answers.
+* **Adjacent defect closed while there:** two AI tests asserted the pinned default model BY NAME,
+  which is a statement about one machine's HF cache — and broke when that cache changed (LFM2.5 no
+  longer cached). Worse, `AiConfig::default()` could carry an entry naming one model while its ref
+  and endpoint named another — the mislabelled-benchmark failure ADR-052 exists to prevent. The
+  built-in default now derives every field FROM the registry's resolution (constants are the
+  no-registry fallback only), and both tests are hermetic: consistency-with-discovery, and
+  constants-vs-shipped-manifest.
+
+**Stated scope:** the AGENT loop (`console agent`, ADR-054) still carries `approved` as a session
+flag — wiring this lifecycle per destructive step inside the loop is registered follow-on. No expiry
+by time travel (TTL inherited unchanged). Entirely the hosted side: no inference and no governance
+engine entered kernel space. `aletheia`: **112 lib tests** + 5 integration tests passed; clippy `-D
+warnings` clean; traceability 106 requirements — 96 delivered / 6 partial / 4 deferred, PASS.
+
+## Previous wave — the console learns to draw (2026-08-22, second slice)
 
 Last wave ended with an honest asterisk: the GPU protocol path worked, but "with `-display none`
 nobody sees the picture". This wave closes the part of that gap which is ours to close — Aletheia now

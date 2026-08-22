@@ -165,13 +165,30 @@ pub mod config {
 
     impl Default for AiConfig {
         fn default() -> Self {
-            AiConfig {
-                provider: "local".into(),
-                backend: "llama_cpp".into(),
-                endpoint: DEFAULT_ENDPOINT.into(),
-                model_ref: DEFAULT_MODEL_REF.into(),
-                model_path: None,
-                entry: registry::default_entry(),
+            // Whatever the registry resolves on THIS machine is what every field must name. A
+            // config whose `entry` says one model while its ref and endpoint say another is the
+            // mislabelled-benchmark failure mode ADR-052 exists to prevent — and it is exactly
+            // what the previous form produced on a machine whose cache lacks the pinned default:
+            // discovery legitimately falls forward to a present model, while model_ref stayed a
+            // second, older opinion. The constants are the NO-REGISTRY fallback, never a
+            // competing one; agreement with the shipped manifest is held by its own test.
+            match registry::default_entry() {
+                Some(e) => AiConfig {
+                    provider: "local".into(),
+                    backend: e.backend.clone(),
+                    endpoint: e.endpoint.clone(),
+                    model_ref: e.repo.clone(),
+                    model_path: None,
+                    entry: Some(e),
+                },
+                None => AiConfig {
+                    provider: "local".into(),
+                    backend: "llama_cpp".into(),
+                    endpoint: DEFAULT_ENDPOINT.into(),
+                    model_ref: DEFAULT_MODEL_REF.into(),
+                    model_path: None,
+                    entry: None,
+                },
             }
         }
     }
@@ -346,12 +363,30 @@ mod tests {
     use super::prompt;
 
     #[test]
-    fn config_defaults_to_the_local_registry_default() {
+    fn config_defaults_agree_with_the_local_registry_default() {
+        // HERMETIC on purpose: the previous form asserted `lfm2.5` BY NAME, which is a statement
+        // about the contents of one machine's HF cache, not about the OS — and it broke the day
+        // that cache changed. The invariant that holds everywhere: the built-in default carries
+        // EXACTLY what discovery resolves, and names it consistently in every field. Which model
+        // that is, is the registry's decision (a present model beats an absent pinned one).
         let c = AiConfig::default();
         assert!(c.wants_local_model());
-        assert_eq!(c.model_ref, DEFAULT_MODEL_REF);
         assert_eq!(c.backend, "llama_cpp");
-        assert_eq!(c.entry.as_ref().map(|e| e.id.as_str()), Some("lfm2.5"));
+        let d = super::registry::default_entry();
+        match (&c.entry, d) {
+            (Some(e), Some(de)) => {
+                assert_eq!(e, &de, "the built-in default IS the registry default, not a rival");
+                assert_eq!(c.model_ref, e.repo);
+                assert_eq!(c.endpoint, e.endpoint);
+            }
+            (None, None) => {
+                assert_eq!(c.model_ref, DEFAULT_MODEL_REF);
+                assert_eq!(c.endpoint, DEFAULT_ENDPOINT);
+            }
+            (got, want) => panic!(
+                "config default {got:?} disagrees with the registry default {want:?}"
+            ),
+        }
     }
 
     /// The constants are a copy of the default manifest, and a copy is a thing that drifts. This is
@@ -360,11 +395,17 @@ mod tests {
     /// moment a benchmark reports one model's numbers under another model's name.
     #[test]
     fn the_constants_and_the_default_manifest_agree() {
-        let e = super::registry::default_entry().expect("a default model is registered");
-        assert_eq!(e.repo, DEFAULT_MODEL_REF);
-        assert_eq!(e.file, DEFAULT_MODEL_FILE);
-        assert_eq!(e.sha256, DEFAULT_MODEL_SHA256);
-        assert_eq!(e.context, DEFAULT_MODEL_CTX);
+        // Compared against the SHIPPED MANIFEST, not whatever this machine's cache resolves today:
+        // discovery legitimately prefers a present model over an absent pinned one, so asking the
+        // resolver here would test the contents of $HOME instead of the copy.
+        let m = super::registry::manifests()
+            .into_iter()
+            .find(|e| e.id == "lfm2.5")
+            .expect("the pinned default manifest ships with the OS");
+        assert_eq!(m.repo, DEFAULT_MODEL_REF);
+        assert_eq!(m.file, DEFAULT_MODEL_FILE);
+        assert_eq!(m.sha256, DEFAULT_MODEL_SHA256);
+        assert_eq!(m.context, DEFAULT_MODEL_CTX);
     }
 
     #[test]
