@@ -81,9 +81,15 @@ pipes stdout at a serial port can never type an unanswered question.
 
 ## Non-claims
 
-- The AGENT loop (`console agent`, ADR-054) still carries `approved` as a session flag; wiring the
-  same lifecycle per destructive step inside the loop is registered follow-on work, not silently
-  assumed.- No expiry test by time travel: TTL logic is inherited unchanged from ADR-015 and exercised at
+- ~~The AGENT loop still carries `approved` as a session flag~~ - CLOSED in the same wave:
+  `advance` now consults a `Governor` seam. An unapproved session's destructive proposal ASKS
+  (exit 7, id on stderr, question carried IN the transcript so it survives the process); a grant
+  is spent at typing time exactly once; a denial becomes a Correction to the model while a second
+  insistence on an already-refused line stays terminal overreach (`denied_lines`); an unreachable
+  store refuses by name rather than typing ungoverned. `--approve` remains inline consent that
+  says it recorded nothing. The gate (`console-agent-e2e.sh`) replaced its refuse-only bound with
+  the full dance against a live machine.
+- No expiry test by time travel: TTL logic is inherited unchanged from ADR-015 and exercised at
   the boundaries the tests can reach deterministically.
 - No kernel changes: this is entirely the hosted side, consistent with ADR-053 — no inference and
   no governance engine entered kernel space.

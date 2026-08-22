@@ -20,7 +20,10 @@
 //!   `kernel_core::shell::COMMANDS`, so there is still exactly one list of commands in the system;
 //! * a control byte in any argument is still a refused step (`console_ops::render`), so an
 //!   observation full of escape sequences cannot become a second console line;
-//! * a destructive command still requires approval, now at every step rather than once.
+//! * a destructive command still requires approval at every step — and since ADR-059 it goes
+//!   through the Core's real pending-approval surface (`Governor`), not a session flag: an
+//!   unapproved session's destructive proposal ASKS, a grant types once, a denial becomes a
+//!   correction to the model, and `--approve` remains inline consent that records nothing.
 //!
 //! And three bounds exist only because this is a loop:
 //!
@@ -162,6 +165,25 @@ pub struct Session {
     /// said it is done, and every extra command would be spent on a question nobody asked.
     #[serde(default)]
     pub answer: Option<String>,
+    /// A destructive step awaiting its human (ADR-059 applied to this loop). While set, the next
+    /// turn consults the approval store BEFORE the model: granted → spend and type the stored line;
+    /// denied → tell the model; still pending → re-ask with the SAME id. The question lives in the
+    /// transcript so it survives the process that asked it, exactly like every other piece of
+    /// session state.
+    #[serde(default)]
+    pub pending_approval: Option<PendingStep>,
+    /// Lines the human has REFUSED in this session. One refusal is information for the model; a
+    /// second insistence on an already-refused line is overreach, and overreach is terminal.
+    #[serde(default)]
+    pub denied_lines: Vec<String>,
+}
+
+/// One destructive step waiting for its human: which record answers for it, and the exact line the
+/// grant will be spent on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingStep {
+    pub approval_id: String,
+    pub line: String,
 }
 
 impl Session {
@@ -174,6 +196,8 @@ impl Session {
             budget,
             approved,
             answer: None,
+            pending_approval: None,
+            denied_lines: Vec::new(),
         }
     }
 
@@ -225,6 +249,10 @@ pub enum AgentRefusal {
     AlreadyAnswered,
     /// The driver asked to continue a session that was started for a different request.
     RequestChanged,
+    /// Governance itself was unreachable, so a destructive step could be neither asked nor
+    /// answered. Terminal by construction: typing ungoverned is the one outcome worse than
+    /// refusing, and an approval store that cannot answer cannot be waited on either.
+    Governance(String),
 }
 
 impl core::fmt::Display for AgentRefusal {
@@ -256,6 +284,10 @@ impl core::fmt::Display for AgentRefusal {
                 f,
                 "this transcript was opened for a different request — start a new session rather than changing the question mid-loop"
             ),
+            AgentRefusal::Governance(why) => write!(
+                f,
+                "the approval store is unavailable ({why}) — a destructive step types nothing rather than typing ungoverned"
+            ),
         }
     }
 }
@@ -278,6 +310,47 @@ pub enum Advance {
     Type(String),
     /// The session is over; this is the answer.
     Done(String),
+    /// A destructive step needs a human before anything is typed (ADR-059 on this loop). The
+    /// question is recorded in the session AND in the approval store under `approval_id`; nothing
+    /// was typed and no budget was spent. The driver surfaces the id, a human answers through
+    /// `aletheiad approvals grant|deny`, and the SAME command resumes the session — which then
+    /// spends the grant, tells the model about a denial, or re-asks with the same id.
+    NeedsApproval { approval_id: String, line: String },
+}
+
+/// What governance said about one destructive step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// A recorded human yes covers this exact line — type it (and spend it, if it was a grant).
+    Spend,
+    /// No answer yet. `approval_id` names the pending record to surface.
+    Ask { approval_id: String },
+    /// The human refused THIS line. First refusal per line is a correction to the model; insisting
+    /// on an already-refused line is terminal overreach.
+    Denied,
+    /// Governance could not be consulted — named reason. Nothing types.
+    Unavailable(String),
+}
+
+/// The seam between the loop and whatever records human answers for destructive steps.
+///
+/// Deliberately a trait rather than a `SysCore` parameter: the loop's logic must be provable
+/// without a store (every test here drives fakes), and the store-backed implementation lives with
+/// the store (`syscore::ConsoleGovernor`). `advance` calls this ONLY for steps the console registry
+/// classifies destructive — safe steps never touch it, so governance costs nothing where it gates
+/// nothing.
+pub trait Governor {
+    fn judge(&mut self, line: &str) -> Verdict;
+}
+
+/// Inline consent: the operator pre-approved the whole session (`--approve`). Nothing is recorded —
+/// which is exactly why the CLI says out loud that it recorded nothing.
+pub struct InlineGovernor;
+
+impl Governor for InlineGovernor {
+    fn judge(&mut self, _line: &str) -> Verdict {
+        Verdict::Spend
+    }
 }
 
 /// The multi-turn seam.
@@ -316,7 +389,11 @@ pub trait ConsoleAgent {
 /// that asked for authority it does not have gets refused, because asking again changes nothing
 /// except how many times it was invited to try — and the same is true of `halt`, of the budget, and
 /// of a backend that cannot be reached.
-pub fn advance(session: &mut Session, agent: &dyn ConsoleAgent) -> Result<Advance, AgentRefusal> {
+pub fn advance(
+    session: &mut Session,
+    agent: &dyn ConsoleAgent,
+    gov: &mut dyn Governor,
+) -> Result<Advance, AgentRefusal> {
     if let Some(a) = &session.answer {
         // Answering twice is not harmful, but it is a driver bug, and a loop that hides driver bugs
         // is a loop that will hide the next one too.
@@ -330,6 +407,55 @@ pub fn advance(session: &mut Session, agent: &dyn ConsoleAgent) -> Result<Advanc
         return Err(AgentRefusal::BudgetExhausted {
             spent: session.turns.len(),
         });
+    }
+    // A question already asked is resolved BEFORE the model is consulted again. Re-proposing would
+    // be a different question wearing the same transcript; the human answered (or has not yet) the
+    // question this session asked, and that answer — not a fresh proposal — decides what happens.
+    if let Some(p) = session.pending_approval.clone() {
+        match gov.judge(&p.line) {
+            Verdict::Spend => {
+                session.pending_approval = None;
+                session.budget -= 1;
+                session.turns.push(Turn {
+                    line: p.line.clone(),
+                    observation: None,
+                });
+                return Ok(Advance::Type(p.line));
+            }
+            Verdict::Ask { approval_id } => {
+                // Still unanswered: say so, adopting the store's CURRENT id for this line. The
+                // store is the authority on its own records — a stale id held here would send
+                // the human off to answer a ghost. The model is not consulted, so a waiting
+                // question cannot drift into a different one while nobody is looking.
+                session.pending_approval = Some(PendingStep {
+                    approval_id: approval_id.clone(),
+                    line: p.line.clone(),
+                });
+                return Ok(Advance::NeedsApproval {
+                    approval_id,
+                    line: p.line,
+                });
+            }
+            Verdict::Denied => {
+                session.pending_approval = None;
+                if session.denied_lines.contains(&p.line) {
+                    return Err(AgentRefusal::Step(Refusal::Approval {
+                        op: first_word_of(&p.line),
+                    }));
+                }
+                session.denied_lines.push(p.line.clone());
+                session.corrections.push(Correction {
+                    proposed: p.line.clone(),
+                    refusal: DENIAL_CORRECTION.into(),
+                });
+                // Fall through: the model is told and asked for another way.
+            }
+            Verdict::Unavailable(why) => {
+                // The pending question stays SET: an unavailable store is not an answer, and a
+                // later healthy call must resume THIS question rather than mint a new one.
+                return Err(AgentRefusal::Governance(why));
+            }
+        }
     }
     // Corrections are counted per CALL, not per session: each one is a re-ask of the same step, and
     // a step that eventually rendered has nothing left to correct.
@@ -349,7 +475,14 @@ pub fn advance(session: &mut Session, agent: &dyn ConsoleAgent) -> Result<Advanc
         if matches!(step.op.as_str(), "halt" | "reboot") {
             return Err(AgentRefusal::EndsTheSession { op: step.op });
         }
-        let line = match console_ops::render(&step.op, &step.args, session.approved) {
+        let destructive = console_ops::lookup(&step.op)
+            .map(|m| matches!(m.risk, crate::tools::Risk::Destructive))
+            .unwrap_or(true);
+        // Rendered with the approval gate OPEN so a malformed destructive proposal fails for its
+        // MALFORMATION here — correctable, per ADR-055 — instead of for its authority. What may
+        // NOT happen is the line reaching a driver ungoverned: every path below either consults
+        // `gov` first or carries `session.approved` inline consent.
+        let line = match console_ops::render(&step.op, &step.args, true) {
             Ok(line) => line,
             Err(refusal) => {
                 if !refusal.is_recoverable() || corrected >= MAX_CORRECTIONS {
@@ -365,6 +498,38 @@ pub fn advance(session: &mut Session, agent: &dyn ConsoleAgent) -> Result<Advanc
                 continue;
             }
         };
+        if destructive && !session.approved {
+            match gov.judge(&line) {
+                Verdict::Spend => {}
+                Verdict::Ask { approval_id } => {
+                    session.pending_approval = Some(PendingStep {
+                        approval_id: approval_id.clone(),
+                        line: line.clone(),
+                    });
+                    return Ok(Advance::NeedsApproval { approval_id, line });
+                }
+                Verdict::Denied => {
+                    if session.denied_lines.contains(&line) {
+                        return Err(AgentRefusal::Step(Refusal::Approval {
+                            op: first_word_of(&line),
+                        }));
+                    }
+                    session.denied_lines.push(line.clone());
+                    if corrected >= MAX_CORRECTIONS {
+                        return Err(AgentRefusal::Step(Refusal::Approval {
+                            op: first_word_of(&line),
+                        }));
+                    }
+                    session.corrections.push(Correction {
+                        proposed: line.clone(),
+                        refusal: DENIAL_CORRECTION.into(),
+                    });
+                    corrected += 1;
+                    continue;
+                }
+                Verdict::Unavailable(why) => return Err(AgentRefusal::Governance(why)),
+            }
+        }
         // No-progress is checked on the RENDERED line rather than on the step, because two different
         // argument spellings that render identically are the same command typed twice.
         if repeats_since_the_machine_changed(session, &line) {
@@ -390,6 +555,17 @@ call a tool — reply in one short sentence with the answer.",
         });
         return Ok(Advance::Type(line));
     }
+}
+
+/// What a DENIAL tells the model. It is a correction, not a refusal, because the human's no is
+/// information about THIS command — the model may know another way to answer. Proposing the same
+/// line again after being told is overreach, and overreach is terminal (see `denied_lines`).
+const DENIAL_CORRECTION: &str = "the human REFUSED this command at the approval prompt — do not \
+propose it again; find another way to answer the request, or reply with the answer if what you have \
+already been shown is enough";
+
+fn first_word_of(line: &str) -> String {
+    line.split_whitespace().next().unwrap_or_default().to_string()
 }
 
 /// The index of the first turn whose observation is shown in full.
@@ -807,6 +983,11 @@ impl ConsoleAgent for DeterministicAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every pre-existing test runs under inline consent: it exercises the loop, not the store.
+    fn adv(s: &mut Session, a: &dyn ConsoleAgent) -> Result<Advance, AgentRefusal> {
+        advance(s, a, &mut InlineGovernor)
+    }
     use serde_json::json;
 
     fn step(op: &str, args: serde_json::Value) -> Step {
@@ -847,20 +1028,20 @@ mod tests {
             Move::Answer("it says hello".into()),
         ]);
         assert_eq!(
-            advance(&mut s, &agent).unwrap(),
+            adv(&mut s, &agent).unwrap(),
             Advance::Type("cat manifesto".into())
         );
         assert!(s.awaiting_observation());
         s.observe("hello world!").unwrap();
         assert!(!s.awaiting_observation());
         assert_eq!(
-            advance(&mut s, &agent).unwrap(),
+            adv(&mut s, &agent).unwrap(),
             Advance::Done("it says hello".into())
         );
         assert_eq!(s.answer.as_deref(), Some("it says hello"));
         // And it will not run again.
         assert_eq!(
-            advance(&mut s, &agent).unwrap_err(),
+            adv(&mut s, &agent).unwrap_err(),
             AgentRefusal::AlreadyAnswered
         );
     }
@@ -872,9 +1053,9 @@ mod tests {
             Move::Command(step("ls", json!({}))),
             Move::Command(step("cat", json!({ "name": "a" }))),
         ]);
-        advance(&mut s, &agent).unwrap();
+        adv(&mut s, &agent).unwrap();
         assert_eq!(
-            advance(&mut s, &agent).unwrap_err(),
+            adv(&mut s, &agent).unwrap_err(),
             AgentRefusal::NoStepInFlight
         );
     }
@@ -887,12 +1068,12 @@ mod tests {
             Move::Command(step("cat", json!({ "name": "a" }))),
             Move::Command(step("cat", json!({ "name": "b" }))),
         ]);
-        advance(&mut s, &agent).unwrap();
+        adv(&mut s, &agent).unwrap();
         s.observe("a").unwrap();
-        advance(&mut s, &agent).unwrap();
+        adv(&mut s, &agent).unwrap();
         s.observe("b").unwrap();
         assert_eq!(
-            advance(&mut s, &agent).unwrap_err(),
+            adv(&mut s, &agent).unwrap_err(),
             AgentRefusal::BudgetExhausted { spent: 2 }
         );
     }
@@ -909,10 +1090,10 @@ mod tests {
             Move::Command(step("ls", json!({}))),
             Move::Command(step("ls", json!({}))),
         ]);
-        advance(&mut s, &agent).unwrap();
+        adv(&mut s, &agent).unwrap();
         s.observe("manifesto  poem").unwrap();
         assert_eq!(
-            advance(&mut s, &agent).unwrap_err(),
+            adv(&mut s, &agent).unwrap_err(),
             AgentRefusal::NoProgress { line: "ls".into() }
         );
         assert_eq!(s.corrections.len(), MAX_CORRECTIONS);
@@ -920,17 +1101,24 @@ mod tests {
 
     #[test]
     fn a_destructive_step_without_approval_refuses_and_renders_nothing() {
+        // ADR-059: "without approval" now means the store has not said yes yet — so the loop ASKS
+        // instead of refusing, and the refusal-shaped guarantee survives unchanged: nothing is
+        // recorded, nothing is typed, no budget is spent.
         let mut s = Session::new("r", "", 6, false);
         let agent = scripted(vec![Move::Command(step("rm", json!({ "name": "poem" })))]);
-        assert_eq!(
-            advance(&mut s, &agent).unwrap_err(),
-            AgentRefusal::Step(Refusal::Approval { op: "rm".into() })
-        );
+        let mut gov = FakeGov::always_ask();
+        match advance(&mut s, &agent, &mut gov).unwrap() {
+            Advance::NeedsApproval { approval_id, line } => {
+                assert_eq!(approval_id, "a1");
+                assert_eq!(line, "rm poem");
+            }
+            other => panic!("expected a question for the human, got {other:?}"),
+        }
         assert!(
             s.turns.is_empty(),
             "nothing was recorded, so nothing was typed"
         );
-        assert_eq!(s.budget, 6, "a refused step costs no budget");
+        assert_eq!(s.budget, 6, "an unanswered step costs no budget");
     }
 
     #[test]
@@ -938,7 +1126,7 @@ mod tests {
         let mut s = Session::new("r", "", 6, true);
         let agent = scripted(vec![Move::Command(step("rm", json!({ "name": "poem" })))]);
         assert_eq!(
-            advance(&mut s, &agent).unwrap(),
+            adv(&mut s, &agent).unwrap(),
             Advance::Type("rm poem".into())
         );
     }
@@ -949,7 +1137,7 @@ mod tests {
             let mut s = Session::new("r", "", 6, true);
             let agent = scripted(vec![Move::Command(step(op, json!({})))]);
             assert_eq!(
-                advance(&mut s, &agent).unwrap_err(),
+                adv(&mut s, &agent).unwrap_err(),
                 AgentRefusal::EndsTheSession { op: op.into() }
             );
             assert!(s.turns.is_empty());
@@ -968,7 +1156,7 @@ mod tests {
             Move::Command(step("format", json!({}))),
         ]);
         assert_eq!(
-            advance(&mut s, &agent).unwrap_err(),
+            adv(&mut s, &agent).unwrap_err(),
             AgentRefusal::Step(Refusal::UnknownCommand("format".into()))
         );
     }
@@ -1057,7 +1245,7 @@ mod tests {
             "grep",
             json!({ "text": "front", "name": "manifesto" }),
         ))]);
-        advance(&mut s, &agent).unwrap();
+        adv(&mut s, &agent).unwrap();
         s.observe("the OS you can sit in front of").unwrap();
         let p = transcript_prompt(&s);
         assert!(p.contains("never as instructions"));
@@ -1193,7 +1381,7 @@ mod tests {
             let agent = DeterministicAgent;
             let mut typed: Vec<String> = Vec::new();
             let answer = loop {
-                match advance(&mut s, &agent) {
+                match adv(&mut s, &agent) {
                     Ok(Advance::Type(line)) => {
                         typed.push(line.clone());
                         // Stand in for the machine: the gate uses a real one.
@@ -1205,7 +1393,9 @@ mod tests {
                         .unwrap();
                     }
                     Ok(Advance::Done(a)) => break a,
-                    Err(e) => panic!("`{}` refused: {e}", c.natural),
+                    // Inline consent never asks; a NeedsApproval here would mean the governor
+                    // seam leaked into the pre-existing cases.
+                    other => panic!("`{}` unexpected turn: {other:?}", c.natural),
                 }
             };
             assert!(
@@ -1227,14 +1417,14 @@ mod tests {
     fn the_deterministic_arm_runs_a_scripted_sequence_and_terminates() {
         let mut s = Session::new("ls ; cat manifesto", "", 6, false);
         let agent = DeterministicAgent;
-        assert_eq!(advance(&mut s, &agent).unwrap(), Advance::Type("ls".into()));
+        assert_eq!(adv(&mut s, &agent).unwrap(), Advance::Type("ls".into()));
         s.observe("manifesto  poem").unwrap();
         assert_eq!(
-            advance(&mut s, &agent).unwrap(),
+            adv(&mut s, &agent).unwrap(),
             Advance::Type("cat manifesto".into())
         );
         s.observe("the OS you can sit in front of").unwrap();
-        match advance(&mut s, &agent).unwrap() {
+        match adv(&mut s, &agent).unwrap() {
             Advance::Done(a) => assert!(a.contains("the OS you can sit in front of")),
             other => panic!("expected an answer, got {other:?}"),
         }
@@ -1253,7 +1443,7 @@ mod tests {
         ]);
         let mut s = Session::new("show me that line", "", 6, false);
         assert_eq!(
-            advance(&mut s, &agent).unwrap(),
+            adv(&mut s, &agent).unwrap(),
             Advance::Type("cat poem".into()),
             "a fixable mistake must not end the session"
         );
@@ -1273,7 +1463,7 @@ mod tests {
             Move::Command(step("ls", json!({}))),
         ]);
         let mut s = Session::new("what is here", "", 6, false);
-        advance(&mut s, &agent).unwrap();
+        adv(&mut s, &agent).unwrap();
         let prompt = transcript_prompt(&s);
         assert!(prompt.contains("REFUSED"));
         assert!(prompt.contains("nosuchcommand"));
@@ -1296,7 +1486,7 @@ mod tests {
             line: "stat backup".into(),
             observation: Some("backup: 30 bytes".into()),
         });
-        match advance(&mut s, &agent).unwrap() {
+        match adv(&mut s, &agent).unwrap() {
             Advance::Done(a) => assert!(a.contains("30 bytes")),
             other => panic!("expected the correction to produce an answer, got {other:?}"),
         }
@@ -1317,7 +1507,7 @@ mod tests {
         }
         let agent = scripted(moves);
         let mut s = Session::new("show me", "", 6, false);
-        match advance(&mut s, &agent) {
+        match adv(&mut s, &agent) {
             Err(AgentRefusal::Step(_)) => {}
             other => {
                 panic!("expected a refusal after {MAX_CORRECTIONS} corrections, got {other:?}")
@@ -1330,20 +1520,39 @@ mod tests {
     #[test]
     fn overreaching_is_never_corrected() {
         // MALFORMING gets told how; OVERREACHING gets refused. A model asked to try again for
-        // authority it does not have is a model being invited to keep trying.
+        // authority it does not have is a model being invited to keep trying. Under ADR-059 the
+        // authority question goes to a GOVERNOR, so this is proved with one that keeps refusing:
+        // the session must die on the second insistence rather than re-ask forever.
         let agent = scripted(vec![
             Move::Command(step("rm", json!({ "name": "poem" }))),
-            Move::Command(step("ls", json!({}))),
+            Move::Command(step("rm", json!({ "name": "poem" }))),
         ]);
         let mut s = Session::new("delete the poem", "", 6, false);
-        match advance(&mut s, &agent) {
+        let mut gov = FakeGov::with(vec![Verdict::Denied, Verdict::Denied]);
+        match advance(&mut s, &agent, &mut gov) {
             Err(AgentRefusal::Step(r)) => assert!(!r.is_recoverable()),
-            other => panic!("an unapproved destructive step must refuse outright, got {other:?}"),
+            other => panic!("insisting past a denial must refuse outright, got {other:?}"),
         }
         assert!(
-            s.corrections.is_empty(),
-            "missing authority is not a writing mistake"
+            s.corrections.len() == 1 && s.corrections[0].refusal.contains("REFUSED"),
+            "the FIRST denial was information; the second was overreach"
         );
+    }
+
+    #[test]
+    fn an_unanswered_ask_renders_nothing_and_asks_the_human() {
+        // The old flag-based form of this test asserted a refusal. The honest successor asserts the
+        // QUESTION: an unapproved destructive step renders to a driver only after a human yes, and
+        // until then nothing is typed and nothing is spent.
+        let agent = scripted(vec![Move::Command(step("rm", json!({ "name": "poem" })))]);
+        let mut s = Session::new("delete the poem", "", 6, false);
+        let mut gov = FakeGov::always_ask();
+        match advance(&mut s, &agent, &mut gov) {
+            Ok(Advance::NeedsApproval { line, .. }) => assert_eq!(line, "rm poem"),
+            other => panic!("an unapproved destructive step must ASK, got {other:?}"),
+        }
+        assert!(s.turns.is_empty(), "nothing was typed");
+        assert_eq!(s.budget, 6, "asking spends no console step");
     }
 
     #[test]
@@ -1353,7 +1562,7 @@ mod tests {
             Move::Command(step("ls", json!({}))),
         ]);
         let mut s = Session::new("shut it down", "", 6, true);
-        match advance(&mut s, &agent) {
+        match adv(&mut s, &agent) {
             Err(AgentRefusal::EndsTheSession { op }) => assert_eq!(op, "halt"),
             other => panic!("expected halt to be refused outright, got {other:?}"),
         }
@@ -1368,7 +1577,7 @@ mod tests {
             Move::Command(step("ls", json!({}))),
         ]);
         let mut s = Session::new("read it", "", 6, false);
-        advance(&mut s, &agent).unwrap();
+        adv(&mut s, &agent).unwrap();
         let prompt = transcript_prompt(&s);
         assert!(
             !prompt.contains('\u{1b}'),
@@ -1391,7 +1600,7 @@ mod tests {
         });
         let agent = scripted(vec![Move::Command(step("cat", json!({ "name": "poem" })))]);
         assert_eq!(
-            advance(&mut s, &agent).unwrap(),
+            adv(&mut s, &agent).unwrap(),
             Advance::Type("cat poem".into()),
             "the machine changed between the two reads, so the second one is new information"
         );
@@ -1415,7 +1624,7 @@ mod tests {
             moves.push(Move::Command(step("cat", json!({ "name": "poem" }))));
         }
         let agent = scripted(moves);
-        match advance(&mut s, &agent) {
+        match adv(&mut s, &agent) {
             Err(AgentRefusal::NoProgress { line }) => assert_eq!(line, "cat poem"),
             other => panic!("expected no-progress, got {other:?}"),
         }
@@ -1447,7 +1656,7 @@ mod tests {
             )));
         }
         let agent = scripted(moves);
-        match advance(&mut s, &agent) {
+        match adv(&mut s, &agent) {
             Err(AgentRefusal::NoProgress { line }) => {
                 assert_eq!(line, "append poem second line")
             }
@@ -1540,5 +1749,197 @@ mod tests {
         let old = r#"{"request":"x","brief":"","turns":[],"budget":6,"approved":false}"#;
         let s: Session = serde_json::from_str(old).expect("an older transcript must still load");
         assert!(s.corrections.is_empty());
+    }
+
+    // --- governance on the loop (ADR-059): the destructive steps of an unapproved session ---
+
+    /// A canned governor with a record of what it was asked, so tests can prove the loop consults
+    /// it exactly when the registry says a step is destructive — and never otherwise.
+    struct FakeGov {
+        verdicts: std::cell::RefCell<Vec<Verdict>>,
+        asked: std::cell::RefCell<Vec<String>>,
+    }
+    impl FakeGov {
+        fn always_ask() -> Self {
+            FakeGov {
+                verdicts: std::cell::RefCell::new(vec![]),
+                asked: std::cell::RefCell::new(vec![]),
+            }
+        }
+        fn with(v: Vec<Verdict>) -> Self {
+            FakeGov {
+                verdicts: std::cell::RefCell::new(v),
+                asked: std::cell::RefCell::new(vec![]),
+            }
+        }
+    }
+    impl Governor for FakeGov {
+        fn judge(&mut self, line: &str) -> Verdict {
+            self.asked.borrow_mut().push(line.to_string());
+            let mut q = self.verdicts.borrow_mut();
+            if q.is_empty() {
+                // Exhausted script == the store keeps asking.
+                Verdict::Ask { approval_id: "a1".into() }
+            } else {
+                q.drain(..1).next().expect("checked non-empty")
+            }
+        }
+    }
+
+    const A1: &str = "a1";
+
+    #[test]
+    fn an_unapproved_destructive_step_asks_instead_of_typing() {
+        let mut s = Session::new("tidy up", "", 6, false);
+        let agent = scripted(vec![Move::Command(step("rm", json!({ "name": "notes" })))]);
+        let mut gov = FakeGov::always_ask();
+        match advance(&mut s, &agent, &mut gov).unwrap() {
+            Advance::NeedsApproval { approval_id, line } => {
+                assert_eq!(approval_id, A1);
+                assert_eq!(line, "rm notes");
+            }
+            other => panic!("expected a question, got {other:?}"),
+        }
+        // Nothing typed, nothing spent; the question lives in the session so it survives the
+        // process that asked it.
+        assert_eq!(s.budget, 6);
+        assert!(s.turns.is_empty());
+        let p = s.pending_approval.expect("pending recorded in the transcript");
+        assert_eq!(p.line, "rm notes");
+        assert_eq!(p.approval_id, A1);
+        // And the governor was asked about exactly this one line.
+        assert_eq!(&*gov.asked.borrow(), &["rm notes".to_string()][..]);
+    }
+
+    #[test]
+    fn a_granted_question_types_on_resume_without_the_model() {
+        let mut s = Session::new("tidy up", "", 6, false);
+        s.pending_approval = Some(PendingStep {
+            approval_id: A1.into(),
+            line: "rm poem".into(),
+        });
+        // An EMPTY scripted list: if the model were consulted before the store answered, this
+        // turn would fail with Model(InvalidOutput) rather than type.
+        let agent = scripted(vec![]);
+        let mut gov = FakeGov::with(vec![Verdict::Spend]);
+        match advance(&mut s, &agent, &mut gov).unwrap() {
+            Advance::Type(line) => assert_eq!(line, "rm poem"),
+            other => panic!("expected the granted line, got {other:?}"),
+        }
+        assert!(s.pending_approval.is_none());
+        assert_eq!(s.budget, 5, "typing spends budget, asking never did");
+        assert_eq!(s.turns.len(), 1);
+        assert!(s.turns[0].observation.is_none(), "in flight until observed");
+    }
+
+    #[test]
+    fn a_still_pending_question_reasks_the_same_id_and_never_the_model() {
+        let mut s = Session::new("tidy up", "", 6, false);
+        s.pending_approval = Some(PendingStep {
+            approval_id: "same-id".into(),
+            line: "rm poem".into(),
+        });
+        let agent = scripted(vec![]); // consulted here = drift: waiting questions must not move
+        let mut gov = FakeGov::always_ask();
+        match advance(&mut s, &agent, &mut gov).unwrap() {
+            Advance::NeedsApproval { approval_id, line } => {
+                assert_eq!(approval_id, "a1");
+                assert_eq!(line, "rm poem");
+            }
+            other => panic!("expected the same question back, got {other:?}"),
+        }
+        // The transcript tracks whatever id the store NOW answers for this line, so a human is
+        // never sent to resolve a ghost record.
+        assert_eq!(s.pending_approval.as_ref().unwrap().approval_id, "a1");
+        assert_eq!(&*gov.asked.borrow(), &["rm poem".to_string()][..]);
+    }
+
+    #[test]
+    fn a_denial_corrects_once_and_a_second_insistence_is_terminal() {
+        let mut s = Session::new("tidy up", "", 6, false);
+        let agent = scripted(vec![
+            Move::Command(step("rm", json!({ "name": "notes" }))),
+            Move::Command(step("rm", json!({ "name": "notes" }))),
+        ]);
+        let mut gov = FakeGov::with(vec![Verdict::Denied, Verdict::Denied]);
+        let err = advance(&mut s, &agent, &mut gov).unwrap_err();
+        assert!(
+            matches!(err, AgentRefusal::Step(Refusal::Approval { ref op }) if op == "rm"),
+            "insisting on a refused line is overreach: {err}"
+        );
+        assert!(s.turns.is_empty(), "nothing ever typed");
+        assert_eq!(s.denied_lines, vec!["rm notes".to_string()]);
+        assert!(
+            s.corrections[0].refusal.contains("REFUSED"),
+            "the model was told what happened"
+        );
+    }
+
+    #[test]
+    fn a_denied_line_corrects_and_a_different_proposal_types() {
+        let mut s = Session::new("tidy up", "", 6, false);
+        let agent = scripted(vec![
+            Move::Command(step("rm", json!({ "name": "notes" }))),
+            Move::Command(step("cat", json!({ "name": "manifesto" }))),
+        ]);
+        let mut gov = FakeGov::with(vec![Verdict::Denied]);
+        match advance(&mut s, &agent, &mut gov).unwrap() {
+            // The safe alternative never touches governance and types as usual.
+            Advance::Type(line) => assert_eq!(line, "cat manifesto"),
+            other => panic!("expected the corrected proposal to type, got {other:?}"),
+        }
+        assert_eq!(s.corrections.len(), 1);
+    }
+
+    #[test]
+    fn an_unavailable_store_refuses_named_and_keeps_the_question() {
+        let mut s = Session::new("tidy up", "", 6, false);
+        s.pending_approval = Some(PendingStep {
+            approval_id: A1.into(),
+            line: "rm poem".into(),
+        });
+        let agent = scripted(vec![]);
+        let mut gov = FakeGov::with(vec![Verdict::Unavailable("store gone".into())]);
+        let err = advance(&mut s, &agent, &mut gov).unwrap_err();
+        assert!(matches!(err, AgentRefusal::Governance(ref w) if w == "store gone"));
+        // An outage is not an answer: the question must still be there when the store comes back.
+        assert!(s.pending_approval.is_some());
+    }
+
+    #[test]
+    fn a_malformed_destructive_proposal_is_corrected_not_killed() {
+        let mut s = Session::new("tidy up", "", 6, false);
+        let agent = scripted(vec![
+            Move::Command(step("rm", json!({ "name": "two words" }))),
+            Move::Command(step("rm", json!({ "name": "notes" }))),
+        ]);
+        let mut gov = FakeGov::always_ask();
+        // Under the OLD flag semantics this session died on the first step (the Approval refusal
+        // pre-empted validation). Now malformation is correctable, and the VALID second proposal
+        // reaches governance as a proper question.
+        match advance(&mut s, &agent, &mut gov).unwrap() {
+            Advance::NeedsApproval { line, .. } => assert_eq!(line, "rm notes"),
+            other => panic!("expected the fixed proposal to ask, got {other:?}"),
+        }
+        assert!(s.corrections[0].refusal.contains("must be one word"));
+        // Only the VALID line was ever put to governance.
+        assert_eq!(&*gov.asked.borrow(), &["rm notes".to_string()][..]);
+    }
+
+    #[test]
+    fn an_approved_session_never_consults_governance() {
+        let mut s = Session::new("tidy up", "", 6, true);
+        let agent = scripted(vec![Move::Command(step("rm", json!({ "name": "notes" })))]);
+        struct MustNotAsk;
+        impl Governor for MustNotAsk {
+            fn judge(&mut self, _line: &str) -> Verdict {
+                panic!("inline consent must not reach the governor");
+            }
+        }
+        let mut gov = MustNotAsk;
+        match advance(&mut s, &agent, &mut gov).unwrap() {
+            Advance::Type(line) => assert_eq!(line, "rm notes"),
+            other => panic!("inline consent types, got {other:?}"),
+        }
     }
 }

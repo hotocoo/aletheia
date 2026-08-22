@@ -490,12 +490,52 @@ fn console_agent(dir: &std::path::Path, request: &str, args: &[String]) {
     }
 
     let driver = console_agent_interpreter(dir, args);
+    // Governance for this turn (ADR-059 on the loop): inline consent when the operator passed
+    // --approve, otherwise THE approval store. The store is opened lazily-in-spirit — a failure to
+    // open it is not fatal here, because a session that never proposes a destructive step must not
+    // die for a store it never needed; the governor carries the named reason instead, and any
+    // destructive step refuses with it rather than typing ungoverned.
+    #[allow(clippy::large_enum_variant)] // one governor lives per process; boxing would be ceremony
+    enum Gov {
+        Inline,
+        /// OWNS its store rather than borrowing one: the governor must outlive this arm's match
+        /// scope, and an owned core keeps the borrow out of the type.
+        Store {
+            core: aletheia::syscore::SysCore,
+        },
+        Broken(String),
+    }
+    impl aletheia::ai::agent::Governor for Gov {
+        fn judge(&mut self, line: &str) -> aletheia::ai::agent::Verdict {
+            match self {
+                Gov::Inline => aletheia::ai::agent::Verdict::Spend,
+                Gov::Store { core } => aletheia::syscore::SysCore::console_governor(
+                    core,
+                    "human:operator",
+                )
+                .judge(line),
+                Gov::Broken(why) => aletheia::ai::agent::Verdict::Unavailable(why.clone()),
+            }
+        }
+    }
+    let mut gov = if approved {
+        eprintln!("governance: inline consent (--approve) — destructive steps record nothing");
+        Gov::Inline
+    } else {
+        match aletheia::syscore::SysCore::open_default(dir) {
+            Ok(core) => {
+                eprintln!("governance: approval store at {}", dir.display());
+                Gov::Store { core }
+            }
+            Err(e) => Gov::Broken(format!("cannot open {}: {}", dir.display(), e.message)),
+        }
+    };
     let corrections_before = session.corrections.len();
     // Timed here rather than inside `advance`, because what an operator waits for is the whole turn
     // — every model call it took, including the ones that were corrected and never typed. A number
     // that counted only the successful call would report a turn as fast precisely when it was slow.
     let started = std::time::Instant::now();
-    let outcome = agent::advance(&mut session, driver.as_ref());
+    let outcome = agent::advance(&mut session, driver.as_ref(), &mut gov);
     let elapsed_ms = started.elapsed().as_millis();
     // A correction is a model proposal that Aletheia refused and re-asked WITHOUT typing anything.
     // It is reported on stderr, never stdout, because stdout is the line the driver types — but it
@@ -529,6 +569,17 @@ fn console_agent(dir: &std::path::Path, request: &str, args: &[String]) {
         Ok(Advance::Done(answer)) => {
             eprintln!("answer: {answer}");
             std::process::exit(10);
+        }
+        Ok(Advance::NeedsApproval { approval_id, line }) => {
+            // Nothing was typed and no budget was spent. The question survives in the transcript;
+            // a human answers it through `aletheiad approvals`, and the SAME command resumes.
+            eprintln!(
+                "approval required [{approval_id}] — `{line}` changes the machine and needs a human"
+            );
+            eprintln!("  answer it:  aletheiad approvals grant {approval_id}");
+            eprintln!("  or refuse:  aletheiad approvals deny {approval_id}");
+            eprintln!("  then re-run this exact command; a grant types its line once.");
+            std::process::exit(7);
         }
         Err(r) => {
             eprintln!("refused: {r}");
