@@ -1,13 +1,37 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-22 (verification infrastructure — every VM gate holds the boot's whole family/count marker map against an expected table and emits a machine-readable GATE-MARKERS-V1 line, ADR-061; before that: networking second slice — UDP, ARP cache, DHCP discovery cross-checking the claimed address, ADR-060)
+**As of:** 2026-08-22 (fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; before that: every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061; networking second slice — UDP, ARP cache, DHCP discovery, ADR-060)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..061`.
 
-## Current wave — the gates count themselves (2026-08-22, ADR-061)
+## Current wave — the device says no (2026-08-22, ADR-062)
+
+ALET-P2-008 closes. The journal's all-or-nothing contract was proved against snapshots taken
+between protocol steps; now the DEVICE ITSELF refuses mid-protocol. `kernel-core/src/faultdev.rs`
+adds `FaultInject<D>: BlockDevice` — a scripted adversary (read/write/flush × allow/refuse) with
+refusal semantics stated once and proved: refused writes mutate nothing, refused reads leave the
+caller's buffer unwritten, refused flushes surface as Err(Device) because a barrier that did not
+hold must never be reported as durability.
+
+* **A refusal at EVERY position of commit** (8 positions of a two-update transaction, exhaustively)
+  ends in exactly one promised world — ALL-old or ALL-new, never mixed — and WHICH world follows the
+  pivot rule: pre-commit-record-flush refusals end old with nothing replayed; post-pivot refusals
+  end new through recovery.
+* **Recovery is swept across its own protocol too** (record read, payload reads, home writes, final
+  flush): every refusal either surfaces or lands consistently, and a RETRY on healthy hardware
+  completes — the idempotence claim is load-bearing and tested, not asserted.
+* Boundary sweep proves the journal refuses to aim at reserved blocks and out-of-range edges BY
+  NAME over the whole index space; script exhaustion restores pass-through byte-for-byte.
+
+Measured: `kernel-core` **437 tests / 35 suites** green, clippy `-D warnings` clean, fmt clean.
+Register rollup 61 resolved / 25 open / 8 deferred, PASS. Scope: single-threaded scripting; the
+live virtio-blk driver's partial-IO and reset/recovery depth stays open under ALET-P1-019 (slice
+delivered, row annotated).
+
+## Previous wave — the gates count themselves (2026-08-22, ADR-061)
 
 ALET-P2-007 closes. Every kernel suite already ended with a human sentence — `[net] ALL 9 NETWORK
 INVARIANTS HOLD` — and every gate grepped its sentences one by one. Prose greps answer "did THIS

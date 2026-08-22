@@ -35,6 +35,7 @@ pub mod device;
 pub mod dhcp;
 pub mod dma;
 pub mod faultclass;
+pub mod faultdev;
 pub mod fbcon;
 pub mod font8x8;
 pub mod frameown;
