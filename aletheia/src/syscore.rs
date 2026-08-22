@@ -17,6 +17,29 @@ use std::collections::{HashMap, HashSet};
 /// system. Effect authority already attenuates to nothing down a chain; this bounds resource use.
 const MAX_SPAWN_DEPTH: usize = 8;
 
+/// The agent loop's view of this store (ADR-059 on `ai::agent`): one subject's destructive steps,
+/// judged against the SAME records the pipeline and the single-step planner write.
+pub struct ConsoleGovernor<'a> {
+    core: &'a mut SysCore,
+    subject: String,
+}
+
+impl crate::ai::agent::Governor for ConsoleGovernor<'_> {
+    fn judge(&mut self, line: &str) -> crate::ai::agent::Verdict {
+        use crate::ai::agent::Verdict;
+        if self.core.take_console_approval(&self.subject, line).is_ok() {
+            return Verdict::Spend;
+        }
+        match self
+            .core
+            .request_console_approval(&self.subject, line, tools::Risk::Destructive)
+        {
+            Ok(pa) => Verdict::Ask { approval_id: pa.id },
+            Err(e) => Verdict::Unavailable(e.message),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
     Created,
@@ -788,6 +811,17 @@ impl SysCore {
     /// is an audit-grade read (`list_pending_approvals` gates it with `audit.read`).
     pub fn approvals_snapshot(&self) -> Vec<PendingApproval> {
         self.approvals.snapshot()
+    }
+
+    /// ADR-059 applied to the AGENT loop: this store acting as the loop's governor. Spend a grant
+    /// if one covers the line; otherwise record a pending ask; an unreachable store is a NAMED
+    /// verdict, never a silent pass-through — typing ungoverned is the one outcome worse than
+    /// refusing.
+    pub fn console_governor<'a>(core: &'a mut SysCore, subject: &str) -> ConsoleGovernor<'a> {
+        ConsoleGovernor {
+            core,
+            subject: subject.to_string(),
+        }
     }
 
     // --- console approvals (ADR-015 applied to the console surface; ALET-P2-046) ---

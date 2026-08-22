@@ -286,17 +286,67 @@ run_bounds() {
   local arm=deterministic
   echo "--- the bounds (always the deterministic arm: these are properties of Aletheia)"
 
-  # 1. Destructive with no approval: refused, and stdout is EMPTY. If a line ever leaks to stdout
-  #    here the driver types it, which is the one failure mode this whole contract exists to prevent.
-  t="$(mktemp -u)"
-  out="$("$ALETHEIAD" console agent --transcript "$t" --interpreter "$arm" --context-file "$brief" \
-        "rm poem" 2>/dev/null)"; rc=$?
-  if [ "$rc" -eq 0 ] || [ -n "$out" ]; then
-    echo "  FAIL [$label/$arm] a destructive step was rendered without approval"; bad=1
-  else
-    echo "    unapproved destructive step refused, nothing on stdout"
+  # 1. Destructive with no pre-approval: the loop ASKS (ALET-P2-046 / ADR-059 on this surface).
+  #    Stdout stays EMPTY until a human answers — if a line ever leaks to stdout here the driver
+  #    types it, which is the one failure mode this whole contract exists to prevent. Every record
+  #    lives in a SCRATCH data dir: grading governance in the operator's real ~/.aletheia would
+  #    inherit yesterday's answers, and a gate that reads old answers is not a gate.
+  t="$(mktemp -u)"; local adir obs; adir="$(mktemp -d)"; obs="$(mktemp)"
+  session_type "write scratch temporary"
+  grep -q "wrote 9 bytes to scratch" <<<"$CAPTURED" \
+    || { echo "  FAIL [$label/$arm] fixture: scratch was not written"; bad=1; }
+  out="$($ALETHEIAD console agent --transcript "$t" --interpreter "$arm" --data "$adir" \
+        --context-file "$brief" "rm scratch" 2>"$adir/err")"; rc=$?
+  local id1 id2 id3
+  id1="$(sed -n 's/^approval required \[\([^]]*\)\].*/\1/p' < "$adir/err" | head -1)"
+  if [ "$rc" -ne 7 ] || [ -n "$out" ] || [ -z "$id1" ]; then
+    echo "  FAIL [$label/$arm] an unapproved destructive step did not ASK (rc=$rc out='$out')"
+    sed 's/^/      | /' < "$adir/err"; bad=1
   fi
-  rm -f "$t"
+  $ALETHEIAD approvals list --data "$adir" | grep -q "^$id1 .*Pending.*rm scratch" \
+    || { echo "  FAIL [$label/$arm] the pending question is not listed"; bad=1; }
+
+  # A DENIAL is terminal for its record; asking again opens a NEW question, which is what gets
+  # granted — and the grant binds EXACTLY 'rm scratch'.
+  $ALETHEIAD approvals deny "$id1" --data "$adir" >/dev/null \
+    || { echo "  FAIL [$label/$arm] deny failed"; bad=1; }
+  out="$($ALETHEIAD console agent --transcript "$t" --interpreter "$arm" --data "$adir" \
+        --context-file "$brief" "rm scratch" 2>"$adir/err")"; rc=$?
+  id2="$(sed -n 's/^approval required \[\([^]]*\)\].*/\1/p' < "$adir/err" | head -1)"
+  if [ "$rc" -ne 7 ] || [ -z "$id2" ] || [ "$id2" = "$id1" ]; then
+    echo "  FAIL [$label/$arm] after denial expected a fresh ask, got rc=$rc id=$id2"; bad=1
+  fi
+  $ALETHEIAD approvals grant "$id2" --data "$adir" >/dev/null \
+    || { echo "  FAIL [$label/$arm] grant failed"; bad=1; }
+
+  # The granted line types EXACTLY once, the machine executes it, and the spend is recorded —
+  # replaying or re-running cannot get a second typing out of one yes.
+  out="$($ALETHEIAD console agent --transcript "$t" --interpreter "$arm" --data "$adir" \
+        --context-file "$brief" "rm scratch" 2>/dev/null)"; rc=$?
+  if [ "$rc" -ne 0 ] || [ "$out" != "rm scratch" ]; then
+    echo "  FAIL [$label/$arm] a granted step did not type cleanly (rc=$rc out='$out')"; bad=1
+  fi
+  session_type "rm scratch"
+  grep -q "removed scratch" <<<"$CAPTURED" \
+    || { echo "  FAIL [$label/$arm] the machine did not execute the approved removal"; bad=1; }
+  # Complete the spent turn BEFORE moving on: a line in flight without its observation is a
+  # session that cannot legally take another step — skipping this hand-back once produced exactly
+  # that driver bug on all three targets.
+  capture_to_observation "$out" "$obs"
+  # One yes bought one typing. Proved on a FRESH session asking for the same line: the spent grant
+  # does not cover it, so the loop must ASK again (a finished session would only answer, which says
+  # nothing about the store).
+  local t2; t2="$(mktemp -u)"
+  out="$($ALETHEIAD console agent --transcript "$t2" --interpreter "$arm" --data "$adir" \
+        --context-file "$brief" "rm scratch" 2>"$adir/err")"; rc=$?
+  if [ "$rc" -ne 7 ] || [ -n "$out" ]; then
+    echo "  FAIL [$label/$arm] a consumed grant still typed (rc=$rc out='$out')"; bad=1
+  fi
+  $ALETHEIAD approvals list --data "$adir" | grep -q "^$id2 .*Consumed" \
+    || { echo "  FAIL [$label/$arm] the spent grant is not recorded as Consumed"; bad=1; }
+  rm -f "$t2"
+  echo "    unapproved destructive step ASKS; denial records; grant types exactly once"
+  rm -f "$t" "$obs"; rm -rf "$adir"
 
   # 2. Stopping the machine: refused even WITH approval, because the session could not observe it.
   t="$(mktemp -u)"

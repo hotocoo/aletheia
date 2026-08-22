@@ -50,11 +50,21 @@ exactly once (REQ-AI-006, ADR-059).
   no-registry fallback only), and both tests are hermetic: consistency-with-discovery, and
   constants-vs-shipped-manifest.
 
-**Stated scope:** the AGENT loop (`console agent`, ADR-054) still carries `approved` as a session
-flag — wiring this lifecycle per destructive step inside the loop is registered follow-on. No expiry
-by time travel (TTL inherited unchanged). Entirely the hosted side: no inference and no governance
-engine entered kernel space. `aletheia`: **112 lib tests** + 5 integration tests passed; clippy `-D
-warnings` clean; traceability 106 requirements — 96 delivered / 6 partial / 4 deferred, PASS.
+**Follow-on closed in the same wave (ADR-059 on the agent loop):** `agent::advance` now consults a
+`Governor` seam instead of a session flag. An unapproved session's destructive proposal ASKS - exit
+7, id on stderr, and the question lives IN the transcript so it survives the process that asked it.
+On resume the store answers before the model is consulted: a grant is spent at typing time exactly
+once; a denial becomes a Correction to the model while insisting on an already-refused line stays
+terminal overreach (`denied_lines`); an unreachable store refuses by name rather than typing
+ungoverned; `--approve` remains inline consent that says it recorded nothing. Nine new loop tests +
+`console-agent-e2e.sh` bound 1 replaced its refuse-only check with the full dance against a live
+machine (ask -> listed Pending -> deny -> fresh ask -> grant -> typed once -> Consumed -> spent
+types nothing), in a scratch data dir.
+
+**Stated scope:** no expiry by time travel (TTL inherited unchanged). Entirely the hosted side: no
+inference and no governance engine entered kernel space. `aletheia`: **121 lib tests** + integration
+suites passed; clippy `-D warnings` clean; traceability 106 requirements - 96 delivered / 6 partial /
+4 deferred, PASS.
 
 ## Previous wave — the console learns to draw (2026-08-22, second slice)
 
