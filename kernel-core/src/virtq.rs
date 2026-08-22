@@ -38,6 +38,9 @@ struct Desc {
     next: u16,
 }
 
+/// The descriptor has a successor ([`Virtqueue::add_chain`] links request to response with it).
+pub const DESC_F_NEXT: u16 = 1;
+
 /// The buffer is device-WRITABLE — the device fills it (a receive buffer).
 pub const DESC_F_WRITE: u16 = 2;
 
@@ -163,6 +166,75 @@ impl Virtqueue {
         Ok(())
     }
 
+    /// Publish a TWO-DESCRIPTOR CHAIN — `req` (driver-written; the device only reads it) followed by
+    /// `resp` (device-writable) — and offer its head to the device. A virtio control request is ONE
+    /// buffer in the device's eyes: a readable request half followed by a writable response half,
+    /// linked by the descriptors' `next` field. Offering the halves separately would be offering two
+    /// requests, neither of which is one — so devices whose protocol is request/response shaped
+    /// (virtio-gpu's control queue, REQ-GFX-001) need this rather than [`Virtqueue::add`].
+    ///
+    /// Both halves are checked against this queue's DMA gate BEFORE anything is written, so a refused
+    /// chain leaves no partial state behind — a half-published chain is worse than none.
+    ///
+    /// [`Virtqueue::poll_used`] reports the chain's HEAD (`req_slot`) as the completing descriptor,
+    /// and `written` covers the bytes the device wrote across the whole chain's writable halves.
+    ///
+    /// # Safety
+    /// Both slots must be `< len()`, distinct, and idle; the addresses must be identity-mapped
+    /// physical memory the caller owns until the completion is harvested.
+    pub unsafe fn add_chain<H: VirtioHal>(
+        &self,
+        req_slot: u16,
+        req_addr: u64,
+        req_len: u32,
+        resp_slot: u16,
+        resp_addr: u64,
+        resp_len: u32,
+    ) -> Result<(), DmaFault> {
+        if req_slot >= self.qsize || resp_slot >= self.qsize || req_slot == resp_slot {
+            return Err(DmaFault::Malformed);
+        }
+        // THE GATE, for both halves: an address nobody registered never becomes a descriptor —
+        // including the device-writable half, which is the direction that corrupts driver memory.
+        if !self.dma.visible(req_addr as usize, req_len as usize)
+            || !self.dma.visible(resp_addr as usize, resp_len as usize)
+        {
+            return Err(DmaFault::Malformed);
+        }
+        let size = core::mem::size_of::<Desc>();
+        // SAFETY: slot bounds checked immediately above; the caller owns the ring frame exclusively.
+        let req = (self.desc + req_slot as usize * size) as *mut Desc;
+        let resp = (self.desc + resp_slot as usize * size) as *mut Desc;
+        // The request half CARRIES the NEXT flag: without it the device reads a terminal,
+        // out-only descriptor and never reaches the response half at all (found live: QEMU
+        // answered GET_DISPLAY_INFO by writing ZERO bytes — "response size incorrect 0 vs 408").
+        write_volatile(
+            req,
+            Desc {
+                addr: req_addr,
+                len: req_len,
+                flags: DESC_F_NEXT,
+                next: resp_slot,
+            },
+        );
+        write_volatile(
+            resp,
+            Desc {
+                addr: resp_addr,
+                len: resp_len,
+                flags: DESC_F_WRITE,
+                next: 0,
+            },
+        );
+        // The avail ring carries the chain's HEAD; the device walks `next` from there.
+        let idx_ptr = (self.avail + 2) as *mut u16;
+        let ring = (self.avail + 4) as *mut u16;
+        let cur = read_volatile(idx_ptr);
+        write_volatile(ring.add((cur % self.qsize) as usize), req_slot);
+        H::barrier(); // the chain is fully written before the index that publishes it
+        write_volatile(idx_ptr, cur.wrapping_add(1));
+        Ok(())
+    }
     /// Register a buffer this queue will hand to the device. Must be called before [`Virtqueue::add`]
     /// names that address, which is what makes the gate above meaningful rather than decorative.
     pub fn register_buffer(

@@ -54,7 +54,8 @@ OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
-  -netdev user,id=n0 -device virtio-net-device,netdev=n0)"
+  -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -device virtio-gpu-device)"
 CODE=$?
 
 echo "----------------------------------------"
@@ -81,6 +82,8 @@ echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: files
 # The virtio leg proves the namespace over the REAL device too: 5 driver invariants + the 12 fs ones.
 echo "$OUT" | grep -q "ALL 21 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk count wrong (driver + filesystem over the real device)"; fail=1; }
 echo "$OUT" | grep -q "ALL 5 NETWORK INVARIANTS HOLD" || { echo "FAIL: network invariants marker missing (REQ-NET-001; NIC attached, suite must run)"; fail=1; }
+# Graphics over the REAL device (REQ-GFX-001): display info + the whole 2D resource lifecycle.
+echo "$OUT" | grep -q "ALL 13 VIRTIO-GPU INVARIANTS HOLD" || { echo "FAIL: virtio-gpu invariants marker missing (REQ-GFX-001; GPU attached, suite must run)"; fail=1; }
 echo "$OUT" | grep -q "ALL 10 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
@@ -105,7 +108,8 @@ OUT2="$(perl -e 'alarm 120; exec @ARGV or die' \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
-  -netdev user,id=n0 -device virtio-net-device,netdev=n0)"
+  -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -device virtio-gpu-device)"
 CODE2=$?
 echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
 echo "second boot exit code: $CODE2"

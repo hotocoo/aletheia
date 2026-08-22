@@ -14,6 +14,7 @@
 //! (`scripts/vm-e2e.sh`) attaches a 1 MiB disk and asserts the invariant marker.
 use kernel_core::virtioblk::{self, InitReport, MmioLayout, MmioTransport, VirtioHal};
 use kernel_core::virtionet::{self, VirtioNet, VIRTIO_ID_NET};
+use kernel_core::virtiogpu::{self, VirtioGpu, VIRTIO_ID_GPU};
 
 use crate::frames;
 
@@ -160,5 +161,28 @@ pub fn network_device() -> Option<Result<Net, virtionet::NetError>> {
         };
         kprintln!("[net] virtio-net @ {:#x}", base);
         Some(VirtioNet::init(transport))
+    }
+}
+
+/// This target's concrete GPU device (REQ-GFX-001): the shared driver, same transport seam.
+pub type Gpu = VirtioGpu<Aarch64Virtio, MmioTransport>;
+
+/// Bring up a virtio-gpu device if one is attached. `None` = no GPU (the graceful-skip path), so
+/// a boot without `-device virtio-gpu-device` still passes; the VM gate attaches one and requires
+/// the marker.
+pub fn graphics_device() -> Option<Result<Gpu, virtiogpu::GpuError>> {
+    // SAFETY: the slot addresses are mapped device memory; `new_for` refuses anything that is not
+    // a modern GPU device, and the frames handed to the device are identity-mapped and ours.
+    unsafe {
+        let base = virtioblk::probe_nth_kind(&LAYOUT, VIRTIO_ID_GPU, 0)?;
+        let transport = match MmioTransport::new_for(base, VIRTIO_ID_GPU) {
+            Ok(t) => t,
+            Err(e) => {
+                kprintln!("[gpu] transport setup failed: {}", e);
+                return Some(Err(virtiogpu::GpuError::Unsupported("transport")));
+            }
+        };
+        kprintln!("[gpu] virtio-gpu @ {:#x}", base);
+        Some(VirtioGpu::init(transport))
     }
 }

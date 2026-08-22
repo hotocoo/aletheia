@@ -797,6 +797,44 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         },
     }
 
+    // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu function, the 2D resource
+    // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
+    // asking the device to flush a resource it already destroyed, so the lifecycle proof is the
+    // DEVICE's own error grammar, not our bookkeeping.
+    kprintln!("");
+    kprintln!("--- graphics selftests (virtio-gpu over PCI: display info + 2D resource lifecycle) ---");
+    match virtio::graphics_device() {
+        None => kprintln!("[gpu] no graphics device attached (skipped)"),
+        Some(Err(e)) => {
+            kprintln!("[gpu] device init FAILED: {:?}", e);
+            ActiveHal::exit(300);
+        }
+        Some(Ok(mut gpu)) => {
+            // One boot-log line of fact before the suite: what the machine says it will display.
+            // SAFETY: the device is live and owned here; GET_DISPLAY_INFO is read-only.
+            match unsafe { gpu.get_display_info() } {
+                Ok(scans) => {
+                    for (i, s) in scans.iter().enumerate().filter(|(_, s)| s.enabled) {
+                        kprintln!("[gpu] display {}: {}x{}", i, s.rect.width, s.rect.height);
+                    }
+                }
+                Err(e) => kprintln!("[gpu] display info error: {:?}", e),
+            }
+            match kernel_core::virtiogpu::gpu_suite(gpu, |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[gpu] ALL {} VIRTIO-GPU INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!("[gpu] FAILED at gpu invariant {}: {}", idx, name);
+                    ActiveHal::exit(301 + idx as i32);
+                }
+            }
+        }
+    }
     // The interactive console (REQ-CON-001, ADR-044): the subsystem that lets the machine stay up
     // and answer a human, proved here the same way everything else is — a scripted session against
     // a real namespace, so the gate covers the code an interactive boot runs.

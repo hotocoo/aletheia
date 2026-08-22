@@ -1,13 +1,60 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-21 (overload-audit fixes — the P0 quadratic drain, the degenerate-input backdoor, and the inverted band, closed at both ends of the repo boundary)
+**As of:** 2026-08-22 (graphics first slice — the virtio-gpu control path, live on all three targets)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
 
-## Current wave — the audit's five defects, four closed and one honestly not (2026-08-21)
+## Current wave — the machine learns to face a display (2026-08-22)
+
+The console is the part of this system a person touches, and until this wave it existed only as
+characters on a serial wire. The graphics/compositor gap (**ALET-P2-021**) was the largest remaining
+"an OS you can sit in front of" hole, and this wave delivers its first slice the way networking delivered
+its: reuse the one substrate, add the device kind as data, and prove the path against something that
+ANSWERS (REQ-GFX-001, ADR-057).
+
+* **The substrate learned chains.** A virtio-gpu control request is a TWO-descriptor chain — a
+  driver-written request half followed by a device-WRITABLE response half — which `Virtqueue::add`
+  deliberately could not express. `Virtqueue::add_chain` publishes the linked pair with both halves
+  through the queue's DMA gate before anything is written, so a refused chain leaves no partial state.
+  The first live boot found the exact bug the design invites: without `F_NEXT` on the request half, QEMU
+  read a terminal out-only descriptor and answered by writing ZERO bytes (`response size incorrect 0 vs
+  408` in its own log). The lesson lives in the code, next to the flag.
+* **A driver that declines everything it cannot prove.** `kernel-core/src/virtiogpu.rs` negotiates
+  VERSION_1 and nothing else — VIRGL, EDID and blob resources are refused at negotiation, not ignored.
+  A local resource table validates every geometry and rect argument (extent/area bounds, containment,
+  rid 0, scanout range, detach-before-unref) BEFORE any descriptor exists, and the suite proves that
+  silence is real by comparing a device-traffic counter across whole refusal batteries — sixteen invalid
+  requests, zero device commands, counted.
+* **The lifecycle proof is the device's own error grammar.** GET_DISPLAY_INFO proves the response path;
+  only an ERROR proves the device PARSES commands rather than echoing them. After DETACH + UNREF, the
+  SAME flush is sent again through a documented suite-only probe and the device itself answers
+  ERR_INVALID_RESOURCE_ID — both for an id never created and for the id just destroyed. An echo would
+  have said OK twice.
+* **Geometry is pinned from measurement, not spec recall.** The first boot reported scanout 0 as
+  1280x800 enabled — not the 1024x768 the author "knew". The invariant pins the measured fact and says
+  at the pin why: a silent change there is a different machine than the one these gates qualify.
+* **One suite, three targets, two buses.** aarch64 and RISC-V drive virtio-mmio; x86-64 drives
+  virtio-pci (`find_virtio_gpu_nth`, modern id 0x1050). `ALL 13 VIRTIO-GPU INVARIANTS HOLD`, boot
+  failing `301 + i`, required by all three VM gates with the device attached; VirtualBox lists the
+  family SKIP by name (no virtio-gpu). Host tests pin the wire layout field-for-field against the UAPI
+  header — a typo'd offset is a conversation with nobody — and the fail-closed display-info parser
+  (a malformed enabled flag poisons the whole answer).
+
+**Stated scope:** no visible pixels yet — transferred pixels land on the host surface, which under
+`-display none` is nowhere; the next slice renders text into a real framebuffer. No cursor queue, no
+interrupt-driven completion, backing pages stay DMA-registered for the queue lifetime (bounded by
+MAX_REGIONS; revocation-on-detach is named follow-on). The register row stays OPEN with the slice
+delivered, exactly like networking before its stack. `docs/MATURITY.md` grades the graphics control path
+**I**mplemented — and its networking row, stale at "nothing built" since the ADR-041 wave, now says what
+is actually proved.
+
+`kernel-core`: **385 tests passed** (33 suites — the new `virtiogpu` host proofs among them); all three
+VM gates re-run green with the GPU attached.
+
+## Previous wave — the audit's five defects, four closed and one honestly not (2026-08-21)
 
 The 2026-08-17 wave ended with five defects a measurement had found and a register had named. This
 one closes all five — four by fixing them (**ALET-P3-004**, **ALET-P3-006**, **ALET-P3-007**,
@@ -73,7 +120,7 @@ under measurement is the register working, not failing.
   container damage rather than misread as a bad image), and the MAC still authenticates the
   pre-compression image — tampering trips one layer or the other, refused by name either way.
 
-`kernel-core`: **374 tests passed**; `aletheia-ml`: 20 passed; verification numbers above are from
+`kernel-core`: **385 tests passed**; `aletheia-ml`: 20 passed; verification numbers above are from
 the bench binary the audit shipped, re-run against the fixed tree.
 
 ## Previous implementation wave — the model stops being installed and starts being consulted (2026-08-13)
@@ -2935,12 +2982,12 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 322 passed (28 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+(cd ../kernel-core && cargo test)  # 385 passed (33 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 virtual-memory + 24 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 24 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 virtual-memory + 24 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 13 virtio-gpu + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 24 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 13 virtio-gpu + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 

@@ -62,6 +62,7 @@ pub mod taskfeat;
 pub mod teardown;
 pub mod usermem;
 pub mod virtioblk;
+pub mod virtiogpu;
 pub mod virtionet;
 pub mod virtq;
 pub mod vmaddr;

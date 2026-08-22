@@ -59,6 +59,8 @@ const DEVICE_BLK_TRANSITIONAL: u16 = 0x1001;
 /// not a second driver framework (ADR-041).
 const DEVICE_NET_MODERN: u16 = 0x1041;
 const DEVICE_NET_TRANSITIONAL: u16 = 0x1000;
+/// virtio-gpu's PCI id: modern only (0x1040 | 16). QEMU ships no transitional GPU.
+const DEVICE_GPU_MODERN: u16 = 0x1050;
 
 /// PCI capability ids and the virtio capability's `cfg_type` values (VIRTIO 1.1 §4.1.4).
 const CAP_ID_VENDOR: u8 = 0x09;
@@ -210,6 +212,14 @@ pub unsafe fn find_virtio_blk_nth(nth: usize) -> Option<Bdf> {
 /// Touches the PCI configuration ports.
 pub unsafe fn find_virtio_net_nth(nth: usize) -> Option<Bdf> {
     find_virtio_nth(&[DEVICE_NET_MODERN, DEVICE_NET_TRANSITIONAL], nth)
+}
+
+/// Scan bus 0 for the `nth` virtio GPU function (REQ-GFX-001).
+///
+/// # Safety
+/// Touches the PCI configuration ports.
+pub unsafe fn find_virtio_gpu_nth(nth: usize) -> Option<Bdf> {
+    find_virtio_nth(&[DEVICE_GPU_MODERN], nth)
 }
 
 /// Scan bus 0 for the `nth` virtio function whose device id is one of `ids`.
