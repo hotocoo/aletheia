@@ -248,6 +248,86 @@ pub fn plan_lines(
     Ok((lines, raw))
 }
 
+/// What planning decided about a request for a LIVE operator (ALET-P2-046): either lines that
+/// carry no governance question, or the one destructive line a human must answer for before
+/// anything is typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GovernedPlan {
+    /// Every step is safe — type them.
+    Lines(Vec<String>),
+    /// A destructive step: the EXACT line it would type (validated, control-byte-checked,
+    /// length-bounded — the same rendering the typed line would have), plus its risk class. The
+    /// approval decision itself belongs to the Core's policy engine and approval store; this value
+    /// only carries the question to them.
+    NeedsApproval {
+        line: String,
+        risk: crate::tools::Risk,
+    },
+}
+
+/// Interpret a request into console lines WITH the governance boundary made explicit.
+///
+/// `plan_lines` folds approval into a boolean and refuses a destructive step out of hand — right
+/// for a benchmark arm, silent for an operator. This variant hands the destructive line BACK
+/// instead of refusing it, so the caller can route it through the Core's pending-approval surface
+/// and a human can answer. Validation order is preserved: a MALFORMED destructive step is refused
+/// for its malformation here, never laundered into an approval request for a line that could not
+/// have been typed anyway. Rendering a destructive step with `render(.., true)` below does not
+/// decide anything — the bool means "allowed to SEE the rendered line", and the line reaches
+/// stdout only after the approval store says yes.
+pub fn plan_lines_governed(
+    provider: &dyn ModelProvider,
+    subject: &str,
+    request: &str,
+    context: &str,
+) -> Result<GovernedPlan, String> {
+    let intent = Intent {
+        subject: subject.to_string(),
+        verb: Verb::Raw {
+            text: request.to_string(),
+        },
+    };
+    let raw = provider
+        .interpret_with_context(&intent, context)
+        .map_err(|e| format!("interpretation failed: {e:?}"))?;
+    let plan: Plan = serde_json::from_str(&raw)
+        .map_err(|e| format!("plan parse: {e} — model said: {}", elide(&raw)))?;
+    if plan.steps.is_empty() {
+        return Err(format!("plan has no steps — model said: {}", elide(&raw)));
+    }
+    let mut safe_lines = Vec::new();
+    let mut destructive: Option<(String, crate::tools::Risk)> = None;
+    for s in &plan.steps {
+        let meta = crate::console_ops::lookup(&s.op)
+            .ok_or_else(|| format!("no such console command: {}", s.op.escape_debug()))?;
+        // Render FIRST with the answer the step's own risk requires: safe steps render under the
+        // plain validator; a destructive step renders once to learn the line a human would be
+        // answering for. A malformed destructive step fails HERE — malformation, not overreach.
+        let needs_human = matches!(meta.risk, crate::tools::Risk::Destructive);
+        let rendered = crate::console_ops::render(&s.op, &s.args, true)
+            .map_err(|r| format!("{r} — model said: {}", elide(&raw)))?;
+        if needs_human {
+            // The console contract is EXACTLY ONE command per request (ADR-053). A plan mixing a
+            // destructive step into others would make "what did the human answer for?"
+            // unanswerable, so it is refused rather than partially governed.
+            if plan.steps.len() > 1 {
+                return Err(
+                    "a destructive command must be the only step in a plan — one request, one \
+                     command, one human answer"
+                        .into(),
+                );
+            }
+            destructive = Some((rendered, meta.risk));
+        } else {
+            safe_lines.push(rendered);
+        }
+    }
+    Ok(match destructive {
+        Some((line, risk)) => GovernedPlan::NeedsApproval { line, risk },
+        None => GovernedPlan::Lines(safe_lines),
+    })
+}
+
 /// One line of model output, bounded. A 2 KB blob in a benchmark table is unreadable, and the first
 /// 160 bytes have always been enough to see which key it invented.
 fn elide(raw: &str) -> String {
@@ -540,6 +620,50 @@ mod tests {
             let row = run_case(&DeterministicConsole, case, case.literal);
             assert!(row.outcome.is_ok(), "{}: {:?}", case.literal, row.outcome);
         }
+    }
+
+    /// The governed planner (ALET-P2-046): safe requests type; a destructive request comes back as
+    /// the EXACT line a human must answer for — the same rendering that would have been typed.
+    #[test]
+    fn the_governed_planner_splits_safe_from_destructive() {
+        // Safe: lines, ready to type.
+        match plan_lines_governed(&DeterministicConsole, "human:operator", "ls", "") {
+            Ok(GovernedPlan::Lines(lines)) => assert_eq!(lines, vec!["ls".to_string()]),
+            other => panic!("a safe request plans to lines, got {other:?}"),
+        }
+        // Destructive: a QUESTION, carrying the validated exact line.
+        match plan_lines_governed(
+            &DeterministicConsole,
+            "human:operator",
+            "rm notes",
+            "",
+        ) {
+            Ok(GovernedPlan::NeedsApproval { line, risk }) => {
+                assert_eq!(line, "rm notes");
+                assert_eq!(risk, crate::tools::Risk::Destructive);
+            }
+            other => panic!("a destructive request asks, got {other:?}"),
+        }
+        // The question carries a VALIDATED line: a malformed one is refused for its MALFORMATION
+        // before anyone is asked. The keyword control arm cannot produce a malformed rm (it maps
+        // one word per argument), so a scripted provider hands over the bad plan directly.
+        struct FixedPlan;
+        impl ModelProvider for FixedPlan {
+            fn name(&self) -> &str {
+                "fixed-plan"
+            }
+            fn healthy(&self) -> bool {
+                true
+            }
+            fn interpret(&self, _intent: &Intent) -> Result<String, ModelError> {
+                Ok(json!({"steps":[{"op":"rm","args":{"name":"two words"}}]}).to_string())
+            }
+        }
+        let err = plan_lines_governed(&FixedPlan, "human:operator", "remove the object", "")
+            .unwrap_err();
+        assert!(err.contains("must be one word"), "got: {err}");
+        // And an unknown command never becomes an approval question.
+        assert!(plan_lines_governed(&DeterministicConsole, "h:o", "format disk", "").is_err());
     }
 
     /// The tools ARE the menu now, so this is where the kernel table has to show up — every command

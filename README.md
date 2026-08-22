@@ -473,8 +473,24 @@ printf '  objects:\n    30 manifesto\n    12 poem\n' > /tmp/brief.txt
   --context-file /tmp/brief.txt "show me the poem"
 ```
 
-It prints one console line and nothing else, validated against the kernel's own command table. Or ask
-it for a whole session, feeding the console's reply back as the observation:
+It prints one console line and nothing else, validated against the kernel's own command table. A
+**destructive** request is different: it does not type and it does not refuse — it ASKS. The command
+exits `7` with an approval id on stderr, the pending question is recorded durably in the Core's
+approval store (ADR-015 applied to the console; ADR-059), and a human answers before anything is
+typed — once:
+
+```bash
+./aletheia/target/release/aletheiad console plan --interpreter model \
+  --context-file /tmp/brief.txt "remove the poem"        # exit 7, id on stderr
+./aletheia/target/release/aletheiad approvals list       # see the question
+./aletheia/target/release/aletheiad approvals grant <id> # or `deny` — both are records
+./aletheia/target/release/aletheiad console plan --interpreter model \
+  --context-file /tmp/brief.txt "remove the poem"        # now prints `rm poem`, exactly once
+```
+
+A yes binds to EXACTLY its line (`rm poem` says nothing about `rm manifesto`), is consumed at typing
+time, and cannot survive replay. Or ask for a whole session, feeding the console's reply back as the
+observation:
 
 ```bash
 T=/tmp/session.json

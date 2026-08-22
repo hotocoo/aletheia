@@ -5,7 +5,7 @@ use crate::agents::Agent;
 use crate::capabilities::{CapEngine, Constraints, Decision, Scope, StoredCapability, Target};
 use crate::domain::*;
 use crate::intelligence::{DeterministicRuntime, ModelRuntime};
-use crate::intent_action::{parse_plan, validate_plan, Intent, Step, Trace};
+use crate::intent_action::{parse_plan, validate_plan, Intent, Step, Trace, Verb};
 use crate::policy::{ApprovalState, ApprovalStore, ApprovalVerdict, PendingApproval, PolicyEngine};
 use crate::storage::Store;
 use crate::tools;
@@ -783,6 +783,160 @@ impl SysCore {
         self.approvals.get(id).cloned()
     }
 
+    /// Every approval record, any state — the operator CLI's `approvals list`. Deliberately NOT on
+    /// the service boundary: pending approvals name subjects and bound intents, and that listing
+    /// is an audit-grade read (`list_pending_approvals` gates it with `audit.read`).
+    pub fn approvals_snapshot(&self) -> Vec<PendingApproval> {
+        self.approvals.snapshot()
+    }
+
+    // --- console approvals (ADR-015 applied to the console surface; ALET-P2-046) ---
+    //
+    // A destructive CONSOLE line is governed by the same two independent axes as everything else —
+    // the console registry classifies the risk (the hosted mirror of the kernel's own command
+    // table), and THIS store records the human's answer against the exact line. The lifecycle:
+    //
+    //   request_console_approval   the planner asks: a pending approval is recorded, durable,
+    //                              IDEMPOTENT per (subject, line) so re-asking mints no duplicates
+    //   resolve_console_approval   a human grants or denies it (denial is also a record)
+    //   take_console_approval      the driver, AT TYPING TIME, spends a grant on its one line —
+    //                              once; the spent grant can never authorize a second line
+    //
+    // These three are LOCAL-OPERATOR operations and say so: `aletheiad` already runs with the
+    // operator's own authority over this data directory (it can rewrite the store file), while the
+    // SERVICE boundary (`service.rs`) stays the capability-checked path for untrusted clients —
+    // which is exactly why these methods are deliberately NOT exposed through it. What they buy is
+    // not authentication of the local human; it is that no destructive line is TYPED without a
+    // recorded human yes bound to that exact line, in an audit log that survives restart.
+
+    /// Record (or find) the pending approval for one console line. The verdict comes from THE
+    /// policy engine — the same `evaluate` every other surface answers to — so a future policy
+    /// change applies here without a second implementation drifting into existence.
+    pub fn request_console_approval(
+        &mut self,
+        subject: &str,
+        line: &str,
+        risk: tools::Risk,
+    ) -> Result<PendingApproval> {
+        // Idempotent ask: an identical pending request IS the answer, and a second record would
+        // let one line accumulate grants it did not earn.
+        if let Some(pa) = self.approvals.snapshot().into_iter().find(|pa| {
+            pa.state == ApprovalState::Pending
+                && !pa.is_expired(now())
+                && pa.subject == subject
+                && matches!(&pa.intent.verb, Verb::Console { line: l } if l == line)
+        }) {
+            return Ok(pa);
+        }
+        let intent = Intent {
+            subject: subject.to_string(),
+            verb: Verb::Console {
+                line: line.to_string(),
+            },
+        };
+        match self.policy.evaluate(&Decision::Allow, risk) {
+            ApprovalVerdict::NotRequired => Err(AlethError::validation(
+                "approval requested for a line policy does not gate",
+            )),
+            ApprovalVerdict::Required { reason } => {
+                Ok(self.record_pending_approval(&intent, &reason))
+            }
+        }
+    }
+
+    /// A human resolves one console approval. Granting executes NOTHING here — the core cannot
+    /// type; execution happens when the driver spends the grant at the machine. Denying records
+    /// itself: a refused line leaves evidence, not silence.
+    pub fn resolve_console_approval(
+        &mut self,
+        approval_id: &Id,
+        granted: bool,
+    ) -> Result<PendingApproval> {
+        let pa = self
+            .approvals
+            .get(approval_id)
+            .cloned()
+            .ok_or_else(|| AlethError::not_found("approval not found"))?;
+        if !matches!(pa.intent.verb, Verb::Console { .. }) {
+            return Err(AlethError::validation(
+                "not a console approval — resolve it through resolve_approval",
+            ));
+        }
+        if pa.state != ApprovalState::Pending {
+            return Err(AlethError::conflict("approval already resolved"));
+        }
+        if pa.is_expired(now()) {
+            self.approvals.mark_state(approval_id, ApprovalState::Expired);
+            self.emit(
+                "ApprovalResolved",
+                &new_id(),
+                &pa.subject,
+                json!({"approval": approval_id, "state": "Expired"}),
+            );
+            return Err(AlethError::conflict("approval expired"));
+        }
+        self.approvals.mark_state(
+            approval_id,
+            if granted {
+                ApprovalState::Granted
+            } else {
+                ApprovalState::Denied
+            },
+        );
+        self.emit(
+            "ApprovalResolved",
+            &new_id(),
+            &pa.subject,
+            json!({"approval": approval_id, "granted": granted, "console_line": pa.intent.verb.clone()}),
+        );
+        Ok(self
+            .approvals
+            .get(approval_id)
+            .cloned()
+            .expect("just resolved"))
+    }
+
+    /// Spend a grant on its line: called by the driver AT THE MOMENT IT TYPES. Returns the spent
+    /// approval's id only when a GRANTED, unspent, unexpired approval exists binding EXACTLY this
+    /// subject to EXACTLY this line — any other state is a named refusal, because a driver that
+    /// types on a wrong-shaped yes is worse than one that types nothing.
+    pub fn take_console_approval(&mut self, subject: &str, line: &str) -> Result<Id> {
+        let hit = self.approvals.snapshot().into_iter().find(|pa| {
+            pa.subject == subject
+                && matches!(&pa.intent.verb, Verb::Console { line: l } if l == line)
+                && pa.state == ApprovalState::Granted
+        });
+        let id = match hit {
+            Some(pa) if !pa.is_expired(now()) => pa.id,
+            Some(pa) => {
+                self.approvals.mark_state(&pa.id, ApprovalState::Expired);
+                self.emit(
+                    "ApprovalResolved",
+                    &new_id(),
+                    &pa.subject,
+                    json!({"approval": pa.id, "state": "Expired"}),
+                );
+                return Err(AlethError::conflict("approval expired before use"));
+            }
+            None => {
+                return Err(AlethError::not_found(
+                    "no granted approval binds this line — request one and have it granted",
+                ))
+            }
+        };
+        assert!(
+            self.approvals.consume(&id),
+            "found granted but could not spend — state changed mid-take"
+        );
+        self.emit(
+            "ApprovalConsumed",
+            &new_id(),
+            subject,
+            json!({"approval": id, "console_line": line}),
+        );
+        Ok(id)
+ }
+
     /// Read the tail of the immutable audit log. Capability-gated (`audit.read`): the log carries
     /// provenance, not a public feed — a caller with no covering capability is denied (fail-closed).
     pub fn query_audit(&self, offered: &[String], limit: usize) -> Result<Vec<EventRecord>> {
@@ -852,6 +1006,11 @@ impl SysCore {
             Verb::RestoreVersion { .. } => ("entity.write", Target::default()),
             Verb::Grant { .. } => ("capability.grant", Target::default()),
             Verb::Raw { .. } => ("entity.read", Target::default()),
+            // Resolving a console approval is gated the same way as any other bound intent — but
+            // through the console surface's own action name, not an entity one. The LOCAL console
+            // methods do not consult this; it exists so the GENERIC resolve path and any future
+            // caller of `authz_of_intent` meet a named answer rather than a guess.
+            Verb::Console { .. } => ("console.type", Target::default()),
         }
     }
 
@@ -879,6 +1038,14 @@ impl SysCore {
                             _ => ApprovalState::Denied,
                         };
                         self.approvals.mark_state(&id.to_string(), state);
+                    }
+                }
+                "ApprovalConsumed" => {
+                    // A spent grant survives restart as SPENT: replaying the log into a fresh core
+                    // must not resurrect authority that was already used, or one human yes would
+                    // buy a second typed line after every reboot.
+                    if let Some(id) = ev.payload.get("approval").and_then(|v| v.as_str()) {
+                        self.approvals.consume(&id.to_string());
                     }
                 }
                 _ => {}

@@ -200,21 +200,84 @@ run_arm() {
     esac
   done < <("$ALETHEIAD" console cases)
 
-  # The negative path, at the CLI, not only in a unit test: a destructive request with no approval
-  # must refuse BEFORE anything is rendered, and must print no console line at all. If this ever
-  # passes silently, every other row above is worthless.
-  local refused rc2
-  refused="$("$ALETHEIAD" console plan --interpreter "$arm" --context-file "$brief" "rm manifesto" 2>&1 >/dev/null)"; rc2=$?
-  local emitted; emitted="$("$ALETHEIAD" console plan --interpreter "$arm" --context-file "$brief" "rm manifesto" 2>/dev/null)"
-  if [ "$rc2" -eq 0 ] || [ -n "$emitted" ]; then
-    echo "  FAIL [$label/$arm] a destructive plan was rendered without approval"; bad=1
-  else
-    echo "--> unapproved destructive request refused: $(printf '%s' "$refused" | tail -1)"
+  # -------------------------------------------------------------------------------------------
+  # The governance surface, end to end (ALET-P2-046): a destructive request is not a refusal any
+  # more — it is a QUESTION recorded in the Core's approval store, and the machine types nothing
+  # until a human answers it. Every record below lives in a SCRATCH data dir created for this arm:
+  # grading the governance surface in the operator's real ~/.aletheia would both pollute it and
+  # inherit stale records from yesterday's run — a gate that reads last week's answers is not a
+  # gate. Exit codes are the driver contract: 0 = type it, 7 = approval required.
+  # -------------------------------------------------------------------------------------------
+  local approvals_dir; approvals_dir="$(mktemp -d)"
+  local pout perr pid pid2 pid3 rc7
+
+  # (A) An unapproved destructive request ASKS. Stdout stays EMPTY — stdout means "type this",
+  # and nothing may be typed on an unanswered question.
+  pout="$($ALETHEIAD console plan --interpreter "$arm" --data "$approvals_dir" \
+           --context-file "$brief" "rm poem" 2>"$approvals_dir/err")"; rc7=$?
+  perr="$(cat "$approvals_dir/err")"
+  if [ "$rc7" -ne 7 ] || [ -n "$pout" ] || ! grep -q 'approval required' <<<"$perr"; then
+    echo "  FAIL [$label/$arm] unapproved destructive request did not ASK (rc=$rc7 out='$pout')"
+    printf '%s\n' "$perr" | sed 's/^/      | /'; bad=1
   fi
-  # And the object it would have destroyed is still there.
+  pid="$(sed -n 's/^approval required \[\([^]]*\)\].*/\1/p' <<<"$perr" | head -1)"
+  [ -n "$pid" ] || { echo "  FAIL [$label/$arm] no approval id on stderr"; bad=1; }
+
+  # (B) The question is visible to the human who must answer it.
+  $ALETHEIAD approvals list --data "$approvals_dir" | grep -q "^$pid \[Pending\] .*rm poem" \
+    || { echo "  FAIL [$label/$arm] pending approval not listed"; bad=1; }
+
+  # (C) A DENIAL is also a record, and a denied line types nothing — ever. The operator asking
+  # again opens a NEW question; the old refusal stands.
+  $ALETHEIAD approvals deny "$pid" --data "$approvals_dir" >/dev/null \
+    || { echo "  FAIL [$label/$arm] deny failed"; bad=1; }
+  pout="$($ALETHEIAD console plan --interpreter "$arm" --data "$approvals_dir" \
+           --context-file "$brief" "rm poem" 2>"$approvals_dir/err")"; rc7=$?
+  pid2="$(sed -n 's/^approval required \[\([^]]*\)\].*/\1/p' <<<"$(cat "$approvals_dir/err")" | head -1)"
+  if [ "$rc7" -ne 7 ] || [ -z "$pid2" ] || [ "$pid2" = "$pid" ]; then
+    echo "  FAIL [$label/$arm] after denial: expected a fresh pending, got rc=$rc7 id=$pid2"; bad=1
+  fi
+
+  # (D) A grant binds EXACTLY its line. Granting 'rm poem' must NOT let 'rm manifesto' through:
+  # a yes for one object is silence about every other.
+  $ALETHEIAD approvals grant "$pid2" --data "$approvals_dir" >/dev/null \
+    || { echo "  FAIL [$label/$arm] grant failed"; bad=1; }
+  pout="$($ALETHEIAD console plan --interpreter "$arm" --data "$approvals_dir" \
+           --context-file "$brief" "rm manifesto" 2>"$approvals_dir/err")"; rc7=$?
+  if [ "$rc7" -ne 7 ] || [ -n "$pout" ]; then
+    echo "  FAIL [$label/$arm] a grant for 'poem' authorized touching 'manifesto' (rc=$rc7 out='$pout')"
+    bad=1
+  fi
+
+  # (E) Now the granted line itself: the planner emits it EXACTLY, the driver types it, and the
+  # object is gone — the whole point of the surface.
+  pout="$($ALETHEIAD console plan --interpreter "$arm" --data "$approvals_dir" \
+           --context-file "$brief" "rm poem" 2>/dev/null)"; rc7=$?
+  if [ "$rc7" -ne 0 ] || [ "$pout" != "rm poem" ]; then
+    echo "  FAIL [$label/$arm] a granted line did not type cleanly (rc=$rc7 out='$pout')"; bad=1
+  else
+    session_type "rm poem"
+    grep -q "removed poem" <<<"$CAPTURED" \
+      || { echo "  FAIL [$label/$arm] the machine did not execute the approved removal"; bad=1; }
+    echo "--> governed removal executed under a recorded human grant"
+  fi
+
+  # (F) ONE grant buys ONE typing. Asking again after the spend opens yet another question —
+  # yesterday's yes cannot be spent twice, and replay cannot resurrect it either.
+  pout="$($ALETHEIAD console plan --interpreter "$arm" --data "$approvals_dir" \
+           --context-file "$brief" "rm poem" 2>"$approvals_dir/err")"; rc7=$?
+  pid3="$(sed -n 's/^approval required \[\([^]]*\)\].*/\1/p' <<<"$(cat "$approvals_dir/err")" | head -1)"
+  if [ "$rc7" -ne 7 ] || [ -n "$pout" ] || [ -z "$pid3" ]; then
+    echo "  FAIL [$label/$arm] a consumed grant still typed (rc=$rc7 out='$pout')"; bad=1
+  fi
+  $ALETHEIAD approvals list --data "$approvals_dir" | grep -q "^$pid2 \[Consumed\]" \
+    || { echo "  FAIL [$label/$arm] the spent grant is not recorded as Consumed"; bad=1; }
+
+  # And the object a REFUSED plan named is untouched: governance protects by default.
   session_type "cat manifesto"
   grep -qF "$BODY" <<<"$CAPTURED" \
-    || { echo "  FAIL [$label/$arm] manifesto did not survive the refused plan"; bad=1; }
+    || { echo "  FAIL [$label/$arm] manifesto did not survive the refused plans"; bad=1; }
+  rm -rf "$approvals_dir"
 
   session_close
 

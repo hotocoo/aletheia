@@ -267,6 +267,8 @@ fn focus_entity(intent: &Intent) -> Option<Id> {
         Verb::Derive { source, .. } => Some(source.clone()),
         Verb::Traverse { from, .. } => Some(from.clone()),
         Verb::RestoreVersion { .. } | Verb::Grant { .. } | Verb::Raw { .. } => None,
+        // A console line names no entity in the store — its object lives on the guest machine.
+        Verb::Console { .. } => None,
     }
 }
 
