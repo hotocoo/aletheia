@@ -1,13 +1,56 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-22 (console governance — destructive lines become durable pending approvals bound to the exact line and spent once, ADR-059)
+**As of:** 2026-08-22 (networking second slice — UDP datagrams, an ARP cache whose silence is counted, and DHCP discovery that cross-checks the driver's claimed address against the network's own OFFER, ADR-060)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..059`.
 
-## Current wave — the console asks before it destroys (2026-08-22, third slice)
+## Current wave — the machine asks the network where it lives (2026-08-22)
+
+The networking stack's second slice (REQ-NET-003, ADR-060) closes three items the first slice
+honestly listed as missing — an ARP cache, UDP, and an honest answer to "what is this machine's
+address" — each at the choke point ADR-041 already built.
+
+* **An ARP cache you can AUDIT.** `kernel-core/src/arpcache.rs`: fixed capacity (8 bindings), byte-
+  exact keys (a cache that "closely" matches is a spoof), refresh-in-place, LRU by a monotonic tick,
+  no allocation on the resolve path. Its whole point is OBSERVABLE: `VirtioNet::arp_wire_requests()`
+  counts broadcasts actually put on the wire, and the suite resolves the gateway TWICE and requires
+  the counter to stay at 1. A cache that "worked" while the wire saw a second request would be a
+  cache in name only.
+* **UDP over IPv4, verified at both ends.** `udpv4.rs` owns THE internet checksum (virtionet re-
+  exports it — one implementation, so ICMP and UDP cannot drift into two definitions of well-formed)
+  plus both directions of the datagram. The parser refuses short buffers, lying header and total
+  lengths, a broken header checksum, length fields that lie in either direction, ZERO ("sender did
+  not compute") checksums BY NAME, and a PSEUDO-HEADER checksum under which a datagram re-addressed
+  in flight fails verification instead of parsing. The host proof is exhaustive where it matters:
+  EVERY single-bit flip anywhere in a received datagram is refused by SOME checksum; every truncation
+  prefix is refused.
+* **DHCP DISCOVER → OFFER: the constant becomes a measurement.** The guest keeps its static config;
+  the OFFER is EVIDENCE, never taken (no REQUEST/ACK/renewal). `dhcp.rs` reads it fail-closed — op
+  BOOTREPLY, magic cookie, transaction id BOUND to ours, a bounds-checked option walk honoring PAD
+  and END (an unterminated walk is a truncation, not an offer), message type OFFER, and an offer of
+  no address refused after it proves to be one. The slice's headline invariant: **the address the
+  network offers IS the address the driver claims** — `10.0.2.15` was always spec recall about one
+  simulator; now the boot fails if the authority that assigns addresses disagrees with the driver.
+
+Measured: network invariants 5 → 9 (`ALL 9 NETWORK INVARIANTS HOLD` on all three gates, boot
+failing 220+i); four new behaviors join the cross-target conformance contract (122 → 126 — the DHCP
+round trip must work identically on virtio-mmio and virtio-pci); `kernel-core` grows three modules,
+their inline tests, and `tests/netstack.rs` (**431 tests / 34 suites** on the host). Two register
+defects repaired in passing: the ADR-058 framebuffer-console delivery note had been pasted into the
+NETWORKING row (P2-020) leaving the graphics row claiming "no framebuffer text renderer" a wave
+after it shipped; and the rollup arithmetic had drifted to 58/28 against a table holding 59/27 —
+caught by `check-register.sh`, which exists for exactly that.
+
+**Stated scope:** no TCP, routing, fragmentation, socket layer, or interrupt-driven completion;
+replies are matched synchronously by one waiting caller; the demultiplexer is ethertype → IP
+protocol → UDP port through the same counted-drop receive loop as before. Traceability: **107 reqs —
+97 delivered / 6 partial / 4 deferred**, PASS. Gates: aarch64 PASS, RISC-V PASS, x86-64 image PASS,
+conformance PASS (126 behaviors × 3 targets).
+
+## Previous wave — the console asks before it destroys (2026-08-22, third slice)
 
 ALET-P2-046 closes: the console planner's approval was a CLI flag (`--approve`), and a flag is not
 governance — it is an answer given before the question existed. A destructive console command is now
@@ -3075,12 +3118,12 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 395 passed (34 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+(cd ../kernel-core && cargo test)  # 431 passed (34 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 virtual-memory + 24 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 13 virtio-gpu + 6 framebuffer-console + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 24 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 13 virtio-gpu + 6 framebuffer-console + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 virtual-memory + 32 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 32 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 

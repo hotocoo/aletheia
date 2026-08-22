@@ -774,7 +774,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // PCI transport. ARP the gateway, then ping it: a transmit-only driver would prove nothing.
     kprintln!("");
     kprintln!(
-        "--- network selftests (virtio-net over PCI: ARP + ICMP echo against the gateway) ---"
+        "--- network selftests (virtio-net over PCI: ARP-cache + ICMP echo + UDP-DHCP discovery against the gateway) ---"
     );
     match virtio::network_device() {
         None => kprintln!("[net] no network device attached (skipped)"),

@@ -83,7 +83,7 @@ echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invar
 echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
 # 5 driver invariants + the 12 filesystem behaviors, all over the REAL device (REQ-DRV-004).
 echo "$OUT" | grep -q "ALL 21 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
-echo "$OUT" | grep -q "ALL 5 NETWORK INVARIANTS HOLD" || { echo "FAIL: network invariants marker missing (REQ-NET-001; NIC attached, suite must run)"; fail=1; }
+echo "$OUT" | grep -q "ALL 9 NETWORK INVARIANTS HOLD" || { echo "FAIL: network invariants marker missing (REQ-NET-001/003; NIC attached, suite must run)"; fail=1; }
 # Graphics over the REAL device (REQ-GFX-001): display info + the whole 2D resource lifecycle.
 echo "$OUT" | grep -q "ALL 13 VIRTIO-GPU INVARIANTS HOLD" || { echo "FAIL: virtio-gpu invariants marker missing (REQ-GFX-001; GPU attached, suite must run)"; fail=1; }
 # The framebuffer console renders text into REAL backing pages and hands the frame over; detach revokes (REQ-GFX-002).
