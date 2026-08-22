@@ -1,13 +1,47 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-22 (graphics first slice — the virtio-gpu control path, live on all three targets)
+**As of:** 2026-08-22 (framebuffer console — text rendered into real backing pages, handed to the display pipeline, detach revoked)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..056`.
 
-## Current wave — the machine learns to face a display (2026-08-22)
+## Current wave — the console learns to draw (2026-08-22, second slice)
+
+Last wave ended with an honest asterisk: the GPU protocol path worked, but "with `-display none`
+nobody sees the picture". This wave closes the part of that gap which is ours to close — Aletheia now
+RENDERS text into its own framebuffer memory and hands complete frames to the display pipeline, and
+the limitation it had merely named (backing pages stuck in the DMA registry) is closed at the same
+choke point (REQ-GFX-002, ADR-058).
+
+* **A scatter-gather Surface, because that is what the device speaks.** `fbcon::Surface` maps every
+  pixel through byte offset to page index + offset, over 150 NON-contiguous single frames attached in
+  ONE command (2432 bytes of request; our command buffer is the bound, not QEMU's 16384-entry limit).
+  Pretending frames are contiguous would have meant inventing a constraint no allocator gives us.
+* **A public-domain font, provenance recorded in the source.** font8x8 (Daniel Hepper's aggregation
+  of public-domain IBM VGA glyphs), 8x8 double-struck to 8x16 cells — 80 columns x 15 rows of console.
+* **The serial console's fail-closed doctrine, one layer up.** Printable ASCII blits; LF/CR/BS have
+  rules; ANY other control byte is refused BY NAME with cursor and pixels untouched.
+* **Pixel-exact host proofs.** Blitting is asserted against THE FONT TABLE ITSELF (ink counts computed
+  from `FONT8X8`, so test and font cannot drift); wrap, scroll, backspace-blanks-the-cell, refusal of
+  unknown control bytes, off-surface pixels refused without wrapping — ten tests, all pure.
+* **The VM suite proves the frame reaches hardware — and that DETACH REVOKES.** Create 640x240,
+  attach 150 DMA-gated pages in one command (registry grows by exactly 150), render "Aletheia OS",
+  read the ink back out of OUR OWN backing frames font-exactly, TRANSFER + FLUSH the whole extent,
+  detach — the registry returns to exactly ring + two buffers — unref, and the device confirms the
+  surface is gone. `ALL 6 FRAMEBUFFER-CONSOLE INVARIANTS HOLD` on all three gates.
+* **The substrate gained handle-based registration.** `register_buffer_h` keeps the revocation
+  handle; attach failures roll back their own partial registrations; MAX_REGIONS grew 32 to 192
+  because the bound covers the LIVE set, not a resource's lifetime total.
+
+**Stated scope:** with `-display none` the picture still lands nowhere a human sees — visibility needs
+a host display backend or real hardware, the next honest rung. ASCII only, one console, scroll copies
+pixels. The compositor/window model remains open behind this slice. `E2E-ALL: PASS` (aarch64 full,
+RISC-V full, x86-64 image; VirtualBox SKIP on this host). `kernel-core`: **395 tests passed**
+(34 suites).
+
+## Previous wave — the machine learns to face a display (2026-08-22)
 
 The console is the part of this system a person touches, and until this wave it existed only as
 characters on a serial wire. The graphics/compositor gap (**ALET-P2-021**) was the largest remaining
@@ -51,7 +85,7 @@ delivered, exactly like networking before its stack. `docs/MATURITY.md` grades t
 **I**mplemented — and its networking row, stale at "nothing built" since the ADR-041 wave, now says what
 is actually proved.
 
-`kernel-core`: **385 tests passed** (33 suites — the new `virtiogpu` host proofs among them); all three
+`kernel-core`: **395 tests passed** (34 suites — the `virtiogpu` and `fbcon` host proofs among them); all three
 VM gates re-run green with the GPU attached.
 
 ## Previous wave — the audit's five defects, four closed and one honestly not (2026-08-21)
@@ -120,7 +154,7 @@ under measurement is the register working, not failing.
   container damage rather than misread as a bad image), and the MAC still authenticates the
   pre-compression image — tampering trips one layer or the other, refused by name either way.
 
-`kernel-core`: **385 tests passed**; `aletheia-ml`: 20 passed; verification numbers above are from
+`kernel-core`: **395 tests passed**; `aletheia-ml`: 20 passed; verification numbers above are from
 the bench binary the audit shipped, re-run against the fixed tree.
 
 ## Previous implementation wave — the model stops being installed and starts being consulted (2026-08-13)
@@ -2982,12 +3016,12 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 385 passed (33 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+(cd ../kernel-core && cargo test)  # 395 passed (34 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 virtual-memory + 24 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 13 virtio-gpu + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 24 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 13 virtio-gpu + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 virtual-memory + 24 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 13 virtio-gpu + 6 framebuffer-console + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 11 capability-lifetime + 20 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 24 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 5 network + 13 virtio-gpu + 6 framebuffer-console + 9 durable-store + 9 DMA-boundary + 9 input-ring + 40 console invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 

@@ -33,6 +33,8 @@ pub mod deadva;
 pub mod device;
 pub mod dma;
 pub mod faultclass;
+pub mod fbcon;
+pub mod font8x8;
 pub mod frameown;
 pub mod fs;
 pub mod grant;

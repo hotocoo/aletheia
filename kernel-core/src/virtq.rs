@@ -237,6 +237,10 @@ impl Virtqueue {
     }
     /// Register a buffer this queue will hand to the device. Must be called before [`Virtqueue::add`]
     /// names that address, which is what makes the gate above meaningful rather than decorative.
+    ///
+    /// For buffers the driver will later RETURN to the allocator, prefer
+    /// [`Virtqueue::register_buffer_h`] and revoke on release — a registration that outlives its
+    /// buffer is a region another allocation may reuse while the gate still vouches for it.
     pub fn register_buffer(
         &mut self,
         addr: usize,
@@ -244,6 +248,31 @@ impl Virtqueue {
         owner: &'static str,
     ) -> Result<(), DmaFault> {
         self.dma.register(addr, len, owner).map(|_| ())
+    }
+
+    /// Register and KEEP THE HANDLE, so the caller can [`Virtqueue::revoke_buffer`] when the buffer
+    /// goes back to the allocator (REQ-GFX-002). The GPU console's backing store is hundreds of
+    /// frames over a resource's life; without revocation the registry would fill with stale grants
+    /// — bounded only by giving up, which is not a boundary.
+    pub fn register_buffer_h(
+        &mut self,
+        addr: usize,
+        len: usize,
+        owner: &'static str,
+    ) -> Result<crate::dma::Handle, DmaFault> {
+        self.dma.register(addr, len, owner)
+    }
+
+    /// End a buffer's device-visibility. After this returns, an address that was registered is
+    /// refused as a descriptor again — the DMA twin of erase-on-free. A handle that is not live is
+    /// a counted refusal, never a panic.
+    pub fn revoke_buffer(&mut self, handle: crate::dma::Handle) {
+        let _ = self.dma.revoke(handle);
+    }
+
+    /// Live DMA regions this queue currently vouches for.
+    pub fn live_regions(&self) -> usize {
+        self.dma.live_regions()
     }
 
     /// Would this address be refused as a descriptor right now? Used by the invariant suites to prove the

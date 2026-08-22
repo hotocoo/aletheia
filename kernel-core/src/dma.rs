@@ -25,8 +25,10 @@ use alloc::vec::Vec;
 
 /// Page size the admission rules use.
 pub const PAGE: usize = 4096;
-/// Live regions a registry tracks. Small and fixed: this kernel's drivers use a handful of frames each.
-pub const MAX_REGIONS: usize = 32;
+/// Live regions a registry tracks. Bounded, not tiny: a framebuffer resource's scatter-gather
+/// backing is hundreds of single-frame entries at once (REQ-GFX-002), and revocation-on-detach
+/// returns every one — the bound covers the LIVE set, not a resource's lifetime total.
+pub const MAX_REGIONS: usize = 192;
 
 /// Why a DMA request was refused. Each names a distinct way a device could be pointed at memory it must
 /// not touch.
