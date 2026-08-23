@@ -105,6 +105,8 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 15 FILESYSTEM INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 21 VIRTIO-BLK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 10 DURABLE-STORE INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 12 SOAK INVARIANTS HOLD' "$LOG" \
+   && grep -qE '\[soak\] journal: [0-9]+ txs .* => [0-9]+ tx/s' "$LOG" \
    && grep -q 'ALL 9 NETWORK INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 13 VIRTIO-GPU INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 6 FRAMEBUFFER-CONSOLE INVARIANTS HOLD' "$LOG" \
@@ -122,7 +124,7 @@ if [ "$RC" -eq 33 ] \
   # the boot, or a count changing without the gate being told. Extra families fail too.
   # shellcheck disable=SC1091
   source "$HERE/../scripts/lib-markers.sh"
-  X86_EXPECTED="cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 usermode=39 virtio=21 vm=72"
+  X86_EXPECTED="cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 soak=12 usermode=39 virtio=21 vm=72"
   if ! markers_assert "$X86_EXPECTED" < "$LOG"; then
     echo "SMOKE TEST: FAIL (structured marker map)"
     exit 1

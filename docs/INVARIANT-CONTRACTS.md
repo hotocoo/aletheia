@@ -1,6 +1,6 @@
 # Aletheia — Invariant Contracts
 
-**As of:** 2026-08-03.
+**As of:** 2026-08-23.
 
 Some subsystems were delivered as *code that works* without a written statement of **what must never
 happen**. That gap is what GAPS4 rows ALET-P1-005 / P1-016 / P1-017 / P1-025 name: a passing test tells
@@ -314,3 +314,18 @@ runs when someone is sitting at the machine is a driver no gate covers.
 | INV-PS2-4 | The device **identified itself after passing its power-on self-test**, and the id is in the log. | A controller can pass its own self-test with a dead port, which is why the port test is separate; and the only way anyone learns what an unfamiliar keyboard answered is if the boot said so. | boot invariant `ps2: the keyboard identified itself` |
 | INV-PS2-5 | The suite leaves **IRQ1 masked**, read from the PIC rather than from its own bookkeeping. | Arming an input source is the console's decision, made once beside the other source. A boot suite that armed one behind the console's back would hand every later suite a machine taking interrupts it was not written for. | boot invariant `ps2: the suite leaves IRQ1 masked` |
 | INV-PS2-6 | End to end: a keystroke injected at the **emulated i8042** travels controller → IRQ1 → PIC → vector 0x21 → decoder → shared ring → line editor, and Aletheia's own filesystem changes. | The gate the old one could not be. `console-e2e.sh` types at the serial line, and under `-serial stdio` the terminal IS the wire — which is exactly why ALET-P2-039 survived every console gate. Here the serial line is a FILE with no writer. | `scripts/keyboard-e2e.sh` (7 checks); confirmed by hand on Oracle VirtualBox with `keyboardputstring` |
+## INV-SOAK — lifecycles under repetition (REQ-QUAL-007, ALET-P2-009, ADR-063)
+
+Every other contract on this page was proved on hand-picked cases; this one asks whether the properties
+SURVIVE THE MACHINE RUNNING — committing, naming, sharing and dispatching for a very long time. On a
+kernel whose heap never frees, endurance is a resource property before it is a correctness property:
+one more cycle must cost nothing permanent.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-SOAK-1 | Journal churn allocates **nothing per transaction**: on a target that meters its heap, the meter reads identically at the window's edges. A target with no meter is UNPROVEN, never exempt. | The bump allocator cannot reclaim, so per-op growth is a countdown to death wearing a soak test's clothes. The warm-up commit materializes the device BEFORE the meter starts, so the claim is steady state, not setup. | boot invariant `soak: journal churn allocates nothing per transaction` on all three VM gates |
+| INV-SOAK-2 | Every journaled transaction read back **byte-for-byte** at its verification point, no commit ever failed, and recovery mid-soak replayed idempotently with the sequence continuing past it. | Volume is where a torn write, a lost barrier or a sequence-handling slip would eventually surface. | `a_long_journal_churn_verifies_every_step_and_recovers_midstream`; boot soak invariants 2–3 |
+| INV-SOAK-3 | Every namespace mutation leaves the filesystem **structurally sound** — unique names, disjoint in-bounds extents, bitmap/directory tally exact — audited after EVERY op; contents verify byte-for-byte; a fresh mount sees exactly the survivors. | Structural drift that only appears after many ops is precisely what single-case suites cannot see. | `a_long_namespace_churn_is_structurally_sound_after_every_op`; boot soak invariants 4–5 |
+| INV-SOAK-4 | Under churn, a shared region's bytes are observed through **every live grant**, refcounts return to owner-only after every revoke, unauthorized/amplifying shares are refused at volume, and a revoked grant is refused BY NAME forever after. | Attenuation and revocation are only real if they hold when nobody is watching — under repetition, with volume behind them. | `long_grant_churn_refuses_everything_it_should_and_stays_zero_copy`; boot soak invariants 6–9 |
+| INV-SOAK-5 | A Finished task **never runs again**, Blocked tasks are never dispatched, every priority drain admits→dispatches→finishes each task EXACTLY once, and unknown-id events change nothing — every generation, both schedulers. | Resurrection bugs are state that is only briefly wrong; generations are how you catch them. | `long_task_churn_never_resurrects_a_finished_or_blocked_task`; boot soak invariants 10–11 |
+| INV-SOAK-6 | The same seed replays the **identical campaign** — every checksum and census equal across a full re-run. | A soak whose workload changed run to run would not be evidence of anything. | `two_identical_campaigns_produce_identical_censuses`; boot soak invariant 12 |

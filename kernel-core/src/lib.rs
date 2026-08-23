@@ -58,6 +58,7 @@ pub mod selftest;
 pub mod shell;
 pub mod shootdown;
 pub mod smpsched;
+pub mod soak;
 pub mod spine;
 pub mod storage;
 pub mod supervisor;

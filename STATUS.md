@@ -1,12 +1,53 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-22 (fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; before that: every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061; networking second slice — UDP, ARP cache, DHCP discovery, ADR-060)
+**As of:** 2026-08-23 (long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; before that: fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..061`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..063`.
 
+## Current wave — the machine runs for a living (2026-08-23, ADR-063)
+
+ALET-P2-009 closes. Every suite before this one proved a subsystem CORRECT on hand-picked cases; none
+answered the operator's next question: does it still hold after the machine has been RUNNING —
+committing, naming, sharing, dispatching — for a long time? On a kernel whose heap is a bump allocator
+that NEVER frees (`kernel/src/heap.rs`), endurance is a resource property before it is a correctness
+property: one more cycle must cost nothing permanent. `kernel-core/src/soak.rs` runs FOUR lifecycle
+campaigns to that steady state, defined once for all three CPU targets and the host:
+
+* **journal churn** — two-update transactions with payloads rewritten IN PLACE in buffers allocated
+  before the meter starts; home blocks verified by read-back every eighth transaction; recovery rounds
+  mid-soak prove idempotent replay and a continuing sequence (outside the metered window BY DESIGN —
+  recovery's replay payload allocates);
+* **namespace churn** — create/replace/remove audited against the FULL structural contract (unique
+  names, disjoint in-bounds extents, bitmap/directory tally) after EVERY mutation, contents verified
+  byte-for-byte at every touch, and a fresh mount that must see exactly the survivors;
+* **grant churn** — share→attenuate→write→read→revoke over fixed regions: zero-copy observed every
+  cycle, refcounts exact every cycle, and the refused paths attempted AND counted at volume (96/96
+  unauthorized shares and 288/288 revoked accesses refused on every target);
+* **task generations** — both arch-independent schedulers: a Finished task never dispatched again,
+  Blocked never dispatched, every priority drain exactly-once (768 dispatches per target boot),
+  unknown-id events changing nothing.
+
+One fixed seed drives everything; the suite's final check RE-RUNS the whole campaign and requires
+identical checksums and censuses. Twelve checks gate the boot — and one of them is MEASURED, not just
+stated: **journal churn allocates nothing per transaction**, held EXACTLY against each kernel's own
+heap meter. The first real boot caught the harness itself lying: the metered window originally included
+the sparse device's first-touch block materialization (~20 KiB of one-time setup), so invariant 1 failed
+on hardware until a warm-up commit was moved before the meter — the claim now measures steady state,
+not setup. A `SparseDevice` (materializes only touched blocks) keeps the campaign's footprint
+proportional to WORK done rather than disk size: the whole two-campaign boot costs ~1.67 MB of bump
+heap, measured and printed by every target.
+
+Measured on all three VM gates (throughput REPORTED, never gated — TCG nanoseconds are an emulator's):
+aarch64 396 txs @ ~11 096 tx/s; riscv64 @ ~3 814 tx/s under the slowest emulator inside the same
+120 s watchdog; x86-64 @ ~20 191 tx/s through UEFI. All print `[soak] ALL 12 SOAK INVARIANTS HOLD`,
+join their gates' marker maps as `soak=12` (ADR-061 maps updated deliberately), exit 400+i on failure,
+and three arch-neutral behaviors joined `conformance.sh`'s core contract (126 → 129). Host side:
+`kernel-core/tests/soak.rs` takes the same harness to tens of thousands of transactions, cycles and
+generations on a real allocator — **kernel-core 445 tests / 36 suites green**, clippy `-D warnings`
+clean, fmt clean. Register rollup 62 resolved / 24 open / 8 deferred, PASS.
 ## Current wave — the device says no (2026-08-22, ADR-062)
 
 ALET-P2-008 closes. The journal's all-or-nothing contract was proved against snapshots taken
@@ -3166,12 +3207,12 @@ cargo run -- serve  # long-running Core Alpha behind the Unix-socket IPC boundar
 cargo test --test component   # the 14 P2 WASM-component acceptance + fuzz tests
 cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..004 demo with traces
 
-(cd ../kernel-core && cargo test)  # 431 passed (34 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler, proved on the HOST, no QEMU
+(cd ../kernel-core && cargo test)  # 445 passed (36 suites) — the shared spine invariants + IPC substrate (async/timeout/cancel/trace-replay) + adversarial security-behaviour suite + arch-independent scheduler + long-running lifecycle soak, proved on the HOST, no QEMU
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 virtual-memory + 32 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 32 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 virtual-memory + 32 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console + 12 soak invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 32 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console + 12 soak invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 

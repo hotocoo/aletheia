@@ -87,6 +87,11 @@ echo "$OUT" | grep -q "ALL 13 VIRTIO-GPU INVARIANTS HOLD" || { echo "FAIL: virti
 # The framebuffer console renders text into REAL backing pages and hands the frame over; detach revokes (REQ-GFX-002).
 echo "$OUT" | grep -q "ALL 6 FRAMEBUFFER-CONSOLE INVARIANTS HOLD" || { echo "FAIL: framebuffer-console invariants marker missing (REQ-GFX-002)"; fail=1; }
 echo "$OUT" | grep -q "ALL 10 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
+# Long-running soak (ALET-P2-009, ADR-063): lifecycles under repetition — journal transactions,
+# namespace mutations, capability grants, task generations — proved on this machine, with its own
+# heap meter holding the allocation-free claim exactly and its own clock reporting throughput.
+echo "$OUT" | grep -q "ALL 12 SOAK INVARIANTS HOLD" || { echo "FAIL: soak invariants marker missing (ALET-P2-009, ADR-063)"; fail=1; }
+echo "$OUT" | grep -qE "\[soak\] journal: [0-9]+ txs .* => [0-9]+ tx/s" || { echo "FAIL: the soak never measured journal throughput on this machine"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
 echo "$OUT" | grep -q "ALL 42 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
@@ -106,7 +111,7 @@ echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlst
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 usermode=32 virtio=21 vm=66"
+AARCH64_EXPECTED="cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

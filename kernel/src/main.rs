@@ -492,6 +492,73 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Long-running soak (ALET-P2-009, ADR-063): lifecycles under REPETITION — journal
+    // transactions, namespace mutations, capability grants, task generations — on THIS machine's
+    // own clock and heap meter. What gates is scale-free; what prints is this machine's truth:
+    // throughput numbers are reported, never gated (QEMU-TCG nanoseconds are an emulator's), and
+    // the heap line keeps the suite's own cost on this never-freeing heap a measured fact. The
+    // journal phase's allocation-free claim is gated exactly where the meter can see it.
+    kprintln!("");
+    kprintln!("--- soak selftests (lifecycles under repetition: storage, grants, tasks) ---");
+    {
+        fn heap_meter() -> u64 {
+            crate::heap::used_bytes() as u64
+        }
+        let before = heap_meter();
+        match kernel_core::soak::soak_suite(
+            kernel_core::soak::BOOT_LOAD,
+            |load| {
+                kernel_core::soak::campaign::<ActiveHal>(load, Some(&(heap_meter as fn() -> u64)))
+            },
+            |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            },
+        ) {
+            Ok((r, n)) => {
+                kprintln!(
+                    "[soak] journal: {} txs ({} verifies, {} recovers replayed) in {} ms => {} tx/s",
+                    r.journal.txs,
+                    r.journal.verifies,
+                    r.journal.recovers_replayed,
+                    r.journal.ns_total / 1_000_000,
+                    r.journal.txs_per_second()
+                );
+                kprintln!(
+                    "[soak] namespace: {} ops, every one audited => {} ops/s, {} survivors re-mounted",
+                    r.fs.ops,
+                    r.fs.ops_per_second(),
+                    r.fs.final_survivors
+                );
+                kprintln!(
+                    "[soak] grants: {} cycles, {}/{} unauthorized refused, {}/{} revoked accesses refused",
+                    r.grants.cycles,
+                    r.grants.unauthorized_refused,
+                    r.grants.unauthorized_attempted,
+                    r.grants.revoked_refused,
+                    r.grants.revoked_attempted
+                );
+                kprintln!(
+                    "[soak] tasks: {} generations, {} priority dispatches, each exactly-once",
+                    r.tasks.generations,
+                    r.tasks.priority_dispatched
+                );
+                kprintln!(
+                    "[soak] heap: {} B used by the whole campaign (bump allocator never frees)",
+                    heap_meter().saturating_sub(before)
+                );
+                kprintln!("[soak] ALL {} SOAK INVARIANTS HOLD", n);
+            }
+            Err((idx, name)) => {
+                kprintln!("[soak] FAILED at soak invariant {}: {}", idx, name);
+                semihosting::exit(400 + idx as i32);
+            }
+        }
+    }
+
     // The cross-reboot claim, on REAL hardware (REQ-STOR-003, ADR-038). The persistent medium is the
     // SECOND disk: the scratch one above was reformatted by the destructive suites, this one is never
     // wiped. The boot gate boots twice against the same image file, so the second boot must FIND and

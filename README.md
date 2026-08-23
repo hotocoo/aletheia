@@ -591,10 +591,33 @@ believe, every number this repository quotes has a gate behind it:
 
 ```bash
 cd aletheia && cargo test        # full conformance + unit suite (deterministic; no model needed)
+cd kernel-core && cargo test     # the shared substrate's hosted proofs — 445 tests incl. the long-running lifecycle soak
 ./scripts/e2e-all.sh             # all three CPU targets + the VirtualBox rung, one aggregate pass/fail
 ./scripts/console-e2e.sh         # boot, type, halt, reboot, read it back — three targets
 ./scripts/comparative-bench.sh   # Aletheia against a real Linux kernel on the SAME emulator
 ```
+
+One of those proofs deserves naming because of what it says about endurance: the **long-running soak**
+(ADR-063). Every suite above was proved on hand-picked cases; the soak asks whether the properties
+survive the machine RUNNING — committing, naming, sharing and dispatching for a long time. On a kernel
+whose heap is a bump allocator that never frees, that is a resource property before it is a correctness
+property, so the load-bearing check is MEASURED on the machine itself: journal churn must allocate
+**nothing per transaction**, held exactly against each target's own heap meter, while namespace
+mutations are structurally audited after every operation, capability grants are churned through
+share→attenuate→write→read→revoke with every refusal counted, task generations prove a Finished task
+never runs again — and the same seed must replay the identical campaign. From a real boot:
+
+```text
+[soak] journal: 396 txs (120 verifies, 3 recovers replayed) in 35 ms => 11096 tx/s
+[soak] namespace: 12 ops, every one audited => 3158 ops/s, 3 survivors re-mounted
+[soak] grants: 96 cycles, 96/96 unauthorized refused, 288/288 revoked accesses refused
+[soak] tasks: 48 generations, 768 priority dispatches, each exactly-once
+[soak] heap: 1669872 B used by the whole campaign (bump allocator never frees)
+[soak] ALL 12 SOAK INVARIANTS HOLD
+```
+
+Throughput is reported, never gated — QEMU-TCG nanoseconds are an emulator's numbers. The properties
+are gated, on all three CPU targets, in CI.
 
 [docs/TRY-IT.md](docs/TRY-IT.md) §3 lists the rest (per-target VM gates, the model-driven console
 gate, conformance, and the three claim-checking gates that assert the evidence exists and that CI
@@ -615,7 +638,8 @@ vindicated decisions and six exposures, each mapped to an open row in the gap re
 See [STATUS.md](STATUS.md) for the delivered milestones and test counts, and
 [docs/](docs/) for the PRD, SAD, and ADRs (ADR-015 policy/approval separation, ADR-016 Service
 API/IPC boundary, ADR-017 AI subsystem, ADR-018 Context Engine, ADR-021 SMP, ADR-027 capability
-concurrency, ADR-029 mapping-API admission check, ADR-030 frame ownership, ADR-031 page-table reclamation, ADR-032 address-space destruction, ADR-033 erase on free, ADR-034 W^X). Open findings — what is
+concurrency, ADR-029 mapping-API admission check, ADR-030 frame ownership, ADR-031 page-table reclamation, ADR-032 address-space destruction, ADR-033 erase on free, ADR-034 W^X, ADR-062 fault
+injection, ADR-063 long-running soak). Open findings — what is
 NOT claimed — live in [docs/gap/ARCHITECTURE-GAPS4-REGISTER.md](docs/gap/ARCHITECTURE-GAPS4-REGISTER.md).
 
 ## Strategic path

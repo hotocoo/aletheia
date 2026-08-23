@@ -227,6 +227,13 @@ CONTRACT=(
   "console: faults reports supervisor counters"
   "the boosted LOW runs and services the endpoint"
   "HIGH resumes as highest-priority and receives"
+  # Long-running soak (ALET-P2-009, ADR-063). Repetition is where an arch-specific shortcut would
+  # eventually diverge, so the three behaviors that define "the machine can run forever" are
+  # contracted identically on every CPU: churn that allocates nothing per transaction, revocation
+  # that stays refused forever after, and a Finished task that never runs again.
+  "soak: journal churn allocates nothing per transaction"
+  "soak: a revoked grant is refused by name"
+  "soak: a Finished task never runs again"
 )
 
 hr() { printf '========================================================================\n'; }
