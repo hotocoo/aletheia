@@ -367,6 +367,22 @@ impl SysCore {
                 "not permitted to install components",
             ));
         }
+        // ABI admission at the door (ALET-P1-022, ADR-066): a component that cannot DECLARE which
+        // ABI it speaks - or declares one this host does not speak - is refused BEFORE its bytes
+        // are ever stored, so an unrunnable application can never enter the record. The declared
+        // version is stamped into the entity's metadata as evidence of what was admitted.
+        let abi_version = match crate::component::validate_module_abi(wasm) {
+            Ok(v) => v,
+            Err(reason) => {
+                self.emit(
+                    "ComponentInstallRefused",
+                    &new_id(),
+                    subject,
+                    json!({"name": name, "reason": reason}),
+                );
+                return Err(AlethError::validation(&reason));
+            }
+        };
         let hash = self.store.put_blob(wasm)?;
         let e = Entity {
             id: new_id(),
@@ -374,7 +390,12 @@ impl SysCore {
             content_ref: Some(hash),
             version: 1,
             version_chain: new_id(),
-            metadata: json!({"name": name, "kind": "wasm-component", "bytes": wasm.len()}),
+            metadata: json!({
+                "name": name,
+                "kind": "wasm-component",
+                "bytes": wasm.len(),
+                "abi_version": abi_version
+            }),
             provenance: Provenance::of(subject),
             created_at: now(),
             updated_at: now(),
@@ -385,7 +406,7 @@ impl SysCore {
             "ComponentInstalled",
             &new_id(),
             subject,
-            json!({"app": e.id, "name": name, "bytes": wasm.len()}),
+            json!({"app": e.id, "name": name, "bytes": wasm.len(), "abi_version": abi_version}),
         );
         Ok(e)
     }

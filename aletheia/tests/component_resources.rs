@@ -86,7 +86,11 @@ fn well_behaved_component_passes_under_default_limits() {
     (i32.const 7)))"#,
         plen = payload.len()
     );
-    let wasm = wat::parse_str(&wat).expect("writer wat compiles");
+    let wasm = {
+        let mut w = wat::parse_str(&wat).expect("writer wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
     let write_cap = grant_all(&mut core, &owner, "component:honest", "entity.write");
 
     let outcome = core
@@ -124,7 +128,11 @@ fn memory_hog_grows_to_exactly_its_cap_and_no_further() {
         (local.set $n (i32.add (local.get $n) (i32.const 1)))
         (br $l)))
     (local.get $n)))"#;
-    let wasm = wat::parse_str(wat).expect("hog wat compiles");
+    let wasm = {
+        let mut w = wat::parse_str(wat).expect("hog wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
 
     // Cap = 3 pages total (initial included): the guest may win exactly 2 grows.
     let limits = SandboxLimits {
@@ -169,7 +177,11 @@ fn a_hog_that_ignores_the_refusal_still_never_exceeds_the_cap() {
       (local.set $n (i32.add (local.get $n) (i32.const 1)))
       (br $l))
     (local.get $n)))"#;
-    let wasm = wat::parse_str(wat).expect("deaf hog wat compiles");
+    let wasm = {
+        let mut w = wat::parse_str(wat).expect("deaf hog wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
     let limits = SandboxLimits {
         max_memory_bytes: 2 * 64 * 1024,
         ..SandboxLimits::defaults()
@@ -201,7 +213,11 @@ fn table_hog_is_capped_at_exactly_the_table_budget() {
         (local.set $n (i32.add (local.get $n) (i32.const 1)))
         (br $l)))
     (local.get $n)))"#;
-    let wasm = wat::parse_str(wat).expect("table hog wat compiles");
+    let wasm = {
+        let mut w = wat::parse_str(wat).expect("table hog wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
     let limits = SandboxLimits {
         max_table_elements: 5,
         ..SandboxLimits::defaults()
@@ -230,7 +246,11 @@ fn recursion_bomb_is_killed_by_the_stack_bound_and_named_so() {
     let (mut core, owner) = open();
     let wat = r#"(module
   (func $r (export "run") (result i32) (call $r)))"#;
-    let wasm = wat::parse_str(wat).expect("bomb wat compiles");
+    let wasm = {
+        let mut w = wat::parse_str(wat).expect("bomb wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
     let outcome = core
         .run_component(
             std::slice::from_ref(&owner),
@@ -267,7 +287,11 @@ fn recursion_depth_is_enforced_exactly_as_configured_both_ways() {
   (global $g (mut i32) (i32.const 0)))"#,
             depth = depth
         );
-        wat::parse_str(&wat).expect("deep wat compiles")
+        {
+            let mut w = wat::parse_str(&wat).expect("deep wat compiles");
+            aletheia::component::stamp_abi_section(&mut w, 1);
+            w
+        }
     }
 
     let (mut core, owner) = open();
@@ -323,7 +347,11 @@ fn deadline_kills_a_guest_that_outruns_its_clock_at_a_crossing() {
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l)))
     (i32.const 0)))"#;
-    let wasm = wat::parse_str(wat).expect("clock eater wat compiles");
+    let wasm = {
+        let mut w = wat::parse_str(wat).expect("clock eater wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
     let emit_cap = grant_all(&mut core, &owner, "component:clickeater", "event.emit");
     let tight = SandboxLimits {
         deadline_ms: 1,
@@ -374,7 +402,11 @@ fn unbounded_deadline_exists_only_when_written() {
     (i32.const 0)))"#,
         plen = payload.len()
     );
-    let wasm = wat::parse_str(&wat).expect("writer wat compiles");
+    let wasm = {
+        let mut w = wat::parse_str(&wat).expect("writer wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
     let write_cap = grant_all(&mut core, &owner, "component:noclock", "entity.write");
     let written_unbounded = SandboxLimits {
         deadline_ms: 0,
@@ -414,7 +446,11 @@ fn a_spawned_child_inherits_the_root_resource_envelope() {
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l)))
     (i32.const 0)))"#;
-    let child_wasm = wat::parse_str(child_wat).expect("child wat compiles");
+    let child_wasm = {
+        let mut w = wat::parse_str(child_wat).expect("child wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
     let child = core
         .install_component(
             std::slice::from_ref(&owner),
@@ -438,7 +474,11 @@ fn a_spawned_child_inherits_the_root_resource_envelope() {
         child_id = child.id,
         idlen = child.id.len()
     );
-    let parent_wasm = wat::parse_str(&parent_wat).expect("parent wat compiles");
+    let parent_wasm = {
+        let mut w = wat::parse_str(&parent_wat).expect("parent wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    };
 
     let tight = SandboxLimits {
         deadline_ms: 1,

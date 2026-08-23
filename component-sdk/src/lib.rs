@@ -172,10 +172,17 @@ fn host_spawn(_app: &[u8], _action: &[u8]) -> i64 {
     panic!("aletheia-component-sdk host calls are only available on wasm32 guests")
 }
 
+/// The ABI version this SDK builds against — kept in lockstep with the runtime's `ABI_VERSION`
+/// (aletheia/src/component.rs, ADR-066). The macro below stamps it into every guest it compiles.
+pub const ABI_VERSION: u32 = 1;
+
 /// Declare the component entry point and its no_std runtime glue. Wraps a `fn() -> i32` as the WASM
-/// export `run`, and provides the mandatory `#[panic_handler]` for the no_std guest — a panicking
+/// export `run`, provides the mandatory `#[panic_handler]` for the no_std guest — a panicking
 /// component simply traps (`unreachable`) and leaves no effects, which the host's per-call
-/// all-or-nothing + fuel/trap boundary already guarantees.
+/// all-or-nothing + fuel/trap boundary already guarantees — and STAMPS THE ABI DECLARATION
+/// (ADR-066): a custom section named "aletheia.abi" carrying [`ABI_VERSION`] as four little-endian
+/// bytes. A guest built by this macro can always say which ABI it speaks; the runtime refuses any
+/// that cannot, so an SDK build can never silently outlive the interface it was written against.
 #[macro_export]
 macro_rules! component_main {
     ($entry:ident) => {
@@ -183,6 +190,14 @@ macro_rules! component_main {
         pub extern "C" fn run() -> i32 {
             $entry()
         }
+
+        /// ABI declaration (ADR-066): travels WITH the code, so re-signing or copying the bytes
+        /// cannot strip it, and no side metadata has to be trusted.
+        #[doc(hidden)]
+        #[used]
+        #[no_mangle]
+        #[link_section = "aletheia.abi"]
+        pub static __ALETHEIA_ABI_VERSION: [u8; 4] = $crate::ABI_VERSION.to_le_bytes();
 
         #[cfg(target_arch = "wasm32")]
         #[panic_handler]

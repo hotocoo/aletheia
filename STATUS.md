@@ -1,13 +1,48 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-23 (the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
+**As of:** 2026-08-23 (the component DECLARES what it speaks — the ABI is explicitly versioned: a custom-section declaration enforced at BOTH gates, install refusing undeclared/malformed/foreign-version modules before their bytes are stored and run re-checking on every path, refusals naming both sides of a version disagreement, installed metadata stamping what was admitted, the SDK auto-stamping guests verified end-to-end with a rebuilt wasm32 fixture, and the v1 import surface pinned by a live link probe, ADR-066; before that: the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..065`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..066`.
 
-## Current wave — the sandbox is bounded in every dimension (2026-08-23, ADR-065)
+## Current wave — the component declares what it speaks (2026-08-23, ADR-066)
+
+ALET-P1-022 closes. The component runtime had an interface but no NAME for it: guests imported
+four functions under module `"aletheia"` and exported `run() -> i32` plus `memory`, and nothing
+anywhere recorded which of those facts a given binary was BUILT against. Now a component declares
+its ABI — a custom section `"aletheia.abi"` carrying its version as four little-endian bytes — and
+the declaration travels WITH the code: re-signing or copying the bytes cannot strip it, no side
+metadata has to be trusted.
+
+Two gates, one rule. **At install**, `SysCore::install_component` compiles the module — never
+instantiates it, no guest code runs — and refuses undeclared, malformed (wrong byte length,
+duplicated section) or foreign-version modules BEFORE their bytes are stored: unrunnable code never
+enters the record, the refusal itself is audited as `ComponentInstallRefused`, and admitted
+components carry their declared version in entity metadata as evidence of what was admitted.
+**At run**, every path re-checks after compilation and before any guest state exists, so ad-hoc
+runs are held to the identical standard. Refusals name BOTH sides of a disagreement — `component
+declares ABI v999, host speaks v1` — so an operator can tell "rebuild the guest" from "upgrade the
+host".
+
+The SDK stamps guests automatically (`component_main!` emits the section from its own
+`ABI_VERSION`) — verified END-TO-END by rebuilding the real example with the real wasm32 toolchain:
+the committed fixture grew from 306 to 362 bytes and passes the unchanged gates. And the v1 import
+surface itself is pinned by a LIVE probe: a module importing all four documented signatures must
+still link against the host's linker, so changing a signature without bumping the version fails
+the suite loudly, and bumping the version without migrating guests refuses every existing component
+at the door — both loud, neither quiet.
+
+Host proofs: `aletheia/tests/component_abi.rs`, 8 tests; full aletheia crate green (212 tests
+across 18 suites). **Found while building this wave:** on a workstation whose PATH prefers a
+Homebrew rust over rustup, the example build failed E0463 far from the cause — cargo resolves
+`rustc` from PATH even when cargo itself comes from rustup, so a foreign rustc whose sysroot lacks
+wasm32 std was driving compilation. `scripts/build-example-component.sh` now pins BOTH binaries via
+`rustup which` (**ALET-P2-049**, opened and closed in the same breath — same family as ALET-P2-037/
+038: the harness is part of the claim).
+
+## Previous wave — the sandbox is bounded in every dimension (2026-08-23, ADR-065)
 
 ALET-P1-021 closes. The component sandbox (ADR-014) bounded exactly one resource: fuel, which
 measures COMPUTE — instructions bought by a run. It said nothing about how much MEMORY a guest may

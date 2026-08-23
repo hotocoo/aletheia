@@ -21,8 +21,18 @@ command -v rustup >/dev/null 2>&1 || { echo "error: rustup not on PATH"; exit 1;
 rustup target list --installed | grep -q "$TARGET" || {
   echo "error: target $TARGET not installed — run: rustup target add $TARGET"; exit 1; }
 
+# Resolve the RUSTUP-driven toolchain, not whatever sits first on PATH (a Homebrew or system
+# toolchain has its own sysroot and silently lacks the wasm32 std — ALET-P2-049). BOTH binaries are
+# pinned: cargo resolves `rustc` from PATH at invocation time, so pinning cargo alone still lets a
+# foreign rustc — one whose sysroot has no wasm32 core — drive every compilation (ALET-P2-049).
+CARGO="$(rustup which cargo)"
+RUSTC_BIN="$(rustup which rustc)"
+export RUSTC="$RUSTC_BIN"
+echo "==> using cargo: $CARGO ($("$CARGO" --version))"
+echo "==> using rustc: $RUSTC_BIN ($("$RUSTC_BIN" --version | head -1))"
+
 echo "==> building examples/hello-component for $TARGET (release)"
-( cd "$EXAMPLE" && cargo build --release --target "$TARGET" )
+( cd "$EXAMPLE" && "$CARGO" build --release --target "$TARGET" )
 [ -f "$ARTIFACT" ] || { echo "error: expected artifact missing: $ARTIFACT"; exit 1; }
 
 echo "==> refreshing fixture: $FIXTURE"

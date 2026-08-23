@@ -37,6 +37,115 @@ pub const SPAWN_ACTION: &str = "component.spawn";
 /// without matching on error text written for humans.
 pub const DEADLINE_TRAP: &str = "aletheia-sandbox-deadline";
 
+/// The component ABI this runtime speaks, as an EXPLICIT version (ALET-P1-022, ADR-066).
+///
+/// A component declares which ABI it was built against by carrying a custom section named
+/// [`ABI_SECTION`] whose payload is its version as four little-endian bytes; the runtime refuses -
+/// BY NAME, at install and again at run - any module that does not declare, declares malformedly,
+/// or declares a version other than [`ABI_VERSION`]. The interface those numbers mean is pinned
+/// beside this constant: entry `run() -> i32`, export `memory`, and the four imports under module
+/// "aletheia" (`read`, `write`, `emit`, `spawn`) with exactly the signatures the linker defines
+/// below. The host import surface can therefore no longer drift silently: changing a signature
+/// without bumping this version breaks the probe suite, and bumping the version without migrating
+/// guests refuses every existing component at the door - both loud, neither quiet.
+pub const ABI_VERSION: u32 = 1;
+
+/// Custom-section name carrying the declared ABI version.
+pub const ABI_SECTION: &str = "aletheia.abi";
+
+/// Why a module was refused at the ABI gate. Each names a distinct way to be wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AbiFault {
+    /// No declaration at all - a component that cannot say what it speaks to.
+    Undeclared,
+    /// A declaration exists but is not four clean bytes (truncated, oversized, duplicated).
+    Malformed,
+    /// A well-formed declaration for a DIFFERENT version than this host speaks.
+    Unsupported(u32),
+}
+
+impl AbiFault {
+    /// Stable short name for logs.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            AbiFault::Undeclared => "abi-undeclared",
+            AbiFault::Malformed => "abi-malformed",
+            AbiFault::Unsupported(_) => "abi-unsupported",
+        }
+    }
+
+    /// Human-readable explanation naming both sides of the disagreement where there are two.
+    pub fn message(self) -> String {
+        match self {
+            AbiFault::Undeclared => format!(
+                "abi: component does not declare its ABI (missing custom section \"{ABI_SECTION}\")"
+            ),
+            AbiFault::Malformed => format!(
+                "abi: malformed ABI declaration (custom section \"{ABI_SECTION}\" must carry exactly 4 little-endian bytes)"
+            ),
+            AbiFault::Unsupported(v) => format!(
+                "abi: component declares ABI v{v}, host speaks v{ABI_VERSION} - rebuild against the current SDK"
+            ),
+        }
+    }
+}
+
+/// Read the ABI version a compiled module DECLARES, refusing by name when it cannot.
+pub fn abi_version_of(module: &Module) -> Result<u32, AbiFault> {
+    let mut versions = module
+        .custom_sections()
+        .filter(|s| s.name() == ABI_SECTION)
+        .map(|s| s.data());
+    let payload = match versions.next() {
+        None => return Err(AbiFault::Undeclared),
+        Some(p) => p,
+    };
+    // A second section under the same name means two emitters disagreed inside one binary;
+    // that ambiguity is refused rather than resolved by picking one.
+    if versions.next().is_some() || payload.len() != 4 {
+        return Err(AbiFault::Malformed);
+    }
+    Ok(u32::from_le_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
+}
+
+/// Check a module's declared ABI against what THIS host speaks.
+pub fn check_abi(module: &Module) -> Result<(), AbiFault> {
+    let v = abi_version_of(module)?;
+    if v == ABI_VERSION {
+        Ok(())
+    } else {
+        Err(AbiFault::Unsupported(v))
+    }
+}
+
+/// Compile-and-admit: the whole ABI gate a module must pass, as ONE call for callers (installation)
+/// that hold no engine of their own. Nothing is instantiated and no guest code runs — compilation
+/// and section inspection only. Err carries a human-readable refusal naming the fault.
+pub fn validate_module_abi(wasm: &[u8]) -> Result<u32, String> {
+    let engine = Engine::new(&Config::default());
+    let module = Module::new(&engine, wasm).map_err(|e| format!("module load: {e}"))?;
+    check_abi(&module).map_err(|f| f.message())?;
+    Ok(abi_version_of(&module).expect("check_abi just succeeded"))
+}
+
+/// Append a well-formed ABI declaration carrying `version` to wasm bytes - how tools, tests and
+/// hand-built components stamp the ABI without the SDK.
+pub fn stamp_abi_section(wasm: &mut Vec<u8>, version: u32) {
+    let name = ABI_SECTION.as_bytes();
+    let mut payload = Vec::with_capacity(1 + name.len() + 4);
+    payload.push(name.len() as u8); // section-local LEB128 name length; the name is short
+    payload.extend_from_slice(name);
+    payload.extend_from_slice(&version.to_le_bytes());
+    // Custom sections have id 0 and may appear anywhere, end included; lengths are single-byte
+    // LEB128 while the payload stays under 128, which every stamped ABI here does.
+    assert!(payload.len() < 128, "ABI section unexpectedly large");
+    wasm.push(0x00);
+    wasm.push(payload.len() as u8);
+    wasm.extend_from_slice(&payload);
+}
+
 /// Explicit per-run resource bounds beyond fuel (ALET-P1-021, ADR-065).
 ///
 /// Fuel bounds HOW MUCH COMPUTE a guest may buy; these bounds cap the four resources fuel does not
@@ -511,6 +620,12 @@ pub fn run_with_limits(
         Ok(m) => m,
         Err(e) => return ComponentOutcome::load_err(format!("module load: {e}")),
     };
+    // ABI admission (ALET-P1-022, ADR-066): a module that cannot say which ABI it speaks, says it
+    // malformedly, or speaks a different one is refused BEFORE any guest state exists - the same
+    // gate every run passes through, ad-hoc or installed.
+    if let Err(fault) = check_abi(&module) {
+        return ComponentOutcome::load_err(fault.message());
+    }
 
     let host = HostState {
         caps,

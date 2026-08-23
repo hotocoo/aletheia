@@ -64,7 +64,11 @@ fn seq_wasm(w: usize, e: usize) -> Vec<u8> {
   (func (export "run") (result i32)
 {body}    (i32.const 0)))"#
     );
-    wat::parse_str(&wat).expect("seq wat compiles")
+    {
+        let mut w = wat::parse_str(&wat).expect("seq wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    }
 }
 
 proptest! {

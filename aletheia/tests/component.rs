@@ -42,7 +42,11 @@ fn writer_wasm(payload: &str, event: &str) -> Vec<u8> {
         plen = payload.len(),
         elen = event.len()
     );
-    wat::parse_str(&wat).expect("writer wat compiles")
+    {
+        let mut w = wat::parse_str(&wat).expect("writer wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    }
 }
 
 /// A component that reads the entity whose id is baked into its data segment into a return buffer.
@@ -59,7 +63,11 @@ fn reader_wasm(id: &str) -> Vec<u8> {
         id = id,
         idlen = id.len()
     );
-    wat::parse_str(&wat).expect("reader wat compiles")
+    {
+        let mut w = wat::parse_str(&wat).expect("reader wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    }
 }
 
 /// A real program: read a source entity's content into memory, uppercase the ASCII letters, and
@@ -89,7 +97,11 @@ fn transform_wasm(id: &str) -> Vec<u8> {
         id = id,
         idlen = id.len()
     );
-    wat::parse_str(&wat).expect("transform wat compiles")
+    {
+        let mut w = wat::parse_str(&wat).expect("transform wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    }
 }
 
 /// A component that writes an entity, then loops forever — used to prove a committed effect survives
@@ -107,7 +119,11 @@ fn writer_then_spin_wasm(payload: &str) -> Vec<u8> {
         payload = payload,
         plen = payload.len()
     );
-    wat::parse_str(&wat).expect("writer_then_spin wat compiles")
+    {
+        let mut w = wat::parse_str(&wat).expect("writer_then_spin wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    }
 }
 
 /// A component that spawns an installed child component, requesting a capability action for it.
@@ -126,7 +142,11 @@ fn spawner_wasm(child_id: &str, action: &str) -> Vec<u8> {
         idlen = child_id.len(),
         actlen = action.len()
     );
-    wat::parse_str(&wat).expect("spawner wat compiles")
+    {
+        let mut w = wat::parse_str(&wat).expect("spawner wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    }
 }
 
 /// Multi-agent composition: a component spawns an installed child and the System Core runs it with a
@@ -233,14 +253,16 @@ fn spawned_child_cannot_exceed_parent_authority() {
 
 /// A component that loops forever — used to prove fuel bounding.
 fn spinner_wasm() -> Vec<u8> {
-    wat::parse_str(
+    let mut w = wat::parse_str(
         r#"(module
   (memory (export "memory") 1)
   (func (export "run") (result i32)
     (loop $l (br $l))
     (unreachable)))"#,
     )
-    .expect("spinner wat compiles")
+    .expect("spinner wat compiles");
+    aletheia::component::stamp_abi_section(&mut w, 1);
+    w
 }
 
 fn count_events(core: &SysCore, etype: &str) -> usize {
@@ -662,7 +684,11 @@ fn writer_with_args(ptr: i32, len: i32) -> Vec<u8> {
         ptr = ptr,
         len = len
     );
-    wat::parse_str(&wat).expect("fuzz writer wat compiles")
+    {
+        let mut w = wat::parse_str(&wat).expect("fuzz writer wat compiles");
+        aletheia::component::stamp_abi_section(&mut w, 1);
+        w
+    }
 }
 
 // Fuzzing the untrusted host-ABI boundary (PRD §38.4). Fuzzing is treated as a security control, not
