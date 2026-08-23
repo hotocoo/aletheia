@@ -44,7 +44,10 @@ fn an_ask_is_durable_idempotent_and_bound_to_its_line() {
     let again = core
         .request_console_approval("human:operator", "rm notes", Risk::Destructive)
         .unwrap();
-    assert_eq!(again.id, pa.id, "re-asking the same line finds the same pending record");
+    assert_eq!(
+        again.id, pa.id,
+        "re-asking the same line finds the same pending record"
+    );
     assert_eq!(again.state, ApprovalState::Pending);
     // A different line is a different question.
     let other = core
@@ -86,25 +89,41 @@ fn a_grant_types_exactly_once_and_binds_exactly_its_line() {
     let mut core = SysCore::open(&dir, Box::new(DeterministicRuntime)).unwrap();
 
     // Before the human answers, nothing types.
-    assert!(core.take_console_approval("human:operator", "rm notes").is_err());
+    assert!(core
+        .take_console_approval("human:operator", "rm notes")
+        .is_err());
 
     core.resolve_console_approval(&id, true).unwrap();
 
     // A different line cannot ride on this grant.
-    assert!(core.take_console_approval("human:operator", "rm manifesto").is_err());
+    assert!(core
+        .take_console_approval("human:operator", "rm manifesto")
+        .is_err());
     // Neither can a different subject.
-    assert!(core.take_console_approval("human:owner", "rm notes").is_err());
+    assert!(core
+        .take_console_approval("human:owner", "rm notes")
+        .is_err());
 
     // The right driver, the right line: the grant is spent, once.
-    let spent = core.take_console_approval("human:operator", "rm notes").unwrap();
+    let spent = core
+        .take_console_approval("human:operator", "rm notes")
+        .unwrap();
     assert_eq!(spent, id);
-    assert!(core.take_console_approval("human:operator", "rm notes").is_err());
+    assert!(core
+        .take_console_approval("human:operator", "rm notes")
+        .is_err());
 
     // Reopen: replaying the log keeps the authority spent.
     let mut core2 = SysCore::open(&dir, Box::new(DeterministicRuntime)).unwrap();
     let rec = core2.get_approval(&id).expect("record survives restart");
-    assert_eq!(rec.state, ApprovalState::Consumed, "a spent grant stays spent");
-    assert!(core2.take_console_approval("human:operator", "rm notes").is_err());
+    assert_eq!(
+        rec.state,
+        ApprovalState::Consumed,
+        "a spent grant stays spent"
+    );
+    assert!(core2
+        .take_console_approval("human:operator", "rm notes")
+        .is_err());
 }
 
 #[test]
@@ -119,7 +138,9 @@ fn a_denial_is_a_record_that_never_types() {
     let mut core = SysCore::open(&dir, Box::new(DeterministicRuntime)).unwrap();
     let denied = core.resolve_console_approval(&id, false).unwrap();
     assert_eq!(denied.state, ApprovalState::Denied);
-    assert!(core.take_console_approval("human:operator", "reboot").is_err());
+    assert!(core
+        .take_console_approval("human:operator", "reboot")
+        .is_err());
     // Resolution is terminal — no re-granting a denied record into a typed line.
     assert!(core.resolve_console_approval(&id, true).is_err());
     // And the operator asking AGAIN starts a NEW question; the old denial stands.
@@ -152,9 +173,7 @@ fn the_two_approval_worlds_do_not_blur() {
             .approval_id
             .expect("a destructive core intent without inline approval records a pending")
     };
-    let err = core
-        .resolve_console_approval(&intent_id, true)
-        .unwrap_err();
+    let err = core.resolve_console_approval(&intent_id, true).unwrap_err();
     assert!(
         err.message.contains("not a console approval"),
         "got: {}",
@@ -165,10 +184,11 @@ fn the_two_approval_worlds_do_not_blur() {
         .request_console_approval("human:operator", "halt", Risk::Destructive)
         .unwrap()
         .id;
-    let err = core
-        .resolve_approval(&[], &line_id, true)
-        .unwrap_err();
+    let err = core.resolve_approval(&[], &line_id, true).unwrap_err();
     assert!(!err.message.is_empty());
     // The console record was untouched by the refused attempt.
-    assert_eq!(core.get_approval(&line_id).unwrap().state, ApprovalState::Pending);
+    assert_eq!(
+        core.get_approval(&line_id).unwrap().state,
+        ApprovalState::Pending
+    );
 }

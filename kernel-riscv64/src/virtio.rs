@@ -16,8 +16,8 @@
 //! `[virtio] no device (skipped)` and boots green; `scripts/vm-e2e-riscv.sh` attaches a 1 MiB disk and
 //! requires the invariant marker.
 use kernel_core::virtioblk::{self, InitReport, MmioLayout, MmioTransport, VirtioHal};
-use kernel_core::virtionet::{self, VirtioNet, VIRTIO_ID_NET};
 use kernel_core::virtiogpu::{self, VirtioGpu, VIRTIO_ID_GPU};
+use kernel_core::virtionet::{self, VirtioNet, VIRTIO_ID_NET};
 
 use crate::frames;
 

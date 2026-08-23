@@ -900,7 +900,8 @@ impl SysCore {
             return Err(AlethError::conflict("approval already resolved"));
         }
         if pa.is_expired(now()) {
-            self.approvals.mark_state(approval_id, ApprovalState::Expired);
+            self.approvals
+                .mark_state(approval_id, ApprovalState::Expired);
             self.emit(
                 "ApprovalResolved",
                 &new_id(),
@@ -969,7 +970,7 @@ impl SysCore {
             json!({"approval": id, "console_line": line}),
         );
         Ok(id)
- }
+    }
 
     /// Read the tail of the immutable audit log. Capability-gated (`audit.read`): the log carries
     /// provenance, not a public feed — a caller with no covering capability is denied (fail-closed).

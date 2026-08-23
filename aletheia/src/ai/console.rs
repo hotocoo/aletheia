@@ -632,12 +632,7 @@ mod tests {
             other => panic!("a safe request plans to lines, got {other:?}"),
         }
         // Destructive: a QUESTION, carrying the validated exact line.
-        match plan_lines_governed(
-            &DeterministicConsole,
-            "human:operator",
-            "rm notes",
-            "",
-        ) {
+        match plan_lines_governed(&DeterministicConsole, "human:operator", "rm notes", "") {
             Ok(GovernedPlan::NeedsApproval { line, risk }) => {
                 assert_eq!(line, "rm notes");
                 assert_eq!(risk, crate::tools::Risk::Destructive);
@@ -659,8 +654,8 @@ mod tests {
                 Ok(json!({"steps":[{"op":"rm","args":{"name":"two words"}}]}).to_string())
             }
         }
-        let err = plan_lines_governed(&FixedPlan, "human:operator", "remove the object", "")
-            .unwrap_err();
+        let err =
+            plan_lines_governed(&FixedPlan, "human:operator", "remove the object", "").unwrap_err();
         assert!(err.contains("must be one word"), "got: {err}");
         // And an unknown command never becomes an approval question.
         assert!(plan_lines_governed(&DeterministicConsole, "h:o", "format disk", "").is_err());

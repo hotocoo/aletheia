@@ -300,7 +300,8 @@ fn console_plan(dir: &std::path::Path, request: &str, args: &[String]) {
             let mut core = match aletheia::syscore::SysCore::open_default(dir) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("refused: `{line}` changes the machine and the approval store is \
+                    eprintln!(
+                        "refused: `{line}` changes the machine and the approval store is \
                                unavailable ({e}) — type nothing, ask nobody"
                     );
                     std::process::exit(1);
@@ -360,7 +361,10 @@ fn approvals_cmd(args: &[String]) {
                     aletheia::intent_action::Verb::Console { line } => format!("console:`{line}`"),
                     other => format!("intent:{other:?}"),
                 };
-                println!("{} [{:?}] {} {} — {}", pa.id, pa.state, pa.subject, bound, pa.reason);
+                println!(
+                    "{} [{:?}] {} {} — {}",
+                    pa.id, pa.state, pa.subject, bound, pa.reason
+                );
             }
         }
         Some(verb @ ("grant" | "deny")) => {
@@ -509,11 +513,9 @@ fn console_agent(dir: &std::path::Path, request: &str, args: &[String]) {
         fn judge(&mut self, line: &str) -> aletheia::ai::agent::Verdict {
             match self {
                 Gov::Inline => aletheia::ai::agent::Verdict::Spend,
-                Gov::Store { core } => aletheia::syscore::SysCore::console_governor(
-                    core,
-                    "human:operator",
-                )
-                .judge(line),
+                Gov::Store { core } => {
+                    aletheia::syscore::SysCore::console_governor(core, "human:operator").judge(line)
+                }
                 Gov::Broken(why) => aletheia::ai::agent::Verdict::Unavailable(why.clone()),
             }
         }

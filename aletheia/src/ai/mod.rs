@@ -375,7 +375,10 @@ mod tests {
         let d = super::registry::default_entry();
         match (&c.entry, d) {
             (Some(e), Some(de)) => {
-                assert_eq!(e, &de, "the built-in default IS the registry default, not a rival");
+                assert_eq!(
+                    e, &de,
+                    "the built-in default IS the registry default, not a rival"
+                );
                 assert_eq!(c.model_ref, e.repo);
                 assert_eq!(c.endpoint, e.endpoint);
             }
@@ -383,9 +386,9 @@ mod tests {
                 assert_eq!(c.model_ref, DEFAULT_MODEL_REF);
                 assert_eq!(c.endpoint, DEFAULT_ENDPOINT);
             }
-            (got, want) => panic!(
-                "config default {got:?} disagrees with the registry default {want:?}"
-            ),
+            (got, want) => {
+                panic!("config default {got:?} disagrees with the registry default {want:?}")
+            }
         }
     }
 

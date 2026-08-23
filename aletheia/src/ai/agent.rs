@@ -565,7 +565,10 @@ propose it again; find another way to answer the request, or reply with the answ
 already been shown is enough";
 
 fn first_word_of(line: &str) -> String {
-    line.split_whitespace().next().unwrap_or_default().to_string()
+    line.split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// The index of the first turn whose observation is shown in full.
@@ -1779,7 +1782,9 @@ mod tests {
             let mut q = self.verdicts.borrow_mut();
             if q.is_empty() {
                 // Exhausted script == the store keeps asking.
-                Verdict::Ask { approval_id: "a1".into() }
+                Verdict::Ask {
+                    approval_id: "a1".into(),
+                }
             } else {
                 q.drain(..1).next().expect("checked non-empty")
             }
@@ -1804,7 +1809,9 @@ mod tests {
         // process that asked it.
         assert_eq!(s.budget, 6);
         assert!(s.turns.is_empty());
-        let p = s.pending_approval.expect("pending recorded in the transcript");
+        let p = s
+            .pending_approval
+            .expect("pending recorded in the transcript");
         assert_eq!(p.line, "rm notes");
         assert_eq!(p.approval_id, A1);
         // And the governor was asked about exactly this one line.
