@@ -25,6 +25,7 @@
 extern crate alloc;
 
 pub mod arpcache;
+pub mod bench;
 pub mod capalg;
 pub mod capstore;
 pub mod compress;

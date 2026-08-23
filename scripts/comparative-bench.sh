@@ -29,6 +29,17 @@
 # RUNNING IT:  ./scripts/comparative-bench.sh
 # The Linux leg needs Docker (to build a busybox initramfs) and network access (to fetch the kernel).
 # It SKIPs — never silently passes, and never quietly drops the comparison — when either is missing.
+#
+# THE TYPED-WORKLOAD LEG (REQ-PERF-002): boot and idle say how a machine WAITS; this leg says how
+# it ANSWERS. After the idle sampling, still alive, each guest receives the IDENTICAL scripted
+# session over its serial console: WORKLOAD_OPS 'echo WL-<label>-<i>' lines, one at a time, each
+# held until THAT op's unique token comes back as OUTPUT (anchored '^WL-', so the terminal's own
+# input echo of 'echo WL-...' can never satisfy the wait). Wall-clock across all N round-trips is
+# reported as ms/op beside the other columns. This is an END-TO-END interactive-path measurement —
+# tty discipline or kernel input ring, line editor, dispatcher, output formatting, serial
+# transmission — under the same emulator, driven by the same script, and it is a small STRESS test
+# too: the input path must take N paced lines with nothing dropped (Aletheia's 'mem' command can
+# prove the drop counter stayed at zero afterward; see the honesty notes at the bottom).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -40,6 +51,9 @@ KERNEL_URL="${KERNEL_URL:-https://dl-cdn.alpinelinux.org/alpine/$ALPINE_VER/rele
 IDLE_SAMPLES="${IDLE_SAMPLES:-6}"
 IDLE_INTERVAL="${IDLE_INTERVAL:-2}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-180}"
+# Typed-workload sizing: 25 paced round-trips is seconds of wall clock and enough to see the
+# per-op cost rise above timer noise; set WORKLOAD_OPS=0 to skip the leg entirely.
+WORKLOAD_OPS="${WORKLOAD_OPS:-25}"
 # One boot is not a measurement; see boot_median. Three is enough to see a distribution and cheap
 # enough to run on every push.
 BOOT_SAMPLES="${BOOT_SAMPLES:-3}"
@@ -50,8 +64,42 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 # Results, filled per leg.
-AL_BOOT_MS=""; AL_IDLE=""; AL_BYTES=""
-LX_BOOT_MS=""; LX_IDLE=""; LX_BYTES=""; LX_STATUS="SKIP"
+AL_BOOT_MS=""; AL_IDLE=""; AL_BYTES=""; AL_WL_MS=""
+LX_BOOT_MS=""; LX_IDLE=""; LX_BYTES=""; LX_STATUS="SKIP"; LX_WL_MS=""
+
+# ---------------------------------------------------------------------------------------------
+# THE TYPED-WORKLOAD LEG. Drive WORKLOAD_OPS echo round-trips into a LIVE guest through its
+# serial console, one at a time, each held until that op's unique token comes back as OUTPUT.
+# The wait anchors on '^WL-' so the terminal's own INPUT ECHO of 'echo WL-...' can never satisfy
+# it — we measure the guest's answer, not our own typing. Wall-clock across all ops is reported
+# as ms/op. Both guests get byte-identical treatment: same emulator, same pacing, same protocol,
+# same judge (this loop). Redox is excluded from THIS leg only because its image boots to a login
+# prompt whose credentials this script refuses to guess on somebody else's OS.
+#
+# The fifo is already held open on fd 9 by the caller; writing goes to the same pipe the guest
+# reads. Polling granularity is 20 ms — far below one round-trip under TCG, so it prices in no
+# meaningful share of the result.
+typed_workload() {
+  local label="$1" log="$2" t0 t1 i deadline
+  [ "$WORKLOAD_OPS" -gt 0 ] || return 0
+  t0="$(python3 -c 'import time;print(int(time.time()*1000))')"
+  for i in $(seq 1 "$WORKLOAD_OPS"); do
+    printf 'echo WL-%s-%s\n' "$label" "$i" >&9
+    deadline=$((SECONDS + 60))
+    until grep -qE "^WL-$label-$i\r*$" "$log"; do
+      if [ "$SECONDS" -ge "$deadline" ]; then
+        echo "    FAIL [$label] workload op $i was never answered by the guest"
+        return 1
+      fi
+      sleep 0.005
+    done
+  done
+  t1="$(python3 -c 'import time;print(int(time.time()*1000))')"
+  WORKLOAD_MS=$((t1 - t0))
+  printf '    typed workload: %s echo round-trips in %s ms => %s ms/op end-to-end\n' \
+    "$WORKLOAD_OPS" "$WORKLOAD_MS" "$((WORKLOAD_MS / WORKLOAD_OPS))"
+  return 0
+}
 
 # ---------------------------------------------------------------------------------------------
 # Boot something, wait for the string that means "there is a prompt", and then measure the host CPU
@@ -127,6 +175,9 @@ boot_and_measure() {
     [ "$i" -gt 1 ] && samples+=("$cpu")
     sleep "$IDLE_INTERVAL"
   done
+  # The guest stays ALIVE for the typed-workload leg: boot and idle say how a machine waits,
+  # the workload says how it ANSWERS. Only after it does the guest get put down.
+  typed_workload "$label" "$log" || { kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1; }
   kill -9 "$pid" 2>/dev/null
   exec 9>&-
 
@@ -180,7 +231,7 @@ if boot_median aletheia "aletheia> " \
     -drive "if=none,format=raw,file=$WORK/al-s.img,id=blk0" -device virtio-blk-pci,drive=blk0 \
     -drive "if=none,format=raw,file=$WORK/al-p.img,id=blk1" -device virtio-blk-pci,drive=blk1 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot; then
-  AL_BOOT_MS="$BOOT_MS"; AL_IDLE="$IDLE_CPU"
+  AL_BOOT_MS="$BOOT_MS"; AL_IDLE="$IDLE_CPU"; AL_WL_MS="$WORKLOAD_MS"
 else
   fail=1
 fi
@@ -216,7 +267,7 @@ else
           qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64 -nographic -no-reboot \
           -kernel "$WORK/vmlinuz" -initrd "$WORK/initramfs.gz" \
           -append "console=ttyS0 quiet rdinit=/init"; then
-        LX_BOOT_MS="$BOOT_MS"; LX_IDLE="$IDLE_CPU"; LX_STATUS="OK"
+        LX_BOOT_MS="$BOOT_MS"; LX_IDLE="$IDLE_CPU"; LX_STATUS="OK"; LX_WL_MS="$WORKLOAD_MS"
       else
         fail=1
       fi
@@ -285,6 +336,7 @@ printf '%-28s-+-%-18s-+-%-18s-+-%-18s\n' "----------------------------" "-------
 printf '%-28s | %-18s | %-18s | %-18s\n' "boot to a prompt" "${AL_BOOT_MS:-FAIL} ms" "${LX_BOOT_MS:-SKIP} ms" "${RX_BOOT_MS:-SKIP} ms"
 printf '%-28s | %-18s | %-18s | %-18s\n' "idle host CPU at prompt" "${AL_IDLE:-FAIL} %" "${LX_IDLE:-SKIP} %" "${RX_IDLE:-SKIP} %"
 printf '%-28s | %-18s | %-18s | %-18s\n' "bootable payload" "${AL_BYTES:-FAIL} B" "${LX_BYTES:-SKIP} B" "${RX_BYTES:-SKIP} B"
+printf '%-28s | %-18s | %-18s | %-18s\n' "typed echo round-trip" "${AL_WL_MS:-FAIL} ms" "${LX_WL_MS:-SKIP} ms" "n/a (login)"
 printf '%-28s | %-18s | %-18s | %-18s\n' "privileged lines of code" "$KLOC (Rust)" "~40M (C, cited)" "n/a"
 hr
 cat <<'RUSTOS'
@@ -344,6 +396,16 @@ HOW TO READ THIS.
                                 says whether the kernel knows how to wait. Parity with Linux here is
                                 the claim -- and until REQ-CON-006 it was not true: Aletheia's
                                 console loop spun, and an idle machine cost a whole core.
+
+  typed echo round-trip         The same fair shape, under LOAD: N 'echo' round-trips typed into
+                                each guest's shell, wall-clocked end-to-end. It exercises the whole
+                                interactive path -- tty/input ring, line editor, dispatcher,
+                                output formatting, serial transmission -- and doubles as a small
+                                stress test: a dropped keystroke hangs the leg and FAILS it, never
+                                passes quietly. Stated asymmetry: Aletheia's dispatcher runs in
+                                KERNEL space while busybox sh runs in USER space over syscalls;
+                                that is a design difference between the systems, not a controlled
+                                variable, and this column prices it in rather than hiding it.
 
   privileged lines of code      The column that does not depend on an emulator, a host, or a
                                 workload. It is how much code must be correct for the machine to be

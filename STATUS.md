@@ -1,13 +1,68 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-23 (long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; before that: fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
+**As of:** 2026-08-23 (the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; before that: long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..063`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..064`.
 
-## Current wave — the machine runs for a living (2026-08-23, ADR-063)
+## Current wave — the machine measures itself (2026-08-23, ADR-064)
+
+ALET-P2-010 closes. The kernel could say how fast its load-bearing paths run on ONE target, once,
+ad hoc — `kernel/src/bench.rs` measured svc traps and capability-checked delivery on aarch64 only.
+The operator's first question about a NEW machine had no arch-independent answer, and the
+comparative benchmark compared only how two operating systems WAIT (boot-to-prompt, idle host
+CPU), never how they ANSWER. `kernel-core/src/bench.rs` closes both gaps through the same `Hal`
+clock seam soak already proved:
+
+* **Five measured paths** — authority checks (`CapEngine::evaluate`), capability-checked delivery
+  round-trips, journal commits, scheduler dispatches, console line formatting — each over buffers
+  allocated before its meter starts, each warmed up outside the meter, on every one of the three
+  CPU targets inside its VM gate. **Reported:** throughput and unit cost in ns where the clock is
+  calibrated (aarch64 CNTFRQ: authority 144 ns/op; riscv64 SBI timebase) and in raw ticks labelled
+  "uncalibrated" on x86-64 (TSC has no known frequency here; a cost below clock resolution prints
+  `<1`, never a confident 0). **Gated — twelve structural checks:** the clock advanced in every
+  window; every authority check allowed (authority cannot change mid-measurement); every delivery
+  delivered and summed to a closed form; every commit read back byte-for-byte after the window;
+  an equal-size rerun window materialized ZERO device blocks (steady state, not first-touch setup);
+  dispatch EXACTLY fair across the pool; console bytes equal the arithmetic with the last line
+  re-encoded outside the meter; a rerun performing IDENTICAL work; and four pixel-level GUI checks:
+  glyph-exact rendering against the embedded font table, wrap, scroll, and THIS boot's own summary
+  legible on the display over real framebuffer frames — **the results are verified on BOTH
+  consoles**, serial log as TUI, framebuffer surface as GUI.
+* **Hosted proof** (`tests/bench.rs`, 7 tests): all twelve hold on an advancing calibrated clock;
+  a FROZEN clock is refused by name at invariant 1 (a benchmark that cannot see time must not
+  report infinite speed); an uncalibrated clock reports ticks and says so, never nanoseconds; a
+  counting global allocator shows a full campaign performs NO per-operation allocation at 400 000
+  measured operations; every line fits the 80-cell display unwrapped; an undersized surface is
+  refused, not truncated; reduced scale passes unchanged gates. kernel-core is now **452 tests /
+  37 suites green**, clippy `-D warnings` clean, fmt clean (four collapsible-if lints in
+  `dhcp.rs` that a newer stable clippy started firing were collapsed — guards moved into match
+  arms, semantics unchanged).
+* **All three gates updated deliberately** (ADR-061): expected maps gain `bench=12` plus named
+  greps for the family sentence and a real authority measurement — aarch64 and RISC-V maps stay
+  IDENTICAL by assertion, x86-64 differs only where that machine differs. Re-run green on all
+  three targets: aarch64 VM-E2E PASS, RISC-V VM-E2E PASS, x86-64 SMOKE TEST PASS (two boots,
+  exit 33 both).
+* **The cross-OS half** (REQ-PERF-002 on top of REQ-PERF-001): `comparative-bench.sh` gains a
+  typed-workload leg — after idle sampling, still alive, each guest receives byte-identical paced
+  `echo` round-trips over serial, each held until that op's unique token returns as OUTPUT
+  (anchored `^WL-` so input echo can never satisfy it), wall-clocked end-to-end as ms/op beside
+  boot and idle. Same emulator, same pacing, same judge; a dropped keystroke FAILS the leg rather
+  than passing quietly — and the first real run caught exactly that class of bug in the HARNESS:
+  Aletheia's serial lines end CR CR LF while the original answer anchor allowed one CR, so a guest
+  that HAD answered was judged silent; the anchor now judges the token, not the line ending.
+  Measured on this workstation, same emulator, same flags: Aletheia answers 25 echo round-trips in
+  **3 ms/op** against Linux busybox sh's **26–33 ms/op**, while Linux keeps the boot-time win
+  (2063 ms vs 3070 ms to a prompt) — both truths printed side by side, with the stated asymmetry
+  that Aletheia's dispatcher runs in kernel space while busybox sh is user-space over syscalls.
+  The VirtualBox gate joins the family too: the benchmark needs no device, so it is REQUIRED there
+  as well.
+
+Traceability rollup: **111 requirements — 101 delivered / 6 partial / 4 deferred**, PASS.
+
+## Previous wave — the machine runs for a living (2026-08-23, ADR-063)
 
 ALET-P2-009 closes. Every suite before this one proved a subsystem CORRECT on hand-picked cases; none
 answered the operator's next question: does it still hold after the machine has been RUNNING —
@@ -3211,8 +3266,8 @@ cargo run         # aletheiad: boots the hosted System Core + runs the UC-001..0
 ./scripts/check-traceability.sh    # requirement traceability gate: every delivered/partial requirement maps to existing impl+test evidence (gap Issue 12)
 
 ./scripts/e2e-all.sh         # ONE command, all three targets: aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke-test -> single PASS/FAIL
-./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 virtual-memory + 32 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console + 12 soak invariants + exit 0
-./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 32 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console + 12 soak invariants + exit 0
+./scripts/vm-e2e.sh          # aarch64 microkernel in QEMU: 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 virtual-memory + 32 EL0 user-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console + 12 soak + 12 benchmark invariants + exit 0
+./scripts/vm-e2e-riscv.sh    # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode): 13 spine + 14 capability-lifetime + 22 risk-advisor + 21 memory + 66 Sv39 virtual-memory + 32 U-mode + 22 SMP + 15 filesystem + 21 virtio-blk + 9 network + 13 virtio-gpu + 6 framebuffer-console + 10 durable-store + 9 DMA-boundary + 9 input-ring + 42 console + 12 soak + 12 benchmark invariants + exit 0
 ./scripts/linux_pipe_bench.sh # real-Linux IPC baseline for the perf discussion (needs Docker)
 ```
 

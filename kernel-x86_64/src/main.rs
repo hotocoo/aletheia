@@ -796,6 +796,49 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // The machine measures itself (ALET-P2-010, ADR-064, REQ-PERF-002): the five load-bearing
+    // paths — authority checks, capability-checked delivery, journal commits, scheduler
+    // dispatches, console formatting — measured on THIS machine's own clock through the shared
+    // Hal seam. Throughput is REPORTED, never gated (emulation timing is an emulator's); what
+    // gates is everything structural: work really done, authority unbroken, commits read back,
+    // steady state not first-touch setup, exactly-fair dispatch, byte-exact console arithmetic,
+    // a rerun performing IDENTICAL work, and — the GUI half — the summary rendered GLYPH-EXACT
+    // onto real framebuffer pages, wrap and scroll contracts included. The serial log above is
+    // the TUI half of that claim.
+    kprintln!("");
+    kprintln!("--- benchmark selftests (this machine measures itself) ---");
+    {
+        let mut bench_pages: alloc::vec::Vec<usize> =
+            alloc::vec::Vec::with_capacity(kernel_core::bench::FB_PAGES);
+        for _ in 0..kernel_core::bench::FB_PAGES {
+            match crate::frames::alloc_zeroed() {
+                Some(f) => bench_pages.push(f.addr()),
+                None => break,
+            }
+        }
+        match kernel_core::bench::bench_suite::<ActiveHal>(
+            kernel_core::bench::BOOT_LOAD,
+            &bench_pages,
+            |line| kprintln!("{}", line),
+            |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            },
+        ) {
+            Ok((_report, n)) => {
+                kprintln!("[bench] ALL {} BENCHMARK INVARIANTS HOLD", n);
+                kprintln!("[bench] GUI half: the same numbers were proved ON THE FRAMEBUFFER");
+            }
+            Err((idx, name)) => {
+                kprintln!("[bench] FAILED at benchmark invariant {}: {}", idx, name);
+                ActiveHal::exit(420 + idx as i32);
+            }
+        }
+    }
+
     // The cross-reboot claim, on REAL hardware (REQ-STOR-003, ADR-038). The persistent medium is the
     // SECOND disk: the scratch one above was reformatted by the destructive suites, this one is never
     // wiped. The boot gate boots twice against the same image file, so the second boot must FIND and

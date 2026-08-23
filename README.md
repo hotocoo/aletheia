@@ -591,14 +591,15 @@ believe, every number this repository quotes has a gate behind it:
 
 ```bash
 cd aletheia && cargo test        # full conformance + unit suite (deterministic; no model needed)
-cd kernel-core && cargo test     # the shared substrate's hosted proofs — 445 tests incl. the long-running lifecycle soak
+cd kernel-core && cargo test     # the shared substrate's hosted proofs — 452 tests incl. soak + the self-benchmark suite
 ./scripts/e2e-all.sh             # all three CPU targets + the VirtualBox rung, one aggregate pass/fail
 ./scripts/console-e2e.sh         # boot, type, halt, reboot, read it back — three targets
-./scripts/comparative-bench.sh   # Aletheia against a real Linux kernel on the SAME emulator
+./scripts/comparative-bench.sh   # Aletheia vs a real Linux kernel on the SAME emulator:
+                                 # boot, idle CPU, and a typed echo-workload leg under load
 ```
 
-One of those proofs deserves naming because of what it says about endurance: the **long-running soak**
-(ADR-063). Every suite above was proved on hand-picked cases; the soak asks whether the properties
+Two of those proofs deserve naming. The **long-running soak**
+(ADR-063): every suite was proved on hand-picked cases; the soak asks whether the properties
 survive the machine RUNNING — committing, naming, sharing and dispatching for a long time. On a kernel
 whose heap is a bump allocator that never frees, that is a resource property before it is a correctness
 property, so the load-bearing check is MEASURED on the machine itself: journal churn must allocate
@@ -618,6 +619,30 @@ never runs again — and the same seed must replay the identical campaign. From 
 
 Throughput is reported, never gated — QEMU-TCG nanoseconds are an emulator's numbers. The properties
 are gated, on all three CPU targets, in CI.
+
+The **self-benchmark** (ADR-064) is its performance sibling: an arch-independent suite, defined once
+in `kernel-core/src/bench.rs`, runs inside every target's boot gate and measures the five load-bearing
+paths on each machine's own clock — authority checks, capability-checked delivery, journal commits,
+scheduler dispatches, console formatting. Throughput is again REPORTED (nanoseconds where the clock is
+calibrated; raw ticks labelled "uncalibrated" on x86-64, whose TSC frequency nobody here pretends to
+know); what is GATED is everything structural: work really done, authority unbroken mid-window, commits
+read back byte-for-byte, steady state proven by a zero-materialization rerun window, exactly-fair
+dispatch, byte-exact console arithmetic, identical-work determinism — and four pixel-level checks that
+render THIS boot's summary onto real framebuffer pages through wrap and scroll, so every number is
+verified on BOTH consoles: the serial log a gate judges, and the display a human sees. From a real boot:
+
+```text
+[bench] authority : 100000 checks | 15 ms | 6384476/s | 144 ns/op
+[bench] delivery  : 100000 rt | 33 ms | 3018684/s | 320 ns/op
+[bench] storage   : 256 txs | 20 ms | 12570/s | 79536 ns/op
+[bench] schedule  : 100000 disp | 40 ms | 2479604/s | 400 ns/op
+[bench] console   : 100000 lines | 6 ms | 16556291/s | 48 ns/op
+[bench] ALL 12 BENCHMARK INVARIANTS HOLD
+```
+
+And the comparative benchmark now drives a **typed workload** into both guests on the same emulator —
+identical paced `echo` round-trips, judged by output tokens, wall-clocked end-to-end — so the cross-OS
+comparison covers how each system ANSWERS under load, not only how it boots and how it waits.
 
 [docs/TRY-IT.md](docs/TRY-IT.md) §3 lists the rest (per-target VM gates, the model-driven console
 gate, conformance, and the three claim-checking gates that assert the evidence exists and that CI

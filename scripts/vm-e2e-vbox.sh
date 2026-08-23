@@ -101,6 +101,8 @@ REQUIRED=(
   # Parentheses are ERE groups — escaped, or this matches a line the kernel never prints.
   'TERMINATED \(Fault\(UserNotMapped\)\); system continues'
   'FILESYSTEM INVARIANTS HOLD'
+  # The self-benchmark (ALET-P2-010, ADR-064) needs no device - it must hold on VirtualBox too.
+  'ALL 12 BENCHMARK INVARIANTS HOLD'
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'

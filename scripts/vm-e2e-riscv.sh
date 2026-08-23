@@ -94,6 +94,10 @@ echo "$OUT" | grep -q "ALL 10 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: du
 # heap meter holding the allocation-free claim exactly and its own clock reporting throughput.
 echo "$OUT" | grep -q "ALL 12 SOAK INVARIANTS HOLD" || { echo "FAIL: soak invariants marker missing (ALET-P2-009, ADR-063)"; fail=1; }
 echo "$OUT" | grep -qE "\[soak\] journal: [0-9]+ txs .* => [0-9]+ tx/s" || { echo "FAIL: the soak never measured journal throughput on this machine"; fail=1; }
+# The machine measures itself (ALET-P2-010, ADR-064, REQ-PERF-002): structural benchmark gates on
+# THIS machine, with its measured costs REPORTED beside them.
+echo "$OUT" | grep -q "ALL 12 BENCHMARK INVARIANTS HOLD" || { echo "FAIL: benchmark invariants marker missing (ALET-P2-010, ADR-064, REQ-PERF-002)"; fail=1; }
+echo "$OUT" | grep -qE "\[bench\] authority: [0-9]+ checks \\| " || { echo "FAIL: the machine never measured its own authority-check cost (REQ-PERF-002)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
 echo "$OUT" | grep -q "ALL 42 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
@@ -112,7 +116,7 @@ echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlst
 # map by design — the same arch-independent suites must prove the same counts over either bus, and
 # a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
 source "$ROOT/scripts/lib-markers.sh"
-RISCV_EXPECTED="cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 virtio=21 vm=66"
+RISCV_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

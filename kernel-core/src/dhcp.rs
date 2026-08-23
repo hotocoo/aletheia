@@ -172,25 +172,19 @@ pub fn parse_offer(buf: &[u8], want_xid: u32) -> Result<Offer, DhcpError> {
         }
         let val = &buf[i + 2..i + 2 + len];
         match kind {
-            OPT_MSG_TYPE => {
-                if len >= 1 {
-                    msg_type = Some(val[0]);
-                }
+            // Guards live in the match arms themselves (collapsible-if lint, clippy 1.9x):
+            // a short option value is SKIPPED by its declared length, never interpreted.
+            OPT_MSG_TYPE if len >= 1 => {
+                msg_type = Some(val[0]);
             }
-            OPT_SERVER_ID => {
-                if len == 4 {
-                    o.server_id = Some([val[0], val[1], val[2], val[3]]);
-                }
+            OPT_SERVER_ID if len == 4 => {
+                o.server_id = Some([val[0], val[1], val[2], val[3]]);
             }
-            OPT_SUBNET => {
-                if len == 4 {
-                    o.subnet_mask = Some([val[0], val[1], val[2], val[3]]);
-                }
+            OPT_SUBNET if len == 4 => {
+                o.subnet_mask = Some([val[0], val[1], val[2], val[3]]);
             }
-            OPT_ROUTER => {
-                if len == 4 {
-                    o.router = Some([val[0], val[1], val[2], val[3]]);
-                }
+            OPT_ROUTER if len == 4 => {
+                o.router = Some([val[0], val[1], val[2], val[3]]);
             }
             OPT_LEASE_TIME if len == 4 => {
                 o.lease_secs = Some(u32::from_be_bytes([val[0], val[1], val[2], val[3]]));
