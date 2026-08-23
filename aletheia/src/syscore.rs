@@ -62,6 +62,9 @@ pub struct SysCore {
     root_minted: bool,
     /// Trust anchor for component signatures (ADR-025 Phase 1). Empty by default.
     trust: crate::provenance::TrustStore,
+    /// Asymmetric trust anchor (root public keys + signer revocations) for the supply-chain path
+    /// (ALET-P1-023, ADR-067). Empty by default — nothing verifies until an operator trusts a root.
+    asym_trust: crate::provenance::AsymTrustStore,
     /// When true, `run_installed` refuses any component whose stored signature is missing or does not
     /// verify against the trust anchor ("cannot execute under secure policy"). Default false, so the
     /// existing unsigned install/run flow is unchanged until an operator opts in.
@@ -94,6 +97,7 @@ impl SysCore {
             cancelled: HashSet::new(),
             root_minted,
             trust: crate::provenance::TrustStore::new(),
+            asym_trust: crate::provenance::AsymTrustStore::new(),
             require_signed_components: false,
         };
         core.rebuild_approvals();
@@ -371,18 +375,7 @@ impl SysCore {
         // ABI it speaks - or declares one this host does not speak - is refused BEFORE its bytes
         // are ever stored, so an unrunnable application can never enter the record. The declared
         // version is stamped into the entity's metadata as evidence of what was admitted.
-        let abi_version = match crate::component::validate_module_abi(wasm) {
-            Ok(v) => v,
-            Err(reason) => {
-                self.emit(
-                    "ComponentInstallRefused",
-                    &new_id(),
-                    subject,
-                    json!({"name": name, "reason": reason}),
-                );
-                return Err(AlethError::validation(&reason));
-            }
-        };
+        let abi_version = self.admit_wasm(wasm, name, subject)?;
         let hash = self.store.put_blob(wasm)?;
         let e = Entity {
             id: new_id(),
@@ -585,6 +578,13 @@ impl SysCore {
         if app.etype != EntityType::Application {
             return None;
         }
+        // The spawn path loads stored code and launches it — under secure policy it must pass the
+        // SAME live provenance gate as run_installed, or a spawn request becomes a side door around
+        // every signature check (ALET-P2-050, ADR-067). A refusal is audited before returning None,
+        // so the child's absence is visible in the log rather than silently swallowed.
+        if !self.launch_provenance_ok(&app, parent_subject) {
+            return None;
+        }
         let hash = app.content_ref.clone()?;
         let wasm = self.store.get_blob(&hash).cloned()?;
         let child_subject = format!("{}>{}", parent_subject, req.app_id);
@@ -643,29 +643,14 @@ impl SysCore {
             .content_ref
             .clone()
             .ok_or_else(|| AlethError::validation("application has no code"))?;
-        // Secure-launch provenance gate (ADR-025 Phase 1, gap Issue 7): under secure policy the app's
-        // stored signature must verify over its content hash against the trust anchor. Missing or
-        // invalid => refuse the launch (fail closed) and record the rejection. Default policy (off)
-        // leaves the existing unsigned launch path unchanged.
-        if self.require_signed_components {
-            let sig = app.metadata.get("signature").and_then(|v| v.as_str());
-            let verified = sig.map(|s| self.trust.verify(&hash, s)).unwrap_or(false);
-            if !verified {
-                let reason = if sig.is_none() {
-                    "unsigned"
-                } else {
-                    "invalid signature"
-                };
-                self.emit(
-                    "ComponentSignatureRejected",
-                    &new_id(),
-                    subject,
-                    json!({"app": app.id, "reason": reason}),
-                );
-                return Err(AlethError::authorization(
-                    "component signature not verified under secure policy",
-                ));
-            }
+        // Secure-launch provenance gate (ADR-025 Phase 1; generalized by ADR-067): under secure
+        // policy the app's stored provenance — symmetric signature, direct root signature, or an
+        // endorsed chain — must RE-VERIFY against CURRENT trust. Missing or invalid => refuse the
+        // launch (fail closed) and record the rejection. The same gate guards the spawn path.
+        if !self.launch_provenance_ok(&app, subject) {
+            return Err(AlethError::authorization(
+                "component signature not verified under secure policy",
+            ));
         }
         let wasm = self
             .store
@@ -695,6 +680,222 @@ impl SysCore {
     /// signature is missing or does not verify against the trust anchor (gap Issue 7 / ADR-025 P1).
     pub fn set_require_signed_components(&mut self, require: bool) {
         self.require_signed_components = require;
+    }
+
+    // --- supply-chain verification (ALET-P1-023, ADR-067) ---
+
+    /// Trust a ROOT public key for the asymmetric provenance path: artifacts signed directly by this
+    /// root, or by any signing key the root endorses, verify. Holding the store confers no ability to
+    /// sign — public keys only.
+    pub fn trust_component_root(&mut self, root_public_key: [u8; 32]) {
+        self.asym_trust.trust_root(root_public_key);
+    }
+
+    /// Revoke a component-SIGNING key: every artifact it signed stops verifying AT THE NEXT LAUNCH —
+    /// including ones already installed and previously admitted. Trust decisions are live; rotation
+    /// after compromise is a first-class operation, not a reinstall.
+    pub fn revoke_component_signer(&mut self, signer_public_key: [u8; 32]) {
+        self.asym_trust.revoke_signing_key(signer_public_key);
+        self.emit(
+            "ComponentSignerRevoked",
+            &new_id(),
+            "system",
+            json!({"signer": crate::crypto::hex(&signer_public_key)}),
+        );
+    }
+
+    /// The shared code-admission gate for EVERY install path (ALET-P1-022/ADR-066): compile the
+    /// module — never instantiate it, no guest code runs — and refuse anything that cannot declare a
+    /// current ABI or is not valid wasm at all. Returns the declared ABI version for the record;
+    /// refusals are audited as ComponentInstallRefused so nothing enters the record unlogged.
+    fn admit_wasm(&mut self, wasm: &[u8], name: &str, subject: &str) -> Result<u32> {
+        match crate::component::validate_module_abi(wasm) {
+            Ok(v) => Ok(v),
+            Err(reason) => {
+                self.emit(
+                    "ComponentInstallRefused",
+                    &new_id(),
+                    subject,
+                    json!({ "name": name, "reason": reason }),
+                );
+                Err(AlethError::validation(&reason))
+            }
+        }
+    }
+
+    /// Install a component whose provenance is an ED25519 DIRECT SIGNATURE or a ROOT→SIGNER CHAIN
+    /// (ALET-P1-023, ADR-067). The chain must verify against the asymmetric trust anchor at install,
+    /// the artifact must pass the same ABI admission as every other install path, and BOTH the
+    /// verified evidence and the signatures themselves are recorded in entity metadata so the launch
+    /// gate can RE-JUDGE the artifact against CURRENT trust (revocation included) at every run.
+    pub fn install_verified_component(
+        &mut self,
+        offered: &[String],
+        subject: &str,
+        name: &str,
+        wasm: &[u8],
+        provenance: &crate::provenance::ComponentProvenance,
+    ) -> Result<Entity> {
+        let target = Target {
+            id: None,
+            etype: Some(EntityType::Application),
+        };
+        if !matches!(
+            self.caps.evaluate("component.install", &target, offered),
+            Decision::Allow
+        ) {
+            self.emit(
+                "CapabilityDenied",
+                &new_id(),
+                subject,
+                json!({ "action": "component.install" }),
+            );
+            return Err(AlethError::authorization(
+                "not permitted to install components",
+            ));
+        }
+        let abi_version = self.admit_wasm(wasm, name, subject)?;
+        let hash = crate::crypto::sha256_hex(wasm);
+        // Verify the chain FIRST, store only what verified. The evidence names which root and signer
+        // vouched for the bytes; a failure names WHICH link failed.
+        let evidence = match &provenance.endorsement {
+            None => self
+                .asym_trust
+                .verify_direct_evidence(&hash, &provenance.component_sig),
+            Some(endorsement) => self.asym_trust.verify_chain_evidence(
+                &hash,
+                &provenance.signer,
+                endorsement,
+                &provenance.component_sig,
+            ),
+        };
+        let evidence = match evidence {
+            Ok(e) => e,
+            Err(fault) => {
+                self.emit(
+                    "ComponentSignatureRejected",
+                    &new_id(),
+                    subject,
+                    json!({
+                        "name": name,
+                        "reason": fault.as_str(),
+                        "detail": fault.message(),
+                    }),
+                );
+                return Err(AlethError::authorization(&fault.message()));
+            }
+        };
+        let stored_hash = self.store.put_blob(wasm)?;
+        let e = Entity {
+            id: new_id(),
+            etype: EntityType::Application,
+            content_ref: Some(stored_hash),
+            version: 1,
+            version_chain: new_id(),
+            metadata: json!({
+                "name": name,
+                "kind": "wasm-component",
+                "bytes": wasm.len(),
+                "abi_version": abi_version,
+                "provenance": {
+                    "kind": if provenance.endorsement.is_some() { "ed25519-chain" } else { "ed25519-direct" },
+                    "root": evidence.root_hex(),
+                    "signer": evidence.signer_hex(),
+                    "component_sig": provenance.component_sig,
+                    "endorsement": provenance.endorsement,
+                },
+            }),
+            provenance: Provenance::of(subject),
+            created_at: now(),
+            updated_at: now(),
+            deleted: false,
+        };
+        self.store.put_entity(&e)?;
+        self.emit(
+            "ComponentInstalled",
+            &new_id(),
+            subject,
+            json!({
+                "app": e.id,
+                "name": name,
+                "bytes": wasm.len(),
+                "abi_version": abi_version,
+                "provenance_kind": if provenance.endorsement.is_some() { "ed25519-chain" } else { "ed25519-direct" },
+                "signer": evidence.signer_hex(),
+                "root": evidence.root_hex(),
+            }),
+        );
+        Ok(e)
+    }
+
+    /// The LIVE launch-provenance gate (ADR-067): under secure policy, EVERY path that turns a stored
+    /// Application into running code — `run_installed` AND the spawn path alike — must re-verify its
+    /// provenance against the CURRENT trust state. Stored signatures are EVIDENCE to re-judge, not a
+    /// verdict frozen at install time: a signer revoked after admission goes dark here, and an
+    /// unsigned artifact cannot slip in through a side door. Refusals are audited by name.
+    fn launch_provenance_ok(&mut self, app: &Entity, subject: &str) -> bool {
+        if !self.require_signed_components {
+            return true;
+        }
+        let hash = app.content_ref.clone().unwrap_or_default();
+        // Legacy symmetric provenance (ADR-025 Phase 1).
+        if let Some(sig) = app.metadata.get("signature").and_then(|v| v.as_str()) {
+            if self.trust.verify(&hash, sig) {
+                return true;
+            }
+        }
+        // Asymmetric provenance (ADR-067): direct root signature or endorsed chain, re-verified
+        // against the CURRENT anchor — revocation included.
+        let prov = app.metadata.get("provenance");
+        let kind = prov
+            .and_then(|p| p.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let verified = match (kind, prov) {
+            ("ed25519-direct", Some(p)) => {
+                let sig = p
+                    .get("component_sig")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                self.asym_trust.verify_direct_evidence(&hash, sig).is_ok()
+            }
+            ("ed25519-chain", Some(p)) => {
+                let sig = p
+                    .get("component_sig")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let signer = p.get("signer").and_then(|v| v.as_str());
+                let endorsement = p.get("endorsement").and_then(|v| v.as_str());
+                match (signer.map(crate::crypto::unhex), endorsement) {
+                    (Some(Some(pk)), Some(endorsement)) if pk.len() == 32 => {
+                        let mut key = [0u8; 32];
+                        key.copy_from_slice(&pk);
+                        self.asym_trust
+                            .verify_chain_evidence(&hash, &key, endorsement, sig)
+                            .is_ok()
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if !verified {
+            self.emit(
+                "ComponentSignatureRejected",
+                &new_id(),
+                subject,
+                json!({
+                    "app": app.id,
+                    "gate": "launch-provenance",
+                    "reason": if app.metadata.get("provenance").is_some() || app.metadata.get("signature").is_some() {
+                        "untrusted, tampered, or revoked since admission"
+                    } else {
+                        "unsigned"
+                    },
+                }),
+            );
+        }
+        verified
     }
 
     /// Sign a component's content hash with the trust anchor's active key so a caller can install it
@@ -734,6 +935,10 @@ impl SysCore {
                 "not permitted to install components",
             ));
         }
+        // The SAME ABI admission every install path passes (ALET-P1-022): a validly signed module
+        // that cannot run is still not installable — the supply chain vouches for code, and the
+        // platform refuses code it cannot load, whatever the paperwork says.
+        let abi_version = self.admit_wasm(wasm, name, subject)?;
         let hash = crate::crypto::sha256_hex(wasm);
         if !self.trust.verify(&hash, signature) {
             self.emit(
@@ -753,7 +958,7 @@ impl SysCore {
             content_ref: Some(stored_hash),
             version: 1,
             version_chain: new_id(),
-            metadata: json!({"name": name, "kind": "wasm-component", "bytes": wasm.len(), "signature": signature}),
+            metadata: json!({"name": name, "kind": "wasm-component", "bytes": wasm.len(), "abi_version": abi_version, "signature": signature}),
             provenance: Provenance::of(subject),
             created_at: now(),
             updated_at: now(),
@@ -764,7 +969,7 @@ impl SysCore {
             "ComponentInstalled",
             &new_id(),
             subject,
-            json!({"app": e.id, "name": name, "bytes": wasm.len(), "signed": true}),
+            json!({"app": e.id, "name": name, "bytes": wasm.len(), "abi_version": abi_version, "signed": true}),
         );
         Ok(e)
     }

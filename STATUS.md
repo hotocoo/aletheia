@@ -1,13 +1,52 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-23 (the component DECLARES what it speaks — the ABI is explicitly versioned: a custom-section declaration enforced at BOTH gates, install refusing undeclared/malformed/foreign-version modules before their bytes are stored and run re-checking on every path, refusals naming both sides of a version disagreement, installed metadata stamping what was admitted, the SDK auto-stamping guests verified end-to-end with a rebuilt wasm32 fixture, and the v1 import surface pinned by a live link probe, ADR-066; before that: the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
+**As of:** 2026-08-23 (the supply chain is VERIFIED, LIVE, and RECORDED — chain verification crosses the installation boundary: root→signing-key→component provenance is enforced at install against public keys only, admitted entities record their full evidence, the launch gate re-judges that evidence against CURRENT trust so signer revocation goes live at the next launch, all faults are named per link, and the spawn path — found skipping provenance entirely, ALET-P2-050 — now passes the same gate, ADR-067; before that: the component DECLARES what it speaks — the ABI is explicitly versioned: a custom-section declaration enforced at BOTH gates, install refusing undeclared/malformed/foreign-version modules before their bytes are stored and run re-checking on every path, refusals naming both sides of a version disagreement, installed metadata stamping what was admitted, the SDK auto-stamping guests verified end-to-end with a rebuilt wasm32 fixture, and the v1 import surface pinned by a live link probe, ADR-066; before that: the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..066`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..067`.
 
-## Current wave — the component declares what it speaks (2026-08-23, ADR-066)
+## Current wave — the supply chain is verified, live, and recorded (2026-08-23, ADR-067)
+
+ALET-P1-023 closes. The pieces of a component supply chain existed on either side of the
+installation boundary and never met: `AsymTrustStore` could verify a
+root→signing-key→component CHAIN — in its own unit tests — while `install_signed_component`
+verified ONE direct signature against a SYMMETRIC key store. Nothing installed a chain-signed
+artifact, nothing recorded WHICH chain vouched for what was admitted, and nothing could UNSAY the
+verdict later: a signing key compromised after admission kept verifying forever, because trust
+decisions were frozen at install time.
+
+Now:
+
+* **Chain verification crosses the boundary.** `install_verified_component` admits an ed25519
+  direct root signature or an ENDORSED CHAIN against public keys only — never instantiating guest
+  code — and refuses what fails, with the fault NAMED per link (`RevokedSigner` /
+  `UnendorsedSigner` / `BadComponentSignature`: rotate-and-re-sign-everything, reject-the-key, and
+  reject-the-artifact are three different responses to three different events).
+* **Evidence is recorded.** Admitted entities carry kind, root, signer, component signature,
+  endorsement and ABI version in metadata, so every install answers "what is this and who vouched
+  for it" without re-parsing bytes.
+* **Trust decisions are LIVE.** One launch gate (`launch_provenance_ok`) re-judges stored evidence
+  against CURRENT trust on EVERY run: revoking a signer goes dark at the next launch for everything
+  that key ever signed — rotation after compromise without reinstalling anything.
+* **Code admission is unified.** All install paths share `admit_wasm`; the signed path had missed
+  the ABI gate — a validly signed module that cannot run is still not installable, whatever the
+  paperwork says.
+
+**Found by building this wave:** under secure policy the SPAWN path skipped provenance entirely —
+`prepare_spawn` loaded stored code straight into execution — so an unsigned application that had
+slipped into the store was one `spawn` host call away from RUNNING (**ALET-P2-050**, opened and
+closed here). The same live gate now guards both paths, and a smuggled child's refusal is audited
+rather than silently swallowed.
+
+Host proofs: `aletheia/tests/component_supply_chain.rs`, 7 tests — including revocation going LIVE
+against an already-admitted component, and verified composition still working under secure policy.
+Full aletheia crate green: 19 suites / 219 tests. Named non-claims: exactly one chain shape
+(root→signer→artifact), no expiry semantics, symmetric HMAC remains accepted as ADR-025 Phase 1
+legacy, hardware roots and anti-rollback stay REQ-BOOT-001.
+
+## Previous wave — the component declares what it speaks (2026-08-23, ADR-066)
 
 ALET-P1-022 closes. The component runtime had an interface but no NAME for it: guests imported
 four functions under module `"aletheia"` and exported `run() -> i32` plus `memory`, and nothing

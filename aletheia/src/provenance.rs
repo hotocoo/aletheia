@@ -118,14 +118,23 @@ fn ed25519_verify(public_key: &[u8; 32], msg: &[u8], sig_hex: &str) -> bool {
 /// material). Empty ⇒ nothing verifies (fail closed). The asymmetric counterpart to [`TrustStore`];
 /// the crucial difference is that holding this store confers NO ability to sign — a compromised
 /// verifier still cannot forge a component signature.
+///
+/// Since the supply-chain wave (ALET-P1-023, ADR-067) the store also tracks REVOKED component-signing
+/// keys: a key the operator revokes stops verifying IMMEDIATELY, so an artifact admitted while its
+/// signer was trusted is refused at the next launch — trust decisions are LIVE, not frozen at
+/// install time.
 #[derive(Default, Clone)]
 pub struct AsymTrustStore {
     roots: Vec<[u8; 32]>,
+    revoked_signers: Vec<[u8; 32]>,
 }
 
 impl AsymTrustStore {
     pub fn new() -> Self {
-        AsymTrustStore { roots: Vec::new() }
+        AsymTrustStore {
+            roots: Vec::new(),
+            revoked_signers: Vec::new(),
+        }
     }
 
     /// Trust a ROOT public key (idempotent).
@@ -139,11 +148,41 @@ impl AsymTrustStore {
         self.roots.is_empty()
     }
 
+    /// Revoke a component-signing key: its signatures — past, present and future — stop verifying.
+    /// Idempotent. Revocation is of the SIGNER, not of any one artifact: every component the key
+    /// signed goes dark at once, which is exactly what "rotate after compromise" requires.
+    pub fn revoke_signing_key(&mut self, public_key: [u8; 32]) {
+        if !self.revoked_signers.contains(&public_key) {
+            self.revoked_signers.push(public_key);
+        }
+    }
+
+    pub fn is_revoked(&self, public_key: &[u8; 32]) -> bool {
+        self.revoked_signers.contains(public_key)
+    }
+
     /// Direct verify: a trusted ROOT key itself signed the component's content hash.
     pub fn verify_direct(&self, content_hash_hex: &str, sig_hex: &str) -> bool {
         self.roots
             .iter()
             .any(|r| ed25519_verify(r, content_hash_hex.as_bytes(), sig_hex))
+    }
+
+    /// Direct verify WITH EVIDENCE: names WHICH root verified, so the admission record can say so.
+    pub fn verify_direct_evidence(
+        &self,
+        content_hash_hex: &str,
+        sig_hex: &str,
+    ) -> Result<ChainEvidence, ChainFault> {
+        for r in &self.roots {
+            if ed25519_verify(r, content_hash_hex.as_bytes(), sig_hex) {
+                return Ok(ChainEvidence {
+                    root: *r,
+                    signer: *r,
+                });
+            }
+        }
+        Err(ChainFault::BadComponentSignature)
     }
 
     /// Hierarchical verify (root → signing key → component): a trusted root ENDORSED `signing_key`
@@ -157,11 +196,118 @@ impl AsymTrustStore {
         endorsement_hex: &str,
         sig_hex: &str,
     ) -> bool {
+        self.verify_chain_evidence(content_hash_hex, signing_key, endorsement_hex, sig_hex)
+            .is_ok()
+    }
+
+    /// Hierarchical verify WITH EVIDENCE and NAMED faults (ALET-P1-023, ADR-067). The refusal names
+    /// WHICH link failed — a revoked signer is distinguishable from an unendorsed one and from a bad
+    /// component signature, because "rotate the key" and "rebuild the artifact" are different
+    /// responses to different faults.
+    pub fn verify_chain_evidence(
+        &self,
+        content_hash_hex: &str,
+        signing_key: &[u8; 32],
+        endorsement_hex: &str,
+        sig_hex: &str,
+    ) -> Result<ChainEvidence, ChainFault> {
+        // Revocation is checked FIRST: a revoked signer is refused even if every cryptographic link
+        // would verify — that is the whole meaning of revocation.
+        if self.is_revoked(signing_key) {
+            return Err(ChainFault::RevokedSigner);
+        }
         let endorsed = self
             .roots
             .iter()
             .any(|r| ed25519_verify(r, signing_key, endorsement_hex));
-        endorsed && ed25519_verify(signing_key, content_hash_hex.as_bytes(), sig_hex)
+        if !endorsed {
+            return Err(ChainFault::UnendorsedSigner);
+        }
+        if !ed25519_verify(signing_key, content_hash_hex.as_bytes(), sig_hex) {
+            return Err(ChainFault::BadComponentSignature);
+        }
+        Ok(ChainEvidence {
+            root: self
+                .roots
+                .iter()
+                .find(|r| ed25519_verify(r, signing_key, endorsement_hex))
+                .copied()
+                .expect("endorsed just above"),
+            signer: *signing_key,
+        })
+    }
+}
+
+/// The caller-supplied provenance bundle for installing a chain-verified component: WHO signed the
+/// artifact (`signer`), their signature over the content hash (`component_sig`), and — when the
+/// signer is not itself a trusted root — the root's endorsement of the signer.
+#[derive(Debug, Clone)]
+pub struct ComponentProvenance {
+    /// The signing key's PUBLIC key (32 bytes).
+    pub signer: [u8; 32],
+    /// Signature over the content hash (64-byte Ed25519, hex).
+    pub component_sig: String,
+    /// Root endorsement of `signer` (hex), present iff the signer is not itself a trusted root.
+    pub endorsement: Option<String>,
+}
+
+/// Evidence of WHICH chain verified an artifact — recorded at admission and re-checked at every
+/// launch against the CURRENT trust state, so the record can be re-judged, not just re-read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainEvidence {
+    /// The trusted root at the top of the verified chain.
+    pub root: [u8; 32],
+    /// The signing key whose signature covered the content hash (== root for direct signatures).
+    pub signer: [u8; 32],
+}
+
+impl ChainEvidence {
+    pub fn root_hex(&self) -> String {
+        hex(&self.root)
+    }
+
+    pub fn signer_hex(&self) -> String {
+        hex(&self.signer)
+    }
+}
+
+/// Why a chain verification failed. Each names a distinct link, because the right RESPONSE differs:
+/// a revoked signer means rotate and re-sign everything; an unendorsed signer means the key was
+/// never part of this chain; a bad component signature means the ARTIFACT is not what was signed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainFault {
+    /// The signing key was revoked by the operator — every artifact it signed is refused.
+    RevokedSigner,
+    /// No trusted root endorsed this signing key.
+    UnendorsedSigner,
+    /// The component signature does not verify over the content hash under the signing key.
+    BadComponentSignature,
+}
+
+impl ChainFault {
+    /// Stable short name for audit events.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ChainFault::RevokedSigner => "revoked-signer",
+            ChainFault::UnendorsedSigner => "unendorsed-signer",
+            ChainFault::BadComponentSignature => "bad-component-signature",
+        }
+    }
+
+    /// Human-readable explanation.
+    pub fn message(self) -> String {
+        match self {
+            ChainFault::RevokedSigner => {
+                "provenance: signing key has been revoked - every artifact it signed is refused"
+                    .into()
+            }
+            ChainFault::UnendorsedSigner => {
+                "provenance: signing key is not endorsed by any trusted root".into()
+            }
+            ChainFault::BadComponentSignature => {
+                "provenance: component signature does not verify over the content hash".into()
+            }
+        }
     }
 }
 
