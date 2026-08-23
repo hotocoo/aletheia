@@ -1,13 +1,58 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-23 (the supply chain is VERIFIED, LIVE, and RECORDED — chain verification crosses the installation boundary: root→signing-key→component provenance is enforced at install against public keys only, admitted entities record their full evidence, the launch gate re-judges that evidence against CURRENT trust so signer revocation goes live at the next launch, all faults are named per link, and the spawn path — found skipping provenance entirely, ALET-P2-050 — now passes the same gate, ADR-067; before that: the component DECLARES what it speaks — the ABI is explicitly versioned: a custom-section declaration enforced at BOTH gates, install refusing undeclared/malformed/foreign-version modules before their bytes are stored and run re-checking on every path, refusals naming both sides of a version disagreement, installed metadata stamping what was admitted, the SDK auto-stamping guests verified end-to-end with a rebuilt wasm32 fixture, and the v1 import surface pinned by a live link probe, ADR-066; before that: the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
+**As of:** 2026-08-23 (encryption at rest is a LIFECYCLE, not a key file — the hosted semantic store gains versioned data keys under a root-derived keystore with rotation/rekey/retirement, constructed prefix||counter nonces whose ledger is the authenticated log itself, position-bound AEAD frames that refuse reordering/deletion/duplication with the position named, plaintext-SHA-256 identity semantics proved in both directions, and transparent wholesale migration of pre-ADR-069 logs detected by trial-authentication — closing the P1-028/029/030 trio over the store, ADR-069; before that: the supply chain is VERIFIED, LIVE, and RECORDED — chain verification crosses the installation boundary: root→signing-key→component provenance is enforced at install against public keys only, admitted entities record their full evidence, the launch gate re-judges that evidence against CURRENT trust so signer revocation goes live at the next launch, all faults are named per link, and the spawn path — found skipping provenance entirely, ALET-P2-050 — now passes the same gate, ADR-067; before that: the component DECLARES what it speaks — the ABI is explicitly versioned: a custom-section declaration enforced at BOTH gates, install refusing undeclared/malformed/foreign-version modules before their bytes are stored and run re-checking on every path, refusals naming both sides of a version disagreement, installed metadata stamping what was admitted, the SDK auto-stamping guests verified end-to-end with a rebuilt wasm32 fixture, and the v1 import surface pinned by a live link probe, ADR-066; before that: the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..068`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..069`.
 
-## Current wave — a dependency is pulled in only under authority (2026-08-23, ADR-068)
+## Current wave — encryption at rest is a lifecycle, not a key file (2026-08-23, ADR-069)
+
+ALET-P1-028, ALET-P1-029 and ALET-P1-030 close together, because they were one gap wearing three
+numbers: the store had SEALED every frame since its first commit, and had no answer for where the
+key LIVES, why a nonce never REPEATS, or what a content address MEANS once the bytes at rest are
+ciphertext.
+
+* **Keys (P1-028).** Data keys are VERSIONED entries in `keystore.bin`, sealed as one
+  atomically-replaced object under `HMAC-SHA256(root, "aletheia/keystore/v1")` — the root `key`
+  file keeps its name and role (custody anchor that wraps data keys) and never sits beside a
+  ciphertext made directly under it. `rotate_encryption_keys` mints max+1 with a fresh key AND a
+  fresh nonce-space prefix; writes always use the newest; `rekey_log` rewrites the whole log
+  under one version from an append-order journal mirror and retires the rest, atomic by
+  temp+rename. Every refusal names its fact: retire-above-newest, stranding retirement, a frame
+  naming a retired version, keystore auth failure with NO partial load, corrupt root.
+* **Nonces (P1-029).** Every DATA frame nonce is CONSTRUCTED: 32-bit per-version random prefix
+  || 64-bit monotone counter — reuse impossible BY CONSTRUCTION, not improbable by birthday
+  bound. The counter ledger IS the log: after any crash, replay recovers each version's
+  high-water mark from its own AUTHENTICATED frames, forward-only. Exhaustion at u64::MAX is a
+  named refusal demanding rotation, never a wraparound. The keystore object alone uses random
+  nonces BY WRITTEN BOUND (rewrites are bounded; ~(rewrites)²/2^97 < 10⁻¹⁷ for a million).
+* **Identity (P1-030).** The address remains SHA-256(PLAINTEXT) — identity, dedup and references
+  are semantic facts that outlive the encoding — while equal plaintexts produce DIFFERENT
+  ciphertext frames, so equality leaks nothing on the wire. Frames are POSITION-bound: the AAD
+  covers sequence number + exact length + key version, so transposition, deletion, duplication
+  and resend-at-another-position all fail authentication WITH THE POSITION NAMED, and an
+  EXHAUSTIVE sweep flips every single bit of a whole log image and refuses every one. The one
+  residual — truncation at an EXACT frame boundary — is the documented non-claim, pinned by a
+  test in both directions so doc and behavior cannot drift.
+* **Legacy.** A pre-ADR-069 log (bare nonce||ciphertext under the root) is detected by
+  TRIAL-AUTHENTICATION of its first frame — a frame authenticates under exactly one reading to
+  within cryptographic probability, so no byte pattern is trusted — and migrated wholesale
+  before any append, through the UNCHANGED public API. Steady-state logs are always pure v2.
+
+Host proofs: `aletheia/tests/encryption_at_rest.rs`, 11 proofs + 3 in-module unit tests; the
+contract is written once in `docs/INVARIANT-CONTRACTS.md` §INV-ATREST (9 invariants). The same
+wave closed the three documentation rows: docs/ASM-BOUNDARY.md (every assembly site inventoried),
+docs/UNSAFE-AUDIT.md (token-exact unsafe surface + ownership rules) and
+docs/INVARIANTS-INDEX.md (all 18 contract families mapped to their proofs) — held against the
+tree by `scripts/check-boundary-docs.sh`, run by CI every push. Full
+aletheia crate green: 124 lib tests + 14 integration suites. Named non-claims: AEAD cannot
+distinguish wrong-key from tampered-bytes (refusals say so and name position + version); tail
+truncation at a frame boundary needs an external anchor (future work); concurrent writers to one
+store remain out of scope; root custody and secure-boot delivery stay REQ-BOOT-001.
+
+## Previous wave — a dependency is pulled in only under authority (2026-08-23, ADR-068)
 
 ALET-P1-024 closes — and with it the P1 trio over the component subsystem: versioned ABI (066),
 live chain-verified provenance (067), and now the composition edge itself.

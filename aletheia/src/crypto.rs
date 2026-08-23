@@ -1,6 +1,6 @@
 //! Content addressing (SHA-256) + AEAD encryption at rest (ChaCha20-Poly1305). ADR-005.
 use crate::domain::{AlethError, Result};
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use sha2::{Digest, Sha256};
 
@@ -35,6 +35,13 @@ pub fn random_token() -> String {
 
 pub fn random_key() -> [u8; 32] {
     rand::random::<[u8; 32]>()
+}
+
+/// A fresh 32-bit nonce-space prefix for one key version (ADR-069): the random half of a
+/// constructed prefix||counter nonce, drawn once per version so distinct versions never share
+/// a nonce space even if their counters were somehow both rewound.
+pub fn random_key_prefix() -> [u8; 4] {
+    rand::random::<[u8; 4]>()
 }
 
 /// HMAC-SHA256 (RFC 2104), built on the already-present `sha2` — no extra dependency. Used for
@@ -105,6 +112,42 @@ impl Cipher {
         out.extend_from_slice(&ct);
         out
     }
+    /// Authenticated encryption with additional authenticated data (ADR-069 log frames): the
+    /// AAD is never confidential but IS authenticated — a frame bound to its position fails to
+    /// open anywhere else.
+    pub fn seal_with_aad(&self, nonce12: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        let nonce = Self::nonce12(nonce12)?;
+        self.inner
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| AlethError::persistence("aead seal failed"))
+    }
+
+    pub fn open_with_aad(&self, nonce12: &[u8], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        let nonce = Self::nonce12(nonce12)?;
+        self.inner
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|_| AlethError::persistence("aead open failed"))
+    }
+
+    fn nonce12(bytes: &[u8]) -> Result<Nonce> {
+        let arr: [u8; 12] = bytes
+            .try_into()
+            .map_err(|_| AlethError::internal("nonce is not 12 bytes"))?;
+        Ok(Nonce::from(arr))
+    }
+
     pub fn open(&self, data: &[u8]) -> Result<Vec<u8>> {
         if data.len() < 12 {
             return Err(AlethError::persistence("ciphertext too short"));

@@ -238,6 +238,14 @@ jobs:
       - name: Assert the register's own claims hold
         run: ./scripts/check-register.sh
 
+  boundary-docs:
+    name: Boundary & audit docs match the tree (asm sites, unsafe inventory, invariant index)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regenerate inventories from source and hold the docs against them
+        run: ./scripts/check-boundary-docs.sh
+
   ci-parity:
     name: CI coverage (every architecture boot-gated, both pipelines agree, claimed gates run)
     runs-on: ubuntu-latest

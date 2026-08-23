@@ -46,7 +46,7 @@ check verifies the **mapping** is real and that no delivered claim is evidence-f
 | REQ-PIPE-001 | Intent→Action pipeline: validate→authorize→execute→verify→record | ADR-002 | kernel-core/src/spine.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-PIPE-002 | Malformed model output cannot execute | ADR-006 | kernel-core/src/spine.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-STORE-001 | Content-addressed, versioned semantic store | ADR-005 | kernel-core/src/spine.rs; aletheia/src/storage.rs | kernel-core/tests/invariants.rs | - | delivered |
-| REQ-STORE-002 | Encrypted at rest (ChaCha20-Poly1305) | ADR-005 | aletheia/src/storage.rs | aletheia/tests/acceptance.rs | - | delivered |
+| REQ-STORE-002 | Encrypted at rest (ChaCha20-Poly1305) as a LIFECYCLE — versioned keys under a root, constructed per-frame nonces, position-bound frames, plaintext-identity semantics | ADR-005; ADR-069 | aletheia/src/storage.rs; aletheia/src/atrest.rs | aletheia/tests/acceptance.rs; aletheia/tests/encryption_at_rest.rs; docs/INVARIANT-CONTRACTS.md | - | delivered |
 | REQ-IPC-001 | Capability-gated synchronous IPC | ADR-016 | kernel-core/src/ipc.rs | kernel-core/tests/invariants.rs | scripts/vm-e2e.sh | delivered |
 | REQ-IPC-002 | Capability transfer with attenuation | ADR-016 | kernel-core/src/ipc.rs | kernel-core/tests/invariants.rs | - | delivered |
 | REQ-IPC-003 | Bounded message queues | ADR-016 | kernel-core/src/ipc.rs | kernel-core/tests/invariants.rs | - | delivered |
