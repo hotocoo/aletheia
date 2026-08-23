@@ -42,7 +42,7 @@ SYSTEM CORE (aletheia/src)
   ├── worldmodel        typed, provenance-bearing relationship graph + traversal
   ├── intent_action     the deterministic pipeline (parse · validate · authorize · execute · verify · record)
   ├── ai/               the AI subsystem (below) — model-agnostic
-  ├── component         capability-secure WASM component runtime (no ambient authority)
+  ├── component         capability-secure WASM sandbox (no ambient authority) bounded in EVERY dimension — fuel, memory, tables, stack, wall clock (ADR-065)
   ├── agents            first-class, capability-bounded, revocable actors
   ├── syscore           composition root wiring the pipeline + task lifecycle + approvals
   └── service           capability-gated Service API + IPC (in-process + Unix socket) — the app boundary

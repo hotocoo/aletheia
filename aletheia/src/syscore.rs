@@ -406,13 +406,36 @@ impl SysCore {
         wasm: &[u8],
         fuel: u64,
     ) -> Result<crate::component::ComponentOutcome> {
+        self.run_component_with_limits(
+            launch_caps,
+            grant_caps,
+            subject,
+            wasm,
+            fuel,
+            &crate::component::SandboxLimits::defaults(),
+        )
+    }
+
+    /// Run a component under EXPLICIT sandbox bounds (ALET-P1-021, ADR-065): `fuel` bounds compute;
+    /// `limits` bounds memory bytes, table elements, stack depth and wall clock. The whole spawn
+    /// tree runs inside THIS envelope — a child inherits its parent's resource bounds exactly as it
+    /// inherits an ATTENUATED copy of its authority, so no descendant can exceed the root's budget.
+    pub fn run_component_with_limits(
+        &mut self,
+        launch_caps: &[String],
+        grant_caps: &[String],
+        subject: &str,
+        wasm: &[u8],
+        fuel: u64,
+        limits: &crate::component::SandboxLimits,
+    ) -> Result<crate::component::ComponentOutcome> {
         if self.require_signed_components {
             self.emit("ComponentSignatureRejected", &new_id(), subject, json!({"reason": "ad-hoc run refused under secure policy; install a signed component"}));
             return Err(AlethError::authorization(
                 "ad-hoc component execution refused under secure policy",
             ));
         }
-        self.launch_component(launch_caps, grant_caps, subject, wasm, fuel)
+        self.launch_component(launch_caps, grant_caps, subject, wasm, fuel, limits)
     }
 
     /// The authorized launch path shared by `run_component` (ad-hoc) and `run_installed` (verified):
@@ -427,6 +450,7 @@ impl SysCore {
         subject: &str,
         wasm: &[u8],
         fuel: u64,
+        limits: &crate::component::SandboxLimits,
     ) -> Result<crate::component::ComponentOutcome> {
         if !matches!(
             self.caps
@@ -443,24 +467,33 @@ impl SysCore {
         }
         // Launch is authorized once at the top; this component and any children it spawns then run
         // with capabilities strictly attenuated down the tree (no child can exceed its parent).
-        Ok(self.compose_run(grant_caps, subject, wasm, fuel, 0))
+        Ok(self.compose_run(grant_caps, subject, wasm, fuel, limits, 0))
     }
 
     /// Run a component and fulfil any children it spawns (multi-agent composition). Each child runs
     /// with a capability ATTENUATED from this component's grant — delegated through the cap engine,
-    /// which rejects amplification — so no child can exceed its parent's authority. Spawn depth is
-    /// bounded (`MAX_SPAWN_DEPTH`) so a spawn cycle cannot exhaust the system.
+    /// which rejects amplification — so no child can exceed its parent's authority — and inside the
+    /// SAME resource envelope as the root (ALET-P1-021): authority and budget both narrow downward.
+    /// Spawn depth is bounded (`MAX_SPAWN_DEPTH`) so a spawn cycle cannot exhaust the system.
     fn compose_run(
         &mut self,
         grant_caps: &[String],
         subject: &str,
         wasm: &[u8],
         fuel: u64,
+        limits: &crate::component::SandboxLimits,
         depth: usize,
     ) -> crate::component::ComponentOutcome {
         // Split borrow of self: `&self.caps` (read) + `&mut self.store` (effects) are disjoint fields.
-        let mut outcome =
-            crate::component::run(&self.caps, &mut self.store, grant_caps, subject, wasm, fuel);
+        let mut outcome = crate::component::run_with_limits(
+            &self.caps,
+            &mut self.store,
+            grant_caps,
+            subject,
+            wasm,
+            fuel,
+            limits,
+        );
         self.emit(
             "ComponentRan",
             &new_id(),
@@ -469,6 +502,11 @@ impl SysCore {
                 "ok": outcome.ok,
                 "exit_code": outcome.exit_code,
                 "fuel_exhausted": outcome.fuel_exhausted,
+                // ALET-P1-021 / ADR-065: the audit log names WHICH bound held, not just that
+                // something went wrong, so an operator can tell a fuel-starved guest from one
+                // that outran its clock or its stack.
+                "killed_by": outcome.killed_by.map(|k| k.as_str()),
+                "deadline_exceeded": outcome.deadline_exceeded,
                 "host_calls": outcome.calls.len(),
                 "wrote": outcome.wrote.len(),
                 "spawns": outcome.spawns.len()
@@ -497,8 +535,14 @@ impl SysCore {
                     subject,
                     json!({"app": req.app_id, "action": req.action, "child": child_subject, "granted": !child_grant.is_empty()}),
                 );
-                let child_outcome =
-                    self.compose_run(&child_grant, &child_subject, &child_wasm, fuel, depth + 1);
+                let child_outcome = self.compose_run(
+                    &child_grant,
+                    &child_subject,
+                    &child_wasm,
+                    fuel,
+                    limits,
+                    depth + 1,
+                );
                 children.push(child_outcome);
             }
         }
@@ -608,8 +652,17 @@ impl SysCore {
             .cloned()
             .ok_or_else(|| AlethError::not_found("application code missing"))?;
         // Provenance is already settled above; launch via the internal path (not the public ad-hoc
-        // `run_component`, which would refuse under secure policy).
-        self.launch_component(launch_caps, grant_caps, subject, &wasm, fuel)
+        // `run_component`, which would refuse under secure policy). Installed components run under
+        // the DEFAULT sandbox bounds for now — binding per-component limits into the installation
+        // record is named future work in ADR-065, not silently assumed here.
+        self.launch_component(
+            launch_caps,
+            grant_caps,
+            subject,
+            &wasm,
+            fuel,
+            &crate::component::SandboxLimits::defaults(),
+        )
     }
 
     /// Trust a component-signing key: the trust anchor for secure-launch provenance (ADR-025 Phase 1).

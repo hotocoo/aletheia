@@ -1,13 +1,53 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-23 (the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; before that: long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
+**As of:** 2026-08-23 (the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..064`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..065`.
 
-## Current wave — the machine measures itself (2026-08-23, ADR-064)
+## Current wave — the sandbox is bounded in every dimension (2026-08-23, ADR-065)
+
+ALET-P1-021 closes. The component sandbox (ADR-014) bounded exactly one resource: fuel, which
+measures COMPUTE — instructions bought by a run. It said nothing about how much MEMORY a guest may
+hold, how large its TABLES may grow, how DEEP its call stack may wind, or how much WALL-CLOCK time
+it may consume — four separate ways to hurt the machine hosting you, each of which previously ended
+at whatever the ENGINE shipped with, as an anonymous trap nobody configured and nobody could name
+in an audit log. `aletheia/src/component.rs` now carries `SandboxLimits`, five explicit bounds with
+NO unbounded constructor:
+
+* **memory bytes and table elements** ride wasmi's store limiter scoped to the ONE-RUN store
+  (instance/table/memory counts pinned to 1). Growth past a cap fails the way the spec allows —
+  `memory.grow`/`table.grow` answer `-1` — so a respectful guest keeps running inside its cap; a
+  deaf guest that ignores the refusal never gets another byte and dies of FUEL asking. The suite
+  proves the cap holds EXACTLY: a guest that counts its growth wins reports precisely the
+  configured page/element budget, in both directions of the policy.
+* **stack height and recursion depth** are engine compilation limits, set per run because the
+  engine is created per run. A recursion bomb is killed BY NAME — `KillReason::Stack` in the
+  outcome and in the `ComponentRan` audit event — never again an anonymous trap; and depth is
+  enforced exactly as configured BOTH ways (100 frames fit the default 256 and finish; the same
+  guest dies when the operator lowers the bound beneath it).
+* **wall clock** is enforced where it can honestly be: at every HOST-CALL CROSSING. A crossing
+  that arrives after the deadline audits a DEADLINE row and refuses by trap — nothing further can
+  be authorized on a clock the run has already outrun. Between crossings fuel bounds the work, and
+  the suite's clock-eater (200 000 paced host calls, fuel deliberately vast, deadline 1 ms) is
+  stopped at a crossing whose DEADLINE audit row is the LAST thing recorded.
+* every kill is NAMED (`killed_by`: fuel / deadline / stack) because an audit log that only says
+  "an error" makes the three indistinguishable; and an overrun a pure-compute guest managed to
+  FINISH inside is still reported in `deadline_exceeded`, because silence would read as compliance.
+* composition follows capability: the whole spawn tree runs inside the ROOT's envelope, so budget
+  narrows down the tree exactly as attenuated authority does — proved by a parent spawning an
+  installed clock-eater child that dies inside a 1 ms envelope nobody re-specified for it.
+
+Host proofs: `aletheia/tests/component_resources.rs`, 10 tests; the full aletheia crate is green
+(204 tests across 15 suites), clippy clean. Named non-claims (stated in ADR-065 and in the code):
+a single host-call BODY is not clock-interruptible (bounded by store-operation granularity);
+between crossings the fuel-to-time ratio varies with the workload; limits are per-RUN today —
+`run_installed` deliberately uses the defaults, and binding per-component limits into installation
+records is future work rather than silently assumed.
+
+## Previous wave — the machine measures itself (2026-08-23, ADR-064)
 
 ALET-P2-010 closes. The kernel could say how fast its load-bearing paths run on ONE target, once,
 ad hoc — `kernel/src/bench.rs` measured svc traps and capability-checked delivery on aarch64 only.
