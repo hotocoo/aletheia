@@ -578,6 +578,29 @@ impl SysCore {
         if app.etype != EntityType::Application {
             return None;
         }
+        // Defense in depth (ALET-P1-024, ADR-068): the guest's queue is a REQUEST. The host
+        // re-evaluates spawn authority itself before resolving the dependency — a parent that lost
+        // or never held `component.spawn` over this child cannot have the edge fulfilled, whatever
+        // its own record of the run says. Refusals are audited so an unfulfilled edge is visible.
+        {
+            use crate::component::SPAWN_ACTION;
+            let target = Target {
+                id: Some(req.app_id.clone()),
+                etype: Some(EntityType::Application),
+            };
+            if !matches!(
+                self.caps.evaluate(SPAWN_ACTION, &target, parent_caps),
+                Decision::Allow
+            ) {
+                self.emit(
+                    "ComponentSpawnDenied",
+                    &new_id(),
+                    parent_subject,
+                    json!({ "app": req.app_id, "reason": "spawn not authorized" }),
+                );
+                return None;
+            }
+        }
         // The spawn path loads stored code and launches it — under secure policy it must pass the
         // SAME live provenance gate as run_installed, or a spawn request becomes a side door around
         // every signature check (ALET-P2-050, ADR-067). A refusal is audited before returning None,

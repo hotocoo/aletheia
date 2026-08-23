@@ -484,10 +484,12 @@ fn a_spawned_child_inherits_the_root_resource_envelope() {
         deadline_ms: 1,
         ..SandboxLimits::defaults()
     };
+    // Resolving the dependency is itself authorized (ALET-P1-024): the parent needs component.spawn.
+    let spawn_cap = grant_all(&mut core, &owner, "component:parent", "component.spawn");
     let outcome = core
         .run_component_with_limits(
             std::slice::from_ref(&owner),
-            &[emit_cap],
+            &[emit_cap, spawn_cap],
             "component:parent",
             &parent_wasm,
             2_000_000_000,

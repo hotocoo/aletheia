@@ -545,6 +545,11 @@ fn host_emit(caller: &mut Caller<'_, HostState<'_>>, bytes: Vec<u8>) -> Result<i
 /// Record a spawn request (multi-agent composition). The parent names a child application and the
 /// capability action it wants the child to have; the System Core fulfils it after this run, giving
 /// the child an ATTENUATED capability delegated from the parent (never more than the parent holds).
+///
+/// A dependency is pulled in only under AUTHORITY (ALET-P1-024, ADR-068): naming an installed
+/// application authorizes nothing by itself. The parent must hold `component.spawn` covering THIS
+/// child — a capability that can be scoped to exactly the dependencies it is meant to use — and the
+/// attempt is audited whatever the answer. The queue is a request, never a verdict.
 fn host_spawn(
     caller: &mut Caller<'_, HostState<'_>>,
     app_bytes: Vec<u8>,
@@ -560,12 +565,22 @@ fn host_spawn(
         Err(_) => return Ok(BAD),
     };
     let st = caller.data_mut();
+    let target = Target {
+        id: Some(app_id.clone()),
+        etype: Some(EntityType::Application),
+    };
+    let decision = st.caps.evaluate(SPAWN_ACTION, &target, &st.offered);
     st.calls.push(HostCall {
         func: "spawn".into(),
         action: SPAWN_ACTION.into(),
-        decision: "QUEUED".into(),
+        decision: decision_str(&decision),
         target: Some(app_id.clone()),
     });
+    match decision {
+        Decision::Allow => {}
+        Decision::RequireApproval => return Ok(APPROVAL),
+        Decision::Deny(_) => return Ok(DENIED),
+    }
     st.spawns.push(SpawnRequest { app_id, action });
     Ok(OK_CODE)
 }

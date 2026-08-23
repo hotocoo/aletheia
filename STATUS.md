@@ -5,9 +5,43 @@
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..067`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..068`.
 
-## Current wave — the supply chain is verified, live, and recorded (2026-08-23, ADR-067)
+## Current wave — a dependency is pulled in only under authority (2026-08-23, ADR-068)
+
+ALET-P1-024 closes — and with it the P1 trio over the component subsystem: versioned ABI (066),
+live chain-verified provenance (067), and now the composition edge itself.
+
+Composition was the one capability-shaped action that required no capability. `SPAWN_ACTION`
+("component.spawn") existed as a constant and was recorded in every audit row — but was never
+EVALUATED. `host_spawn` queued whatever a guest requested: naming an installed application
+authorized pulling it into execution, and nothing stood between a component and running ANY app in
+the store. The attenuated delegation on the child was real; the EDGE itself was free.
+
+Now resolving a dependency is checked at TWO layers:
+
+* **At the component boundary** (`host_spawn`): the parent's exact authority is evaluated for
+  `component.spawn` over THIS child. Allow queues; Deny returns the refused code with the attempt
+  audited; RequireApproval returns the approval sentinel — the human gate survives at the component
+  boundary like everywhere else.
+* **At fulfilment** (`prepare_spawn`): the System Core re-evaluates against the CURRENT registry
+  before loading any code, auditing refusals as `ComponentSpawnDenied`. The queue is a request,
+  never a verdict — this layer guards every caller of the resolution path, present and future.
+
+The grant is SCOPABLE in the lattice that already exists: `component.spawn` over `Scope::Entities`
+pins exactly which applications a component may ever pull in — the operator names the set, the
+engine enforces it, no new mechanism required. Revocation is live. Underneath, the older bounds
+hold unchanged: children are attenuated from parents, spawn depth is bounded, cycles terminate.
+
+Host proofs: `aletheia/tests/component_dependencies.rs`, 4 tests — no-authority refused by name
+with nothing queued; a scoped grant resolves exactly its named dependency and no other; an
+approval-constrained grant does not compose inline; a revoked grant resolves nothing against the
+live registry. Full aletheia crate green: 20 suites / 223 tests. Named non-claims: dependencies are
+resolved by run-time REQUEST — there is no separate install-time dependency manifest (the
+capability scope IS the declaration); per-parent quotas and dependency version pins beyond the ABI
+remain future work.
+
+## Previous wave — the supply chain is verified, live, and recorded (2026-08-23, ADR-067)
 
 ALET-P1-023 closes. The pieces of a component supply chain existed on either side of the
 installation boundary and never met: `AsymTrustStore` could verify a

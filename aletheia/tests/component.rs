@@ -170,12 +170,22 @@ fn component_spawns_a_child_with_attenuated_authority() {
         Scope::All,
         Constraints::none(),
     );
+    // Resolving a dependency is itself authorized (ALET-P1-024): the parent needs component.spawn
+    // covering the child, not just the action it wants the child to perform.
+    let spawn_cap = grant(
+        &mut core,
+        &owner,
+        "component:parent",
+        "component.spawn",
+        Scope::All,
+        Constraints::none(),
+    );
     let parent = spawner_wasm(&child.id, "entity.write");
 
     let outcome = core
         .run_component(
             std::slice::from_ref(&owner),
-            &[write_cap],
+            &[write_cap, spawn_cap],
             "component:parent",
             &parent,
             5_000_000,
@@ -227,12 +237,22 @@ fn spawned_child_cannot_exceed_parent_authority() {
         Scope::All,
         Constraints::none(),
     );
+    // The parent MAY resolve the dependency (component.spawn) while holding only entity.read —
+    // spawn authority is separate from what it can delegate to the child.
+    let spawn_cap = grant(
+        &mut core,
+        &owner,
+        "component:parent",
+        "component.spawn",
+        Scope::All,
+        Constraints::none(),
+    );
     let parent = spawner_wasm(&child.id, "entity.write");
 
     let outcome = core
         .run_component(
             std::slice::from_ref(&owner),
-            &[read_cap],
+            &[read_cap, spawn_cap],
             "component:parent",
             &parent,
             5_000_000,

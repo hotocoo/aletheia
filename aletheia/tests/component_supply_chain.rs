@@ -244,10 +244,21 @@ fn the_spawn_path_passes_through_the_same_provenance_gate() {
         .unwrap();
 
     core.set_require_signed_components(true);
+    // Resolving the dependency is itself authorized (ALET-P1-024): the parent holds component.spawn.
+    let spawn_cap = core
+        .grant_to(
+            std::slice::from_ref(&owner),
+            "component:parent",
+            "component.spawn",
+            aletheia::capabilities::Scope::All,
+            aletheia::capabilities::Constraints::none(),
+        )
+        .unwrap()
+        .token;
     let outcome = core
         .run_installed(
             std::slice::from_ref(&owner),
-            &[],
+            &[spawn_cap],
             "op",
             &parent.id,
             1_000_000,
@@ -301,10 +312,20 @@ fn a_verified_child_spawns_normally_under_secure_policy() {
         .unwrap();
 
     core.set_require_signed_components(true);
+    let spawn_cap = core
+        .grant_to(
+            std::slice::from_ref(&owner),
+            "component:parent",
+            "component.spawn",
+            aletheia::capabilities::Scope::All,
+            aletheia::capabilities::Constraints::none(),
+        )
+        .unwrap()
+        .token;
     let outcome = core
         .run_installed(
             std::slice::from_ref(&owner),
-            &[],
+            &[spawn_cap],
             "op",
             &parent.id,
             1_000_000,
