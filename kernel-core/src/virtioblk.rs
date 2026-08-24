@@ -516,6 +516,57 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         ))
     }
 
+    /// Recover a device after an error: full reset → renegotiate → re-publish the SAME rings and
+    /// buffers (the frames are still ours) → DRIVER_OK. The queue's avail/used indices restart at
+    /// zero on both sides, which is exactly what a fresh init produces, so no request can be
+    /// half-answered afterwards. Idempotent: resetting a healthy device is harmless.
+    pub fn reset(&mut self) -> Result<(), &'static str> {
+        unsafe {
+            self.transport.set_status(0);
+            let mut status = S_ACKNOWLEDGE;
+            self.transport.set_status(status);
+            status |= S_DRIVER;
+            self.transport.set_status(status);
+
+            let features_lo = self.transport.device_features(0);
+            let features_hi = self.transport.device_features(1);
+            let version1 = (features_hi & (1 << F_VERSION_1_BIT)) != 0;
+            if !version1 {
+                return Err("reset: device no longer offers VIRTIO_F_VERSION_1 — fail closed");
+            }
+            self.flush_ok = (features_lo & (1 << F_BLK_FLUSH_BIT)) != 0;
+            let drv_lo = if self.flush_ok {
+                1 << F_BLK_FLUSH_BIT
+            } else {
+                0
+            };
+            self.transport.set_driver_features(0, drv_lo);
+            self.transport.set_driver_features(1, 1 << F_VERSION_1_BIT);
+
+            status |= S_FEATURES_OK;
+            self.transport.set_status(status);
+            if self.transport.status() & S_FEATURES_OK == 0 {
+                self.transport.set_status(status | S_FAILED);
+                return Err("reset: device rejected negotiated features (FEATURES_OK cleared)");
+            }
+
+            self.transport.select_queue(0);
+            self.transport.after_queue_select();
+            if self.transport.queue_num_max() == 0 {
+                return Err("reset: queue 0 unavailable (QueueNumMax == 0)");
+            }
+            self.transport.set_queue_num(self.qsize as u32);
+            self.transport
+                .set_queue_addrs(self.desc as u64, self.avail as u64, self.used as u64);
+            H::barrier();
+            self.transport.queue_ready();
+
+            status |= S_DRIVER_OK;
+            self.transport.set_status(status);
+        }
+        Ok(())
+    }
+
     /// Would an address this driver never registered be refused as a descriptor? The suite asks this to
     /// prove the DMA gate denies by default (REQ-DRV-006, ADR-043) rather than merely existing.
     pub fn dma_gate_refuses_unregistered(&self) -> bool {
@@ -551,9 +602,11 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
     }
 
     /// Post the head descriptor to the avail ring, notify the device, and poll the used ring to
-    /// completion. Returns the device status byte. The poll is BOUNDED: a device that never completes
-    /// returns `Err` rather than spinning forever (the VM watchdog is only the backstop).
-    unsafe fn submit(&self, head: u16) -> Result<u8, StorageError> {
+    /// completion. Returns `(device status byte, bytes the device reported writing)`. The poll is
+    /// BOUNDED: a device that never completes returns `Err` rather than spinning forever (the VM
+    /// watchdog is only the backstop). The used-ring entry's `id` is VALIDATED — a device that
+    /// names another descriptor's completion is lying about whose request finished.
+    unsafe fn submit(&self, head: u16) -> Result<(u8, u32), StorageError> {
         // avail ring layout: [flags:u16][idx:u16][ring:u16 * qsize][used_event:u16]
         let avail_idx_ptr = (self.avail + 2) as *mut u16;
         let avail_ring = (self.avail + 4) as *mut u16;
@@ -579,14 +632,26 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
             }
             core::hint::spin_loop();
         }
-        H::barrier(); // used.idx observed before we read the status the device wrote
+        H::barrier(); // used.idx observed before we read the entry the device wrote
 
-        Ok(read_volatile(self.status as *const u8))
+        // The completed entry lives at (old_used % qsize): [id: u32][len: u32]. A device that names
+        // a different head is answering a request we did not make — refuse it here rather than
+        // interpreting whatever status byte follows.
+        let entry = (self.used + 4 + 8 * (old_used % self.qsize) as usize) as *const u32;
+        let id = read_volatile(entry);
+        if id != head as u32 {
+            return Err(StorageError::Device);
+        }
+        let len = read_volatile(entry.add(1));
+
+        Ok((read_volatile(self.status as *const u8), len))
     }
 
     /// Issue one virtio-blk request. `has_data` builds the 3-descriptor chain (header, data, status);
     /// a flush omits the data descriptor. `device_writes_data` marks the data buffer device-writable
-    /// (a READ). Returns `Err(Device)` if the device reports a non-OK status.
+    /// (a READ). The completion is validated in FULL before success is reported: status must be OK
+    /// AND the used-ring byte count must be EXACTLY what the chain promised — a device that completes
+    /// short (a PARTIAL read or write) or long is an error, never silently-truncated data.
     unsafe fn request(
         &self,
         rtype: u32,
@@ -629,8 +694,16 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
             self.set_desc(1, self.status as u64, 1, VIRTQ_DESC_F_WRITE, 0);
         }
 
+        // Bytes the DEVICE reports writing: the status byte always, plus the whole data buffer for
+        // a READ. Anything else — a short READ (partial data), a padded WRITE, a padded FLUSH — is a
+        // refused completion, checked BEFORE any data reaches the caller.
+        let expect_wlen: u32 = if has_data && device_writes_data {
+            BLOCK_SIZE as u32 + 1
+        } else {
+            1
+        };
         match self.submit(0)? {
-            VIRTIO_BLK_S_OK => Ok(()),
+            (VIRTIO_BLK_S_OK, len) if len == expect_wlen => Ok(()),
             _ => Err(StorageError::Device),
         }
     }

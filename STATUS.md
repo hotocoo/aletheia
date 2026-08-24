@@ -54,6 +54,20 @@ BEFORE landing by running the gate). Contract: `docs/INVARIANT-CONTRACTS.md` §I
 on arm64 hosts. Named residuals: rolling back BOTH objects consistently remains undetectable
 without an external anchor (pinned OPENING, in both directions, by test); secure-boot delivery of
 the root stays REQ-BOOT-001; capability image and entity records still commit separately.
+
+**Also closed in this wave — ALET-P1-019, virtio-blk production-grade test depth.** The driver
+now validates its completions IN FULL before reporting success: the used-ring entry's `id` must
+name the descriptor head it was posted under and its byte count must be EXACTLY what the chain
+promised, so a SHORT read is refused before any byte reaches the caller buffer, a padded WRITE or
+FLUSH is refused, a completion for another descriptor's request is refused, and garbage status
+bytes are refused even with an exact count. `VirtioBlk::reset` restores service after a failure
+through full renegotiation over the SAME frames, idempotently. Proved by a host-side virtio-mmio
+DEVICE MODEL that runs the device side synchronously and can LIE per-field: ten new tests in
+`kernel-core/tests/virtioblk.rs`, including an exhaustive malformation matrix (short / zero /
+long / garbage-status / id-lie / silent) where every malformed run must refuse BOTH operations
+with nothing in the caller buffer. Named residual: fuzzing against REAL hardware beyond QEMU's
+honest device remains VM-gate coverage.
+
 ## Previous wave — encryption at rest is a lifecycle, not a key file (2026-08-23, ADR-069)
 
 ALET-P1-028, ALET-P1-029 and ALET-P1-030 close together, because they were one gap wearing three
