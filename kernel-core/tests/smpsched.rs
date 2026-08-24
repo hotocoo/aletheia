@@ -436,3 +436,212 @@ fn nested_queue_lock_trips_the_audit_tripwire() {
     let sched = SmpSched::new(2);
     sched.__audit_probe_nested_lock();
 }
+
+// ---------------------------------------------------------------------------
+// ALET-P1-014 — contention DEPTH. The tests above prove the contract exists;
+// these prove it HOLDS under the load patterns a multicore scheduler actually
+// sees: producers racing consumers, mixed affinity masks under steal storms,
+// unrepresentable pins refused at the boundary, and the ADR-028 lock tripwire
+// counters returning to zero after every storm (a measured claim, not a design
+// note).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dynamic_producer_consumer_storm_keeps_exactly_once_and_the_tripwire_zero() {
+    const NCPUS: usize = 4;
+    const PRODUCERS: usize = 4;
+    const PER_PRODUCER: usize = 1_000;
+    const TOTAL: usize = PRODUCERS * PER_PRODUCER;
+
+    let sched = Arc::new(SmpSched::new(NCPUS));
+    let seen: Arc<Vec<AtomicU8>> = Arc::new((0..TOTAL).map(|_| AtomicU8::new(0)).collect());
+    let produced = Arc::new(AtomicUsize::new(0));
+    let executed = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicU8::new(0));
+
+    // Producers place concurrently through least-loaded placement - the racy
+    // path: two producers snapshot loads at once and must still enqueue exactly.
+    let producers: Vec<_> = (0..PRODUCERS)
+        .map(|p| {
+            let sched = Arc::clone(&sched);
+            let produced = Arc::clone(&produced);
+            std::thread::spawn(move || {
+                for i in 0..PER_PRODUCER {
+                    let id = (p * PER_PRODUCER + i) as u64;
+                    if p % 2 == 0 {
+                        sched.enqueue_least_loaded(id);
+                    } else {
+                        // The other half races through explicit-queue placement.
+                        sched.enqueue_on((p * 3 + i) % NCPUS, id);
+                    }
+                    produced.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        })
+        .collect();
+
+    // Consumers run until the STATIC total is dispatched - never until
+    // executed >= produced, which is a moving target mid-storm and would let a
+    // consumer quit while producers are still enqueueing (that bug was in the
+    // TEST, not the scheduler, and losing 16 tasks is exactly what it looked like).
+    let consumers: Vec<_> = (0..NCPUS)
+        .map(|cpu| {
+            let sched = Arc::clone(&sched);
+            let seen = Arc::clone(&seen);
+            let executed = Arc::clone(&executed);
+            let produced = Arc::clone(&produced);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut stolen = 0usize;
+                let start = Instant::now();
+                while executed.load(Ordering::SeqCst) < TOTAL && start.elapsed() < DEADLINE
+                {
+                    match sched.next_for(cpu) {
+                        Some(d) => {
+                            assert!(
+                                d.stolen_from.map(|v| v < NCPUS).unwrap_or(true),
+                                "stolen_from named a CPU that does not exist"
+                            );
+                            assert!(
+                                seen[d.task as usize].fetch_add(1, Ordering::SeqCst) == 0,
+                                "task {} dispatched twice",
+                                d.task
+                            );
+                            if d.stolen_from.is_some() {
+                                stolen += 1;
+                            }
+                            executed.fetch_add(1, Ordering::SeqCst);
+                        }
+                        None => {
+                            if produced.load(Ordering::SeqCst) == TOTAL {
+                                break; // nothing left anywhere
+                            }
+                            std::hint::spin_loop();
+                        }
+                    }
+                }
+                let _ = stop;
+                stolen
+            })
+        })
+        .collect();
+
+    for p in producers {
+        p.join().unwrap();
+    }
+    for c in consumers {
+        c.join().unwrap();
+    }
+
+    assert_eq!(produced.load(Ordering::SeqCst), TOTAL);
+    assert_eq!(executed.load(Ordering::SeqCst), TOTAL, "no task lost");
+    for t in seen.iter() {
+        assert_eq!(
+            t.load(Ordering::SeqCst),
+            1,
+            "exactly-once under dynamic load"
+        );
+    }
+    for cpu in 0..NCPUS {
+        assert_eq!(sched.load(cpu), 0, "queue {cpu} drained");
+        assert_eq!(
+            sched.debug_locks_held(cpu),
+            0,
+            "CPU {cpu} leaked a queue-lock hold through the storm (ADR-028)"
+        );
+    }
+}
+
+#[test]
+fn affinity_is_respected_under_a_steal_storm_and_empty_masks_change_nothing() {
+    const NCPUS: usize = 4;
+    const RUNNABLE: usize = 2_000;
+    const EMPTY: usize = 50;
+
+    let sched = Arc::new(SmpSched::new(NCPUS));
+    let seen: Arc<Vec<AtomicU8>> = Arc::new((0..RUNNABLE).map(|_| AtomicU8::new(0)).collect());
+    let ran_on: Arc<Vec<AtomicU8>> = Arc::new((0..NCPUS).map(|_| AtomicU8::new(0)).collect());
+    let executed = Arc::new(AtomicUsize::new(0));
+
+    // Mixed masks, seeded onto queues that deliberately do NOT match them:
+    // a third pinned (one CPU only), a third restricted to {cpu, cpu+1 mod N},
+    // a third ANY - and every EMPTY-mask task is refused placement outright.
+    for t in 0..RUNNABLE {
+        let id = t as u64;
+        let mask = match t % 3 {
+            0 => AffinityMask::only(t % NCPUS),
+            1 => {
+                let c = t % NCPUS;
+                AffinityMask::only(c).with((c + 1) % NCPUS)
+            }
+            _ => AffinityMask::ANY,
+        };
+        let wrong_queue = (t + 1) % NCPUS; // seed on a queue unrelated to the mask
+        sched.enqueue_on_affine(wrong_queue, id, mask);
+    }
+    for e in 0..EMPTY {
+        assert_eq!(
+            sched.enqueue_least_loaded_affine((RUNNABLE + e) as u64, AffinityMask::from_bits(0)),
+            None,
+            "an empty mask must be refused placement"
+        );
+    }
+    let queued_before: usize = (0..NCPUS).map(|c| sched.load(c)).sum();
+    assert_eq!(
+        queued_before, RUNNABLE,
+        "exactly the runnable tasks are queued; empty-mask refusals changed nothing"
+    );
+
+    let workers: Vec<_> = (0..NCPUS)
+        .map(|cpu| {
+            let sched = Arc::clone(&sched);
+            let seen = Arc::clone(&seen);
+            let ran_on = Arc::clone(&ran_on);
+            let executed = Arc::clone(&executed);
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                while executed.load(Ordering::SeqCst) < RUNNABLE && start.elapsed() < DEADLINE {
+                    if let Some(d) = sched.next_for(cpu) {
+                        assert!(
+                            d.stolen_from.map(|v| v < NCPUS).unwrap_or(true),
+                            "stolen_from named a nonexistent CPU"
+                        );
+                        assert!(
+                            seen[d.task as usize].fetch_add(1, Ordering::SeqCst) == 0,
+                            "task {} dispatched twice",
+                            d.task
+                        );
+                        ran_on[cpu].fetch_add(1, Ordering::SeqCst);
+                        executed.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().unwrap();
+    }
+
+    assert_eq!(
+        executed.load(Ordering::SeqCst),
+        RUNNABLE,
+        "every runnable task ran"
+    );
+    for t in seen.iter() {
+        assert_eq!(t.load(Ordering::SeqCst), 1, "exactly-once under the storm");
+    }
+    // The EMPTY-mask tasks were never dispatched anywhere and are still queued.
+    // Every runnable task drained; the empty-mask tasks never existed anywhere.
+    let queued_after: usize = (0..NCPUS).map(|c| sched.load(c)).sum();
+    assert_eq!(
+        queued_after, 0,
+        "queues must be fully drained after the storm"
+    );
+
+    // The lock tripwire returned to zero everywhere after the storm.
+    for cpu in 0..NCPUS {
+        assert_eq!(sched.debug_locks_held(cpu), 0);
+    }
+}

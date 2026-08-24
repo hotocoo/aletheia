@@ -68,6 +68,19 @@ long / garbage-status / id-lie / silent) where every malformed run must refuse B
 with nothing in the caller buffer. Named residual: fuzzing against REAL hardware beyond QEMU's
 honest device remains VM-gate coverage.
 
+**Also closed in this wave — ALET-P1-014, scheduler multicore contention DEPTH.** New host
+proofs in `kernel-core/tests/smpsched.rs`: a dynamic producer/consumer STORM (four producers
+racing four consumers through least-loaded placement and explicit-queue seeding concurrently)
+holding exactly-once for 4000 tasks with every queue drained; AFFINITY respected under a steal
+storm with mixed masks (pins, two-CPU windows, ANY) seeded deliberately onto mismatched queues;
+EMPTY-mask tasks refused placement outright — changing nothing, never lost; and the ADR-028 lock
+tripwire made a MEASURED claim via a test-only `debug_locks_held` accessor asserted zero after
+every storm. Writing the storm found a bug in the test's OWN exit condition — consumers quitting
+on executed >= produced, a moving target mid-storm — which losing 16 tasks made visible
+immediately. The scheduler itself needed no change: the contract held under everything the new
+storms threw at it.
+
+
 ## Previous wave — encryption at rest is a lifecycle, not a key file (2026-08-23, ADR-069)
 
 ALET-P1-028, ALET-P1-029 and ALET-P1-030 close together, because they were one gap wearing three

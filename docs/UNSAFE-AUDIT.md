@@ -18,7 +18,7 @@ below, and the number exists so neither growth nor deletion can happen unnoticed
 | Crate | Count | What the surface actually is |
 |-------|-------|------------------------------|
 | aletheia | 3 | the Windows transport FFI (`BCryptGenRandom` extern + call) — the only unsafe in the hosted Core; everything else, including all crypto and storage, is safe Rust over audited libraries |
-| kernel-core | 92 | arch-independent contracts: volatile device-register access behind typed seams, page-table entry bit manipulation on owned tables, the shared spine's raw-pointer task contexts |
+| kernel-core | 93 | arch-independent contracts: volatile device-register access behind typed seams (incl. the virtio-blk reset renegotiation and the host-test device model's register/ring access), page-table entry bit manipulation on owned tables, the shared spine's raw-pointer task contexts |
 | kernel | 178 | aarch64 bring-up: EL1/EL0 trampolines, GIC programming, MMIO for virtio-mmio/PL011/PL031, per-CPU areas, frame-table bitmaps |
 | kernel-x86_64 | 253 | the largest surface, because x86-64 has the most assembly-adjacent state: IDT/GDT/TSS construction, CR3/CR4/EFER control registers, port I/O, LAPIC, SMP trampolines, OVMF memory-map parsing |
 | kernel-riscv64 | 176 | S-mode bring-up: stvec/satp/sepc CSR blocks, PLIC/CLINT MMIO, hart context switch, sbi call sites |

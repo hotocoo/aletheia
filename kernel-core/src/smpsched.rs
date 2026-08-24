@@ -348,4 +348,24 @@ impl SmpSched {
             self.with_queue(0, other, |_| {});
         });
     }
+
+    /// TEST-ONLY: how many run-queue locks `cpu` currently holds on the dispatch path (always 0
+    /// outside a dispatch). The contention suite asserts these return to zero after every storm,
+    /// which is what makes the ADR-028 discipline a MEASURED claim under real threads: an
+    /// unbalanced enter/exit pair anywhere on the dispatch path shows up here. Release builds
+    /// have no counters and report 0.
+    #[doc(hidden)]
+    pub fn debug_locks_held(&self, cpu: usize) -> u8 {
+        #[cfg(debug_assertions)]
+        {
+            self.held
+                .get(cpu)
+                .map(|c| c.load(Ordering::SeqCst))
+                .unwrap_or(0)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            0
+        }
+    }
 }
