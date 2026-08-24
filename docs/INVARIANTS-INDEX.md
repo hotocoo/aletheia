@@ -35,6 +35,7 @@ Proof surfaces, in descending strength:
 | INV-PS2 | Bringing the controller up | REQ-CON-003 | ACPI-gated probing, self-test then config read-back, translation enabled, IRQ1 masked after suite, end-to-end keystroke | boot-gate: vm-e2e-x86.sh; e2e: keyboard-e2e.sh |
 | INV-SOAK | Lifecycles under repetition | REQ-QUAL-007 | journal churn allocates nothing (metered), byte-exact verification, structural soundness per op, grant churn zero-copy, task generations, seed-determinism | boot-gate soak suites on all three VM gates |
 | INV-ATREST | Encryption at rest lifecycle | REQ-STORE-002 | plaintext-SHA identity both halves, constructed nonces globally distinct across reopens, exhaustive single-bit-flip refusal, position-bound frames, named key lifecycle, legacy migration | host: aletheia/tests/encryption_at_rest.rs |
+| INV-CAP-CUSTODY | Authority custody lifecycle | REQ-CAP-008 | root-derived versioned keystore, one-way rotation chain whose retirement destroys keys, constructed nonces reserved before use, whole-object refusals, three-commit rekey complete at every crash position (recorded-op exhaustive sweep) | host: kernel-core/tests/capvault.rs (exhaustive crash-position sweep, full byte×bit and truncation sweeps, device-level no-op proof) — host-only by the same posture as INV-ATREST |
 
 ## Reading the map
 

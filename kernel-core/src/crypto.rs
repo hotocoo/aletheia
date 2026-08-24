@@ -216,6 +216,297 @@ pub fn ct_eq_32(left: &[u8; 32], right: &[u8; 32]) -> bool {
     difference == 0
 }
 
+// ---------------------------------------------------------------------------
+// AEAD: ChaCha20-Poly1305 (RFC 8439)
+// ---------------------------------------------------------------------------
+
+/// Why an authenticated open refused. AEAD cannot distinguish a wrong key from tampered bytes —
+/// the same property the hosted store documents — so both are one refusal and the caller names
+/// the object, not the cause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AeadError {
+    /// The input cannot hold even an authentication tag.
+    Truncated,
+    /// The tag did not verify. The plaintext is withheld — a failed open yields nothing.
+    Authenticate,
+}
+
+const CHACHA_CONSTANTS: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
+
+fn chacha_quarter(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+    state[a] = state[a].wrapping_add(state[b]);
+    state[d] ^= state[a];
+    state[d] = state[d].rotate_left(16);
+    state[c] = state[c].wrapping_add(state[d]);
+    state[b] ^= state[c];
+    state[b] = state[b].rotate_left(12);
+    state[a] = state[a].wrapping_add(state[b]);
+    state[d] ^= state[a];
+    state[d] = state[d].rotate_left(8);
+    state[c] = state[c].wrapping_add(state[d]);
+    state[b] ^= state[c];
+    state[b] = state[b].rotate_left(7);
+}
+
+/// One ChaCha20 block function (RFC 8439 section 2.3): the 64-byte keystream block for a counter.
+pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
+    let mut k = [0u32; 8];
+    for i in 0..8 {
+        k[i] = u32::from_le_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]]);
+    }
+    let mut n = [0u32; 3];
+    for i in 0..3 {
+        n[i] = u32::from_le_bytes([
+            nonce[4 * i],
+            nonce[4 * i + 1],
+            nonce[4 * i + 2],
+            nonce[4 * i + 3],
+        ]);
+    }
+    let initial = [
+        CHACHA_CONSTANTS[0],
+        CHACHA_CONSTANTS[1],
+        CHACHA_CONSTANTS[2],
+        CHACHA_CONSTANTS[3],
+        k[0],
+        k[1],
+        k[2],
+        k[3],
+        k[4],
+        k[5],
+        k[6],
+        k[7],
+        counter,
+        n[0],
+        n[1],
+        n[2],
+    ];
+    let mut st = initial;
+    for _ in 0..10 {
+        chacha_quarter(&mut st, 0, 4, 8, 12);
+        chacha_quarter(&mut st, 1, 5, 9, 13);
+        chacha_quarter(&mut st, 2, 6, 10, 14);
+        chacha_quarter(&mut st, 3, 7, 11, 15);
+        chacha_quarter(&mut st, 0, 5, 10, 15);
+        chacha_quarter(&mut st, 1, 6, 11, 12);
+        chacha_quarter(&mut st, 2, 7, 8, 13);
+        chacha_quarter(&mut st, 3, 4, 9, 14);
+    }
+    let mut out = [0u8; 64];
+    for i in 0..16 {
+        let word = st[i].wrapping_add(initial[i]);
+        out[4 * i..4 * i + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    out
+}
+
+/// Poly1305 over a message under a one-time 32-byte key (RFC 8439 section 2.5): the first half is
+/// the clamped multiplier r, the second half the one-time addend s. The accumulator is kept fully
+/// reduced modulo p = 2^130 - 5 after every block, which bounds every intermediate by construction.
+fn poly1305(key: &[u8; 32], msg: &[u8]) -> [u8; 16] {
+    // The RFC 8439 clamp 0x0FFFFFFC0FFFFFFC0FFFFFFC0FFFFFFF split over the two little-endian
+    // limbs: byte 0 stays whole (the low limb ends FFFF), while the top nibble of every
+    // 32-bit word and the low two bits of each later word's first byte are cleared.
+    let r0 = u64::from_le_bytes(key[0..8].try_into().unwrap()) & 0x0fff_fffc_0fff_ffff;
+    let r1 = u64::from_le_bytes(key[8..16].try_into().unwrap()) & 0x0fff_fffc_0fff_fffc;
+    let s0 = u64::from_le_bytes(key[16..24].try_into().unwrap());
+    let s1 = u64::from_le_bytes(key[24..32].try_into().unwrap());
+
+    // Accumulator h < p < 2^130 as three little-endian 64-bit limbs (h2 is a small carry).
+    let (mut h0, mut h1, mut h2) = (0u64, 0u64, 0u64);
+
+    for chunk in msg.chunks(16) {
+        // n = chunk || 0x01 as a 17-byte little-endian integer, so n < 2^129.
+        let mut blk = [0u8; 17];
+        blk[..chunk.len()].copy_from_slice(chunk);
+        blk[chunk.len()] = 1;
+        let n0 = u64::from_le_bytes(blk[0..8].try_into().unwrap());
+        let n1 = u64::from_le_bytes(blk[8..16].try_into().unwrap());
+
+        // h += n, bounded by 2^130 + 2^129 < 2^131. For a FULL 16-byte chunk the appended
+        // 0x01 is the 2^128 bit and rides in h2; a SHORT final chunk appends it one byte
+        // lower, where it is already inside n1 (or n0) and must NOT be double-counted.
+        let (t, c1) = h0.overflowing_add(n0);
+        h0 = t;
+        let (t, c2) = h1.carrying_add(n1, c1);
+        h1 = t;
+        h2 += c2 as u64 + if chunk.len() == 16 { 1 } else { 0 };
+
+        // h *= r mod p. With h < 2^131 and r < 2^124 the product fits 256 bits exactly.
+        let mut prod = [0u64; 4];
+        mul_add_at(&mut prod, 0, h0, r0);
+        mul_add_at(&mut prod, 1, h0, r1);
+        mul_add_at(&mut prod, 1, h1, r0);
+        mul_add_at(&mut prod, 2, h1, r1);
+        mul_add_at(&mut prod, 2, h2, r0);
+        mul_add_at(&mut prod, 3, h2, r1);
+
+        // Reduce mod 2^130 - 5 in limb arithmetic: P = A + B*2^130 with A the low 130 bits of P
+        // and B = P >> 130 (< 2^126). Since 2^130 == 5 (mod p), P == A + 5B, and
+        // A + 5B < 2^130 + 5*2^126 < 2p, so ONE conditional subtract finishes canonically.
+        // Bit 130 sits in prod[2] bit 2.
+        let a = (prod[0], prod[1], prod[2] & 0b11);
+        let b0 = (prod[2] >> 2) | (prod[3] << 62);
+        let b1 = prod[3] >> 2;
+        // 5B = (B << 2) + B, held as three limbs. The two-bit barrel shift moves b0's top
+        // bits INTO s1 — forgetting that shift-in is exactly how a silent 2^65 goes missing.
+        let s0 = b0.wrapping_shl(2);
+        let s1 = b1.wrapping_shl(2) | (b0 >> 62);
+        let c2 = b1 >> 62;
+        let (t0, c3) = s0.overflowing_add(b0);
+        let (t1, c4) = s1.carrying_add(b1, c3);
+        let t2 = c2 + c4 as u64;
+        // A + 5B.
+        let (u0, d1) = a.0.overflowing_add(t0);
+        let (u1, d2) = a.1.carrying_add(t1, d1);
+        let u2 = a.2 + t2 + d2 as u64;
+        // Bound: A < 2^130 and 5B < 2^128 give R < 5*2^128 < 2p, so u2 (bits 128.. of R)
+        // is at most 4 and ONE conditional subtract yields the canonical representative.
+        // One conditional subtract of p = 2^130 - 5 leaves the accumulator fully reduced:
+        // p = 0x3FFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFB, i.e. limbs (...FFFB, ...FFFF, 3).
+        const P0: u64 = 0xFFFF_FFFF_FFFF_FFFB;
+        const P1: u64 = u64::MAX;
+        const P2: u64 = 3;
+        // (u2,u1,u0) >= (3, MAX, P0) reduces to this: P1 being the limb maximum makes any
+        // strict u1 comparison vacuous, so only the exact-top-limb case remains.
+        let ge = u2 > P2 || (u2 == P2 && u1 == P1 && u0 >= P0);
+        if ge {
+            let (w0, br) = u0.overflowing_sub(P0);
+            let (w1, br2) = u1.borrowing_sub(P1, br);
+            let (w2, _) = u2.borrowing_sub(P2, br2);
+            h0 = w0;
+            h1 = w1;
+            h2 = w2;
+        } else {
+            h0 = u0;
+            h1 = u1;
+            h2 = u2;
+        }
+    }
+
+    // tag = (h + s) mod 2^128.
+    let (t0, carry) = h0.overflowing_add(s0);
+    let t1 = h1.wrapping_add(s1).wrapping_add(carry as u64);
+    let mut out = [0u8; 16];
+    out[0..8].copy_from_slice(&t0.to_le_bytes());
+    out[8..16].copy_from_slice(&t1.to_le_bytes());
+    out
+}
+
+/// Multiply two 64-bit values and fold the 128-bit product into a 256-bit little-endian
+/// accumulator starting at limb `at`, propagating carries all the way up.
+fn mul_add_at(prod: &mut [u64; 4], at: usize, x: u64, y: u64) {
+    let m = (x as u128) * (y as u128);
+    let lo = m as u64;
+    let hi = (m >> 64) as u64;
+    add_with_carry(prod, at, lo);
+    // The high half of a product landing in the top limb would mean P >= 2^256, which the
+    // bounds above exclude; the guard keeps a mathematically-impossible carry from panicking.
+    if at + 1 < prod.len() {
+        add_with_carry(prod, at + 1, hi);
+    } else {
+        debug_assert_eq!(hi, 0);
+    }
+}
+
+fn add_with_carry(prod: &mut [u64; 4], at: usize, x: u64) {
+    let (t, mut c) = prod[at].overflowing_add(x);
+    prod[at] = t;
+    let mut j = at + 1;
+    while c && j < 4 {
+        let (t, c2) = prod[j].overflowing_add(1);
+        prod[j] = t;
+        c = c2;
+        j += 1;
+    }
+}
+
+/// The MAC data layout RFC 8439 section 2.8 fixes: pad16(AAD) || pad16(ciphertext) ||
+/// len(AAD) || len(ciphertext), lengths as little-endian u64.
+fn aead_mac_data(aad: &[u8], ciphertext: &[u8]) -> Vec<u8> {
+    fn pad16(out: &mut Vec<u8>, data: &[u8]) {
+        out.extend_from_slice(data);
+        let rem = data.len() % 16;
+        if rem != 0 {
+            out.extend(core::iter::repeat_n(0u8, 16 - rem));
+        }
+    }
+    let mut mac = Vec::with_capacity(aad.len() + ciphertext.len() + 64);
+    pad16(&mut mac, aad);
+    pad16(&mut mac, ciphertext);
+    mac.extend_from_slice(&(aad.len() as u64).to_le_bytes());
+    mac.extend_from_slice(&(ciphertext.len() as u64).to_le_bytes());
+    mac
+}
+
+/// Authenticated encryption (RFC 8439): returns ciphertext || 16-byte tag. Block 0 of the
+/// keystream is the one-time Poly1305 key and encryption starts at block counter 1, so a caller
+/// must never reuse (key, nonce) — which is precisely what the constructed nonces upstream
+/// guarantee.
+pub fn aead_seal(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    let poly_block = chacha20_block(key, 0, nonce);
+    let mut poly_key = [0u8; 32];
+    poly_key.copy_from_slice(&poly_block[..32]);
+
+    let blocks = plaintext.len().div_ceil(64);
+    let mut ct = Vec::with_capacity(plaintext.len());
+    for i in 0..blocks {
+        let ks = chacha20_block(key, 1 + i as u32, nonce);
+        let start = i * 64;
+        let end = core::cmp::min(start + 64, plaintext.len());
+        for (j, b) in plaintext[start..end].iter().enumerate() {
+            ct.push(b ^ ks[j]);
+        }
+    }
+
+    let tag = poly1305(&poly_key, &aead_mac_data(aad, &ct));
+    ct.extend_from_slice(&tag);
+    ct
+}
+
+/// Authenticated decryption: verifies the tag BEFORE releasing any bytes. A failed open yields
+/// AeadError::Authenticate and no plaintext — never a decryption of unauthenticated data.
+pub fn aead_open(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    sealed: &[u8],
+) -> Result<Vec<u8>, AeadError> {
+    if sealed.len() < 16 {
+        return Err(AeadError::Truncated);
+    }
+    let split = sealed.len() - 16;
+    let (ct, tag) = sealed.split_at(split);
+
+    let poly_block = chacha20_block(key, 0, nonce);
+    let mut poly_key = [0u8; 32];
+    poly_key.copy_from_slice(&poly_block[..32]);
+    let expected = poly1305(&poly_key, &aead_mac_data(aad, ct));
+
+    let mut supplied = [0u8; 16];
+    supplied.copy_from_slice(tag);
+    // Constant-time compare of a fixed-size tag.
+    let mut diff = 0u8;
+    for i in 0..16 {
+        diff |= expected[i] ^ supplied[i];
+    }
+    if diff != 0 {
+        return Err(AeadError::Authenticate);
+    }
+
+    let blocks = ct.len().div_ceil(64);
+    let mut pt = Vec::with_capacity(ct.len());
+    for i in 0..blocks {
+        let ks = chacha20_block(key, 1 + i as u32, nonce);
+        let start = i * 64;
+        let end = core::cmp::min(start + 64, ct.len());
+        for (j, b) in ct[start..end].iter().enumerate() {
+            pt.push(b ^ ks[j]);
+        }
+    }
+    Ok(pt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +545,66 @@ mod tests {
         let mut changed = tag;
         changed[0] ^= 1;
         assert!(!ct_eq_32(&tag, &changed));
+    }
+    // ---- RFC 8439 known-answer vectors -------------------------------------------------------
+
+    #[test]
+    fn chacha20_block_matches_rfc8439_232() {
+        let key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let nonce = [0u8, 0, 0, 0x09, 0, 0, 0, 0x4a, 0, 0, 0, 0];
+        let ks = chacha20_block(&key, 1, &nonce);
+        let expected: [u8; 64] = [
+            0x10, 0xf1, 0xe7, 0xe4, 0xd1, 0x3b, 0x59, 0x15, 0x50, 0x0f, 0xdd, 0x1f, 0xa3, 0x20,
+            0x71, 0xc4, 0xc7, 0xd1, 0xf4, 0xc7, 0x33, 0xc0, 0x68, 0x03, 0x04, 0x22, 0xaa, 0x9a,
+            0xc3, 0xd4, 0x6c, 0x4e, 0xd2, 0x82, 0x64, 0x46, 0x07, 0x9f, 0xaa, 0x09, 0x14, 0xc2,
+            0xd7, 0x05, 0xd9, 0x8b, 0x02, 0xa2, 0xb5, 0x12, 0x9c, 0xd1, 0xde, 0x16, 0x4e, 0xb9,
+            0xcb, 0xd0, 0x83, 0xe8, 0xa2, 0x50, 0x3c, 0x4e,
+        ];
+        assert_eq!(ks, expected);
+    }
+
+    #[test]
+    fn poly1305_matches_rfc8439_252() {
+        let key: [u8; 32] = [
+            0x85, 0xd6, 0xbe, 0x78, 0x57, 0x55, 0x6d, 0x33, 0x7f, 0x44, 0x52, 0xfe, 0x42, 0xd5,
+            0x06, 0xa8, 0x01, 0x03, 0x80, 0x8a, 0xfb, 0x0d, 0xb2, 0xfd, 0x4a, 0xbf, 0xf6, 0xaf,
+            0x41, 0x49, 0xf5, 0x1b,
+        ];
+        let msg = b"Cryptographic Forum Research Group";
+        let tag = poly1305(&key, msg);
+        let expected: [u8; 16] = [
+            0xa8, 0x06, 0x1d, 0xc1, 0x30, 0x51, 0x36, 0xc6, 0xc2, 0x2b, 0x8b, 0xaf, 0x0c, 0x01,
+            0x27, 0xa9,
+        ];
+        assert_eq!(tag, expected);
+    }
+
+    #[test]
+    fn aead_matches_rfc8439_282_sunscreen_vector() {
+        let key: [u8; 32] = core::array::from_fn(|i| 0x80 + i as u8);
+        let nonce: [u8; 12] = [
+            0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+        ];
+        let aad: [u8; 12] = [
+            0x50, 0x51, 0x52, 0x53, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+        ];
+        let plaintext = b"Ladies and Gentlemen of the class of \x2799: If I could offer you only one tip for the future, sunscreen would be it.";
+        let sealed = aead_seal(&key, &nonce, &aad, plaintext);
+        let ct = &sealed[..sealed.len() - 16];
+        let tag = &sealed[sealed.len() - 16..];
+        assert_eq!(&ct[0..8], &[0xd3, 0x1a, 0x8d, 0x34, 0x64, 0x8e, 0x60, 0xdb]);
+        assert_eq!(
+            &ct[106..114],
+            &[0xd2, 0x65, 0x86, 0xce, 0xc6, 0x4b, 0x61, 0x16]
+        );
+        assert_eq!(
+            tag,
+            &[
+                0x1a, 0xe1, 0x0b, 0x59, 0x4f, 0x09, 0xe2, 0x6a, 0x7e, 0x90, 0x2e, 0xcb, 0xd0, 0x60,
+                0x06, 0x91
+            ]
+        );
+        let opened = aead_open(&key, &nonce, &aad, &sealed).expect("open");
+        assert_eq!(opened, plaintext.to_vec());
     }
 }

@@ -241,6 +241,23 @@ malformed would prove nothing about the check it was aimed at.
 | INV-CAP-LIFE-7 | A refused load changes **nothing** — the running engine's verdicts and live count are unchanged, and the image itself is not mutated by the attempt. | Fail-closed means the error path yields no engine; what this adds is that it also yields no side effect, including on the bytes the next boot will read. | `a_refused_load_leaves_the_running_engine_untouched` |
 | INV-CAP-LIFE-8 | Authority is stable across **ten** reboots with a mint, a delegation and a revocation between each — every killed token still dead, every live one still authorizing, and the live set exactly what was minted and not revoked. | One round trip proves the encoder. The point of a lifetime model is the tenth reboot, and that nothing accumulates in between. | `authority_is_stable_across_ten_reboots` |
 
+## INV-CAP-CUSTODY — authority custody is a lifecycle (ALET-P1-034, ADR-070)
+
+`capvault` seals the persisted registry under keys the VAULT owns: a root handed in once at open
+wraps a versioned keystore, rotation walks a one-way chain, and retirement deletes the only copy
+of a key. There is no entropy at boot, so every nonce is CONSTRUCTED — deterministic per-key
+prefix || monotone counter persisted in the keystore — and reuse is impossible by construction.
+Both objects authenticate before they parse; there is no partial load of a keystore. The crash
+model is ADR-062's: the host proof records the pivot's exact device-op sequence and fires the
+right kind of refusal at EVERY position.
+
+Proofs are HOST-side (`kernel-core/tests/capvault.rs`), mirroring ADR-069's posture for the
+encryption-at-rest lifecycle: the boot heap never frees (ADR-063), and this suite's sweep churn
+would starve later boot suites of exactly the allocations they need — a real failure mode the
+first boot-gated version hit. The gate-marker map is therefore unchanged by this family.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
 ## INV-KEYMAP — what a scancode means (REQ-CON-003, ALET-P2-039, ADR-049)
 
 A keyboard is a device someone else may be holding. The interesting properties are therefore not
@@ -332,6 +349,15 @@ host by `aletheia/tests/encryption_at_rest.rs` (plus three unit tests in `alethe
 they are hosted-store contracts — the kernel-side durable store has no crypto yet and claims none.
 
 | Id | Invariant | Why it is load-bearing | Adversarial proof |
+| INV-CAP-CUSTODY-1 | A sealed registry **reopens under its root alone** with authority intact — across repeated save/reopen cycles verdicts are identical and reserved counters strictly increase. | Custody that cannot restore authority is decoration; counters that could repeat would reuse a nonce under the same key, the one failure AEAD cannot survive. | `sealed_round_trip_across_reopen_cycles_keeps_authority_and_counters_monotone` |
+| INV-CAP-CUSTODY-2 | Rotation mints **max+1** and retains its predecessor; rekey retires every version below the newest, **destroying** the retired key inside the vault (`key_for_test` returns None); a replayed pre-pivot image names its dead version. | Retirement that leaves a usable key behind is a label, not retirement — the one-way chain makes deletion real, and replay is the smallest edit that revives the most authority. | `rekey_retires_by_name_and_destroys_the_retired_key`; `a_refusal_at_every_rekey_position_leaves_a_complete_world` sibling assertions in `kernel-core/tests/capvault.rs` |
+| INV-CAP-CUSTODY-3 | Rolling the KEYSTORE back alone against a newer image names the future version (`FutureVersion{requested, newest}`); rolling back BOTH objects consistently OPENS — the documented residual an external anchor would be needed to catch. | Detectability must be stated per-object: keystore-alone rollback is visible, whole-world rollback is not. Both directions PINNED so doc and behavior cannot drift. | `rollback_semantics_are_pinned_in_both_directions`; also asserted inside the crash-position sweep's promised stages |
+| INV-CAP-CUSTODY-4 | A wrong root refuses the WHOLE keystore with nothing loaded, nothing decoded, and **no byte of the medium changed** — verified block-for-block against a pre-attempt snapshot. | Authentication precedes parsing, so a failed open releases no bytes into any parser; fail-closed must also mean side-effect-free at the device level. | `a_wrong_root_refusal_is_a_total_noop_at_the_device_level` |
+| INV-CAP-CUSTODY-5 | **Every** single-bit flip of EITHER object and **every** truncation of either object is refused, through real filesystem rewrites. | A region the AEAD or the structural checks did not cover would show up here as an open that succeeded; the sweeps make "authenticated" measured rather than intended. | `every_single_bit_flip_of_either_object_is_refused_through_the_filesystem`; `every_truncation_of_either_object_is_refused` |
+| INV-CAP-CUSTODY-6 | Objects from ANOTHER store refuse under ours by name: the image fails authentication under our key (`ImageAuth`), the keystore under our root (`KeystoreAuth`). | Same machinery, different custody: derivation is domain-separated but custody-scoped, and the refusal names which layer caught it. | `another_stores_objects_refuse_under_ours_by_name` |
+| INV-CAP-CUSTODY-7 | The counter protocol RESERVES first and exhaustion at u64::MAX is NAMED: MAX-1 seals and reserves MAX; MAX refuses BY NAME storing nothing and changing nothing; rotation escapes exhaustion without touching the root. | Reserve-first survives crashes (a gap wastes a number, reuse is impossible); wraparound would silently hand a new image a used nonce. | `counter_exhaustion_is_exact_named_and_escapable_by_rotation`; round-trip test asserts strictly increasing counters across cycles |
+| INV-CAP-CUSTODY-8 | At EVERY device-operation position of the three-commit rekey pivot, a refusal of the RIGHT KIND surfaces as Err, the protocol ABORTS consuming nothing further, and the reopened world holds SOME complete stage ([1], [1,2] or [2]) with authority intact. | The pivot touches two objects across three commits; a half-pivot world would strand authority between versions. The op sequence is RECORDED from one clean run, so each fault aims correctly instead of silently missing. | `a_refusal_at_every_rekey_position_leaves_a_complete_world` (exhaustive over the recorded sequence) |
+| INV-CAP-CUSTODY-9 | Layering: an image that AUTHENTICATES under a real retained key but widens a delegation inside is refused THROUGH the vault with the inner admission name preserved (`Image(Amplified)`). | Custody sits ON TOP of INV-CAP-LIFE's checks, never instead of them — the seal must not launder an admission failure into something vague. | `a_widened_registry_sealed_under_the_real_key_is_refused_through_the_vault` (forgery sealed via `seal_image_bytes_for_test`) |
 |----|-----------|------------------------|-------------------|
 | INV-ATREST-1 | The content address is **SHA-256(PLAINTEXT)**, and dedup happens above the crypto layer: two puts of equal content write exactly one frame, and the address equals the hash of the plaintext both times. | Identity is a semantic fact that must outlive the storage encoding. An address derived from ciphertext would change under rotation/rekey and break every stored reference to it. | `address_is_plaintext_sha256_and_dedup_survives_encryption` |
 | INV-ATREST-2 | Equal plaintexts NEVER produce equal frames: not at two positions in one store, not across independent stores. | If ciphertext leaked equality of plaintext, the "no metadata leaks" claim of encryption at rest would be false in the one direction content addressing tempts you to reintroduce it. | `identical_plaintexts_produce_different_frames_and_cross_store_ciphertext_differs` |

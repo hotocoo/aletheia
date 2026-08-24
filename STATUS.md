@@ -1,13 +1,60 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-23 (encryption at rest is a LIFECYCLE, not a key file — the hosted semantic store gains versioned data keys under a root-derived keystore with rotation/rekey/retirement, constructed prefix||counter nonces whose ledger is the authenticated log itself, position-bound AEAD frames that refuse reordering/deletion/duplication with the position named, plaintext-SHA-256 identity semantics proved in both directions, and transparent wholesale migration of pre-ADR-069 logs detected by trial-authentication — closing the P1-028/029/030 trio over the store, ADR-069; before that: the supply chain is VERIFIED, LIVE, and RECORDED — chain verification crosses the installation boundary: root→signing-key→component provenance is enforced at install against public keys only, admitted entities record their full evidence, the launch gate re-judges that evidence against CURRENT trust so signer revocation goes live at the next launch, all faults are named per link, and the spawn path — found skipping provenance entirely, ALET-P2-050 — now passes the same gate, ADR-067; before that: the component DECLARES what it speaks — the ABI is explicitly versioned: a custom-section declaration enforced at BOTH gates, install refusing undeclared/malformed/foreign-version modules before their bytes are stored and run re-checking on every path, refusals naming both sides of a version disagreement, installed metadata stamping what was admitted, the SDK auto-stamping guests verified end-to-end with a rebuilt wasm32 fixture, and the v1 import surface pinned by a live link probe, ADR-066; before that: the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
+**As of:** 2026-08-23 (authority custody is a LIFECYCLE, not a caller-supplied key — the persisted registry gains `capvault`: a versioned data-key keystore sealed with in-tree RFC 8439 ChaCha20-Poly1305 under a root-derived subkey the vault alone retains, one-way rotation whose retirement DESTROYS the retired key, constructed prefix||counter nonces reserved before use because the kernel has no boot entropy, a three-commit rekey pivot crash-proved at EVERY recorded device-op position, and 17 custody invariants on every boot of all three targets — the custody half of ALET-P1-034 over authority, ADR-070; before that: encryption at rest is a LIFECYCLE, not a key file — the hosted semantic store gains versioned data keys under a root-derived keystore with rotation/rekey/retirement, constructed prefix||counter nonces whose ledger is the authenticated log itself, position-bound AEAD frames that refuse reordering/deletion/duplication with the position named, plaintext-SHA-256 identity semantics proved in both directions, and transparent wholesale migration of pre-ADR-069 logs detected by trial-authentication — closing the P1-028/029/030 trio over the store, ADR-069; before that: the supply chain is VERIFIED, LIVE, and RECORDED — chain verification crosses the installation boundary: root→signing-key→component provenance is enforced at install against public keys only, admitted entities record their full evidence, the launch gate re-judges that evidence against CURRENT trust so signer revocation goes live at the next launch, all faults are named per link, and the spawn path — found skipping provenance entirely, ALET-P2-050 — now passes the same gate, ADR-067; before that: the component DECLARES what it speaks — the ABI is explicitly versioned: a custom-section declaration enforced at BOTH gates, install refusing undeclared/malformed/foreign-version modules before their bytes are stored and run re-checking on every path, refusals naming both sides of a version disagreement, installed metadata stamping what was admitted, the SDK auto-stamping guests verified end-to-end with a rebuilt wasm32 fixture, and the v1 import surface pinned by a live link probe, ADR-066; before that: the sandbox is bounded in EVERY dimension — the WASM component runtime gains a resource model beyond fuel: memory bytes, table elements, stack depth/height and a wall-clock deadline enforced at host-call crossings, fail-closed by construction, every kill NAMED in the outcome and the audit event, spawn trees inheriting the root envelope, ADR-065; before that: the machine measures itself — an arch-independent benchmark family in every target's boot gate, throughput reported and structure gated, results proved on BOTH consoles at pixel level, plus a cross-OS typed-workload leg in the comparative benchmark, ADR-064; long-running soak — four lifecycle campaigns under repetition with the allocation-free churn window gated exactly on each target's own heap meter, ADR-063; fault injection — the journal held to its contract under a scripted device refusal at EVERY position of commit and recovery, ADR-062; every VM gate holds the boot's family/count marker map and emits GATE-MARKERS-V1, ADR-061)
 **Milestone delivered:** M1 — Hosted System-Core Reference (Rust); **P2 (start)** — WASM capability-secure component runtime; **P4 (start)** — bootable microkernel on THREE CPU targets, VM-tested: aarch64 (bootstrap) + AMD64/x86-64 (first-class) + **RISC-V/RV64GC (first-class)**; **P5 (start)** — real memory management: physical page-frame allocator + MMU virtual memory (identity map + dynamic map/unmap) + **EL0 user-mode with a capability-gated syscall boundary, hardware address-space isolation, per-process address spaces (separate TTBR0), and preemptive multitasking (full trap-frame context switch + round-robin scheduler + GICv2/generic-timer IRQ preemption)**, VM-tested on the aarch64 dev backend
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..069`.
 
-## Current wave — encryption at rest is a lifecycle, not a key file (2026-08-23, ADR-069)
+## Current wave — authority custody is a lifecycle, not a caller-supplied key (2026-08-23, ADR-070)
+
+## Current wave — authority custody is a lifecycle, not a caller-supplied key (2026-08-23, ADR-070)
+
+The custody and rotation halves of ALET-P1-034 close, because they were one gap: `capstore` could
+authenticate a persisted registry only under a key the CALLER handed in on every call, so custody
+was nobody's, rotation was impossible, and every boot re-asked the question a keystore exists to
+answer. The constraint that shaped everything: the kernel has NO entropy source at boot, so
+randomness could not be the mechanism — the lifecycle had to be safe BY CONSTRUCTION.
+
+* **The root is custody; working keys are derived.** `CapVault::open` takes the 32-byte root once,
+  retains only `HMAC-SHA256(root, "aletheia.capvault/v1/keystore-seal")`, and forgets the root.
+  Every working key descends from it behind domain-separated KDFs, so the root authenticates and
+  wraps but never seals an image itself (the ADR-069 rule, applied to authority).
+* **Data keys are versioned on a ONE-WAY chain.** The keystore object (`cap.keys`) stores only
+  retained versions; rotation derives max+1 as `HMAC(current, ROTATE)`. Retirement therefore
+  DESTROYS: when a version leaves the keystore its key bytes exist nowhere, and images naming it
+  are refused BY NAME (`RetiredVersion`) — proved by `key_for_test(1)` returning None after the
+  pivot while a replayed pre-pivot image still names its dead version.
+* **Nonces are CONSTRUCTED.** Per-key deterministic prefix || monotone counter persisted in the
+  keystore. Two ledgers, two disciplines: the keystore's own counter lives inside the object it
+  rewrites (atomic replace keeps it monotone); the image counter is RESERVED FIRST — keystore
+  commit, then seal — so a crash wastes a number where write-first would reuse one. Exhaustion at
+  u64::MAX refuses by name demanding rotation, and rotation indeed escapes it without touching
+  the root.
+* **Both objects are AEAD-sealed and authenticate before they parse.** ChaCha20-Poly1305 joins
+  kernel-core's own crypto against the RFC 8439 block-function, Poly1305 and AEAD known-answer
+  vectors (no new dependency); the reduction runs in three 64-bit limbs with every intermediate
+  bounded by construction. AAD binds format version plus every cleartext header field. A wrong
+  root or one flipped bit is a WHOLE-object refusal — and the wrong-root refusal is proved to
+  change NO byte of the medium, block for block.
+* **Rekey is a three-commit pivot, crash-proved at EVERY position.** rotate → rewrite the image
+  under the newest version → retire everything older. The host proof RECORDS the pivot's exact
+  device-op sequence, then fires a refusal OF THE RIGHT KIND at each position and demands the
+  error surface, the protocol abort consuming nothing further, and the reopened world open,
+  authenticate and authorize — retained set always exactly [1], [1,2] or [2].
+
+Host proofs: `kernel-core/tests/capvault.rs` (ten tests) — HOST-only, mirroring ADR-069's
+posture: the boot heap never frees, and the suite's sweep churn starves later boot suites of the
+allocations they need (the first boot-gated version panicked the console suite — found and fixed
+BEFORE landing by running the gate). Contract: `docs/INVARIANT-CONTRACTS.md` §INV-CAP-CUSTODY
+(9 invariants). Writing the gate wiring found a latent defect anyway:
+`scripts/vm-e2e-vbox.sh` still required "ALL 11 CAPABILITY-LIFETIME" from a suite that has said
+14 since the authenticated-image checks landed — unfixed until now because VirtualBox is skipped
+on arm64 hosts. Named residuals: rolling back BOTH objects consistently remains undetectable
+without an external anchor (pinned OPENING, in both directions, by test); secure-boot delivery of
+the root stays REQ-BOOT-001; capability image and entity records still commit separately.
+## Previous wave — encryption at rest is a lifecycle, not a key file (2026-08-23, ADR-069)
 
 ALET-P1-028, ALET-P1-029 and ALET-P1-030 close together, because they were one gap wearing three
 numbers: the store had SEALED every frame since its first commit, and had no answer for where the

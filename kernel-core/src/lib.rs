@@ -28,6 +28,7 @@ pub mod arpcache;
 pub mod bench;
 pub mod capalg;
 pub mod capstore;
+pub mod capvault;
 pub mod compress;
 pub mod conring;
 pub mod crypto;
