@@ -139,6 +139,31 @@ pub extern "C" fn kmain() -> ! {
     }
 
     // The frozen risk forest this image carries (REQ-ML-001, ADR-056). It is ADVISORY: it may
+    
+    // The IOMMU contract (ALET-P1-018, ADR-071): per-device translation spaces,
+    // deny-by-default, the kernel image unmappable on both sides, named faults.
+    // Modeled in software (the boot heap cannot afford sweep churn - ADR-063);
+    // hardware realization is scoped in the gap register.
+    kprintln!("");
+    kprintln!("--- iommu selftests (device-visible memory enforced by translation) ---");
+    match kernel_core::iommu::iommu_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[iommu] ALL {} IOMMU-CONTRACT INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[iommu] FAILED at iommu-contract invariant {}: {}",
+                idx,
+                name
+            );
+            semihosting::exit(130 + idx as i32);
+        }
+    }
+
     // reorder tasks whose effective priority is already equal, and nothing else. So the suite proves
     // the advisory property itself — an abstaining model schedules bit-identically to the model-free
     // kernel, and priority is never traded for risk — alongside exact parity with the trainer and a

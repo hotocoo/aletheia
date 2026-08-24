@@ -106,6 +106,17 @@ CONTRACT=(
   "capstore: an authenticated image still authorizes with its trusted key"
   "capstore: an authenticated image rejects a wrong key before load"
   "capstore: an authenticated image rejects tamper before load"
+  # The IOMMU contract (ALET-P1-018, ADR-071): device-visible memory enforced by
+  # TRANSLATION. Per-device address spaces, deny-by-default with named faults, and
+  # kernel-image protection are the same contract on every CPU - a target whose
+  # IOMMU model let one device see another's windows would be a different machine.
+  "iommu: a mapped window translates each page to its own physical page"
+  "iommu: an unmapped page of an attached device faults by name"
+  "iommu: one device's windows do not exist for another"
+  "iommu: the kernel image is refused as IOVA and as physical target"
+  "iommu: an overlapping IOVA window is a named refusal"
+  "iommu: unmapping ends access immediately"
+  "iommu: a read-only page refuses stores under its own name"
   # What a scancode MEANS (REQ-CON-003, ADR-049). The DEVICE is x86-64's alone — the QEMU `virt`
   # machine has no PS/2 controller — but the decoder is arch-independent and its output alphabet is
   # the console's shared contract. A target that decoded a byte the line editor refuses would be a

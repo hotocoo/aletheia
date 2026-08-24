@@ -43,6 +43,7 @@ pub mod font8x8;
 pub mod frameown;
 pub mod fs;
 pub mod grant;
+pub mod iommu;
 pub mod ipc;
 pub mod keymap;
 pub mod layout;

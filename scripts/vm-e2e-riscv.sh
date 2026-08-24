@@ -70,6 +70,7 @@ fail=0
 echo "$OUT" | grep -q "S->M boundary OK"              || { echo "FAIL: SBI boundary marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 13 INVARIANTS HOLD"        || { echo "FAIL: invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD" || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
+echo "$OUT" | grep -q "ALL 9 IOMMU-CONTRACT INVARIANTS HOLD" || { echo "FAIL: iommu-contract invariants marker missing (ALET-P1-018, ADR-071)"; fail=1; }
 echo "$OUT" | grep -q "ALL 22 RISK-ADVISOR INVARIANTS HOLD" || { echo "FAIL: risk-advisor invariants marker missing (REQ-ML-001, ADR-056)"; fail=1; }
 # The forest under load: cost measured on this machine, and the properties that must hold at
 # any scale. A model that is only verified on 256 fixture rows is verified at a scale no scheduler
@@ -116,7 +117,7 @@ echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlst
 # map by design — the same arch-independent suites must prove the same counts over either bus, and
 # a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
 source "$ROOT/scripts/lib-markers.sh"
-RISCV_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 virtio=21 vm=66"
+RISCV_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

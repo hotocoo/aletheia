@@ -37,6 +37,8 @@ Proof surfaces, in descending strength:
 | INV-ATREST | Encryption at rest lifecycle | REQ-STORE-002 | plaintext-SHA identity both halves, constructed nonces globally distinct across reopens, exhaustive single-bit-flip refusal, position-bound frames, named key lifecycle, legacy migration | host: aletheia/tests/encryption_at_rest.rs |
 | INV-CAP-CUSTODY | Authority custody lifecycle | REQ-CAP-008 | root-derived versioned keystore, one-way rotation chain whose retirement destroys keys, constructed nonces reserved before use, whole-object refusals, three-commit rekey complete at every crash position (recorded-op exhaustive sweep) | host: kernel-core/tests/capvault.rs (exhaustive crash-position sweep, full byte×bit and truncation sweeps, device-level no-op proof) — host-only by the same posture as INV-ATREST |
 
+| INV-IOMMU | The IOMMU contract | ALET-P1-018 / REQ-DRV-006 | per-device translation spaces, deny-by-default with named faults, kernel-image unmappable both sides, revocation-as-unmap, double-map and PA-aliasing refused, bounded tables | host: kernel-core/tests/iommu.rs; boot-gate iommu suite on all three VM gates; conformance: seven IOMMU behaviors |
+
 ## Reading the map
 
 A row whose proof names ONLY a boot-gate is hardware-shaped behavior that cannot be honestly

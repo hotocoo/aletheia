@@ -494,8 +494,7 @@ fn dynamic_producer_consumer_storm_keeps_exactly_once_and_the_tripwire_zero() {
             std::thread::spawn(move || {
                 let mut stolen = 0usize;
                 let start = Instant::now();
-                while executed.load(Ordering::SeqCst) < TOTAL && start.elapsed() < DEADLINE
-                {
+                while executed.load(Ordering::SeqCst) < TOTAL && start.elapsed() < DEADLINE {
                     match sched.next_for(cpu) {
                         Some(d) => {
                             assert!(
