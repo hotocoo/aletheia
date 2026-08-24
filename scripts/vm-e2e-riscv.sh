@@ -49,6 +49,13 @@ PIMG="$KDIR/target/virtio-blk-persistent.img"
 rm -f "$PIMG"
 dd if=/dev/zero of="$PIMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create persistent image"; exit 3; }
 
+# The custody anchor (ALET-P1-034, ADR-072): a DETERMINISTIC 32-byte root delivered over the
+# firmware configuration channel, outside every disk the vault protects. Fixed bytes keep the
+# gate reproducible; DELIVERY is what is proved here, not this demo anchor's secrecy.
+ROOTBIN="$KDIR/target/capvault-root.bin"
+printf 'aletheia-capvault-root-0123456789abcdef' | head -c 32 > "$ROOTBIN"
+[ "$(wc -c < "$ROOTBIN")" -eq 32 ] || { echo "FAIL: root materialization"; exit 3; }
+
 echo "==> booting in QEMU riscv64 'virt' + OpenSBI (120s watchdog, virtio-blk attached, -smp 4 for the SMP suite)"
 OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
   qemu-system-riscv64 -machine virt -cpu rv64 -smp 4 -m 128M -nographic \
@@ -57,6 +64,7 @@ OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
   -device virtio-gpu-device)"
 CODE=$?
 
@@ -71,6 +79,9 @@ echo "$OUT" | grep -q "S->M boundary OK"              || { echo "FAIL: SBI bound
 echo "$OUT" | grep -q "ALL 13 INVARIANTS HOLD"        || { echo "FAIL: invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD" || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 IOMMU-CONTRACT INVARIANTS HOLD" || { echo "FAIL: iommu-contract invariants marker missing (ALET-P1-018, ADR-071)"; fail=1; }
+# Custody crosses the platform boundary (ALET-P1-034, ADR-072), proved over the SECOND bus.
+echo "$OUT" | grep -q "ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD" || { echo "FAIL: custody-delivery invariants marker missing (ALET-P1-034, ADR-072)"; fail=1; }
+echo "$OUT" | grep -q "platform custody: root DELIVERED over firmware configuration" || { echo "FAIL: the platform did not deliver the custody anchor"; fail=1; }
 echo "$OUT" | grep -q "ALL 22 RISK-ADVISOR INVARIANTS HOLD" || { echo "FAIL: risk-advisor invariants marker missing (REQ-ML-001, ADR-056)"; fail=1; }
 # The forest under load: cost measured on this machine, and the properties that must hold at
 # any scale. A model that is only verified on 256 fixture rows is verified at a scale no scheduler
@@ -117,7 +128,7 @@ echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlst
 # map by design — the same arch-independent suites must prove the same counts over either bus, and
 # a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
 source "$ROOT/scripts/lib-markers.sh"
-RISCV_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 virtio=21 vm=66"
+RISCV_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 vault=14 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
@@ -132,12 +143,33 @@ OUT2="$(perl -e 'alarm 120; exec @ARGV or die' \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
   -device virtio-gpu-device)"
 CODE2=$?
 echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
 echo "second boot exit code: $CODE2"
 [ "$CODE2" -eq 0 ] || { echo "FAIL: second boot expected exit 0, got $CODE2"; fail=1; }
 echo "$OUT2" | grep -q "PERSISTENT MEDIUM: boot #2, 1 entities verified" || { echo "FAIL: the OS did not remember across the reboot (boot #2 must verify boot #1's entity)"; fail=1; }
+
+# ---- THIRD BOOT, platform silent: custody refuses FAIL-CLOSED, machine continues ----
+# Without the firmware item there is NO root anywhere — not on disk, not compiled in. The vault
+# must stay sealed BY NAME while every other subsystem keeps working (ADR-072).
+echo "==> third boot WITHOUT the firmware root (absence must be a named refusal, not a crash)"
+OUT3="$(perl -e 'alarm 120; exec @ARGV or die' \
+  qemu-system-riscv64 -machine virt -cpu rv64 -smp 4 -m 128M -nographic \
+  -bios default -kernel "$ELF" \
+  -global virtio-mmio.force-legacy=false \
+  -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
+  -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
+  -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -device virtio-gpu-device)"
+CODE3=$?
+echo "$OUT3" | grep -E "\[vault\]" || true
+echo "third boot exit code: $CODE3"
+[ "$CODE3" -eq 0 ] || { echo "FAIL: third boot expected exit 0, got $CODE3"; fail=1; }
+echo "$OUT3" | grep -q "PLATFORM ROOT ABSENT (RootNotProvided)" || { echo "FAIL: absent platform root was not refused by name"; fail=1; }
+echo "$OUT3" | grep -q "PERSISTENT MEDIUM: boot #3," || { echo "FAIL: third boot did not witness the durable store"; fail=1; }
+echo "$OUT3" | grep -q "\[e2e\] PASS" || { echo "FAIL: third boot did not reach e2e PASS (one sealed vault must not kill the machine)"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then
   echo "VM-E2E (riscv64): PASS"

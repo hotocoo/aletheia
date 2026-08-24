@@ -26,6 +26,7 @@ extern crate alloc;
 
 pub mod arpcache;
 pub mod bench;
+pub mod bootroot;
 pub mod capalg;
 pub mod capstore;
 pub mod capvault;
@@ -42,6 +43,7 @@ pub mod fbcon;
 pub mod font8x8;
 pub mod frameown;
 pub mod fs;
+pub mod fwcfg;
 pub mod grant;
 pub mod iommu;
 pub mod ipc;

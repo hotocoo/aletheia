@@ -118,6 +118,7 @@ SKIPPED=(
   'NETWORK INVARIANTS HOLD   (this VM is provisioned with no NIC)'
   'VIRTIO-GPU INVARIANTS HOLD   (VirtualBox emulates no virtio-gpu device)'
   'FRAMEBUFFER-CONSOLE INVARIANTS HOLD   (needs the virtio-gpu device)'
+  'CUSTODY-DELIVERY INVARIANTS HOLD   (needs a persistent virtio-blk disk AND the QEMU fw_cfg channel)'
 )
 
 # --- build ------------------------------------------------------------------------------------

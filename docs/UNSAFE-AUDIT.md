@@ -19,9 +19,9 @@ below, and the number exists so neither growth nor deletion can happen unnoticed
 |-------|-------|------------------------------|
 | aletheia | 3 | the Windows transport FFI (`BCryptGenRandom` extern + call) — the only unsafe in the hosted Core; everything else, including all crypto and storage, is safe Rust over audited libraries |
 | kernel-core | 93 | arch-independent contracts: volatile device-register access behind typed seams (incl. the virtio-blk reset renegotiation and the host-test device model's register/ring access), page-table entry bit manipulation on owned tables, the shared spine's raw-pointer task contexts |
-| kernel | 178 | aarch64 bring-up: EL1/EL0 trampolines, GIC programming, MMIO for virtio-mmio/PL011/PL031, per-CPU areas, frame-table bitmaps |
-| kernel-x86_64 | 253 | the largest surface, because x86-64 has the most assembly-adjacent state: IDT/GDT/TSS construction, CR3/CR4/EFER control registers, port I/O, LAPIC, SMP trampolines, OVMF memory-map parsing |
-| kernel-riscv64 | 176 | S-mode bring-up: stvec/satp/sepc CSR blocks, PLIC/CLINT MMIO, hart context switch, sbi call sites |
+| kernel | 182 | aarch64 bring-up: EL1/EL0 trampolines, GIC programming, MMIO for virtio-mmio/PL011/PL031/per-CPU areas/frame-table bitmaps, plus the fw_cfg window (ADR-072): one 16-bit BE selector store at +8 and byte loads at +0 |
+| kernel-x86_64 | 255 | the largest surface, because x86-64 has the most assembly-adjacent state: IDT/GDT/TSS construction, CR3/CR4/EFER control registers, port I/O, LAPIC, SMP trampolines, OVMF memory-map parsing; +2 for the fw_cfg ioport transport (outw selector at 0x510, inb data at 0x511, ADR-072) |
+| kernel-riscv64 | 178 | S-mode bring-up: stvec/satp/sepc CSR blocks, PLIC/CLINT MMIO, hart context switch, sbi call sites; +2 for the fw_cfg window transport (ADR-072, same measured model as aarch64) |
 | component-sdk | 4 | guest-export glue in the macro that stamps the ABI custom section |
 
 ## Ownership

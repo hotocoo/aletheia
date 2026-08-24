@@ -7,7 +7,7 @@ ENTRY(_start)
 
 RAM_START = 0x80200000;
 STACK_SIZE = 0x100000;   /* 1 MiB */
-HEAP_SIZE  = 0x800000;   /* 8 MiB */
+HEAP_SIZE  = 0xC00000;   /* 12 MiB - custody residency grew with ADR-072: the vault\n                         keeps its keystore, image and witness state live on the bump heap */
 
 SECTIONS
 {

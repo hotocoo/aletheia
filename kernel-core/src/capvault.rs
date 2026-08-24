@@ -519,6 +519,19 @@ impl CapVault {
         }
     }
 
+    /// Admit an ALREADY-READ image object through the full version-resolution and
+    /// authentication path. Proof surface only: the custody-delivery suite holds pre-rekey
+    /// image BYTES and must show the retired version is refused BY NAME without a filesystem
+    /// rewrite per probe.
+    #[doc(hidden)]
+    pub fn admit_image_bytes_for_test(
+        &self,
+        stored: &[u8],
+        now: u64,
+    ) -> Result<crate::spine::CapEngine, VaultError> {
+        self.admit_image_bytes(stored, now)
+    }
+
     /// Seal arbitrary plaintext as if it were the vault's own image under `version` — the seam
     /// layering proofs use to hand the admission path a WELL-SEALED forgery.
     pub fn seal_image_bytes_for_test(

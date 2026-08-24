@@ -55,10 +55,21 @@ dd if=/dev/zero of="$SCRATCH" bs=1048576 count=1 2>/dev/null || { echo "FAIL: cr
 PERSIST="$WORK/virtio-blk-persistent.img"
 dd if=/dev/zero of="$PERSIST" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create persistent disk"; exit 1; }
 
+# The custody anchor (ALET-P1-034, ADR-072): a DETERMINISTIC 32-byte root delivered over the
+# firmware configuration ioports, outside every disk the vault protects. Fixed bytes keep the
+# gate reproducible; DELIVERY is what is proved here, not this demo anchor's secrecy.
+ROOTBIN="$WORK/capvault-root.bin"
+printf 'aletheia-capvault-root-0123456789abcdef' | head -c 32 > "$ROOTBIN"
+[ "$(wc -c < "$ROOTBIN")" -eq 32 ] || { echo "FAIL: create custody anchor"; exit 1; }
+
 # One boot, into the log path given. The NVRAM copy is per-boot (OVMF rewrites it), the disks are not:
 # that is what makes the second boot a real reboot of the same machine rather than a fresh one.
 boot_once() {
-  local log="$1" vars="$2"
+  local log="$1" vars="$2" root="${3:-}"
+  local fwargs=""
+  if [ -n "$root" ]; then
+    fwargs="-fw_cfg name=opt/org.aletheia/capvault-root,file=$root"
+  fi
   : > "$log"
   cp "$VARSSRC" "$vars"
   qemu-system-x86_64 -machine q35 -m 256 -smp 4 \
@@ -73,6 +84,7 @@ boot_once() {
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
     -device virtio-gpu-pci \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    $fwargs \
     -serial file:"$log" -display none -no-reboot &
   local qpid=$!
   ( sleep 30; kill -9 "$qpid" 2>/dev/null ) &
@@ -82,7 +94,7 @@ boot_once() {
   return $rc
 }
 
-boot_once "$LOG" "$VARS"; RC=$?
+boot_once "$LOG" "$VARS" "$ROOTBIN"; RC=$?
 
 echo "==== serial log ===="
 cat "$LOG"
@@ -92,6 +104,8 @@ echo "QEMU exit code: $RC (expect 33)"
 if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 22 MEMORY INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD' "$LOG" \
+   && grep -q 'platform custody: root DELIVERED over firmware configuration' "$LOG" \
    && grep -q 'ALL 9 IOMMU-CONTRACT INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 22 RISK-ADVISOR INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 8 STRESS INVARIANTS HOLD' "$LOG" \
@@ -127,7 +141,7 @@ if [ "$RC" -eq 33 ] \
   # the boot, or a count changing without the gate being told. Extra families fail too.
   # shellcheck disable=SC1091
   source "$HERE/../scripts/lib-markers.sh"
-  X86_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 soak=12 usermode=39 virtio=21 vm=72"
+  X86_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 soak=12 usermode=39 vault=14 virtio=21 vm=72"
   if ! markers_assert "$X86_EXPECTED" < "$LOG"; then
     echo "SMOKE TEST: FAIL (structured marker map)"
     exit 1
@@ -135,15 +149,29 @@ if [ "$RC" -eq 33 ] \
   # ---- SECOND BOOT against the SAME persistent disk: the OS must REMEMBER (REQ-STOR-003) ----
   echo "==> rebooting the same image against the SAME persistent disk (cross-reboot proof)"
   LOG2="$WORK/serial2.log"
-  boot_once "$LOG2" "$WORK/vars2.fd"; RC2=$?
+  boot_once "$LOG2" "$WORK/vars2.fd" "$ROOTBIN"; RC2=$?
   grep -E 'PERSISTENT MEDIUM' "$LOG2" || true
   echo "second boot exit code: $RC2 (expect 33)"
   if [ "$RC2" -eq 33 ] \
      && grep -q 'PERSISTENT MEDIUM: boot #2, 1 entities verified' "$LOG2" \
      && grep -q 'e2e\] PASS' "$LOG2"; then
-    echo "SMOKE TEST: PASS"
+    # ---- THIRD BOOT, platform silent: custody refuses FAIL-CLOSED, machine continues ----
+    echo "==> third boot WITHOUT the firmware root (absence must be a named refusal, not a crash)"
+    LOG3="$WORK/serial3.log"
+    boot_once "$LOG3" "$WORK/vars3.fd"; RC3=$?
+    grep -E '\[vault\]' "$LOG3" || true
+    echo "third boot exit code: $RC3 (expect 33)"
+    if [ "$RC3" -eq 33 ] \
+       && grep -q 'PLATFORM ROOT ABSENT (RootNotProvided)' "$LOG3" \
+       && grep -q 'PERSISTENT MEDIUM: boot #3,' "$LOG3" \
+       && grep -q 'e2e\] PASS' "$LOG3"; then
+      echo "SMOKE TEST: PASS"
+      rm -rf "$WORK"
+      exit 0
+    fi
+    echo "SMOKE TEST: FAIL (absent platform root was not refused by name, or the machine did not continue)"
     rm -rf "$WORK"
-    exit 0
+    exit 1
   fi
   echo "SMOKE TEST: FAIL (the OS did not remember across the reboot)"
   rm -rf "$WORK"

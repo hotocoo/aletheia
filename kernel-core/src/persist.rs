@@ -45,11 +45,13 @@ use crate::storage::BlockDevice;
 
 /// The fs object the store lives in.
 pub const STORE_OBJECT: &str = "spine.store";
-/// Record magic ("AlSt\0\0\0\1") and version.
-const REC_MAGIC: u64 = 0x416C_5374_0000_0001;
-const REC_VERSION: u64 = 1;
-/// Header: magic, version, next_id, count.
-const HDR_LEN: usize = 32;
+/// Record magic ("AlSt\0\0\0\2") and version. Version 2 adds the CUSTODY GENERATION the
+/// record was last paired with (ADR-072): what makes a rolled-back vault detectable against an
+/// entity store that remembers newer authority. Version 1 records are refused by name.
+const REC_MAGIC: u64 = 0x416C_5374_0000_0002;
+const REC_VERSION: u64 = 2;
+/// Header: magic, version, next_id, count, cap_generation.
+const HDR_LEN: usize = 40;
 /// Trailing checksum length: FNV-1a over every byte before it.
 const CKSUM_LEN: usize = 8;
 /// Per-entity fixed part: id, (etype+deleted+pad), version, chain, content_hash, two lengths.
@@ -145,14 +147,24 @@ fn take32(buf: &[u8], at: &mut usize) -> Option<u32> {
     Some(u32::from_le_bytes(a))
 }
 
-/// Encode a store into the durable record. Pure — no device, so it is trivially testable and cannot
-/// leave anything half-written.
+/// Encode a store into the durable record with no custody generation witnessed (zero). Pure —
+/// no device, so it is trivially testable and cannot leave anything half-written.
 pub fn encode(store: &Store) -> Vec<u8> {
+    encode_with_generation(store, 0)
+}
+
+/// Encode a store into the durable record, recording the CUSTODY GENERATION (ADR-072) the store
+/// was last paired with: the keystore's monotone nonce counter at the last sealed save. This is
+/// the external anchor ADR-070 said a consistent-older-pair rollback needed — the entity store,
+/// written by a different subsystem on a different schedule, remembers how new authority was
+/// when the objects it describes were last sealed. Pure — no device.
+pub fn encode_with_generation(store: &Store, cap_generation: u64) -> Vec<u8> {
     let entities: Vec<&Entity> = store.entities().collect();
     let mut out = Vec::with_capacity(HDR_LEN + entities.len() * (ENT_FIXED + 32));
     put64(&mut out, REC_MAGIC);
     put64(&mut out, REC_VERSION);
     put64(&mut out, store.next_id());
+    put64(&mut out, cap_generation);
     put64(&mut out, entities.len() as u64);
     for e in entities {
         put64(&mut out, e.id);
@@ -179,6 +191,13 @@ pub fn encode(store: &Store) -> Vec<u8> {
 
 /// Decode a durable record, re-verifying every entity's content address. Any defect is a refusal.
 pub fn decode(buf: &[u8]) -> Result<Store, PersistError> {
+    decode_with_generation(buf).map(|(store, _gen)| store)
+}
+
+/// Decode a durable record AND its custody generation (ADR-072), re-verifying every entity's
+/// content address. Any defect is a refusal; the generation only exists on version-2 records,
+/// which is the only version this build writes or admits.
+pub fn decode_with_generation(buf: &[u8]) -> Result<(Store, u64), PersistError> {
     let mut at = 0usize;
     let magic = take64(buf, &mut at).ok_or(PersistError::Truncated)?;
     let version = take64(buf, &mut at).ok_or(PersistError::Truncated)?;
@@ -186,6 +205,7 @@ pub fn decode(buf: &[u8]) -> Result<Store, PersistError> {
         return Err(PersistError::BadFormat);
     }
     let next_id = take64(buf, &mut at).ok_or(PersistError::Truncated)?;
+    let cap_generation = take64(buf, &mut at).ok_or(PersistError::Truncated)?;
     let count = take64(buf, &mut at).ok_or(PersistError::Truncated)? as usize;
 
     let mut entities = Vec::with_capacity(core::cmp::min(count, 1024));
@@ -239,7 +259,7 @@ pub fn decode(buf: &[u8]) -> Result<Store, PersistError> {
     if content_hash(body) != u64::from_le_bytes(stored) {
         return Err(PersistError::ChecksumMismatch);
     }
-    Ok(Store::restore(entities, next_id))
+    Ok((Store::restore(entities, next_id), cap_generation))
 }
 
 /// Write `store` to the device as one atomic filesystem transaction. Returns the record's byte length.
@@ -282,7 +302,19 @@ pub fn save_compressed<D: BlockDevice>(
     dev: &mut D,
     store: &Store,
 ) -> Result<usize, PersistError> {
-    let bytes = crate::compress::compress(&encode(store));
+    save_compressed_with_generation(fs, dev, store, 0)
+}
+
+/// Write the store COMPRESSED while recording a custody generation (ADR-072). One atomic
+/// filesystem transaction, exactly like [`save_compressed`] — the generation rides INSIDE the
+/// record, under its trailing checksum, so it can never be edited without detection.
+pub fn save_compressed_with_generation<D: BlockDevice>(
+    fs: &mut Filesystem,
+    dev: &mut D,
+    store: &Store,
+    cap_generation: u64,
+) -> Result<usize, PersistError> {
+    let bytes = crate::compress::compress(&encode_with_generation(store, cap_generation));
     fs.replace(dev, STORE_OBJECT, &bytes)?;
     Ok(bytes.len())
 }
@@ -291,13 +323,24 @@ pub fn save_compressed<D: BlockDevice>(
 /// decompressed first, a raw record decodes as always. Backward compatibility is detection, not
 /// assumption — a machine that booted once on an older image must keep booting on it.
 pub fn load_compressed<D: BlockDevice>(fs: &Filesystem, dev: &D) -> Result<Store, PersistError> {
+    load_compressed_with_generation(fs, dev).map(|(store, _gen)| store)
+}
+
+/// Read a store AND the custody generation (ADR-072) it witnessed, from either envelope form.
+/// The generation of a record that predates witnessing is zero — which every monotone check
+/// treats as "nothing remembered yet", never as a rollback.
+pub fn load_compressed_with_generation<D: BlockDevice>(
+    fs: &Filesystem,
+    dev: &D,
+) -> Result<(Store, u64), PersistError> {
     let bytes = fs.read(dev, STORE_OBJECT)?;
     if bytes.len() >= crate::compress::HEADER_LEN && bytes[0..4] == *b"ACMP" {
         let raw = crate::compress::decompress(&bytes)
             .map_err(|e| PersistError::Compressed(CompressedRecordError::Decompress(e)))?;
-        return decode(&raw);
+        return decode_with_generation(&raw);
     }
-    decode(&bytes).map_err(|_| PersistError::Compressed(CompressedRecordError::UnrecognisedObject))
+    decode_with_generation(&bytes)
+        .map_err(|_| PersistError::Compressed(CompressedRecordError::UnrecognisedObject))
 }
 
 /// The content of the boot-witness entity for boot number `n`. Kept in one place so the kernel that
@@ -348,17 +391,20 @@ pub fn open_and_witness<D: BlockDevice>(dev: &mut D) -> Result<(u64, usize), Per
         Err(e) => return Err(PersistError::from(e)),
     };
 
-    let mut store = match load_compressed(&fs, dev) {
+    let (mut store, witnessed_gen) = match load_compressed_with_generation(&fs, dev) {
         Ok(s) => s,
         // A first boot, or an image written by an OLDER kernel before compression existed:
         // detection, not assumption — the raw record decodes exactly as it always did.
-        Err(PersistError::Absent) => Store::new(),
+        Err(PersistError::Absent) => (Store::new(), 0),
         Err(e) => return Err(e),
     };
     let verified = store.entities().count();
     let boot = boot_count(&store) + 1;
     store.put(EntityType::Event, &witness_content(boot), "kernel::persist");
-    save_compressed(&mut fs, dev, &store)?;
+    // The witness write PRESERVES the custody generation it read (ADR-072): the witness is a
+    // different subsystem's bookkeeping and must never reset what authority was last paired
+    // here — resetting it would silently re-arm a vault that rolled back behind our back.
+    save_compressed_with_generation(&mut fs, dev, &store, witnessed_gen)?;
     Ok((boot, verified))
 }
 

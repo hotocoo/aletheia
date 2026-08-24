@@ -117,6 +117,13 @@ CONTRACT=(
   "iommu: an overlapping IOVA window is a named refusal"
   "iommu: unmapping ends access immediately"
   "iommu: a read-only page refuses stores under its own name"
+  # Custody crosses the platform boundary (ALET-P1-034, ADR-072): the SAME delivery semantics
+  # must hold over fw_cfg ioports (x86-64) and fw_cfg MMIO (aarch64/RISC-V) — the refusals are
+  # the security boundary, so they are worded identically on purpose.
+  "platform custody: the firmware-delivered root opens the vault"
+  "platform custody: the sealed registry refuses a foreign root"
+  "platform custody: rolled-back custody is refused by name against the witness"
+  "platform custody: an undelivered root refuses fail-closed by name"
   # What a scancode MEANS (REQ-CON-003, ADR-049). The DEVICE is x86-64's alone — the QEMU `virt`
   # machine has no PS/2 controller — but the decoder is arch-independent and its output alphabet is
   # the console's shared contract. A target that decoded a byte the line editor refuses would be a

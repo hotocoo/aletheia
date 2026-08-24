@@ -268,6 +268,31 @@ first boot-gated version hit. The gate-marker map is therefore unchanged by this
 | INV-CAP-CUSTODY-8 | At EVERY device-operation position of the three-commit rekey pivot, a refusal of the RIGHT KIND surfaces as Err, the protocol ABORTS consuming nothing further, and the reopened world holds SOME complete stage ([1], [1,2] or [2]) with authority intact. | The pivot touches two objects across three commits; a half-pivot world would strand authority between versions. The op sequence is RECORDED from one clean run, so each fault aims correctly instead of silently missing. | `a_refusal_at_every_rekey_position_leaves_a_complete_world` (exhaustive over the recorded sequence) |
 | INV-CAP-CUSTODY-9 | Layering: an image that AUTHENTICATES under a real retained key but widens a delegation inside is refused THROUGH the vault with the inner admission name preserved (`Image(Amplified)`). | Custody sits ON TOP of INV-CAP-LIFE's checks, never instead of them — the seal must not launder an admission failure into something vague. | `a_widened_registry_sealed_under_the_real_key_is_refused_through_the_vault` (forgery sealed via `seal_image_bytes_for_test`) |
 
+## INV-CAP-DELIVERY — the custody anchor crosses the platform boundary (ALET-P1-034, ADR-072)
+
+The vault root is no longer a caller-supplied argument. The platform delivers it over its
+firmware configuration channel (fw_cfg: ioports under q35, MMIO windows on both virt
+machines), and exactly one door opens a vault. Every non-delivered shape is a NAMED refusal;
+absence seals the vault while the machine continues. Paired commits record the vault's
+keystore generation inside the durable entity-store record (under its trailing checksum), and
+custody-open enforces the monotone rule witnessed <= found — which converts ADR-070's pinned
+"consistent older pair rolls back undetected" residual into a NAMED refusal.
+
+Proofs are split by ADR-063 doctrine: the exhaustive sweeps (lying directories, wrong sizes,
+pair rollback, fault-at-every-pair-position) run on the host in kernel-core/tests/bootroot.rs;
+the boot carries 14 invariants against REAL firmware and the REAL persistent medium on all
+three targets, and every QEMU gate proves ABSENCE live with a third rootless boot.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-CAP-DELIVERY-1 | Only Delivered(exactly 32 bytes) opens a vault; RootNotProvided, FirmwareAbsent and MalformedRoot(size) are refused BY NAME before any byte is decrypted. | Custody that accepts "whatever the bus says" is a minting path; the shapes must be facts, not moods. | open_custody_names_every_undelivered_shape_without_touching_the_medium; every_wrong_size_is_refused_before_a_byte_is_wanted |
+| INV-CAP-DELIVERY-2 | The directory walker is fail-closed against lying firmware: counts past the data, truncated entries, prefix-name lookalikes and dead buses all end in a named outcome, never a panic and never garbage accepted as a root. | Firmware is untrusted input to the trust ANCHOR; a walker that overreads parses attacker structure. | a_directory_count_past_the_data_ends_the_walk_fail_closed; a_truncated_entry_never_matches_and_never_panics; a_prefix_lookalike_name_must_not_match; a_dead_bus_is_named_firmware_absent_never_a_root |
+| INV-CAP-DELIVERY-3 | The sealed registry refuses a FOREIGN root while opening under the delivered one, on the same medium. | Proves the disk alone confers nothing and delivery is load-bearing, not decorative. | suite check 2; the_boot_suite...on_reboot |
+| INV-CAP-DELIVERY-4 | Paired commits witness the vault generation inside the entity-store record; rolled-back custody (a consistent older PAIR) is refused by name naming both sides; recovery at the witnessed generation keeps authority intact. | Closes ADR-070's pinned residual; availability cost of divergence is a lockout pending a forward commit, never authority destruction. | rolling_both_vault_objects_back_is_caught_by_the_entity_store_witness |
+| INV-CAP-DELIVERY-5 | At EVERY device-op position of a paired commit, whatever lands leaves witnessed NEVER ahead of found — forward-safe by commit order. | An interrupted pair must be a retryable state, never a refusal trap that bricks the machine. | a_fault_at_every_pair_position_leaves_witnessed_never_ahead_of_found |
+| INV-CAP-DELIVERY-6 | Booted without the platform item, the vault stays sealed BY NAME, the durable store still witnesses, and the machine reaches e2e PASS. | One missing authority must not kill the machine — nor be silently papered over. | third rootless boot asserted by all three QEMU gates |
+
+
 ## INV-IOMMU — the IOMMU contract (ALET-P1-018, ADR-071)
 
 SoftIommu models what a hardware IOMMU enforces: per-device translation spaces that are deny-by-default,

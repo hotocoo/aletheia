@@ -26,6 +26,7 @@ extern crate alloc;
 
 #[macro_use]
 mod console;
+mod fwcfg;
 mod acpi;
 mod cell;
 mod conirq;
@@ -882,6 +883,45 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             }
         },
         None => kprintln!("[persist] no persistent medium attached (skipped)"),
+    }
+
+    // Custody crosses the platform boundary (ALET-P1-034, ADR-072). The vault root arrives over
+    // the firmware configuration channel - NOT from the caller, and never from the disk it
+    // protects. Absent or malformed delivery is a NAMED fact; the machine continues without the
+    // vault rather than pretending custody happened.
+    kprintln!("");
+    match virtio::persistent_device() {
+        Some(mut medium) => {
+            let mut bus = fwcfg::FwCfgIoports::new();
+            let delivery = kernel_core::bootroot::deliver(&mut bus);
+            kprintln!("[vault] {}", delivery.describe());
+            if let kernel_core::bootroot::RootDelivery::Malformed(n) = &delivery {
+                kprintln!(
+                    "[vault] declared size: {} bytes (custody accepts exactly {})",
+                    n,
+                    kernel_core::bootroot::ROOT_LEN
+                );
+            }
+            if matches!(delivery, kernel_core::bootroot::RootDelivery::Delivered(_)) {
+                match kernel_core::bootroot::boot_suite(&mut medium, &delivery, |n, passed, name| {
+                    if passed {
+                        kprintln!("  [pass {:>2}] {}", n, name);
+                    } else {
+                        kprintln!("  [FAIL {:>2}] {}", n, name);
+                    }
+                }) {
+                    Ok(n) => kprintln!("[vault] ALL {} CUSTODY-DELIVERY INVARIANTS HOLD", n),
+                    Err((idx, name)) => {
+                        kprintln!(
+                            "[vault] FAILED at custody-delivery invariant {}: {}",
+                            idx, name
+                        );
+                        ActiveHal::exit(460 + idx as i32);
+                    }
+                }
+            }
+        }
+        None => kprintln!("[vault] no persistent medium attached (skipped)"),
     }
 
     // What a device is allowed to touch (REQ-DRV-006, ADR-043). Every driver here hands a device a RAW
