@@ -222,6 +222,43 @@ pub unsafe fn find_virtio_gpu_nth(nth: usize) -> Option<Bdf> {
     find_virtio_nth(&[DEVICE_GPU_MODERN], nth)
 }
 
+/// Enumerate EVERY present function on bus 0 - `(bdf, vendor, device id)`, in slot order. The
+/// IOMMU programming path needs the whole picture, not one device kind: a context table is
+/// per-FUNCTION, and a function the programmer never saw is a function DMA-ing outside the
+/// contract.
+///
+/// # Safety
+/// Touches the PCI configuration ports.
+pub unsafe fn enumerate_bus0() -> alloc::vec::Vec<(Bdf, u16, u16)> {
+    let mut out = alloc::vec::Vec::new();
+    for device in 0..32u8 {
+        let zero = Bdf {
+            bus: 0,
+            device,
+            function: 0,
+        };
+        if zero.read32(CFG_VENDOR) == 0xFFFF_FFFF {
+            continue;
+        }
+        let multi = zero.read8(CFG_HEADER_TYPE + 2) & 0x80 != 0;
+        let functions = if multi { 8 } else { 1 };
+        for function in 0..functions {
+            let bdf = Bdf {
+                bus: 0,
+                device,
+                function,
+            };
+            let word = bdf.read16(CFG_VENDOR);
+            if word == 0xFFFF {
+                continue;
+            }
+            let dev_id = bdf.read16(CFG_VENDOR + 2);
+            out.push((bdf, word, dev_id));
+        }
+    }
+    out
+}
+
 /// Scan bus 0 for the `nth` virtio function whose device id is one of `ids`.
 ///
 /// # Safety

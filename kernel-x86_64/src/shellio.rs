@@ -177,12 +177,15 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
 /// Enter the interactive console and never come back. The PERSISTENT disk is preferred when one is
 /// attached, so what a user writes survives the reboot; a RAM disk otherwise.
 #[cfg(feature = "interactive")]
-pub fn interactive() -> ! {
+pub fn interactive(disk_opt: Option<crate::virtio::VirtioBlk>) -> ! {
     kprintln!("");
     kprintln!("========================================");
     kprintln!(" Aletheia interactive console — type `help`");
     kprintln!("========================================");
-    match crate::virtio::persistent_device() {
+    // The persistent device arrives ALREADY BROUGHT UP by the boot (before the VT-d gate turned
+    // enforcement on) - constructing a new instance here would publish queues under an active
+    // remapping unit, which the emulator mishandles (ADR-073).
+    match disk_opt {
         Some(mut disk) => {
             kprintln!(
                 "[console] namespace: the persistent virtio-blk device (writes survive reboot)"

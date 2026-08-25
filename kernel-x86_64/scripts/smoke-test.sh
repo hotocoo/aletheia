@@ -72,22 +72,30 @@ boot_once() {
   fi
   : > "$log"
   cp "$VARSSRC" "$vars"
+  # iommu_platform=on + disable-legacy=on on every virtio device: the device then REQUIRES
+  # VIRTIO_F_IOMMU_PLATFORM, which both proves the driver negotiates it and routes the device's
+  # DMA through the VT-d unit the [dmar] suite programs (ADR-073). Modern-only is required for
+  # the flag, and intel-iommu must precede the devices it serves.
   qemu-system-x86_64 -machine q35 -m 256 -smp 4 \
     -cpu qemu64,+smep \
+    -device intel-iommu \
     -drive if=pflash,format=raw,unit=0,file="$CODE",readonly=on \
     -drive if=pflash,format=raw,unit=1,file="$vars" \
     -drive format=raw,file="$IMG" \
     -drive if=none,format=raw,file="$SCRATCH",id=blk0 \
-    -device virtio-blk-pci,drive=blk0 \
+    -device virtio-blk-pci,drive=blk0,disable-legacy=on,iommu_platform=on \
     -drive if=none,format=raw,file="$PERSIST",id=blk1 \
-    -device virtio-blk-pci,drive=blk1 \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-    -device virtio-gpu-pci \
+    -device virtio-blk-pci,drive=blk1,disable-legacy=on,iommu_platform=on \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on \
+    -device virtio-gpu-pci,disable-legacy=on,iommu_platform=on \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     $fwargs \
     -serial file:"$log" -display none -no-reboot &
   local qpid=$!
-  ( sleep 30; kill -9 "$qpid" 2>/dev/null ) &
+  # 90s: the boot runs every suite PLUS the live VT-d probes, whose bounded device-kick timeouts
+  # and MMIO fault-status polling each cost real seconds under TCG. The guard exists to catch
+  # HANGS (triple fault / silent wedge), not to bound slow-but-progressing boots.
+  ( sleep 90; kill -9 "$qpid" 2>/dev/null ) &
   local wpid=$!
   wait "$qpid"; local rc=$?
   kill "$wpid" 2>/dev/null
@@ -107,6 +115,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD' "$LOG" \
    && grep -q 'platform custody: root DELIVERED over firmware configuration' "$LOG" \
    && grep -q 'ALL 9 IOMMU-CONTRACT INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 12 VT-D INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 22 RISK-ADVISOR INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 8 STRESS INVARIANTS HOLD' "$LOG" \
    && grep -qE 'abstaining workload: [0-9]+ tasks, 0 positions move' "$LOG" \
@@ -141,7 +150,7 @@ if [ "$RC" -eq 33 ] \
   # the boot, or a count changing without the gate being told. Extra families fail too.
   # shellcheck disable=SC1091
   source "$HERE/../scripts/lib-markers.sh"
-  X86_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 soak=12 usermode=39 vault=14 virtio=21 vm=72"
+  X86_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 dmar=12 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 soak=12 usermode=39 vault=14 virtio=21 vm=72"
   if ! markers_assert "$X86_EXPECTED" < "$LOG"; then
     echo "SMOKE TEST: FAIL (structured marker map)"
     exit 1

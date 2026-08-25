@@ -71,6 +71,10 @@ const TIMEOUT_SPINS: u64 = 20_000_000;
 /// Feature bit for VIRTIO_F_VERSION_1 (bit 32 ⇒ bit 0 of the high word). Every GPU-specific
 /// feature (VIRGL, EDID, blobs) is DECLINED — see the scope note above.
 const F_VERSION_1_BIT: u32 = 0;
+/// VIRTIO_F_IOMMU_PLATFORM == bit 33, i.e. bit 1 of the high half. ACCEPTED whenever offered:
+/// behind the VT-d identity domain descriptor addresses are unchanged, and a device that
+/// REQUIRES the feature clears FEATURES_OK otherwise. See virtioblk for the full rationale.
+const F_IOMMU_PLATFORM_BIT: u32 = 1;
 
 /// Device status bits (VIRTIO 1.1 §3.1.1).
 const S_ACKNOWLEDGE: u32 = 1;
@@ -430,10 +434,21 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
                 "device does not offer VIRTIO_F_VERSION_1",
             ));
         }
-        // Accept ONLY VERSION_1. VIRGL, EDID and blob resources are behaviors this driver has no
-        // proofs for, so they are declined rather than silently ignored.
+        // Accept ONLY VERSION_1 - plus the platform-IOMMU feature whenever the device offers it:
+        // behind the VT-d identity domain descriptor addresses are unchanged, and a device that
+        // REQUIRES the feature clears FEATURES_OK otherwise. VIRGL, EDID and blob resources stay
+        // declined; they are behaviors this driver has no proofs for.
+        let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
         transport.set_driver_features(0, 0);
-        transport.set_driver_features(1, 1 << F_VERSION_1_BIT);
+        transport.set_driver_features(
+            1,
+            1 << F_VERSION_1_BIT
+                | if iommu_platform {
+                    1 << F_IOMMU_PLATFORM_BIT
+                } else {
+                    0
+                },
+        );
         status |= S_FEATURES_OK;
         transport.set_status(status);
         if transport.status() & S_FEATURES_OK == 0 {

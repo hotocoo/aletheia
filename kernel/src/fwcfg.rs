@@ -11,11 +11,9 @@ use kernel_core::fwcfg::FwCfgBus;
 pub const FW_CFG_BASE: usize = 0x0902_0000;
 
 /// The platform bus handle. One instance; nothing here is shared across cores.
-/// Control-register offset within the firmware window.
+// The DATA window (loads stream item bytes at base+0) is read in place; it needs no named
+// offset constant - the transport never stores through it (a store would push phantom bytes).
 const SELECTOR: usize = 0x08;
-
-/// Data-register offset (loads stream item bytes here).
-const DATA: usize = 0x00;
 
 pub struct FwCfgMmio {
     base: usize,
@@ -35,10 +33,7 @@ impl FwCfgBus for FwCfgMmio {
         // byte-swapped store selected item 0x0001. A store into the DATA window instead would
         // push phantom bytes and shift every later read.
         unsafe {
-            core::ptr::write_volatile(
-                (self.base + SELECTOR) as *mut u16,
-                selector.swap_bytes(),
-            )
+            core::ptr::write_volatile((self.base + SELECTOR) as *mut u16, selector.swap_bytes())
         };
     }
     fn read_byte(&mut self) -> u8 {

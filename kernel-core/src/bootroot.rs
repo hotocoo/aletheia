@@ -32,8 +32,8 @@
 //! against the REAL firmware channel and REAL persistent medium on all three targets.
 
 use crate::capvault::{self, CapVault, VaultError};
-use crate::fwcfg::{self, FwCfgBus};
 use crate::fs::Filesystem;
+use crate::fwcfg::{self, FwCfgBus};
 use crate::persist::{self, PersistError};
 use crate::spine::{CapEngine, Decision, EntityType, Store, Target};
 use crate::storage::BlockDevice;
@@ -178,7 +178,9 @@ pub fn commit_pair<D: BlockDevice>(
     engine: &CapEngine,
     store: &Store,
 ) -> Result<u64, PairError> {
-    vault.save_sealed(fs, dev, engine).map_err(PairError::Seal)?;
+    vault
+        .save_sealed(fs, dev, engine)
+        .map_err(PairError::Seal)?;
     let gen = vault.keystore_nonce_counter();
     persist::save_compressed_with_generation(fs, dev, store, gen).map_err(PairError::Witness)?;
     Ok(gen)
@@ -373,9 +375,12 @@ pub fn boot_suite<D: BlockDevice>(
         // A TAMPERED keystore object refuses WHOLE: flip one byte of cap.keys on the medium,
         // demand the named refusal, then restore - a refusal that mutated the medium would be
         // an attacker-visible side effect.
-        let pristine = fs
-            .read(dev, capvault::KEYSTORE_OBJECT)
-            .map_err(|_| (n, "platform custody: keystore object vanished before tamper"))?;
+        let pristine = fs.read(dev, capvault::KEYSTORE_OBJECT).map_err(|_| {
+            (
+                n,
+                "platform custody: keystore object vanished before tamper",
+            )
+        })?;
         let mut evil = pristine.clone();
         evil[10] ^= 0x80;
         fs.replace(dev, capvault::KEYSTORE_OBJECT, &evil)

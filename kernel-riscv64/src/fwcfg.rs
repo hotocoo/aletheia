@@ -33,10 +33,7 @@ impl FwCfgBus for FwCfgMmio {
         // whose value must arrive BIG-ENDIAN on the wire — verified live on the aarch64 twin:
         // native-LE 0x0001 selected item 0x0100; the byte-swapped store selected 0x0001.
         unsafe {
-            core::ptr::write_volatile(
-                (self.base + SELECTOR) as *mut u16,
-                selector.swap_bytes(),
-            )
+            core::ptr::write_volatile((self.base + SELECTOR) as *mut u16, selector.swap_bytes())
         };
     }
     fn read_byte(&mut self) -> u8 {

@@ -23,11 +23,11 @@ global_asm!(include_str!("boot.s"));
 
 #[macro_use]
 mod console;
-mod fwcfg;
 mod arch;
 mod conirq;
 mod exit;
 mod frames;
+mod fwcfg;
 mod hal;
 mod heap;
 mod sbi;
@@ -696,18 +696,23 @@ pub extern "C" fn kmain() -> ! {
                 );
             }
             if matches!(delivery, kernel_core::bootroot::RootDelivery::Delivered(_)) {
-                match kernel_core::bootroot::boot_suite(&mut medium, &delivery, |n, passed, name| {
-                    if passed {
-                        kprintln!("  [pass {:>2}] {}", n, name);
-                    } else {
-                        kprintln!("  [FAIL {:>2}] {}", n, name);
-                    }
-                }) {
+                match kernel_core::bootroot::boot_suite(
+                    &mut medium,
+                    &delivery,
+                    |n, passed, name| {
+                        if passed {
+                            kprintln!("  [pass {:>2}] {}", n, name);
+                        } else {
+                            kprintln!("  [FAIL {:>2}] {}", n, name);
+                        }
+                    },
+                ) {
                     Ok(n) => kprintln!("[vault] ALL {} CUSTODY-DELIVERY INVARIANTS HOLD", n),
                     Err((idx, name)) => {
                         kprintln!(
                             "[vault] FAILED at custody-delivery invariant {}: {}",
-                            idx, name
+                            idx,
+                            name
                         );
                         ActiveHal::exit(460 + idx as i32);
                     }

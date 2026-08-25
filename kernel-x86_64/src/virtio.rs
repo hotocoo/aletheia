@@ -44,13 +44,6 @@ impl VirtioHal for X86Virtio {
 /// This target's concrete block device: the shared driver, over the PCI transport.
 pub type VirtioBlk = virtioblk::VirtioBlk<X86Virtio, PciTransport>;
 
-/// Find a virtio block function on bus 0. `None` = none attached (the graceful-skip path).
-pub fn probe() -> Option<Bdf> {
-    // SAFETY: reads PCI configuration space through the legacy ports; an absent function reads
-    // all-ones, which the scan treats as "no device".
-    unsafe { pci::find_virtio_blk() }
-}
-
 fn log_report(bdf: Bdf, regions: (usize, usize, usize, u32), r: &InitReport) {
     kprintln!(
         "[virtio] block device @ PCI {:02x}:{:02x}.{} (transport v{}, id {:#x})",
@@ -86,44 +79,34 @@ fn log_report(bdf: Bdf, regions: (usize, usize, usize, u32), r: &InitReport) {
     );
 }
 
-/// Prove the shared driver against this target's real emulated device. Skips green (`Ok(0)`) when no
-/// block device is attached. Failure returns `(index, name)` → the caller exits `180 + index`.
-pub fn selftest() -> Result<u32, (u32, &'static str)> {
-    let bdf = match probe() {
-        Some(b) => b,
-        None => {
-            kprintln!("[virtio] no device (skipped)");
-            return Ok(0);
-        }
-    };
-
-    // SAFETY: `bdf` names a virtio block function; `PciTransport::new` resolves its capability regions
-    // (refusing a device missing any of them) and enables memory decoding + bus master, and
+/// Bring up the `nth` virtio block function (0-based) WITHOUT running any suite. Devices come up
+/// BEFORE the VT-d gate turns enforcement on and stay live across it — a device's queues must be
+/// published while the machine is still quiet (see `vtd::dmar_suite`, ADR-073).
+///
+/// # Safety
+/// None: construction only maps register regions and publishes owned frames.
+pub fn open_block(nth: usize) -> Option<VirtioBlk> {
+    // SAFETY: the BDF names a virtio block function; `PciTransport::new` resolves its capability
+    // regions (refusing a device missing any of them) and enables memory decoding + bus master, and
     // `X86Virtio::alloc_frame` hands out identity-mapped frames this kernel owns exclusively.
-    let built = unsafe { PciTransport::new(bdf) };
-    let transport = match built {
-        Ok(t) => t,
-        Err(e) => {
-            kprintln!("[virtio] transport setup failed: {}", e);
-            return Err((0, "virtio-pci transport setup"));
-        }
-    };
-    let regions = transport.regions();
-    let (dev, report) = match unsafe { VirtioBlk::init(transport) } {
-        Ok(pair) => pair,
-        Err(e) => {
-            kprintln!("[virtio] init failed: {}", e);
-            return Err((0, "virtio-blk device initialization"));
-        }
-    };
-    log_report(bdf, regions, &report);
+    unsafe {
+        let bdf = pci::find_virtio_blk_nth(nth)?;
+        let transport = PciTransport::new(bdf).ok()?;
+        let regions = transport.regions();
+        let (dev, report) = VirtioBlk::init(transport).ok()?;
+        log_report(bdf, regions, &report);
+        Some(dev)
+    }
+}
 
+/// Prove the shared driver against this target's real emulated device, on an instance the CALLER
+/// brought up (`open_block`). Failure returns `(index, name)` → the caller exits `180 + index`.
+pub fn block_suite(dev: &mut VirtioBlk) -> Result<u32, (u32, &'static str)> {
     // The device's own answer about its DMA gate: the suite asserts what the DRIVER can vouch for, never a
     // default (REQ-DRV-006, ADR-043).
     let dma_gate_ok = dev.dma_gate_refuses_unregistered() && dev.dma_regions() == 2;
-    let mut dev = dev;
     match virtioblk::device_suite_gated(
-        &mut dev,
+        dev,
         GATE_IMAGE_BLOCKS,
         dma_gate_ok,
         &mut |n, passed, name| {
@@ -136,23 +119,6 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     ) {
         Ok(n) => Ok(n as u32),
         Err((idx, name)) => Err((idx as u32, name)),
-    }
-}
-
-/// The PERSISTENT medium: the SECOND virtio block function, if one is attached (REQ-STOR-003, ADR-038).
-///
-/// Function 0 is the scratch disk the destructive suites reformat; the next one is the medium the OS
-/// keeps its store on and never wipes. Two disks is what makes the cross-reboot claim provable: the boot
-/// gate boots the same image twice against the same persistent image file, and the second boot must FIND
-/// and verify what the first one wrote.
-pub fn persistent_device() -> Option<VirtioBlk> {
-    // SAFETY: the BDF names a virtio block function; `PciTransport::new` resolves and MAPS its register
-    // regions (refusing RAM), and the frames handed to the device are identity-mapped and ours.
-    unsafe {
-        let bdf = pci::find_virtio_blk_nth(1)?;
-        let transport = PciTransport::new(bdf).ok()?;
-        let (dev, _report) = VirtioBlk::init(transport).ok()?;
-        Some(dev)
     }
 }
 

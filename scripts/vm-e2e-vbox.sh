@@ -119,6 +119,7 @@ SKIPPED=(
   'VIRTIO-GPU INVARIANTS HOLD   (VirtualBox emulates no virtio-gpu device)'
   'FRAMEBUFFER-CONSOLE INVARIANTS HOLD   (needs the virtio-gpu device)'
   'CUSTODY-DELIVERY INVARIANTS HOLD   (needs a persistent virtio-blk disk AND the QEMU fw_cfg channel)'
+  'VT-D INVARIANTS HOLD   (VirtualBox declares no DMAR table - the kernel skips the suite green and says why)'
 )
 
 # --- build ------------------------------------------------------------------------------------

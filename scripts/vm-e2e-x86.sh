@@ -24,7 +24,7 @@ rm -f "$X86/target/x86_64-unknown-uefi/release/aletheia-kernel-x86_64.efi"
 echo "==> assembling portable FAT ESP disk image (mtools)"
 bash "$X86/scripts/build-image-linux.sh" || { echo "FAIL: image build"; echo "VM-E2E-X86: FAIL"; exit 1; }
 
-echo "==> booting image in QEMU+OVMF (-smp 4, 30s watchdog)"
+echo "==> booting image in QEMU+OVMF (-smp 4, 90s watchdog)"
 if bash "$X86/scripts/smoke-test.sh" "$X86/build/aletheia-x86_64.img"; then
   echo "VM-E2E-X86: PASS"
   exit 0

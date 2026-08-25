@@ -26,13 +26,13 @@ extern crate alloc;
 
 #[macro_use]
 mod console;
-mod fwcfg;
 mod acpi;
 mod cell;
 mod conirq;
 mod exit;
 mod framebuffer;
 mod frames;
+mod fwcfg;
 mod gdt;
 mod hal;
 mod heap;
@@ -48,6 +48,7 @@ mod smp;
 mod usermode;
 mod virtio;
 mod vm;
+mod vtd;
 
 // Shared, arch-independent Aletheia spine + invariant suite — now a real `kernel-core` dependency
 // (defined once there, not `#[path]`-copied per target; gap-register Issue 1). This target proves
@@ -686,6 +687,17 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // Every PCI device this boot will EVER drive comes up NOW - before the VT-d gate below turns
+    // enforcement on - and stays live across it. That is how a real platform meets an IOMMU: the
+    // hardware is already serving when translation flips on, so enforcement must prove it does not
+    // disturb what is already running. (It also matches the emulator: QEMU's TCG virtqueues first
+    // enabled WHILE GSTS.TES=1 mis-resolve their cached ring mappings - ADR-073 documents the
+    // evidence. Bringing devices up quiet is the order firmware and OSes use anyway.)
+    let mut blk_scratch = virtio::open_block(0);
+    let mut blk_persist = virtio::open_block(1);
+    let mut net_dev = virtio::network_device();
+    let mut gpu_dev = virtio::graphics_device();
+
     // virtio-blk over PCI: the LAST first-class target to get real storage (REQ-DRV-005, ADR-037).
     // q35 has no virtio-mmio window, so `pci.rs` implements the shared driver's `Transport` seam over
     // the device's capability-described BAR regions. Skips green when no disk is attached; the boot
@@ -695,7 +707,14 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     kprintln!(
         "--- virtio-blk selftests (real PCI driver: discovery + virtqueue I/O + journal + filesystem) ---"
     );
-    match virtio::selftest() {
+    let virtio_result = match blk_scratch.as_mut() {
+        None => {
+            kprintln!("[virtio] no device (skipped)");
+            Ok(0)
+        }
+        Some(dev) => virtio::block_suite(dev),
+    };
+    match virtio_result {
         Ok(0) => {} // no device attached — graceful skip, already logged
         Ok(n) => kprintln!("[virtio] ALL {} VIRTIO-BLK INVARIANTS HOLD", n),
         Err((idx, name)) => {
@@ -870,8 +889,8 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // wiped. The boot gate boots twice against the same image file, so the second boot must FIND and
     // verify what the first wrote — the difference between "the OS can write" and "the OS remembers".
     kprintln!("");
-    match virtio::persistent_device() {
-        Some(mut medium) => match kernel_core::persist::open_and_witness(&mut medium) {
+    match blk_persist.as_mut() {
+        Some(medium) => match kernel_core::persist::open_and_witness(medium) {
             Ok((boot, verified)) => kprintln!(
                 "[persist] PERSISTENT MEDIUM: boot #{}, {} entities verified from earlier boots",
                 boot,
@@ -890,8 +909,8 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // protects. Absent or malformed delivery is a NAMED fact; the machine continues without the
     // vault rather than pretending custody happened.
     kprintln!("");
-    match virtio::persistent_device() {
-        Some(mut medium) => {
+    match blk_persist.as_mut() {
+        Some(medium) => {
             let mut bus = fwcfg::FwCfgIoports::new();
             let delivery = kernel_core::bootroot::deliver(&mut bus);
             kprintln!("[vault] {}", delivery.describe());
@@ -903,7 +922,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                 );
             }
             if matches!(delivery, kernel_core::bootroot::RootDelivery::Delivered(_)) {
-                match kernel_core::bootroot::boot_suite(&mut medium, &delivery, |n, passed, name| {
+                match kernel_core::bootroot::boot_suite(medium, &delivery, |n, passed, name| {
                     if passed {
                         kprintln!("  [pass {:>2}] {}", n, name);
                     } else {
@@ -914,7 +933,8 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                     Err((idx, name)) => {
                         kprintln!(
                             "[vault] FAILED at custody-delivery invariant {}: {}",
-                            idx, name
+                            idx,
+                            name
                         );
                         ActiveHal::exit(460 + idx as i32);
                     }
@@ -951,7 +971,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     kprintln!(
         "--- network selftests (virtio-net over PCI: ARP-cache + ICMP echo + UDP-DHCP discovery against the gateway) ---"
     );
-    match virtio::network_device() {
+    match net_dev.take() {
         None => kprintln!("[net] no network device attached (skipped)"),
         Some(Err(e)) => {
             kprintln!("[net] device init FAILED: {:?}", e);
@@ -980,13 +1000,13 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     kprintln!(
         "--- graphics selftests (virtio-gpu over PCI: display info + 2D resource lifecycle) ---"
     );
-    match virtio::graphics_device() {
+    match gpu_dev.as_mut() {
         None => kprintln!("[gpu] no graphics device attached (skipped)"),
         Some(Err(e)) => {
             kprintln!("[gpu] device init FAILED: {:?}", e);
             ActiveHal::exit(300);
         }
-        Some(Ok(mut gpu)) => {
+        Some(Ok(gpu)) => {
             // One boot-log line of fact before the suite: what the machine says it will display.
             // SAFETY: the device is live and owned here; GET_DISPLAY_INFO is read-only.
             match unsafe { gpu.get_display_info() } {
@@ -997,7 +1017,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                 }
                 Err(e) => kprintln!("[gpu] display info error: {:?}", e),
             }
-            match kernel_core::virtiogpu::gpu_suite(&mut gpu, |n, passed, name| {
+            match kernel_core::virtiogpu::gpu_suite(gpu, |n, passed, name| {
                 if passed {
                     kprintln!("  [pass {:>2}] {}", n, name);
                 } else {
@@ -1012,7 +1032,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             }
             // The framebuffer console renders into REAL backing pages and hands the whole frame
             // to the display device — and proves DETACH revokes every page (REQ-GFX-002).
-            match kernel_core::virtiogpu::console_suite(&mut gpu, |n, passed, name| {
+            match kernel_core::virtiogpu::console_suite(gpu, |n, passed, name| {
                 if passed {
                     kprintln!("  [pass {:>2}] {}", n, name);
                 } else {
@@ -1049,6 +1069,30 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // The IOMMU contract meets hardware (ALET-P1-018 first rung, ADR-071 contract / ADR-073):
+    // the VT-d unit QEMU emulates on q35 is discovered through the ACPI DMAR table, programmed
+    // from owned frames (conventional RAM minus the kernel image, per-function context entries),
+    // and turned ON — then the LIVE block functions (serving since before the flip) are probed:
+    // the granted one walks clean, a revoked one is denied with a fault naming it, a restored
+    // one returns to silence, and enforcement stays latched until the machine halts.
+    //
+    // This is deliberately the LAST gate: every DMA-dependent suite above ran while the machine
+    // was still quiet, which is both how real firmware/OSes meet an IOMMU and the only ordering
+    // QEMU's TCG supports (its per-device ring caches mis-resolve once translation is on mid-run
+    // - 'bogus descriptor or out of resources' - masking completions but not the unit's verdicts;
+    // ADR-073 documents the evidence trail). Graceful absence (no DMAR declared - VirtualBox)
+    // skips green; a PRESENT unit that fails any invariant exits 500+i.
+    kprintln!("");
+    kprintln!("--- vt-d selftests (the contract programmed into a real remapping unit) ---");
+    match vtd::dmar_suite(memory_map, blk_scratch.as_mut(), blk_persist.as_mut()) {
+        Ok(_) => {}
+        Err((idx, _name)) => {
+            // The suite already printed "[dmar] FAILED at vt-d invariant N: <detail>" - the NAME
+            // is the diagnosis; this window is only the coarse index.
+            ActiveHal::exit(500 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("[e2e] PASS — x86-64 UEFI boot + arch init + timer IRQ + memory-management + virtual-memory + 13 spine invariants + capability-lifetime + SMP + ring-3 user-mode + filesystem + console");
     kprintln!("[e2e] Aletheia booted as its own OS on AMD64. Halting.");
@@ -1056,7 +1100,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // With `--features interactive` the boot hands the machine to the serial line instead of
     // exiting. The gate builds without the feature, so its exit-code contract is untouched.
     #[cfg(feature = "interactive")]
-    shellio::interactive();
+    shellio::interactive(blk_persist.take());
 
     #[cfg(not(feature = "interactive"))]
     ActiveHal::exit(0)

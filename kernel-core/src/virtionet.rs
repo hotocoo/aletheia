@@ -43,6 +43,9 @@ const TX_QUEUE: u16 = 1;
 /// Feature bits: MAC in device config, and VIRTIO_F_VERSION_1 (bit 32 ⇒ bit 0 of the high half).
 const F_NET_MAC_BIT: u32 = 5;
 const F_VERSION_1_BIT: u32 = 0;
+/// VIRTIO_F_IOMMU_PLATFORM == bit 33, i.e. bit 1 of the high half. See virtioblk for the full
+/// rationale; the same acceptance rule applies to every device this kernel drives.
+const F_IOMMU_PLATFORM_BIT: u32 = 1;
 
 /// Device status bits (VIRTIO 1.1 §3.1.1).
 const S_ACKNOWLEDGE: u32 = 1;
@@ -151,8 +154,20 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         // Accept only MAC (so the address comes from the device rather than being invented) plus
         // VERSION_1. Every offload feature is declined, which is what keeps the header all-zero.
         let want_mac = lo & (1 << F_NET_MAC_BIT) != 0;
+        // Acknowledge the platform-IOMMU feature whenever offered: behind the VT-d identity
+        // domain descriptor addresses are unchanged, and a device that REQUIRES the feature
+        // clears FEATURES_OK otherwise.
+        let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
         transport.set_driver_features(0, if want_mac { 1 << F_NET_MAC_BIT } else { 0 });
-        transport.set_driver_features(1, 1 << F_VERSION_1_BIT);
+        transport.set_driver_features(
+            1,
+            1 << F_VERSION_1_BIT
+                | if iommu_platform {
+                    1 << F_IOMMU_PLATFORM_BIT
+                } else {
+                    0
+                },
+        );
         status |= S_FEATURES_OK;
         transport.set_status(status);
         if transport.status() & S_FEATURES_OK == 0 {

@@ -24,11 +24,11 @@ global_asm!(include_str!("vectors.s"));
 
 #[macro_use]
 mod uart;
-mod fwcfg;
 mod arch;
 mod bench;
 mod conirq;
 mod frames;
+mod fwcfg;
 mod hal;
 mod heap;
 mod semihosting;
@@ -60,24 +60,6 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("[boot] privilege level: {}", ActiveHal::current_privilege());
     kprintln!("[boot] timer freq: {} Hz", ActiveHal::timer_freq_hz());
     kprintln!("[boot] heap: {} B used after init", heap::used_bytes());
-
-    // TEMP DIR DUMP WIDE
-    {
-        let base = fwcfg::FW_CFG_BASE;
-        unsafe { core::ptr::write_volatile((base + 8) as *mut u16, 0x19u16.swap_bytes()); }
-        let mut b = [0u8; 160];
-        for i in 0..160 { b[i] = unsafe { core::ptr::read_volatile(base as *const u8) }; }
-        for row in 0..10 {
-            let o = row * 16;
-            kprintln!("[dw] {:03x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                o, b[o],b[o+1],b[o+2],b[o+3],b[o+4],b[o+5],b[o+6],b[o+7],b[o+8],b[o+9],b[o+10],b[o+11],b[o+12],b[o+13],b[o+14],b[o+15]);
-        }
-    }
-    // END TEMP DIR DUMP
-
-
-
-
 
     // Physical memory: bring up the frame allocator over the RAM above the static kernel region,
     // with its ownership table attached (REQ-MM-002). A pool whose tail has no ownership state
@@ -158,7 +140,7 @@ pub extern "C" fn kmain() -> ! {
     }
 
     // The frozen risk forest this image carries (REQ-ML-001, ADR-056). It is ADVISORY: it may
-    
+
     // The IOMMU contract (ALET-P1-018, ADR-071): per-device translation spaces,
     // deny-by-default, the kernel image unmappable on both sides, named faults.
     // Modeled in software (the boot heap cannot afford sweep churn - ADR-063);
@@ -684,20 +666,25 @@ pub extern "C" fn kmain() -> ! {
                 );
             }
             if matches!(delivery, kernel_core::bootroot::RootDelivery::Delivered(_)) {
-                match kernel_core::bootroot::boot_suite(&mut medium, &delivery, |n, passed, name| {
-                    if passed {
-                        kprintln!("  [pass {:>2}] {}", n, name);
-                    } else {
-                        kprintln!("  [FAIL {:>2}] {}", n, name);
-                    }
-                }) {
+                match kernel_core::bootroot::boot_suite(
+                    &mut medium,
+                    &delivery,
+                    |n, passed, name| {
+                        if passed {
+                            kprintln!("  [pass {:>2}] {}", n, name);
+                        } else {
+                            kprintln!("  [FAIL {:>2}] {}", n, name);
+                        }
+                    },
+                ) {
                     Ok(n) => {
                         kprintln!("[vault] ALL {} CUSTODY-DELIVERY INVARIANTS HOLD", n);
                     }
                     Err((idx, name)) => {
                         kprintln!(
                             "[vault] FAILED at custody-delivery invariant {}: {}",
-                            idx, name
+                            idx,
+                            name
                         );
                         semihosting::exit(460 + idx as i32);
                     }

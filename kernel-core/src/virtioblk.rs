@@ -76,6 +76,11 @@ const S_FAILED: u32 = 0x80;
 // Feature bits (offset within their 32-bit half).
 const F_BLK_FLUSH_BIT: u32 = 9; // VIRTIO_BLK_F_FLUSH, in the low half (bits 0..31)
 const F_VERSION_1_BIT: u32 = 0; // VIRTIO_F_VERSION_1 == bit 32, i.e. bit 0 of the high half
+/// VIRTIO_F_IOMMU_PLATFORM == bit 33, i.e. bit 1 of the high half. Offered only when the
+/// platform sits behind an IOMMU; accepting it commits descriptors to IOVAs the platform
+/// translates - which is exactly what the VT-d identity domain provides, so addresses do not
+/// change. Declining it makes a device that REQUIRES the feature clear FEATURES_OK.
+const F_IOMMU_PLATFORM_BIT: u32 = 1;
 
 // Split-virtqueue descriptor flags.
 const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -407,8 +412,16 @@ pub struct VirtioBlk<H: VirtioHal, T: Transport> {
     /// own fixed ring, so it carries its own registry — otherwise its descriptors would be the one path in
     /// the kernel that still names addresses nobody registered.
     dma: DmaRegistry,
+    /// Completion-poll budget for [`Self::submit`], in spin iterations. Defaults to
+    /// [`SUBMIT_SPINS`]; a caller driving PROBE kicks (the VT-d suite pays one timeout per kick
+    /// when the platform loses completions) may tighten it without touching every other user.
+    completion_spins: u64,
     _hal: PhantomData<H>,
 }
+
+/// The default bounded-wait budget for one request completion: millions of iterations, so a
+/// healthy device always finishes well within it and only a broken ring layout exhausts it.
+pub const SUBMIT_SPINS: u64 = 50_000_000;
 
 impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
     /// Bring the device up: reset → feature negotiation → queue 0 setup → DRIVER_OK. Returns the
@@ -435,11 +448,20 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
 
         let version1 = (features_hi & (1 << F_VERSION_1_BIT)) != 0;
         let flush_ok = (features_lo & (1 << F_BLK_FLUSH_BIT)) != 0;
+        // Acknowledge the platform-IOMMU feature whenever offered: behind the VT-d identity
+        // domain descriptor addresses are unchanged, so acceptance costs nothing and a device
+        // that REQUIRES the feature keeps FEATURES_OK.
+        let iommu_platform = (features_hi & (1 << F_IOMMU_PLATFORM_BIT)) != 0;
         if !version1 {
             return Err("device does not offer VIRTIO_F_VERSION_1 — fail closed");
         }
         let drv_lo = if flush_ok { 1 << F_BLK_FLUSH_BIT } else { 0 };
-        let drv_hi = 1 << F_VERSION_1_BIT;
+        let drv_hi = 1 << F_VERSION_1_BIT
+            | if iommu_platform {
+                1 << F_IOMMU_PLATFORM_BIT
+            } else {
+                0
+            };
         transport.set_driver_features(0, drv_lo);
         transport.set_driver_features(1, drv_hi);
 
@@ -501,6 +523,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 capacity_sectors,
                 flush_ok,
                 dma,
+                completion_spins: SUBMIT_SPINS,
                 _hal: PhantomData,
             },
             InitReport {
@@ -514,6 +537,13 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 capacity_sectors,
             },
         ))
+    }
+
+    /// Tighten (or restore) the completion-poll budget for SUBSEQUENT requests. Probe callers -
+    /// the VT-d suite pays one full timeout per kick when the platform loses completions - set a
+    /// smaller bound here instead of paying the default millions per stimulus.
+    pub fn set_completion_spins(&mut self, spins: u64) {
+        self.completion_spins = spins;
     }
 
     /// Recover a device after an error: full reset → renegotiate → re-publish the SAME rings and
@@ -535,13 +565,20 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 return Err("reset: device no longer offers VIRTIO_F_VERSION_1 — fail closed");
             }
             self.flush_ok = (features_lo & (1 << F_BLK_FLUSH_BIT)) != 0;
+            let iommu_platform = (features_hi & (1 << F_IOMMU_PLATFORM_BIT)) != 0;
             let drv_lo = if self.flush_ok {
                 1 << F_BLK_FLUSH_BIT
             } else {
                 0
             };
+            let drv_hi = 1 << F_VERSION_1_BIT
+                | if iommu_platform {
+                    1 << F_IOMMU_PLATFORM_BIT
+                } else {
+                    0
+                };
             self.transport.set_driver_features(0, drv_lo);
-            self.transport.set_driver_features(1, 1 << F_VERSION_1_BIT);
+            self.transport.set_driver_features(1, drv_hi);
 
             status |= S_FEATURES_OK;
             self.transport.set_status(status);
@@ -627,7 +664,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         let mut spins: u64 = 0;
         while read_volatile(used_idx_ptr) == old_used {
             spins += 1;
-            if spins > 50_000_000 {
+            if spins > self.completion_spins {
                 return Err(StorageError::Device);
             }
             core::hint::spin_loop();

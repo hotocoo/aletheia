@@ -18,11 +18,13 @@
 
 use std::collections::BTreeMap;
 
-use kernel_core::bootroot::{boot_suite, commit_pair, deliver, open_custody, RootDelivery, VaultGateError, ROOT_ITEM};
+use kernel_core::bootroot::{
+    boot_suite, commit_pair, deliver, open_custody, RootDelivery, VaultGateError, ROOT_ITEM,
+};
 use kernel_core::capvault::{CapVault, KEYSTORE_OBJECT, VAULT_OBJECT};
 use kernel_core::faultdev::{FaultInject, Op};
-use kernel_core::fwcfg::{self, FwCfgBus};
 use kernel_core::fs::Filesystem;
+use kernel_core::fwcfg::{self, FwCfgBus};
 use kernel_core::persist::{self, PersistError};
 use kernel_core::spine::{Constraints, EntityType, Scope, Store};
 use kernel_core::storage::{BlockDevice, MemBlockDevice, StorageError};
@@ -43,7 +45,10 @@ struct MemBus {
 
 impl MemBus {
     fn with(items: Vec<(u16, Vec<u8>)>) -> Self {
-        MemBus { items: items.into_iter().collect(), cur: None }
+        MemBus {
+            items: items.into_iter().collect(),
+            cur: None,
+        }
     }
 
     /// No firmware at all: every read is dead.
@@ -61,7 +66,12 @@ impl FwCfgBus for MemBus {
             Some((s, p)) => (s, p),
             None => return 0xFF,
         };
-        let b = self.items.get(&sel).and_then(|v| v.get(pos)).copied().unwrap_or(0xFF);
+        let b = self
+            .items
+            .get(&sel)
+            .and_then(|v| v.get(pos))
+            .copied()
+            .unwrap_or(0xFF);
         self.cur = Some((sel, pos + 1));
         b
     }
@@ -276,7 +286,8 @@ fn rolling_both_vault_objects_back_is_caught_by_the_entity_store_witness() {
 
     // THE ATTACK: restore BOTH vault objects to their generation-1 state - internally
     // consistent, authentic under the root: exactly what ADR-070 proved undetectable.
-    fs.replace(&mut disk, KEYSTORE_OBJECT, &keys_at_gen1).unwrap();
+    fs.replace(&mut disk, KEYSTORE_OBJECT, &keys_at_gen1)
+        .unwrap();
     fs.replace(&mut disk, VAULT_OBJECT, &image_at_gen1).unwrap();
 
     // The pair IS authentic - a bare vault open admits it.
@@ -316,8 +327,10 @@ fn seeded_world() -> (MemBlockDevice, u64) {
         commit_pair(&mut fs, &mut disk, &mut vault, &engine, &Store::new()).unwrap();
     }
     let gen = {
-        let mut fs = Filesystem::mount(&mut disk).unwrap();
-        persist::load_compressed_with_generation(&fs, &disk).unwrap().1
+        let fs = Filesystem::mount(&mut disk).unwrap();
+        persist::load_compressed_with_generation(&fs, &disk)
+            .unwrap()
+            .1
     };
     (disk, gen)
 }
@@ -328,7 +341,10 @@ fn a_fault_at_every_pair_position_leaves_witnessed_never_ahead_of_found() {
     // world (the sweep replays the SECOND commit, where both halves really write).
     let seq: Vec<Op> = {
         let (disk, _gen) = seeded_world();
-        let mut rec = Recorder { inner: disk, log: std::cell::RefCell::new(Vec::new()) };
+        let mut rec = Recorder {
+            inner: disk,
+            log: std::cell::RefCell::new(Vec::new()),
+        };
         let mut fs = Filesystem::mount(&mut rec).unwrap();
         let mut vault = open_custody(&mut fs, &mut rec, &DELIVERY, 0).unwrap();
         let (engine, _) = engine_with_child();
@@ -337,7 +353,7 @@ fn a_fault_at_every_pair_position_leaves_witnessed_never_ahead_of_found() {
         rec.log.into_inner()
     };
     assert!(
-        seq.iter().any(|o| *o == Op::WriteOk),
+        seq.contains(&Op::WriteOk),
         "a clean paired commit must actually write"
     );
 
@@ -360,8 +376,7 @@ fn a_fault_at_every_pair_position_leaves_witnessed_never_ahead_of_found() {
         // durable vault - the door always opens at what the medium itself remembers.
         let (_s, gen_now) = {
             let fs = Filesystem::mount(&mut base).unwrap();
-            persist::load_compressed_with_generation(&fs, &base)
-                .unwrap_or((Store::new(), 0))
+            persist::load_compressed_with_generation(&fs, &base).unwrap_or((Store::new(), 0))
         };
         let opens = {
             let mut fs = Filesystem::mount(&mut base).unwrap();
@@ -370,7 +385,9 @@ fn a_fault_at_every_pair_position_leaves_witnessed_never_ahead_of_found() {
         assert!(
             opens,
             "position {} ({:?}, commit ok={}): post-fault world refuses at its own witness",
-            at, seq[at], outcome.unwrap_or(false)
+            at,
+            seq[at],
+            outcome.unwrap_or(false)
         );
         let _ = snap;
     }

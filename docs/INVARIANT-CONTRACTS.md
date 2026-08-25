@@ -312,6 +312,28 @@ target.
 | INV-IOMMU-8 | A read-only page refuses stores under its own name (`PermDenied`, distinct from `NotMapped`). | Permission enforcement must be distinguishable from absence of mapping, or debugging a fault is guesswork. | suite check 8 |
 | INV-IOMMU-9 | Every fault and translation is COUNTED - the boundary did measurable work, not silence. | A silent boundary cannot be audited; counters make the enforcement observable at boot. | suite check 9 |
 
+## INV-VTD — the IOMMU contract meets hardware (ALET-P1-018, ADR-073)
+
+The x86-64 target programs a REAL DMA-remapping unit (Intel VT-d as emulated on q35) and proves
+ADR-071's contract from the machine's own fault bank. Discovery is from firmware declaration
+(ACPI DMAR/DRHD) and the unit's capability words — never hardcoded offsets; evidence comes from
+the fault-record BANK because QEMU serves FSTS at 0x34 against the spec's 0x30.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-VTD-1 | The remapping unit is found through the ACPI DMAR table's DRHD structure and its register page passes the device-memory admission rule. | A base nobody declared is a base somebody guessed; discovery must be firmware's word, walked by declared lengths. | boot invariant 1 |
+| INV-VTD-2 | The unit answers sane identification (VER nibble-BCD, CAP/ECAP non-degenerate), AGAW picked from CAP.SAGAW, variable registers located via ECAP.IRO/CAP.FRO; RWBF-demanding units are REFUSED. | Programming an unidentified or flush-dependent unit is programming by hope; refusal names what was unreadable or unsupportable. | host tests/vtd.rs probe suite; boot invariant 2 |
+| INV-VTD-3 | Translation starts OFF - firmware hands the machine quiet. | Enablement must be OURS to prove; inheriting TES would make every later claim about ordering untestable. | boot invariant 3 |
+| INV-VTD-4 | The identity domain is built entirely from OWNED frames and the allocator's count balances exactly (tree + root + context). | Tables the ownership model cannot account for are exactly the memory DMA protection exists to guard. | boot invariant 4 |
+| INV-VTD-5 | The kernel image has NO leaf: a live audit of every present entry counts ZERO image violations. | ADR-071's sharpest promise on real silicon - a device inventing kernel-text addresses faults at the unit, not reads code. | host walker proofs; boot invariants 5+6 with SoftIommu mirror agreement |
+| INV-VTD-6 | Model and machine agree: SoftIommu refuses the image and translates spans identically to what was programmed. | Two enforcement stories that can diverge are one story too many; the mirror keeps the model honest against the tables. | boot invariant 6 |
+| INV-VTD-7 | The root table is adopted through the SRTP handshake (RTPS observed, CFR distinguished from timeout). | A pointer the unit never adopted protects nothing; the handshake is the difference between published and in-effect. | boot invariant 7 |
+| INV-VTD-8 | Enforcement turns ON through TE and TES is OBSERVED before any live probe runs. | Proofs under assumed enforcement prove nothing; the bit must be read back first. | boot invariant 8 |
+| INV-VTD-9 | A GRANTED function kicked repeatedly under enforcement leaves the fault bank EMPTY. | Silence here means every descriptor, buffer and ring access translated cleanly - the positive half of enforcement, taken from the unit itself. | boot invariant 9 |
+| INV-VTD-10 | Revoking one function's context entry (then global CCMD+IOTLB invalidation) makes its next kick produce an ACTIVE record naming ITS source-id with reason CONTEXT_ENTRY_P. | Denial must be per-function and attributable, or revocation is theater; repeat faults compress, so the probe re-kicks until evidence lands. | boot invariant 10 |
+| INV-VTD-11 | Restoring the saved entry and re-invalidating returns the SAME function to silence after the record is retired write-one-to-clear. | Recovery must be real: the cleared bank separates old evidence from new behavior, so silence proves the restored walk. | boot invariant 11 |
+| INV-VTD-12 | Enforcement REMAINS on to halt - TES still set, root pointer unchanged - LAYERED OVER the software registry which still refuses unregistered addresses. | An IOMMU that silently drops, and a boundary that trusts it, fail together; latching + layering makes both visible forever after. | boot invariant 12 |
+
 ## INV-KEYMAP — what a scancode means (REQ-CON-003, ALET-P2-039, ADR-049)
 
 A keyboard is a device someone else may be holding. The interesting properties are therefore not
