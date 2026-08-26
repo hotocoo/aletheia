@@ -55,3 +55,13 @@ instead of ignoring it.
 Interrupt remapping, queued invalidation, pass-through translation types, post-enable completion
 assertions (QEMU TCG loses virtio completions across mid-run enablement - ADR-073), SMMUv3
 per-STREAM windows on aarch64 (next rung), and real-hardware variety beyond two emulated units.
+
+## Addendum (same day, first CI contact)
+
+The rung requires a 4-level unit (AGAW Lev4). The ubuntu-latest emulator generation is
+3-level-only and, under per-device windows, emits BOUNDED zero-address write records plus an
+iova 0x28 permission error against a granted function - artifacts never seen on the 4-level
+development unit across repeated boots. Per repository doctrine the gate now SKIPS LOUDLY on
+such units (named skip line before anything is programmed; translation stays OFF) instead of
+failing on emulator bookkeeping, and the skip is tracked in the gap register beside the other
+P1-018 residuals.

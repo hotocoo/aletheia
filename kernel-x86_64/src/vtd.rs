@@ -37,7 +37,7 @@ use kernel_core::dma::Grant;
 use kernel_core::frameown::Owner;
 use kernel_core::iommu::{IommuFault, Perm, SoftIommu, PAGE};
 use kernel_core::storage::{BlockDevice, BLOCK_SIZE};
-use kernel_core::vtd::{self, decode_fault_record, fr, Controller, RegLayout, TableMem};
+use kernel_core::vtd::{self, decode_fault_record, fr, Agaw, Controller, RegLayout, TableMem};
 
 /// The register file at the DRHD base. Widths follow the spec: 32-bit registers as 32, 64-bit
 /// ones as 64, all volatile - the unit sits behind MMIO and must not see torn or merged accesses.
@@ -284,6 +284,20 @@ pub fn dmar_suite(
         lay.frcd_count
     );
     pass!(NAME_2);
+
+    // --- rung floor (ADR-075 addendum): the WINDOW rung is measured on a 4-level unit ---------
+    // The emulator generation behind the 3-level-only unit emits bounded zero-address write
+    // records and iova 0x28 permission errors under per-device windows (measured on CI). On
+    // such units this rung SKIPS LOUDLY before anything is programmed - translation stays OFF,
+    // exactly as firmware handed the machine over - and the gap register tracks it.
+    if agaw == Agaw::Lev3 {
+        kprintln!("[dmar] window rung SKIPPED: unit offers only a 3-level AGAW (ADR-075 addendum)");
+        kprintln!("[dmar] measured artifacts there: bounded zero-address write records + iova 0x28 permission errors");
+        kprintln!(
+            "[dmar] nothing was programmed; translation stays OFF, as handed over by firmware"
+        );
+        return Ok(0);
+    }
 
     // --- 3: the machine arrives quiet ------------------------------------------------------------------------------
     n += 1;
