@@ -1,0 +1,689 @@
+{
+ "profile": "kernel",
+ "rows_per_window": 20000,
+ "slots": 64,
+ "repeats": 3,
+ "policies": [
+  "fifo",
+  "redox-rr",
+  "sel4-prio-rr",
+  "windows-nt",
+  "xnu-macos",
+  "freebsd-ule",
+  "solaris-ts",
+  "zircon-fair",
+  "linux-cfs",
+  "linux-eevdf",
+  "linux-bore",
+  "linux-muqss",
+  "linux-rt-fifo",
+  "aletheia-free",
+  "aletheia-advised"
+ ],
+ "summary": {
+  "fifo": {
+   "description": "arrival order, no policy at all",
+   "survivor_turnaround_mean": 73.25825877177722,
+   "doomed_turnaround_mean": 73.19363066174971,
+   "windows": [
+    70.55004992511233,
+    80.34468976018272,
+    68.88003663003663
+   ],
+   "advised_is_better_by_pct": 17.115335434327598
+  },
+  "redox-rr": {
+   "description": "Redox: round-robin over runnable contexts",
+   "survivor_turnaround_mean": 73.89908193303364,
+   "doomed_turnaround_mean": 73.01195677880426,
+   "windows": [
+    69.99063904143784,
+    83.3911305671869,
+    68.31547619047619
+   ],
+   "advised_is_better_by_pct": 17.83407795963777
+  },
+  "sel4-prio-rr": {
+   "description": "seL4: strict priority, round-robin within a priority, no aging",
+   "survivor_turnaround_mean": 61.64279694028513,
+   "doomed_turnaround_mean": 77.5171040965912,
+   "windows": [
+    66.69495756365451,
+    57.71259992386753,
+    60.520833333333336
+   ],
+   "advised_is_better_by_pct": 1.4972307170606982
+  },
+  "windows-nt": {
+   "description": "Windows NT/10/11: 32 levels, RR within level, anti-starvation boost",
+   "survivor_turnaround_mean": 64.29543492886859,
+   "doomed_turnaround_mean": 76.70221563903344,
+   "windows": [
+    66.9674238642037,
+    59.20917396269509,
+    66.70970695970696
+   ],
+   "advised_is_better_by_pct": 5.561161353344123
+  },
+  "xnu-macos": {
+   "description": "Darwin/XNU: base priority minus decayed CPU usage",
+   "survivor_turnaround_mean": 81.17526200812715,
+   "doomed_turnaround_mean": 69.51322786852909,
+   "windows": [
+    78.16225661507738,
+    96.30034259611725,
+    69.06318681318682
+   ],
+   "advised_is_better_by_pct": 25.19905627953422
+  },
+  "freebsd-ule": {
+   "description": "FreeBSD ULE: interactivity+nice priority, current/next queue swap",
+   "survivor_turnaround_mean": 72.22902085741673,
+   "doomed_turnaround_mean": 73.84044406678859,
+   "windows": [
+    66.68984023964055,
+    86.10963075751808,
+    63.88759157509158
+   ],
+   "advised_is_better_by_pct": 15.934258378632164
+  },
+  "solaris-ts": {
+   "description": "Solaris/illumos TS: ts_dptbl, quantum expiry drops priority",
+   "survivor_turnaround_mean": 61.62082692626182,
+   "doomed_turnaround_mean": 77.52174211303414,
+   "windows": [
+    66.73726909635546,
+    57.65245527217358,
+    60.47275641025641
+   ],
+   "advised_is_better_by_pct": 1.4621109802699095
+  },
+  "zircon-fair": {
+   "description": "Fuchsia Zircon: weight-proportional virtual finish time",
+   "survivor_turnaround_mean": 68.05459397726322,
+   "doomed_turnaround_mean": 75.20181778240918,
+   "windows": [
+    69.5073639540689,
+    64.29996193376475,
+    70.35645604395604
+   ],
+   "advised_is_better_by_pct": 10.777717563158044
+  },
+  "linux-cfs": {
+   "description": "Linux <=6.5 (Debian 12, RHEL 8/9): smallest virtual runtime",
+   "survivor_turnaround_mean": 68.47688989536297,
+   "doomed_turnaround_mean": 75.04246596237394,
+   "windows": [
+    69.61208187718422,
+    65.3943661971831,
+    70.4242216117216
+   ],
+   "advised_is_better_by_pct": 11.327949995358104
+  },
+  "linux-eevdf": {
+   "description": "Linux 6.6+ (Fedora, Arch, Ubuntu 24.10+): earliest eligible virtual deadline",
+   "survivor_turnaround_mean": 68.05459397726322,
+   "doomed_turnaround_mean": 75.20181778240918,
+   "windows": [
+    69.5073639540689,
+    64.29996193376475,
+    70.35645604395604
+   ],
+   "advised_is_better_by_pct": 10.777717563158044
+  },
+  "linux-bore": {
+   "description": "CachyOS/Zen/Liquorix BORE: EEVDF plus a burst penalty",
+   "survivor_turnaround_mean": 68.15581081077774,
+   "doomed_turnaround_mean": 75.0308463889682,
+   "windows": [
+    70.33811782326511,
+    65.40197944423296,
+    68.72733516483517
+   ],
+   "advised_is_better_by_pct": 10.910219792971832
+  },
+  "linux-muqss": {
+   "description": "MuQSS/BFS (-ck, Liquorix): earliest virtual deadline, no fairness accounting",
+   "survivor_turnaround_mean": 64.55970851283209,
+   "doomed_turnaround_mean": 76.26940988497621,
+   "windows": [
+    69.78045431852222,
+    59.38104301484583,
+    64.5176282051282
+   ],
+   "advised_is_better_by_pct": 5.947744423952967
+  },
+  "linux-rt-fifo": {
+   "description": "PREEMPT_RT SCHED_FIFO (RHEL-RT, audio distros): strict priority, no timeslice",
+   "survivor_turnaround_mean": 61.64279694028513,
+   "doomed_turnaround_mean": 77.5171040965912,
+   "windows": [
+    66.69495756365451,
+    57.71259992386753,
+    60.520833333333336
+   ],
+   "advised_is_better_by_pct": 1.4972307170606982
+  },
+  "aletheia-free": {
+   "description": "Aletheia, no model resident: strict priority, FIFO among equals",
+   "survivor_turnaround_mean": 61.64279694028513,
+   "doomed_turnaround_mean": 77.5171040965912,
+   "windows": [
+    66.69495756365451,
+    57.71259992386753,
+    60.520833333333336
+   ],
+   "advised_is_better_by_pct": 1.4972307170606982
+  },
+  "aletheia-advised": {
+   "description": "Aletheia, forest resident: the same, plus low-over-elevated among EQUALS",
+   "survivor_turnaround_mean": 60.71986204963983,
+   "doomed_turnaround_mean": 77.88302154253235,
+   "windows": [
+    65.89428357463804,
+    57.54758279406167,
+    58.71771978021978
+   ],
+   "advised_is_better_by_pct": 0.0
+  }
+ },
+ "windows": [
+  {
+   "seed": 11,
+   "rows": 20000,
+   "positive_rate": 0.5994,
+   "slice_steps_total": 21926,
+   "verdict_census": {
+    "low": 626,
+    "abstain": 3169,
+    "elevated": 16205
+   },
+   "low_survival": 0.9952076677316294,
+   "integer_margin_secs": 5.243630082986783,
+   "arms": {
+    "fifo": {
+     "policy": "fifo",
+     "description": "arrival order, no policy at all",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 70.55004992511233,
+     "survivor_turnaround_p95": 76.0,
+     "doomed_turnaround_mean": 69.73023023023023,
+     "replay_secs": 0.04461708397138864
+    },
+    "redox-rr": {
+     "policy": "redox-rr",
+     "description": "Redox: round-robin over runnable contexts",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 69.99063904143784,
+     "survivor_turnaround_p95": 239.0,
+     "doomed_turnaround_mean": 70.09893226559893,
+     "replay_secs": 0.04497779195662588
+    },
+    "sel4-prio-rr": {
+     "policy": "sel4-prio-rr",
+     "description": "seL4: strict priority, round-robin within a priority, no aging",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 66.69495756365451,
+     "survivor_turnaround_p95": 114.0,
+     "doomed_turnaround_mean": 72.30105105105105,
+     "replay_secs": 0.21860349999042228
+    },
+    "windows-nt": {
+     "policy": "windows-nt",
+     "description": "Windows NT/10/11: 32 levels, RR within level, anti-starvation boost",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 66.9674238642037,
+     "survivor_turnaround_p95": 114.0,
+     "doomed_turnaround_mean": 72.11895228561895,
+     "replay_secs": 0.23727295803837478
+    },
+    "xnu-macos": {
+     "policy": "xnu-macos",
+     "description": "Darwin/XNU: base priority minus decayed CPU usage",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 78.16225661507738,
+     "survivor_turnaround_p95": 561.4499999999998,
+     "doomed_turnaround_mean": 64.51401401401401,
+     "replay_secs": 0.8552687499905005
+    },
+    "freebsd-ule": {
+     "policy": "freebsd-ule",
+     "description": "FreeBSD ULE: interactivity+nice priority, current/next queue swap",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 66.68984023964055,
+     "survivor_turnaround_p95": 638.0,
+     "doomed_turnaround_mean": 72.3108942275609,
+     "replay_secs": 0.4970310420030728
+    },
+    "solaris-ts": {
+     "policy": "solaris-ts",
+     "description": "Solaris/illumos TS: ts_dptbl, quantum expiry drops priority",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 66.73726909635546,
+     "survivor_turnaround_p95": 112.0,
+     "doomed_turnaround_mean": 72.27352352352352,
+     "replay_secs": 0.29339533403981477
+    },
+    "zircon-fair": {
+     "policy": "zircon-fair",
+     "description": "Fuchsia Zircon: weight-proportional virtual finish time",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 69.5073639540689,
+     "survivor_turnaround_p95": 571.0,
+     "doomed_turnaround_mean": 70.4295128461795,
+     "replay_secs": 0.12270012497901917
+    },
+    "linux-cfs": {
+     "policy": "linux-cfs",
+     "description": "Linux <=6.5 (Debian 12, RHEL 8/9): smallest virtual runtime",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 69.61208187718422,
+     "survivor_turnaround_p95": 571.0,
+     "doomed_turnaround_mean": 70.3601935268602,
+     "replay_secs": 0.11922925000544637
+    },
+    "linux-eevdf": {
+     "policy": "linux-eevdf",
+     "description": "Linux 6.6+ (Fedora, Arch, Ubuntu 24.10+): earliest eligible virtual deadline",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 69.5073639540689,
+     "survivor_turnaround_p95": 571.0,
+     "doomed_turnaround_mean": 70.4295128461795,
+     "replay_secs": 0.12313141697086394
+    },
+    "linux-bore": {
+     "policy": "linux-bore",
+     "description": "CachyOS/Zen/Liquorix BORE: EEVDF plus a burst penalty",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 70.33811782326511,
+     "survivor_turnaround_p95": 602.0,
+     "doomed_turnaround_mean": 69.86086086086087,
+     "replay_secs": 0.11914399999659508
+    },
+    "linux-muqss": {
+     "policy": "linux-muqss",
+     "description": "MuQSS/BFS (-ck, Liquorix): earliest virtual deadline, no fairness accounting",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 69.78045431852222,
+     "survivor_turnaround_p95": 372.0,
+     "doomed_turnaround_mean": 70.24691358024691,
+     "replay_secs": 0.12126466596964747
+    },
+    "linux-rt-fifo": {
+     "policy": "linux-rt-fifo",
+     "description": "PREEMPT_RT SCHED_FIFO (RHEL-RT, audio distros): strict priority, no timeslice",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 66.69495756365451,
+     "survivor_turnaround_p95": 114.0,
+     "doomed_turnaround_mean": 72.30105105105105,
+     "replay_secs": 0.23085395799716935
+    },
+    "aletheia-free": {
+     "policy": "aletheia-free",
+     "description": "Aletheia, no model resident: strict priority, FIFO among equals",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 66.69495756365451,
+     "survivor_turnaround_p95": 114.0,
+     "doomed_turnaround_mean": 72.30105105105105,
+     "replay_secs": 0.15828345803311095
+    },
+    "aletheia-advised": {
+     "policy": "aletheia-advised",
+     "description": "Aletheia, forest resident: the same, plus low-over-elevated among EQUALS",
+     "steps": 21926,
+     "completed": 20000,
+     "survivor_turnaround_mean": 65.89428357463804,
+     "survivor_turnaround_p95": 110.0,
+     "doomed_turnaround_mean": 72.83616950283617,
+     "replay_secs": 0.33193695795489475
+    }
+   }
+  },
+  {
+   "seed": 18,
+   "rows": 20000,
+   "positive_rate": 0.7373,
+   "slice_steps_total": 25765,
+   "verdict_census": {
+    "low": 16,
+    "abstain": 8765,
+    "elevated": 11219
+   },
+   "low_survival": 1.0,
+   "integer_margin_secs": 5.109585833968595,
+   "arms": {
+    "fifo": {
+     "policy": "fifo",
+     "description": "arrival order, no policy at all",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 80.34468976018272,
+     "survivor_turnaround_p95": 101.0,
+     "doomed_turnaround_mean": 83.01980198019803,
+     "replay_secs": 0.05315620795590803
+    },
+    "redox-rr": {
+     "policy": "redox-rr",
+     "description": "Redox: round-robin over runnable contexts",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 83.3911305671869,
+     "survivor_turnaround_p95": 259.34999999999945,
+     "doomed_turnaround_mean": 81.94832496948325,
+     "replay_secs": 0.05484520900063217
+    },
+    "sel4-prio-rr": {
+     "policy": "sel4-prio-rr",
+     "description": "seL4: strict priority, round-robin within a priority, no aging",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 57.71259992386753,
+     "survivor_turnaround_p95": 101.0,
+     "doomed_turnaround_mean": 91.08361589583616,
+     "replay_secs": 0.25611945800483227
+    },
+    "windows-nt": {
+     "policy": "windows-nt",
+     "description": "Windows NT/10/11: 32 levels, RR within level, anti-starvation boost",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 59.20917396269509,
+     "survivor_turnaround_p95": 102.0,
+     "doomed_turnaround_mean": 90.55038654550387,
+     "replay_secs": 0.2733299160026945
+    },
+    "xnu-macos": {
+     "policy": "xnu-macos",
+     "description": "Darwin/XNU: base priority minus decayed CPU usage",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 96.30034259611725,
+     "survivor_turnaround_p95": 305.34999999999945,
+     "doomed_turnaround_mean": 77.29601247796012,
+     "replay_secs": 0.9815126670291647
+    },
+    "freebsd-ule": {
+     "policy": "freebsd-ule",
+     "description": "FreeBSD ULE: interactivity+nice priority, current/next queue swap",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 86.10963075751808,
+     "survivor_turnaround_p95": 426.0,
+     "doomed_turnaround_mean": 81.00515394005154,
+     "replay_secs": 0.5849408750073053
+    },
+    "solaris-ts": {
+     "policy": "solaris-ts",
+     "description": "Solaris/illumos TS: ts_dptbl, quantum expiry drops priority",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 57.65245527217358,
+     "survivor_turnaround_p95": 102.0,
+     "doomed_turnaround_mean": 91.11162349111623,
+     "replay_secs": 0.3387642499874346
+    },
+    "zircon-fair": {
+     "policy": "zircon-fair",
+     "description": "Fuchsia Zircon: weight-proportional virtual finish time",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 64.29996193376475,
+     "survivor_turnaround_p95": 442.34999999999945,
+     "doomed_turnaround_mean": 88.77573579275736,
+     "replay_secs": 0.1332355410559103
+    },
+    "linux-cfs": {
+     "policy": "linux-cfs",
+     "description": "Linux <=6.5 (Debian 12, RHEL 8/9): smallest virtual runtime",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 65.3943661971831,
+     "survivor_turnaround_p95": 444.0,
+     "doomed_turnaround_mean": 88.38593516885935,
+     "replay_secs": 0.13942683400819078
+    },
+    "linux-eevdf": {
+     "policy": "linux-eevdf",
+     "description": "Linux 6.6+ (Fedora, Arch, Ubuntu 24.10+): earliest eligible virtual deadline",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 64.29996193376475,
+     "survivor_turnaround_p95": 442.34999999999945,
+     "doomed_turnaround_mean": 88.77573579275736,
+     "replay_secs": 0.13200149999465793
+    },
+    "linux-bore": {
+     "policy": "linux-bore",
+     "description": "CachyOS/Zen/Liquorix BORE: EEVDF plus a burst penalty",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 65.40197944423296,
+     "survivor_turnaround_p95": 449.0,
+     "doomed_turnaround_mean": 88.3832903838329,
+     "replay_secs": 0.1283968329662457
+    },
+    "linux-muqss": {
+     "policy": "linux-muqss",
+     "description": "MuQSS/BFS (-ck, Liquorix): earliest virtual deadline, no fairness accounting",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 59.38104301484583,
+     "survivor_turnaround_p95": 284.0,
+     "doomed_turnaround_mean": 90.52651566526515,
+     "replay_secs": 0.13879300002008677
+    },
+    "linux-rt-fifo": {
+     "policy": "linux-rt-fifo",
+     "description": "PREEMPT_RT SCHED_FIFO (RHEL-RT, audio distros): strict priority, no timeslice",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 57.71259992386753,
+     "survivor_turnaround_p95": 101.0,
+     "doomed_turnaround_mean": 91.08361589583616,
+     "replay_secs": 0.2595606250106357
+    },
+    "aletheia-free": {
+     "policy": "aletheia-free",
+     "description": "Aletheia, no model resident: strict priority, FIFO among equals",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 57.71259992386753,
+     "survivor_turnaround_p95": 101.0,
+     "doomed_turnaround_mean": 91.08361589583616,
+     "replay_secs": 0.19083358300849795
+    },
+    "aletheia-advised": {
+     "policy": "aletheia-advised",
+     "description": "Aletheia, forest resident: the same, plus low-over-elevated among EQUALS",
+     "steps": 25765,
+     "completed": 20000,
+     "survivor_turnaround_mean": 57.54758279406167,
+     "survivor_turnaround_p95": 101.0,
+     "doomed_turnaround_mean": 91.14241150142412,
+     "replay_secs": 0.39154012501239777
+    }
+   }
+  },
+  {
+   "seed": 25,
+   "rows": 20000,
+   "positive_rate": 0.7816,
+   "slice_steps_total": 21056,
+   "verdict_census": {
+    "low": 42,
+    "abstain": 8251,
+    "elevated": 11707
+   },
+   "low_survival": 0.9523809523809523,
+   "integer_margin_secs": 5.027946209011134,
+   "arms": {
+    "fifo": {
+     "policy": "fifo",
+     "description": "arrival order, no policy at all",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 68.88003663003663,
+     "survivor_turnaround_p95": 75.0,
+     "doomed_turnaround_mean": 66.83085977482088,
+     "replay_secs": 0.041825167019851506
+    },
+    "redox-rr": {
+     "policy": "redox-rr",
+     "description": "Redox: round-robin over runnable contexts",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 68.31547619047619,
+     "survivor_turnaround_p95": 229.0,
+     "doomed_turnaround_mean": 66.9886131013306,
+     "replay_secs": 0.0428254590369761
+    },
+    "sel4-prio-rr": {
+     "policy": "sel4-prio-rr",
+     "description": "seL4: strict priority, round-robin within a priority, no aging",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 60.520833333333336,
+     "survivor_turnaround_p95": 93.0,
+     "doomed_turnaround_mean": 69.16664534288638,
+     "replay_secs": 0.20690358302090317
+    },
+    "windows-nt": {
+     "policy": "windows-nt",
+     "description": "Windows NT/10/11: 32 levels, RR within level, anti-starvation boost",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 66.70970695970696,
+     "survivor_turnaround_p95": 128.0,
+     "doomed_turnaround_mean": 67.43730808597748,
+     "replay_secs": 0.22434162499848753
+    },
+    "xnu-macos": {
+     "policy": "xnu-macos",
+     "description": "Darwin/XNU: base priority minus decayed CPU usage",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 69.06318681318682,
+     "survivor_turnaround_p95": 585.2499999999982,
+     "doomed_turnaround_mean": 66.7296571136131,
+     "replay_secs": 0.8319881670176983
+    },
+    "freebsd-ule": {
+     "policy": "freebsd-ule",
+     "description": "FreeBSD ULE: interactivity+nice priority, current/next queue swap",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 63.88759157509158,
+     "survivor_turnaround_p95": 621.6499999999996,
+     "doomed_turnaround_mean": 68.20528403275333,
+     "replay_secs": 0.46246983401943
+    },
+    "solaris-ts": {
+     "policy": "solaris-ts",
+     "description": "Solaris/illumos TS: ts_dptbl, quantum expiry drops priority",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 60.47275641025641,
+     "survivor_turnaround_p95": 101.0,
+     "doomed_turnaround_mean": 69.18007932446264,
+     "replay_secs": 0.2885058330139145
+    },
+    "zircon-fair": {
+     "policy": "zircon-fair",
+     "description": "Fuchsia Zircon: weight-proportional virtual finish time",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 70.35645604395604,
+     "survivor_turnaround_p95": 589.6499999999996,
+     "doomed_turnaround_mean": 66.40020470829069,
+     "replay_secs": 0.11571941699367017
+    },
+    "linux-cfs": {
+     "policy": "linux-cfs",
+     "description": "Linux <=6.5 (Debian 12, RHEL 8/9): smallest virtual runtime",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 70.4242216117216,
+     "survivor_turnaround_p95": 592.6499999999996,
+     "doomed_turnaround_mean": 66.38126919140225,
+     "replay_secs": 0.12025475001428276
+    },
+    "linux-eevdf": {
+     "policy": "linux-eevdf",
+     "description": "Linux 6.6+ (Fedora, Arch, Ubuntu 24.10+): earliest eligible virtual deadline",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 70.35645604395604,
+     "survivor_turnaround_p95": 589.6499999999996,
+     "doomed_turnaround_mean": 66.40020470829069,
+     "replay_secs": 0.12376924999989569
+    },
+    "linux-bore": {
+     "policy": "linux-bore",
+     "description": "CachyOS/Zen/Liquorix BORE: EEVDF plus a burst penalty",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 68.72733516483517,
+     "survivor_turnaround_p95": 583.0,
+     "doomed_turnaround_mean": 66.84838792221085,
+     "replay_secs": 0.12164887500694022
+    },
+    "linux-muqss": {
+     "policy": "linux-muqss",
+     "description": "MuQSS/BFS (-ck, Liquorix): earliest virtual deadline, no fairness accounting",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 64.5176282051282,
+     "survivor_turnaround_p95": 261.0,
+     "doomed_turnaround_mean": 68.03480040941658,
+     "replay_secs": 0.12035979103529826
+    },
+    "linux-rt-fifo": {
+     "policy": "linux-rt-fifo",
+     "description": "PREEMPT_RT SCHED_FIFO (RHEL-RT, audio distros): strict priority, no timeslice",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 60.520833333333336,
+     "survivor_turnaround_p95": 93.0,
+     "doomed_turnaround_mean": 69.16664534288638,
+     "replay_secs": 0.2317388750379905
+    },
+    "aletheia-free": {
+     "policy": "aletheia-free",
+     "description": "Aletheia, no model resident: strict priority, FIFO among equals",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 60.520833333333336,
+     "survivor_turnaround_p95": 93.0,
+     "doomed_turnaround_mean": 69.16664534288638,
+     "replay_secs": 0.16069345804862678
+    },
+    "aletheia-advised": {
+     "policy": "aletheia-advised",
+     "description": "Aletheia, forest resident: the same, plus low-over-elevated among EQUALS",
+     "steps": 21056,
+     "completed": 20000,
+     "survivor_turnaround_mean": 58.71771978021978,
+     "survivor_turnaround_p95": 87.0,
+     "doomed_turnaround_mean": 69.67048362333675,
+     "replay_secs": 0.31924833299126476
+    }
+   }
+  }
+ ],
+ "total_work_identical_in_every_arm": true,
+ "model_contribution_pct": 1.4972307170606982
+}

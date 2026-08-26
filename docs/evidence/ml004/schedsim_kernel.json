@@ -1,0 +1,117 @@
+{
+ "profile": "kernel",
+ "rows_per_window": 60000,
+ "slots": 64,
+ "windows": [
+  {
+   "profile": "kernel",
+   "rows": 60000,
+   "slots": 64,
+   "seed": 11,
+   "positive_rate": 0.8148833333333333,
+   "verdict_census": {
+    "low": 1478,
+    "abstain": 17629,
+    "elevated": 40893
+   },
+   "decisive_rate": 0.7061833333333334,
+   "elevated_precision": 0.764067199765241,
+   "low_survival": 0.9871447902571042,
+   "model_free": {
+    "dispatches": 60000,
+    "survivor_wait_mean": 49.706491401818674,
+    "doomed_wait_mean": 65.9786472501176,
+    "survivor_wait_p95": 114.0,
+    "survivors": 11107,
+    "doomed": 48893
+   },
+   "advised": {
+    "dispatches": 60000,
+    "survivor_wait_mean": 48.99369766813721,
+    "doomed_wait_mean": 66.14057227005911,
+    "survivor_wait_p95": 112.69999999999891,
+    "survivors": 11107,
+    "doomed": 48893
+   },
+   "survivor_wait_delta": 0.7127937336814654,
+   "survivor_wait_delta_pct": 1.4340053252187208,
+   "dispatch_count_identical": true,
+   "integer_margin_secs": 14.895283000019845
+  },
+  {
+   "profile": "kernel",
+   "rows": 60000,
+   "slots": 64,
+   "seed": 18,
+   "positive_rate": 0.7477,
+   "verdict_census": {
+    "low": 194,
+    "abstain": 32778,
+    "elevated": 27028
+   },
+   "decisive_rate": 0.4537,
+   "elevated_precision": 0.7988012431552464,
+   "low_survival": 0.9484536082474226,
+   "model_free": {
+    "dispatches": 60000,
+    "survivor_wait_mean": 27.873497159466243,
+    "doomed_wait_mean": 74.80796665329233,
+    "survivor_wait_p95": 80.0,
+    "survivors": 15138,
+    "doomed": 44862
+   },
+   "advised": {
+    "dispatches": 60000,
+    "survivor_wait_mean": 25.870722684634693,
+    "doomed_wait_mean": 75.48377245775936,
+    "survivor_wait_p95": 67.0,
+    "survivors": 15138,
+    "doomed": 44862
+   },
+   "survivor_wait_delta": 2.0027744748315506,
+   "survivor_wait_delta_pct": 7.185228546577908,
+   "dispatch_count_identical": true,
+   "integer_margin_secs": 14.21377108397428
+  },
+  {
+   "profile": "kernel",
+   "rows": 60000,
+   "slots": 64,
+   "seed": 25,
+   "positive_rate": 0.7828333333333334,
+   "verdict_census": {
+    "low": 1009,
+    "abstain": 30149,
+    "elevated": 28842
+   },
+   "decisive_rate": 0.49751666666666666,
+   "elevated_precision": 0.7410373760488177,
+   "low_survival": 0.6323092170465807,
+   "model_free": {
+    "dispatches": 60000,
+    "survivor_wait_mean": 47.079585571757484,
+    "doomed_wait_mean": 67.37357888013625,
+    "survivor_wait_p95": 81.0,
+    "survivors": 13030,
+    "doomed": 46970
+   },
+   "advised": {
+    "dispatches": 60000,
+    "survivor_wait_mean": 45.507981580967,
+    "doomed_wait_mean": 67.80955929316585,
+    "survivor_wait_p95": 74.0,
+    "survivors": 13030,
+    "doomed": 46970
+   },
+   "survivor_wait_delta": 1.5716039907904857,
+   "survivor_wait_delta_pct": 3.338185694933715,
+   "dispatch_count_identical": true,
+   "integer_margin_secs": 14.204573790950235
+  }
+ ],
+ "survivor_wait_delta_pct_mean": 3.9858065222434482,
+ "survivor_wait_delta_pct_min": 1.4340053252187208,
+ "survivor_wait_delta_pct_max": 7.185228546577908,
+ "windows_improved": 3,
+ "dispatch_count_identical": true
+}
