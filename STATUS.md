@@ -1,6 +1,8 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-26 (the IOMMU contract is programmed into real silicon — on x86-64 the kernel
+**As of:** 2026-08-26 (PER-DEVICE DMA WINDOWS are enforced by the real VT-d unit - each driven function
+translates ONLY the frames its own driver registry granted; a revoked PAGE is denied by name with measured
+reason 6 while sibling windows keep serving - ADR-075); before that: the IOMMU contract crosses the ARM fence — on x86-64 the kernel
 discovers the VT-d unit through ACPI DMAR/DRHD, programs an identity domain over owned frames with
 the kernel image punched out of it, adopts that domain via SRTP and turns enforcement ON, then
 proves live enforcement from the unit's own fault bank: the granted function walks clean, a
@@ -10,9 +12,26 @@ a restored grant returns to silence, and enforcement stays latched until halt �
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..073`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..075`.
 
-## Current wave — the IOMMU contract crosses the ARM fence (2026-08-26, ADR-074)
+## Current wave - per-device DMA windows (2026-08-26, ADR-075)
+
+ALET-P1-018 advances to its third hardware rung. The registry-driven narrowing lands on VT-d:
+every DRIVEN function now gets its OWN second-level tree containing exactly the frames ITS
+driver registry vouches for (leaf-set equality audited live against sorted spans), ungranted
+functions get NO context entry and the gate reads their absence back from the live context
+table, grant sets are pairwise disjoint or the boot refuses, and revocation granularity drops
+to ONE PAGE: the block device data-frame leaf is revoked under enforcement and the unit answers
+with an ACTIVE record naming source-id AND address with MEASURED reason 6 (PAGING_NOT_PRESENT,
+pinned beside the ADR-073 codes 2/4/5) while sibling windows keep serving; restore returns
+read-back equality and silence; enforcement stays latched layered over the software registry.
+dmar 12 -> 14; host proofs tests/vtd.rs 12 -> 15. En route the wave EXPOSED and FIXED a
+repo-wide boot breaker: the ADR-074 seam mapped [bar_base, len) instead of bar_base+offset, so
+q35 device-cfg ran unmapped and every target gate died in an infinite mis-labelled ring-3 fault
+loop (commit fix(pci), found by bisect plus CR3/translate instrumentation). Named at the
+boundary: SMMUv3 per-stream windows, device-side walk probes on ARM (QEMU 11.1 artifact),
+interrupt remapping, queued invalidation and pass-through types stay open in the gap register.
+## Previous wave - the IOMMU contract crosses the ARM fence (2026-08-26, ADR-074)
 
 ALET-P1-018 advances to its second hardware rung. DELIVERY on aarch64: kernel_core::smmu programs
 the ARM SMMUv3 QEMU emulates on virt - discovered through the machine's own device tree, delivered over

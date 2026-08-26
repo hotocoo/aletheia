@@ -50,7 +50,7 @@ target, host property tests with crash sweeps at every prefix — and none of th
    reclaims its private address space, and the boot continues, proved live on all three targets by faulting
    a user task on purpose and then running another one. What remains: restart policy / supervision trees
    (REQ-REL-001, still architecture only), quotas and rate limits, and a production TCB/task lifecycle.
-2. **DMA isolation.** Enforced by the real VT-d unit on x86-64 from the vt-d gate to halt (ADR-073); the virt targets still hand devices raw physical addresses under the software registry alone (P1-018 SMMUv3 rung open).
+2. **DMA isolation.** Enforced by the real VT-d unit on x86-64 from the vt-d gate to halt (ADR-073) and narrowed to PER-DEVICE WINDOWS - each function translates only its own registry-granted frames, page-revocation denied by name with measured reason 6 (ADR-075); the virt targets still hand devices raw physical addresses under the software registry alone (P1-018 SMMUv3 window rung open).
 3. **Interrupt-driven I/O.** Every driver polls. That is provable and slow, and it does not survive real
    device latencies.
 4. **Real hardware variety.** Everything is proved under QEMU. Firmware quirks, cache maintenance for

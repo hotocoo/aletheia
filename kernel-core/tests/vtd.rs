@@ -12,11 +12,12 @@
 //! bind at the leaf.
 
 use kernel_core::vtd::{
-    audit_tree, context_entry_decode, context_entry_encode, decode_fault_record, layout_of,
-    program_identity_domain, rewrite_context_entry, root_entry_encode, Agaw, Controller,
-    DomainStats, FaultRecord, RegLayout, Regs, TableMem, VtdFault, CCMD_ICC, FSTS_PPF, GCMD_SRTP,
-    GCMD_TE, GSTS_CFR, GSTS_RTPS, GSTS_TES, IAM_GLOBAL, IOTLB_IVT, REG_CCMD, REG_FSTS, REG_GCMD,
-    REG_GSTS, REG_RTADDR, REG_VER,
+    audit_tree, context_entry_decode, context_entry_encode, context_entry_read,
+    decode_fault_record, layout_of, leaf_entry, leaf_spans, program_identity_domain,
+    rewrite_context_entry, rewrite_leaf, root_entry_encode, Agaw, Controller, DomainStats,
+    FaultRecord, RegLayout, Regs, TableMem, VtdFault, CCMD_ICC, FSTS_PPF, GCMD_SRTP, GCMD_TE,
+    GSTS_CFR, GSTS_RTPS, GSTS_TES, IAM_GLOBAL, IOTLB_IVT, REG_CCMD, REG_FSTS, REG_GCMD, REG_GSTS,
+    REG_RTADDR, REG_VER,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -589,4 +590,132 @@ fn fault_evidence_flows_from_the_unit_and_decodes_to_named_fields() {
     assert_eq!(rec.reason, kernel_core::vtd::fr::CONTEXT_ENTRY_P);
     assert_eq!(rec.address, 0x0000_DEAD_0000);
     assert!(rec.was_read);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR-075: per-device WINDOW domains. Each device's tree holds exactly the frames ITS registry
+// vouches for; a page can be revoked and restored through the leaf seams without disturbing the
+// sibling windows of the same device.
+// ---------------------------------------------------------------------------------------------
+
+const WIN_A: usize = 0x0000_7000_0000; // device A's granted frame
+const WIN_B: usize = 0x0000_7001_0000; // device B's granted frame
+const WIN_A2: usize = 0x0000_7002_0000; // a SECOND window of device A
+
+#[test]
+fn window_domains_hold_exactly_their_granted_leaves() {
+    let image = (WIN_A + 0x1000000, WIN_A + 0x2000000); // far from every window
+    let mut arena = Arena::new(64);
+    let mut spans_a = vec![(WIN_A, WIN_A + 0x1000), (WIN_A2, WIN_A2 + 0x1000)];
+    spans_a.sort_unstable();
+    let (tree_a, stats_a) =
+        program_identity_domain(&mut arena, &spans_a, image, Agaw::Lev4).expect("domain A builds");
+    let (tree_b, _stats_b) =
+        program_identity_domain(&mut arena, &[(WIN_B, WIN_B + 0x1000)], image, Agaw::Lev4)
+            .expect("domain B builds");
+
+    // Leaf-set equality BOTH directions: neither more nor less than the grant set.
+    let got_a = leaf_spans(&mut arena, tree_a, Agaw::Lev4);
+    assert_eq!(got_a.len(), stats_a.huge_leaves + stats_a.page_leaves);
+    assert_eq!(got_a, spans_a, "tree A must hold exactly A's two windows");
+    assert_eq!(
+        leaf_spans(&mut arena, tree_b, Agaw::Lev4),
+        vec![(WIN_B, WIN_B + 0x1000)],
+        "tree B must hold exactly B's one window"
+    );
+
+    // The walker answers as hardware would: own windows translate IDENTITY, the sibling's
+    // window does not exist here, and the image is unreachable.
+    assert_eq!(
+        walk_slpt(&arena, tree_a, Agaw::Lev4, WIN_A, false),
+        Walk::Translated(WIN_A)
+    );
+    assert_eq!(
+        walk_slpt(&arena, tree_a, Agaw::Lev4, WIN_A2, true),
+        Walk::Translated(WIN_A2)
+    );
+    assert_eq!(
+        walk_slpt(&arena, tree_a, Agaw::Lev4, WIN_B, false),
+        Walk::NotMapped { iova: WIN_B },
+        "device A must NOT translate device B's granted frame"
+    );
+}
+
+#[test]
+fn leaf_revocation_denies_one_page_and_spares_sibling_windows() {
+    let image = (WIN_A + 0x1000000, WIN_A + 0x2000000);
+    let mut arena = Arena::new(32);
+    let (tree, _stats) = program_identity_domain(
+        &mut arena,
+        &[(WIN_A, WIN_A + 0x1000), (WIN_A2, WIN_A2 + 0x1000)],
+        image,
+        Agaw::Lev4,
+    )
+    .expect("two-window domain builds");
+
+    // Capture the live entry, revoke it, and prove THIS page faults while its sibling still
+    // serves - granularity is the whole point of the seam.
+    let original = leaf_entry(&arena, tree, Agaw::Lev4, WIN_A).expect("leaf reads back");
+    assert_ne!(original, 0, "a programmed leaf carries present bits");
+    rewrite_leaf(&mut arena, tree, Agaw::Lev4, WIN_A, None).expect("revocation succeeds");
+    assert_eq!(leaf_entry(&arena, tree, Agaw::Lev4, WIN_A), Ok(0));
+    assert_eq!(
+        walk_slpt(&arena, tree, Agaw::Lev4, WIN_A, false),
+        Walk::NotMapped { iova: WIN_A }
+    );
+    assert_eq!(
+        walk_slpt(&arena, tree, Agaw::Lev4, WIN_A2, false),
+        Walk::Translated(WIN_A2),
+        "the sibling window must keep serving"
+    );
+
+    // Restore the captured entry: translation returns EXACTLY what it was.
+    rewrite_leaf(&mut arena, tree, Agaw::Lev4, WIN_A, Some(original)).expect("restore succeeds");
+    assert_eq!(leaf_entry(&arena, tree, Agaw::Lev4, WIN_A), Ok(original));
+    assert_eq!(
+        walk_slpt(&arena, tree, Agaw::Lev4, WIN_A, false),
+        Walk::Translated(WIN_A)
+    );
+
+    // Fail-closed edges: an IOVA whose path was never built refuses by name, not by inventing
+    // tables; so does anything unaligned.
+    assert_eq!(
+        rewrite_leaf(&mut arena, tree, Agaw::Lev4, WIN_B, None),
+        Err(VtdFault::MalformedRange),
+        "another device's window has no path in this tree"
+    );
+    assert_eq!(
+        rewrite_leaf(&mut arena, tree, Agaw::Lev4, WIN_A + 8, None),
+        Err(VtdFault::MalformedRange),
+        "sub-page IOVA is malformed"
+    );
+}
+
+#[test]
+fn context_entry_read_reports_absence_for_ungranted_functions() {
+    let mut arena = Arena::new(8);
+    let ctx = arena.raw_page();
+    // Grant function 0.2 only; read-back must show presence there and ABSENCE everywhere else -
+    // including a deliberately-revoked slot, which reads back zeroed after the rewrite.
+    let (lo, hi) = context_entry_encode(0x123000, 7, Agaw::Lev3).expect("encodes");
+    rewrite_context_entry(&mut arena, ctx, 0, 2, Some((lo, hi))).expect("grant writes");
+    rewrite_context_entry(&mut arena, ctx, 0, 5, Some((lo, hi))).expect("second grant writes");
+    rewrite_context_entry(&mut arena, ctx, 0, 5, None).expect("revoke writes");
+
+    let (glo, ghi) = context_entry_read(&arena, ctx, 0, 2).expect("granted slot reads");
+    assert_eq!((glo, ghi), (lo, hi));
+
+    let (rlo, rhi) = context_entry_read(&arena, ctx, 0, 5).expect("revoked slot reads");
+    assert_eq!(
+        (rlo, rhi),
+        (0, 0),
+        "a revoked context entry reads back ABSENT"
+    );
+
+    let (ulo, uhi) = context_entry_read(&arena, ctx, 0, 7).expect("ungranted slot reads");
+    assert_eq!(
+        (ulo, uhi),
+        (0, 0),
+        "an undriven function was never programmed"
+    );
 }

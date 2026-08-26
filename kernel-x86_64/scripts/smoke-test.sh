@@ -115,7 +115,7 @@ if [ "$RC" -eq 33 ] \
    && grep -q 'ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD' "$LOG" \
    && grep -q 'platform custody: root DELIVERED over firmware configuration' "$LOG" \
    && grep -q 'ALL 9 IOMMU-CONTRACT INVARIANTS HOLD' "$LOG" \
-   && grep -q 'ALL 12 VT-D INVARIANTS HOLD' "$LOG" \
+   && grep -q 'ALL 14 VT-D INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 22 RISK-ADVISOR INVARIANTS HOLD' "$LOG" \
    && grep -q 'ALL 8 STRESS INVARIANTS HOLD' "$LOG" \
    && grep -qE 'abstaining workload: [0-9]+ tasks, 0 positions move' "$LOG" \
@@ -150,7 +150,7 @@ if [ "$RC" -eq 33 ] \
   # the boot, or a count changing without the gate being told. Extra families fail too.
   # shellcheck disable=SC1091
   source "$HERE/../scripts/lib-markers.sh"
-  X86_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 dmar=12 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 soak=12 usermode=39 vault=14 virtio=21 vm=72"
+  X86_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 dmar=14 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=22 net=9 persist=10 ps2=5 selftest=13 smp=22 soak=12 usermode=39 vault=14 virtio=21 vm=72"
   if ! markers_assert "$X86_EXPECTED" < "$LOG"; then
     echo "SMOKE TEST: FAIL (structured marker map)"
     exit 1

@@ -333,6 +333,23 @@ the fault-record BANK because QEMU serves FSTS at 0x34 against the spec's 0x30.
 | INV-VTD-10 | Revoking one function's context entry (then global CCMD+IOTLB invalidation) makes its next kick produce an ACTIVE record naming ITS source-id with reason CONTEXT_ENTRY_P. | Denial must be per-function and attributable, or revocation is theater; repeat faults compress, so the probe re-kicks until evidence lands. | boot invariant 10 |
 | INV-VTD-11 | Restoring the saved entry and re-invalidating returns the SAME function to silence after the record is retired write-one-to-clear. | Recovery must be real: the cleared bank separates old evidence from new behavior, so silence proves the restored walk. | boot invariant 11 |
 | INV-VTD-12 | Enforcement REMAINS on to halt - TES still set, root pointer unchanged - LAYERED OVER the software registry which still refuses unregistered addresses. | An IOMMU that silently drops, and a boundary that trusts it, fail together; latching + layering makes both visible forever after. | boot invariant 12 |
+## INV-VTD-W - per-device WINDOW domains on VT-d (ALET-P1-018 third rung, ADR-075)
+
+The identity-domain rung proved "the image is not a DMA target"; this rung proves "nothing but
+each driver's OWN granted frames translates for it". The software registry (ADR-043) decides,
+the second-level tables obey, and the unit's fault bank supplies the evidence.
+
+| Id | Invariant | Why it is load-bearing | Adversarial proof |
+|----|-----------|------------------------|-------------------|
+| INV-VTD-W1 | Every DRIVEN function carries named, page-aligned, image-clear registry grants; every PRESENT function nobody drives has NO context entry, read back as zeroed qwords from the live context table. | The registry is the single source of truth; absence must be read back, not assumed, or deny-by-default is a slogan. | host tests/vtd.rs context_entry_read_reports_absence_for_ungranted_functions; boot invariant 4 + 7 |
+| INV-VTD-W2 | One window domain per driven function, built entirely from OWNED frames; the allocator count balances to the exact table total (+root+context). | Per-device isolation built from unaccounted memory would be the protection undermining itself. | boot invariant 5 |
+| INV-VTD-W3 | Each tree LEAF SET equals that device's grant set EXACTLY (sorted span equality), with zero image violations. | Neither more (a window nobody granted) nor less (a grant that faults): partial credit is how isolation quietly becomes theater. | host window_domains_hold_exactly_their_granted_leaves incl. walker NotMapped on the sibling frame; boot invariant 6 |
+| INV-VTD-W4 | Grant sets are pairwise DISJOINT across functions; a foreign frame probed through the seam answers NOT-PRESENT even when it shares an interior table. | Shared L3 tables make absent slots look present to a naive reader; presence-bit semantics keep absence honest. | host leaf_revocation test edge; boot invariant 7 |
+| INV-VTD-W5 | SoftIommu programmed with the SAME windows agrees with the machine: own spans translate IDENTITY, sibling spans are NotMapped, image refused both sides. | The model stays the contract's executable form; drift between mirror and tables is a bug either side. | boot invariant 8 |
+| INV-VTD-W6 | A GRANTED function kicked twice under PER-DEVICE enforcement leaves the fault bank empty. | Narrower tables must not break the drivers they serve - the positive half first. | boot invariant 11 |
+| INV-VTD-W7 | Revoking ONE PAGE (leaf_entry/rewrite_leaf seams, global CCMD+IOTLB flush) makes the next kick produce an ACTIVE record naming source-id AND the revoked address with MEASURED reason 6 (PAGING_NOT_PRESENT), distinct from CONTEXT_ENTRY_P; sibling windows of the same device KEEP SERVING throughout. | Granularity is the point: whole-function denial was ADR-073's rung; page-level denial that spares siblings is what turns a registry into enforced windows. Refusing to re-revoke an absent leaf keeps absence from looking like an act. | host leaf_revocation_denies_one_page_and_spares_sibling_windows; boot invariant 12 |
+| INV-VTD-W8 | Restoring the captured leaf entry returns read-back equality AND silence after the record retires; TES and root stay latched, still layered over the software registry which keeps refusing unregistered addresses. | Recovery must be provably real and the narrowing must cost nothing that ADR-073 already bought. | boot invariants 13+14 |
+
 ## INV-SMMU - the IOMMU contract meets ARM silicon (ALET-P1-018, ADR-074)
 
 The same contract ADR-073 pinned for VT-d, programmed into the ARM SMMUv3 QEMU emulates on

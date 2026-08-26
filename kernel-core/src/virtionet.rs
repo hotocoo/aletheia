@@ -258,6 +258,15 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         self.rx.dma_regions() + self.tx.dma_regions()
     }
 
+    /// The LIVE grants both queues hold for THIS device, named by owner - what the VT-d suite
+    /// programs as this function's per-device window domain (ADR-075). Captured after init:
+    /// nothing later in the boot registers or revokes on these queues.
+    pub fn dma_grants(&self) -> alloc::vec::Vec<crate::dma::Grant> {
+        let mut out = self.rx.grants();
+        out.extend(self.tx.grants());
+        out
+    }
+
     /// Send one Ethernet frame (without the virtio header, which this adds), waiting for the device to
     /// release the buffer so the caller may send again.
     ///

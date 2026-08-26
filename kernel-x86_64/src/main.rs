@@ -971,25 +971,32 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     kprintln!(
         "--- network selftests (virtio-net over PCI: ARP-cache + ICMP echo + UDP-DHCP discovery against the gateway) ---"
     );
+    // ADR-075 grant capture: the suite consumes the device, but its registry grants must reach
+    // the VT-d gate. Init posted every buffer before this point and nothing later registers or
+    // revokes, so a snapshot taken HERE is exactly what enforcement must allow.
+    let mut net_windows: Option<alloc::vec::Vec<kernel_core::dma::Grant>> = None;
     match net_dev.take() {
         None => kprintln!("[net] no network device attached (skipped)"),
         Some(Err(e)) => {
             kprintln!("[net] device init FAILED: {:?}", e);
             ActiveHal::exit(220);
         }
-        Some(Ok(net)) => match kernel_core::virtionet::net_suite(net, |n, passed, name| {
-            if passed {
-                kprintln!("  [pass {:>2}] {}", n, name);
-            } else {
-                kprintln!("  [FAIL {:>2}] {}", n, name);
+        Some(Ok(net)) => {
+            net_windows = Some(net.dma_grants());
+            match kernel_core::virtionet::net_suite(net, |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!("[net] FAILED at network invariant {}: {}", idx, name);
+                    ActiveHal::exit(220 + idx as i32);
+                }
             }
-        }) {
-            Ok(n) => kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n),
-            Err((idx, name)) => {
-                kprintln!("[net] FAILED at network invariant {}: {}", idx, name);
-                ActiveHal::exit(220 + idx as i32);
-            }
-        },
+        }
     }
 
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu function, the 2D resource
@@ -1069,12 +1076,13 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
-    // The IOMMU contract meets hardware (ALET-P1-018 first rung, ADR-071 contract / ADR-073):
-    // the VT-d unit QEMU emulates on q35 is discovered through the ACPI DMAR table, programmed
-    // from owned frames (conventional RAM minus the kernel image, per-function context entries),
-    // and turned ON — then the LIVE block functions (serving since before the flip) are probed:
-    // the granted one walks clean, a revoked one is denied with a fault naming it, a restored
-    // one returns to silence, and enforcement stays latched until the machine halts.
+    // The IOMMU contract meets hardware (ALET-P1-018 third rung, ADR-071/073/075): the VT-d unit
+    // QEMU emulates on q35 is discovered through the ACPI DMAR table, then programmed with a
+    // PER-DEVICE WINDOW DOMAIN per driven function - exactly the frames each driver's own DMA
+    // registry vouches for, nothing else - plus context entries for those functions ONLY, and
+    // enforcement turned ON. The LIVE block function (serving since before the flip) is probed:
+    // it walks clean under its windows; a revoked PAGE is denied with a fault naming its
+    // source-id and address; restoring the leaf returns silence; enforcement stays latched.
     //
     // This is deliberately the LAST gate: every DMA-dependent suite above ran while the machine
     // was still quiet, which is both how real firmware/OSes meet an IOMMU and the only ordering
@@ -1083,8 +1091,24 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // ADR-073 documents the evidence trail). Graceful absence (no DMAR declared - VirtualBox)
     // skips green; a PRESENT unit that fails any invariant exits 500+i.
     kprintln!("");
-    kprintln!("--- vt-d selftests (the contract programmed into a real remapping unit) ---");
-    match vtd::dmar_suite(memory_map, blk_scratch.as_mut(), blk_persist.as_mut()) {
+    kprintln!("--- vt-d selftests (per-device windows programmed into a real remapping unit) ---");
+    // The grant table: every DRIVEN function contributes what ITS registry vouches for. Block
+    // devices are alive right here; the GPU console too; the network device was consumed by its
+    // suite, which captured its grants before the move (identical - idle queues never change).
+    let mut dma_grants: alloc::vec::Vec<vtd::DeviceGrant> = alloc::vec::Vec::new();
+    if let (Some(b), Some(d)) = (unsafe { pci::find_virtio_blk() }, blk_scratch.as_ref()) {
+        dma_grants.push(vtd::DeviceGrant::new(b, d.dma_grants()));
+    }
+    if let (Some(b), Some(d)) = (unsafe { pci::find_virtio_blk_nth(1) }, blk_persist.as_ref()) {
+        dma_grants.push(vtd::DeviceGrant::new(b, d.dma_grants()));
+    }
+    if let (Some(b), Some(w)) = (unsafe { pci::find_virtio_net_nth(0) }, net_windows.as_ref()) {
+        dma_grants.push(vtd::DeviceGrant::from_grants(b, w));
+    }
+    if let (Some(b), Some(Ok(g))) = (unsafe { pci::find_virtio_gpu_nth(0) }, gpu_dev.as_ref()) {
+        dma_grants.push(vtd::DeviceGrant::new(b, g.dma_grants()));
+    }
+    match vtd::dmar_suite(&dma_grants, blk_scratch.as_mut(), blk_persist.as_mut()) {
         Ok(_) => {}
         Err((idx, _name)) => {
             // The suite already printed "[dmar] FAILED at vt-d invariant N: <detail>" - the NAME

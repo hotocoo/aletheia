@@ -226,10 +226,7 @@ pub unsafe fn resolve_virtio_regions(
                     Some(a) => a,
                     None => return Err("virtio-pci register region could not be mapped"),
                 };
-                let region = CapRegion {
-                    addr,
-                    len: length,
-                };
+                let region = CapRegion { addr, len: length };
                 match cfg_type {
                     VIRTIO_PCI_CAP_COMMON_CFG => common = Some(region),
                     VIRTIO_PCI_CAP_NOTIFY_CFG => {

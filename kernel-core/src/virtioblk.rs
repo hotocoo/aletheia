@@ -546,6 +546,13 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         self.completion_spins = spins;
     }
 
+    /// The LIVE grants this driver holds for ITS device, named by owner (ring, data). The VT-d
+    /// suite consumes exactly these to program this device's per-device window domain (ADR-075):
+    /// the registry decides, the tables obey.
+    pub fn dma_grants(&self) -> alloc::vec::Vec<crate::dma::Grant> {
+        self.dma.grants()
+    }
+
     /// Recover a device after an error: full reset → renegotiate → re-publish the SAME rings and
     /// buffers (the frames are still ours) → DRIVER_OK. The queue's avail/used indices restart at
     /// zero on both sides, which is exactly what a fresh init produces, so no request can be

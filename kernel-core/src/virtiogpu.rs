@@ -560,6 +560,13 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
         self.ctrl.live_regions()
     }
 
+    /// The LIVE grants the control queue holds for THIS device, named by owner - ring, command
+    /// and response buffers, and every attached backing page. The VT-d suite programs exactly
+    /// this set as the function's per-device window domain (ADR-075): registry decides, tables obey.
+    pub fn dma_grants(&self) -> alloc::vec::Vec<crate::dma::Grant> {
+        self.ctrl.grants()
+    }
+
     fn refused(&self, why: &'static str) -> GpuError {
         self.local_refusals.set(self.local_refusals.get() + 1);
         GpuError::Refused(why)

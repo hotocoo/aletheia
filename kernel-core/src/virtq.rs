@@ -286,6 +286,12 @@ impl Virtqueue {
         self.dma.live_regions()
     }
 
+    /// The LIVE grants this queue vouches for, NAMED by owner. The hardware IOMMU layer consumes
+    /// exactly these to program per-device windows (ADR-075): the registry decides, tables obey.
+    pub fn grants(&self) -> alloc::vec::Vec<crate::dma::Grant> {
+        self.dma.grants()
+    }
+
     /// Tell the device this queue has new buffers.
     ///
     /// # Safety

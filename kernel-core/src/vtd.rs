@@ -311,6 +311,11 @@ pub mod fr {
     pub const WRITE: u8 = 4;
     /// No read permission at a mapped leaf.
     pub const READ: u8 = 5;
+    /// Paging-structure entry not present - what revoking ONE PAGE of a window set produces
+    /// (ADR-075). MEASURED live on the emulated unit: revoking the block device data-frame
+    /// leaf produced FRCD reason=6 at exactly the revoked address, alongside reason=2 for an
+    /// absent context entry and 4/5 for permission denials - pinned like ADR-073 pinned its.
+    pub const PAGING_NOT_PRESENT: u8 = 6;
 }
 
 // --- the domain builder ---------------------------------------------------------------------------
@@ -479,6 +484,39 @@ fn count_leaf(audit: &mut TreeAudit, e: u64, huge: bool, image: (usize, usize), 
     }
 }
 
+/// Collect every leaf's translated SPAN, sorted - the proof-side twin of the builder. A
+/// per-device WINDOW domain (ADR-075) is correct only if its leaf set EQUALS that device's
+/// granted set: neither more (a window nobody granted), nor less (a grant that would fault).
+pub fn leaf_spans<M: TableMem>(
+    mem: &mut M,
+    top: usize,
+    agaw: Agaw,
+) -> alloc::vec::Vec<(usize, usize)> {
+    let shifts = agaw.shifts();
+    let mut out: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    let mut stack: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    stack.push((top, 0));
+    while let Some((table, level)) = stack.pop() {
+        for idx in 0..512usize {
+            let e = mem.read_u64(table + idx * 8);
+            if e & ENTRY_PRESENT == 0 {
+                continue;
+            }
+            if level + 1 == shifts.len() {
+                let base = (e & ADDR_MASK_4K) as usize;
+                out.push((base, base + PAGE));
+            } else if level + 2 == shifts.len() && e & ENTRY_PS != 0 {
+                let base = (e & ADDR_MASK_4K) as usize;
+                out.push((base, base + (1usize << shifts[level + 1])));
+            } else {
+                stack.push(((e & ADDR_MASK_4K) as usize, level + 1));
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 // --- the controller ------------------------------------------------------------------------------------
 
 const HANDSHAKE_BOUND: u32 = 1_000_000;
@@ -620,6 +658,21 @@ impl<R: Regs> Controller<R> {
     }
 }
 
+/// Read one function context entry BACK - how a gate proves a function it never granted stays
+/// absent, rather than trusting that absence happened because nobody wrote it.
+pub fn context_entry_read<M: TableMem>(
+    mem: &M,
+    ctx_table_pa: usize,
+    dev: u8,
+    fun: u8,
+) -> Result<(u64, u64), VtdFault> {
+    if dev > 31 || fun > 7 {
+        return Err(VtdFault::MalformedRange);
+    }
+    let slot = ctx_table_pa + (((dev as usize) << 3) | fun as usize) * 16;
+    Ok((mem.read_u64(slot), mem.read_u64(slot + 8)))
+}
+
 /// Rewrite one function context entry IN PLACE - grant (`Some`) or revoke (`None`) - through the
 /// same seam the builder used, so live deny/grant choreography cannot diverge from the format.
 pub fn rewrite_context_entry<M: TableMem>(
@@ -647,6 +700,98 @@ pub fn rewrite_context_entry<M: TableMem>(
         None => {
             mem.write_u64(slot, 0);
             mem.write_u64(slot + 8, 0);
+        }
+    }
+    Ok(())
+}
+
+// --- leaf-level seams (ALET-P1-018 third rung, ADR-075): per-device WINDOWS are revoked and
+// --- restored one PAGE at a time, so the same seam that programs whole domains must be able to
+// --- reach one leaf without allocating, guessing, or walking off the path the builder built.
+
+/// Walk to the 4 KiB LEAF SLOT covering `iova` along entries that ALREADY exist. No allocation:
+/// this seam only ever edits a domain the builder programmed. Any absent interior entry means
+/// the caller named a window the tree never had (MalformedRange, fail-closed), and a 2 MiB
+/// huge-page leaf covering the IOVA refuses too - window revocation is page-granular by design.
+fn leaf_walk<M: TableMem>(mem: &M, top: usize, agaw: Agaw, iova: usize) -> Result<usize, VtdFault> {
+    const MASK: usize = 0x1FF;
+    if !iova.is_multiple_of(PAGE) {
+        return Err(VtdFault::MalformedRange);
+    }
+    let shifts = agaw.shifts();
+    let last = shifts.len() - 1;
+    let mut table = top;
+    for (depth, &sh) in shifts.iter().enumerate() {
+        let idx = (iova >> sh) & MASK;
+        let e = mem.read_u64(table + idx * 8);
+        if depth == last {
+            // RAW access at the leaf slot: an entry revoked to zero READS as zero and can be
+            // written back (restore-after-revoke needs exactly this). Presence here is the
+            // CALLER's question, not this seam's refusal.
+            return Ok(table + idx * 8);
+        }
+        if e & ENTRY_PRESENT == 0 {
+            // A hole in the INTERIOR path means the caller asked about memory this device was
+            // NEVER granted - the builder never created tables along that path.
+            return Err(VtdFault::MalformedRange);
+        }
+        if depth + 1 == last && e & ENTRY_PS != 0 {
+            // A huge leaf here covers the IOVA wholesale - there is no 4 KiB slot beneath it,
+            // and splitting under a live walker is not this seam's business.
+            return Err(VtdFault::MalformedRange);
+        }
+        table = (e & ADDR_MASK_4K) as usize;
+    }
+    Err(VtdFault::MalformedRange)
+}
+
+/// Does a PRESENT leaf cover `iova` in this tree? The translate-or-not question, answered
+/// against the raw bits - an ABSENT slot inside a shared table is not a grant, and must never
+/// be mistaken for one just because the slot itself exists.
+pub fn leaf_present<M: TableMem>(
+    mem: &M,
+    top: usize,
+    agaw: Agaw,
+    iova: usize,
+) -> Result<bool, VtdFault> {
+    let raw = leaf_entry(mem, top, agaw, iova)?;
+    Ok(raw & ENTRY_PRESENT != 0)
+}
+
+/// Read the RAW leaf entry covering `iova` - what [`rewrite_leaf`] restores after a revocation
+/// probe. An error names why the read refused; it never invents an entry.
+pub fn leaf_entry<M: TableMem>(
+    mem: &M,
+    top: usize,
+    agaw: Agaw,
+    iova: usize,
+) -> Result<u64, VtdFault> {
+    let slot = leaf_walk(mem, top, agaw, iova)?;
+    Ok(mem.read_u64(slot))
+}
+
+/// Rewrite ONE page leaf IN PLACE: `Some(raw)` publishes exactly those bits (the restore path
+/// passes the entry [`leaf_entry`] captured), `None` revokes - the page stops translating and
+/// later DMA against it faults against real silicon. The caller flushes the IOTLB afterwards;
+/// like context invalidation, the coarse global form is chosen because correctness cannot
+/// depend on getting a scoped field right mid-probe.
+pub fn rewrite_leaf<M: TableMem>(
+    mem: &mut M,
+    top: usize,
+    agaw: Agaw,
+    iova: usize,
+    entry: Option<u64>,
+) -> Result<(), VtdFault> {
+    let slot = leaf_walk(mem, top, agaw, iova)?;
+    match entry {
+        Some(raw) => mem.write_u64(slot, raw),
+        None => {
+            // Revoking something that was never live is refused, not idempotent: a page this
+            // device was never granted must not have its absence look like an act.
+            if mem.read_u64(slot) & ENTRY_PRESENT == 0 {
+                return Err(VtdFault::MalformedRange);
+            }
+            mem.write_u64(slot, 0);
         }
     }
     Ok(())

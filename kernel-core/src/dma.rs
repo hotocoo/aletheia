@@ -62,6 +62,27 @@ struct Region {
     live: bool,
 }
 
+/// One live grant, NAMED: the frame run a device may be told about and the driver that
+/// vouches for it. This is what the hardware IOMMU layer consumes to program per-device
+/// windows (ALET-P1-018, ADR-075) - the software boundary stays the single source of truth
+/// for what each device may touch, so the two layers cannot drift apart by construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grant {
+    /// Page-aligned physical start of the granted span.
+    pub addr: usize,
+    /// Length of the span in PAGES (rounded up from the registered byte length).
+    pub pages: usize,
+    /// The owner string the registering driver gave.
+    pub owner: &'static str,
+}
+
+impl Grant {
+    /// The span's byte length, page-rounded.
+    pub fn len_bytes(&self) -> usize {
+        self.pages * PAGE
+    }
+}
+
 /// The set of physical ranges devices may currently be told about.
 pub struct DmaRegistry {
     regions: Vec<Region>,
@@ -168,6 +189,20 @@ impl DmaRegistry {
             .iter()
             .find(|r| r.live && addr >= r.addr && addr < r.addr + r.len)
             .map(|r| r.owner)
+    }
+
+    /// Snapshot the LIVE grants, in registration order, each NAMED by its owner. Dead regions are
+    /// skipped: revocation must shrink what an IOMMU programs, or revoke would be a lie twice over.
+    pub fn grants(&self) -> alloc::vec::Vec<Grant> {
+        self.regions
+            .iter()
+            .filter(|r| r.live)
+            .map(|r| Grant {
+                addr: r.addr,
+                pages: r.len.div_ceil(PAGE),
+                owner: r.owner,
+            })
+            .collect()
     }
 
     /// Live regions now.
