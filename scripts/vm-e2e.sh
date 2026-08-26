@@ -43,6 +43,12 @@ dd if=/dev/zero of="$IMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create
 # destructive suites; this one is created ONCE and then kept, because the kernel is booted TWICE below.
 # Boot 1 must create the store; boot 2 must FIND and verify what boot 1 wrote — the difference between
 # "the OS can write" and "the OS remembers".
+## The SMMUv3 rung's victim (ADR-074): a virtio-blk-pci function rides BEHIND the unit on
+# the PCIe root complex (stream id = RID) - exactly what the live proofs kick under
+# enforcement. Fresh every run: this gate reformats it by design.
+PCIIMG="$KDIR/target/virtio-blk-pci-test.img"
+dd if=/dev/zero of="$PCIIMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create pci disk image"; exit 3; }
+
 PIMG="$KDIR/target/virtio-blk-persistent.img"
 rm -f "$PIMG"
 dd if=/dev/zero of="$PIMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create persistent image"; exit 3; }
@@ -55,15 +61,39 @@ ROOTBIN="$KDIR/target/capvault-root.bin"
 printf 'aletheia-capvault-root-0123456789abcdef' | head -c 32 > "$ROOTBIN"
 [ "$(wc -c < "$ROOTBIN")" -eq 32 ] || { echo "FAIL: root materialization"; exit 3; }
 
+# The machine declares itself (ADR-074): dump the tree QEMU generates for THIS configuration,
+# trim it to its declared total size, and hand it back over the firmware configuration channel
+# - the same declared door the custody anchor uses. Direct -kernel ELF boots get NO register-
+# level DTB pointer at all (measured: x0 reads 0 at the entry), so this channel is not a
+# convenience - it is the only declaration the guest can discover.
+DTBRAW="$KDIR/target/virt-dtb-raw.bin"
+DTBT="$KDIR/target/virt-dtb.bin"
+qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+  -global virtio-mmio.force-legacy=false \
+  -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
+  -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
+  -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -device virtio-gpu-device \
+  -machine dumpdtb="$DTBRAW" >/dev/null 2>&1
+[ -s "$DTBRAW" ] || { echo "FAIL: device-tree dump"; exit 3; }
+set -- $(od -An -tu1 -j4 -N4 "$DTBRAW")
+TSZ=$(( $1 << 24 | $2 << 16 | $3 << 8 | $4 ))
+head -c "$TSZ" "$DTBRAW" > "$DTBT"
+[ "$(wc -c < "$DTBT")" -eq "$TSZ" ] || { echo "FAIL: device-tree trim"; exit 3; }
+
+
 echo "==> booting in QEMU (120s watchdog, virtio-blk attached, -smp 4 for the SMP suite)"
 OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
-  qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
+  -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
   -device virtio-gpu-device)"
 CODE=$?
 
@@ -77,6 +107,8 @@ fail=0
 echo "$OUT" | grep -q "ALL 13 INVARIANTS HOLD"        || { echo "FAIL: spine invariants marker missing"; fail=1; }
 echo "$OUT" | grep -q "ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD" || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
 echo "$OUT" | grep -q "ALL 9 IOMMU-CONTRACT INVARIANTS HOLD" || { echo "FAIL: iommu-contract invariants marker missing (ALET-P1-018, ADR-071)"; fail=1; }
+echo "$OUT" | grep -q "ALL 10 SMMUV3 INVARIANTS HOLD" || { echo "FAIL: smmuv3 invariants marker missing (ALET-P1-018, ADR-074)"; fail=1; }
+echo "$OUT" | grep -q "enforcement LIVE" || { echo "FAIL: smmuv3 enforcement never turned ON"; fail=1; }
 # Custody crosses the platform boundary (ALET-P1-034, ADR-072): the firmware-delivered root must
 # open, seal, reopen, rotate, rekey, and refuse every named impostor — on THIS machine.
 echo "$OUT" | grep -q "ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD" || { echo "FAIL: custody-delivery invariants marker missing (ALET-P1-034, ADR-072)"; fail=1; }
@@ -129,7 +161,7 @@ echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlst
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 vault=14 virtio=21 vm=66"
+AARCH64_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 smmu=10 vault=14 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
@@ -138,13 +170,15 @@ echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { ech
 # ---- SECOND BOOT on the SAME persistent medium: the OS must REMEMBER (REQ-STOR-003) ----
 echo "==> rebooting the same image against the SAME persistent disk (cross-reboot proof)"
 OUT2="$(perl -e 'alarm 120; exec @ARGV or die' \
-  qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
+  -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
   -device virtio-gpu-device)"
 CODE2=$?
 echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
@@ -157,12 +191,14 @@ echo "$OUT2" | grep -q "PERSISTENT MEDIUM: boot #2, 1 entities verified" || { ec
 # stays sealed BY NAME while every other subsystem keeps working (ADR-072).
 echo "==> third boot WITHOUT the firmware root (absence must be a named refusal, not a crash)"
 OUT3="$(perl -e 'alarm 120; exec @ARGV or die' \
-  qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
   -device virtio-gpu-device)"
 CODE3=$?
 echo "$OUT3" | grep -E "\[vault\]" || true

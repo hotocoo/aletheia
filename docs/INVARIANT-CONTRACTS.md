@@ -333,6 +333,28 @@ the fault-record BANK because QEMU serves FSTS at 0x34 against the spec's 0x30.
 | INV-VTD-10 | Revoking one function's context entry (then global CCMD+IOTLB invalidation) makes its next kick produce an ACTIVE record naming ITS source-id with reason CONTEXT_ENTRY_P. | Denial must be per-function and attributable, or revocation is theater; repeat faults compress, so the probe re-kicks until evidence lands. | boot invariant 10 |
 | INV-VTD-11 | Restoring the saved entry and re-invalidating returns the SAME function to silence after the record is retired write-one-to-clear. | Recovery must be real: the cleared bank separates old evidence from new behavior, so silence proves the restored walk. | boot invariant 11 |
 | INV-VTD-12 | Enforcement REMAINS on to halt - TES still set, root pointer unchanged - LAYERED OVER the software registry which still refuses unregistered addresses. | An IOMMU that silently drops, and a boundary that trusts it, fail together; latching + layering makes both visible forever after. | boot invariant 12 |
+## INV-SMMU - the IOMMU contract meets ARM silicon (ALET-P1-018, ADR-074)
+
+The same contract ADR-073 pinned for VT-d, programmed into the ARM SMMUv3 QEMU emulates on
+virt. Discovery runs through the device tree the firmware publishes over the configuration
+channel; programming is stage-2-only STEs naming one identity domain built from owned frames;
+evidence discipline follows ADR-073. The rows below are gated on aarch64 only - the unit
+exists only there - and the DEVICE-SIDE walk probes of the VT-d rung stay open for this target:
+on QEMU 11.1 a CLI-attached virtio-blk-pci does not route DMA through the legacy iommu=smmuv3
+unit (abort-canary measured), so the live invariants prove everything UP TO device walks.
+| ID | The promise | Why | Proved by |
+|----|-------------|-----|-----------|
+| INV-SMMU-1 | The unit is found through the tree the machine publishes: an arm,smmu-v3 node whose register window lies inside the identity-mapped Device GiB. | Discovery is the platform's word read by declared lengths, never a constant somebody remembered. | boot invariant 1 |
+| INV-SMMU-2 | The host bridge binds PCIe requesters to THAT unit (iommu-map), and no virtio-mmio node carries an iommus property - platform devices are outside the coverage story, by assertion. | What enforcement covers must be what the map says it covers, checked not assumed. | boot invariant 2 |
+| INV-SMMU-3 | Identification is sane and stage-2 real: IDR0.S2P set, AArch64-only TTF, GRAN4K, SIDSIZE >= 8, OAS reported; anything degenerate is refused before a write. | Programming an unidentified unit is programming by hope. | host tests/smmu.rs probe suite; boot invariant 3 |
+| INV-SMMU-4 | Enforcement starts OFF - CR0ACK.SMMUEN reads clear before this kernel writes anything. | Enablement must be ours to prove; inherited state makes ordering claims untestable. | boot invariant 4 |
+| INV-SMMU-5 | The stage-2 domain is built entirely from OWNED frames minus the protected image span, and the allocator delta equals exactly the tables the walk built (stream table and queues publish separately). | Unaccounted table frames are precisely the memory DMA protection exists to guard. | boot invariant 5; host builder tests refuse image overlap and malformed geometry |
+| INV-SMMU-6 | The kernel image has NO leaf: the live audit counts ZERO image violations across every present entry. | The contract's sharpest promise on a second silicon family. | host audit proofs; boot invariant 6 |
+| INV-SMMU-7 | Every present function is granted an STE under the stream id the DECLARED iommu-map gives it (identity here); a requester without a binding refuses BY NAME. | Grants outside the declared map would be the kernel inventing authority the platform never gave. | boot invariant 7; host grant/revoke walker proofs |
+| INV-SMMU-8 | SoftIommu and the programmed shape agree: identity translation on sample spans, the image refused as IOVA and as physical target, per-device spaces distinct. | One enforcement story or two that can diverge - the mirror keeps the model honest. | boot invariant 8; host walker identity + cross-device proofs |
+| INV-SMMU-9 | Stream table and both queues publish with readback (STRTAB_BASE matches, geometry legal) while enforcement is still OFF; then enablement turns ON through the CR0->CR0ACK handshake and GERROR stays clean. | Tables under a live walker are undefined behavior; adoption plus ack is the difference between published and in-effect. | boot invariants 9+10; host controller end-to-end against the simulated unit |
+| INV-SMMU-10 | Enforcement REMAINS latched - SMMUEN still acked, pointers unchanged - LAYERED OVER the software DMA registry which still refuses unregistered addresses. | Layering makes both boundaries visible forever after the gate ends. | boot invariant 10 |
+
 
 ## INV-KEYMAP — what a scancode means (REQ-CON-003, ALET-P2-039, ADR-049)
 

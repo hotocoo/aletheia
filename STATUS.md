@@ -1,6 +1,6 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-25 (the IOMMU contract is programmed into real silicon — on x86-64 the kernel
+**As of:** 2026-08-26 (the IOMMU contract is programmed into real silicon — on x86-64 the kernel
 discovers the VT-d unit through ACPI DMAR/DRHD, programs an identity domain over owned frames with
 the kernel image punched out of it, adopts that domain via SRTP and turns enforcement ON, then
 proves live enforcement from the unit's own fault bank: the granted function walks clean, a
@@ -12,7 +12,23 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..073`.
 
-## Current wave — the IOMMU contract is programmed into real silicon (2026-08-25, ADR-073)
+## Current wave — the IOMMU contract crosses the ARM fence (2026-08-26, ADR-074)
+
+ALET-P1-018 advances to its second hardware rung. DELIVERY on aarch64: kernel_core::smmu programs
+the ARM SMMUv3 QEMU emulates on virt - discovered through the machine's own device tree, delivered over
+the firmware configuration channel (the same door as the custody anchor; direct -kernel ELF boots get
+NO DTB pointer at all - measured x0=0), stage-2-only identity domain over OWNED frames minus image, every
+present PCI function granted an STE under its DECLARED iommu-map stream id, stream table + command/event
+queues published with readback, enforcement enabled through CR0->CR0ACK and latched layered over the software
+DMA registry: a 10-invariant boot gate (smmu=10) on top of 15 host proofs against a simulated unit and a
+device-side walker built from the emulator's own decoder shapes. The virtio-pci transport moved ONCE into
+kernel-core (PciEnv seam) when this wave became its second consumer; the aarch64 kernel became its own PCI
+firmware (BAR sizing + assignment) because bare-metal boots run none. NAMED at the boundary: CLI-attached
+virtio-pci DMA does not traverse the legacy iommu=smmuv3 unit on QEMU 11.1 (abort-canary measured), so
+grant-serves/revocation-events stay open in the gap register beside ADR-073's completion-loss artifact.
+
+
+## Previous wave — the IOMMU contract is programmed into real silicon (2026-08-25, ADR-073)
 
 ALET-P1-018 advances to the first hardware rung. DELIVERY on x86-64:
 `kernel-core/src/vtd.rs` (the wire: register map, root/context encodings, second-level domain
@@ -49,7 +65,7 @@ Every QEMU gate gained a THIRD rootless boot proving absence seals the vault whi
 continues; marker maps gained vault=14 deliberately (ADR-061). Heap grew 8 -> 12 MiB on the DT
 targets to hold the resident custody state (ADR-063 posture).
 
-## Current wave — the IOMMU contract is modeled, not assumed (2026-08-23, ADR-071)
+## Previous wave — the IOMMU contract is modeled, not assumed (2026-08-23, ADR-071)
 
 ALET-P1-018 advances: `kernel-core/src/iommu.rs` defines and proves the full enforcement semantics
 of a hardware IOMMU as a software model (`SoftIommu`), so every proof runs on the host today and

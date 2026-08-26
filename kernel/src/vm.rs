@@ -19,6 +19,7 @@
 //! WB-WA walks · TTBR1 walks disabled (EPD1=1, higher-half deferred) · IPS 40-bit. Every block and
 //! page descriptor sets the **Access Flag (bit 10)** — an unset AF faults on first access.
 use crate::frames;
+use crate::frames::RAM_END;
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use kernel_core::deadva;
@@ -33,7 +34,7 @@ use kernel_core::vmaddr::{self, AddrPlan};
 const RAM_BASE: usize = 0x4000_0000;
 const UART_BASE: usize = 0x0900_0000;
 const BLOCK_2M: usize = 0x20_0000;
-const GIB: usize = 0x4000_0000;
+pub(crate) const GIB: usize = 0x4000_0000;
 
 // --- Translation-control register values ---------------------------------------------------
 /// MAIR_EL1: attr0 = Normal WB R/W-alloc (0xFF), attr1 = Device-nGnRnE (0x00).
@@ -467,6 +468,24 @@ pub fn leaf_of(root: usize, va: usize) -> Option<(u64, usize)> {
     }
 }
 
+/// The block-aligned span the identity map builds with 4 KiB pages and every mapping API
+/// refuses - the span an IOMMU domain must punch out too (ADR-074).
+pub fn protected_span() -> (usize, usize) {
+    image_split_span()
+}
+
+/// True when pa lies inside a region THIS kernel maps 1:1: RAM up to RAM_END, or the
+/// Device-mapped peripheral GiB below it. Every raw-physical read the late boot performs goes
+/// through this guard, because the identity map is the only window the kernel has.
+pub fn is_mapped_identity(pa: usize) -> bool {
+    (RAM_BASE..RAM_END).contains(&pa) || pa < GIB
+}
+
+/// A byte slice over identity-mapped physical memory, bounds-checked by is_mapped_identity.
+/// The 'static lifetime is honest: the identity map outlives every suite this kernel runs.
+///
+/// # Safety-free contract
+/// Returns None rather than forming a slice over anything the map does not cover.
 /// Permissions of the leaf that maps `va`, decoded into the arch-neutral model (REQ-MM-006).
 fn attrs_of(root: usize, va: usize) -> Option<PageAttrs> {
     leaf_of(root, va).map(|(entry, level)| Tables.decode(entry, level))

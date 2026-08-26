@@ -91,7 +91,7 @@ pub fn open_block(nth: usize) -> Option<VirtioBlk> {
     // `X86Virtio::alloc_frame` hands out identity-mapped frames this kernel owns exclusively.
     unsafe {
         let bdf = pci::find_virtio_blk_nth(nth)?;
-        let transport = PciTransport::new(bdf).ok()?;
+        let transport = pci::transport_new(bdf).ok()?;
         let regions = transport.regions();
         let (dev, report) = VirtioBlk::init(transport).ok()?;
         log_report(bdf, regions, &report);
@@ -131,7 +131,7 @@ pub fn network_device() -> Option<Result<Net, virtionet::NetError>> {
     // regions (refusing RAM), and the frames handed to the device are identity-mapped and ours.
     unsafe {
         let bdf = pci::find_virtio_net_nth(0)?;
-        let transport = match PciTransport::new(bdf) {
+        let transport = match pci::transport_new(bdf) {
             Ok(t) => t,
             Err(e) => {
                 kprintln!("[net] transport setup failed: {}", e);
@@ -159,7 +159,7 @@ pub fn graphics_device() -> Option<Result<Gpu, virtiogpu::GpuError>> {
     // register regions (refusing RAM), and the frames handed to the device are identity-mapped.
     unsafe {
         let bdf = pci::find_virtio_gpu_nth(0)?;
-        let transport = match PciTransport::new(bdf) {
+        let transport = match pci::transport_new(bdf) {
             Ok(t) => t,
             Err(e) => {
                 kprintln!("[gpu] transport setup failed: {}", e);

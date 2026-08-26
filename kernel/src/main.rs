@@ -27,12 +27,15 @@ mod uart;
 mod arch;
 mod bench;
 mod conirq;
+mod dtb;
 mod frames;
 mod fwcfg;
 mod hal;
 mod heap;
+mod pci;
 mod semihosting;
 mod shellio;
+mod smmu;
 mod smp;
 mod usermode;
 mod virtio;
@@ -47,6 +50,10 @@ use kernel_core::{selftest, spine};
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     use hal::{ActiveHal, Hal};
+    // Device-tree discovery runs BEFORE any frame churns: the DTB lives in RAM the frame
+    // pool manages, so a late parse could read buffers long since handed out (ADR-074).
+    smmu::discover_early();
+
     kprintln!("========================================");
     kprintln!(
         " Aletheia microkernel — HAL backend: {}",
@@ -794,6 +801,27 @@ pub extern "C" fn kmain() -> ! {
         Err((idx, name)) => {
             kprintln!("[console] FAILED at console invariant {}: {}", idx, name);
             semihosting::exit(250 + idx as i32);
+        }
+    }
+
+    // The SMMUv3 hardware rung (ALET-P1-018, ADR-074): discovered from the device tree,
+    // programmed behind the shared contract seams, enforcement ON and proved live - LAST,
+    // because what it turns on stays on until halt. Skips green, naming why, when the
+    // platform declares no unit or no PCIe device rides behind it.
+    kprintln!("");
+    kprintln!("--- smmuv3 selftests (the IOMMU contract meets ARM silicon) ---");
+    match smmu::suite(&mut |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(0) => {}
+        Ok(n) => kprintln!("[smmu] ALL {} SMMUV3 INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[smmu] FAILED at smmuv3 invariant {}: {}", idx, name);
+            semihosting::exit(480 + idx as i32);
         }
     }
 
