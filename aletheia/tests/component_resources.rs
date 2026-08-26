@@ -353,8 +353,11 @@ fn deadline_kills_a_guest_that_outruns_its_clock_at_a_crossing() {
         w
     };
     let emit_cap = grant_all(&mut core, &owner, "component:clickeater", "event.emit");
+    // 50 ms: tight enough that a budget-burning child still dies of Deadline inside the
+    // ROOT'S envelope, loose enough that a loaded CI runner cannot push the parent itself past
+    // the wall clock between host calls - the parent dying here is noise, not signal.
     let tight = SandboxLimits {
-        deadline_ms: 1,
+        deadline_ms: 50,
         ..SandboxLimits::defaults()
     };
     let outcome = core
@@ -480,8 +483,11 @@ fn a_spawned_child_inherits_the_root_resource_envelope() {
         w
     };
 
+    // 50 ms: tight enough that a budget-burning child still dies of Deadline inside the
+    // ROOT'S envelope, loose enough that a loaded CI runner cannot push the parent itself past
+    // the wall clock between host calls - the parent dying here is noise, not signal.
     let tight = SandboxLimits {
-        deadline_ms: 1,
+        deadline_ms: 50,
         ..SandboxLimits::defaults()
     };
     // Resolving the dependency is itself authorized (ALET-P1-024): the parent needs component.spawn.

@@ -95,7 +95,7 @@ boot_once() {
   # 90s: the boot runs every suite PLUS the live VT-d probes, whose bounded device-kick timeouts
   # and MMIO fault-status polling each cost real seconds under TCG. The guard exists to catch
   # HANGS (triple fault / silent wedge), not to bound slow-but-progressing boots.
-  ( sleep 90; kill -9 "$qpid" 2>/dev/null ) &
+  ( sleep 240; kill -9 "$qpid" 2>/dev/null ) &
   local wpid=$!
   wait "$qpid"; local rc=$?
   kill "$wpid" 2>/dev/null

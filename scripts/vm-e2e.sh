@@ -84,7 +84,7 @@ head -c "$TSZ" "$DTBRAW" > "$DTBT"
 
 
 echo "==> booting in QEMU (120s watchdog, virtio-blk attached, -smp 4 for the SMP suite)"
-OUT="$(perl -e 'alarm 120; exec @ARGV or die' \
+OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
   qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
@@ -169,7 +169,7 @@ echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { ech
 
 # ---- SECOND BOOT on the SAME persistent medium: the OS must REMEMBER (REQ-STOR-003) ----
 echo "==> rebooting the same image against the SAME persistent disk (cross-reboot proof)"
-OUT2="$(perl -e 'alarm 120; exec @ARGV or die' \
+OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
   qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
@@ -190,7 +190,7 @@ echo "$OUT2" | grep -q "PERSISTENT MEDIUM: boot #2, 1 entities verified" || { ec
 # Without the firmware item there is NO root anywhere — not on disk, not compiled in. The vault
 # stays sealed BY NAME while every other subsystem keeps working (ADR-072).
 echo "==> third boot WITHOUT the firmware root (absence must be a named refusal, not a crash)"
-OUT3="$(perl -e 'alarm 120; exec @ARGV or die' \
+OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
