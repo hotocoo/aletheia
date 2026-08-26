@@ -65,6 +65,19 @@ structured_output = "gbnf-grammar"
 #   export MODEL_ENDPOINT=http://localhost:8081                 # AiConfig::resolve override
 #   aletheiad model use aletheia-lm                             # -> `serving: yes — aletheia-lm`
 #
+# ---------------------------------------------------------------------------
+# v4 run notes (2026-08-26). Designed at 3.036B, then resized THE SAME DAY to the
+# measured wall-clock-loss frontier of this box: 1.183B total under the SAME
+# Llama-family contract (d=2048 x 24 layers, GQA 16/4 hd128, SwiGLU 5632, RoPE
+# 500k, tied embeddings — still NO sliding-window/QK-norm so llama.cpp's plain
+# llama arch can express it and Unsloth can quantize to UD-IQ4_NL without
+# surgery; the 3B shape stays in git history for a cloud-GPU rerun where it is
+# genuinely the right size). Tokenizer is aletheia_tok_v4: byte-level BPE at
+# 49,152, fitted on code + prose
+# (Wikipedia-en, FineWeb-Edu). Weights train bf16 end to end; export_hf.py in
+# dl/src/aletheia_lm writes the HF dir for later UD-IQ4_NL conversion. Context
+# stays 2048: that is what the weights are trained at. See dl/docs/PRETRAIN-3B.md.
+# ---------------------------------------------------------------------------
 # `model bench` over that seam planned 0/6 operations (`InvalidOutput`, median 10.9 s), which is the
 # CORRECT result for a base model 5,500 steps into a 500,000-step run: the call connected, was
 # timed, and was rejected on content rather than falling back to the deterministic interpreter.
