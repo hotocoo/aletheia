@@ -592,8 +592,8 @@ pub fn dmar_suite(
         if let Some((idx, rec)) = scan_faults(&mut ctrl, &lay) {
             bail!(
                 format_args!(
-                    "the unit faulted a GRANTED function: FRCD[{}] sid={:#06x} reason={}",
-                    idx, rec.source_id, rec.reason
+                    "the unit faulted a GRANTED function: FRCD[{}] sid={:#06x} reason={} addr={:#x} read={}",
+                    idx, rec.source_id, rec.reason, rec.address, rec.was_read
                 ),
                 NAME_11
             );
