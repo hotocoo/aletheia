@@ -218,12 +218,16 @@ pub unsafe fn resolve_virtio_regions(
             {
                 let pa = bar_base_pa(env, bdf, bar)?;
                 let mlen = length.max(1) as usize;
-                let addr = match env.map_region(pa, mlen) {
+                // Map [pa+offset, pa+offset+len): the capability OFFSET names where this
+                // register block lives INSIDE the BAR, so mapping the BAR base alone leaves
+                // every non-zero-offset region (device cfg on q35 sits at +0x2000)
+                // untranslated - found live when the x86 gate flooded ring-3 #PFs.
+                let addr = match env.map_region(pa + offset as u64, mlen) {
                     Some(a) => a,
                     None => return Err("virtio-pci register region could not be mapped"),
                 };
                 let region = CapRegion {
-                    addr: addr + offset as usize,
+                    addr,
                     len: length,
                 };
                 match cfg_type {
@@ -361,6 +365,19 @@ impl PciTransport {
             self.device_cfg.addr,
             self.notify_off_multiplier,
         )
+    }
+
+    /// Assemble a transport from ALREADY-RESOLVED regions - lets a target's gate resolve first,
+    /// log what it resolved, and still hand the standard transport to the driver.
+    pub fn from_parts(r: VirtioPciRegions) -> Self {
+        PciTransport {
+            common: r.common,
+            notify: r.notify,
+            notify_off_multiplier: r.notify_off_multiplier,
+            device_cfg: r.device_cfg,
+            notify_off: 0,
+            device_id: r.device_id,
+        }
     }
 
     /// Latch the selected queue's notify offset - called once after queue select (via
