@@ -1,0 +1,433 @@
+{
+  "tool": "lethe_train.py (REQ-ML-006, ADR-077)",
+  "deterministic_seed_train": 7799,
+  "deterministic_seed_heldout": 45323,
+  "traces": {
+    "train": 300,
+    "heldout": 300,
+    "steps": 256
+  },
+  "platform": {
+    "ladder_khz": [
+      800000,
+      1200000,
+      2000000,
+      2400000,
+      2800000
+    ],
+    "ladder_mv": [
+      700,
+      800,
+      900,
+      1000,
+      1100
+    ],
+    "nominal_idx": 2,
+    "trip_mc": 95000,
+    "ramp_ticks": 2,
+    "wake_penalty": {
+      "1": 1,
+      "2": 3
+    },
+    "park_energy": {
+      "1": 0.35,
+      "2": 0.1
+    }
+  },
+  "trees": {
+    "freq_nodes": 9,
+    "idle_nodes": 5
+  },
+  "results": {
+    "baseline_adr076": {
+      "shortfall": 0.017434895833333332,
+      "energy": 0.45368088348765373,
+      "score": 0.6280298418209871
+    },
+    "eager_park_c2": {
+      "shortfall": 0.018575520833333335,
+      "energy": 0.44100591161908415,
+      "score": 0.6267611199524175
+    },
+    "hysteresis_tuned": {
+      "shortfall": 0.012020833333333345,
+      "energy": 0.5673786100662294,
+      "score": 0.6875869433995628
+    },
+    "lethe": {
+      "shortfall": 0.015838541666666678,
+      "energy": 0.4515739627539861,
+      "score": 0.6099593794206528
+    },
+    "always_nominal": {
+      "shortfall": 0.001065104166666667,
+      "energy": 0.9967187500000075,
+      "score": 1.0073697916666742
+    },
+    "always_low": {
+      "shortfall": 0.26010677083333317,
+      "energy": 0.09679012345679106,
+      "score": 2.6978578317901225
+    }
+  },
+  "per_regime": {
+    "baseline_adr076": {
+      "idle": {
+        "shortfall": 0.0,
+        "energy": 0.09679012345679065,
+        "score": 0.09679012345679065,
+        "traces": 49
+      },
+      "ramp": {
+        "shortfall": 0.0023437500000000016,
+        "energy": 0.4848087647306389,
+        "score": 0.5082462647306389,
+        "traces": 44
+      },
+      "staccato": {
+        "shortfall": 0.05616918103448274,
+        "energy": 0.5212672945934431,
+        "score": 1.0829591049382707,
+        "traces": 29
+      },
+      "sawtooth": {
+        "shortfall": 0.01779513888888889,
+        "energy": 0.4176248856881571,
+        "score": 0.595576274577046,
+        "traces": 27
+      },
+      "bursty": {
+        "shortfall": 0.025605867346938767,
+        "energy": 0.6011900431468884,
+        "score": 0.8572487166162761,
+        "traces": 98
+      },
+      "steady": {
+        "shortfall": 0.009596108490566036,
+        "energy": 0.4664285974260425,
+        "score": 0.5623896823317028,
+        "traces": 53
+      }
+    },
+    "eager_park_c2": {
+      "idle": {
+        "shortfall": 0.0,
+        "energy": 0.016685971552972967,
+        "score": 0.016685971552972967,
+        "traces": 49
+      },
+      "ramp": {
+        "shortfall": 0.0023437500000000016,
+        "energy": 0.4696842557519631,
+        "score": 0.4931217557519631,
+        "traces": 44
+      },
+      "staccato": {
+        "shortfall": 0.05616918103448274,
+        "energy": 0.5212672945934431,
+        "score": 1.0829591049382707,
+        "traces": 29
+      },
+      "sawtooth": {
+        "shortfall": 0.01779513888888889,
+        "energy": 0.4601175983081844,
+        "score": 0.6380689871970733,
+        "traces": 27
+      },
+      "bursty": {
+        "shortfall": 0.02909757653061224,
+        "energy": 0.5979856042532748,
+        "score": 0.8889613695593972,
+        "traces": 98
+      },
+      "steady": {
+        "shortfall": 0.009596108490566036,
+        "energy": 0.46557618324889366,
+        "score": 0.5615372681545541,
+        "traces": 53
+      }
+    },
+    "hysteresis_tuned": {
+      "idle": {
+        "shortfall": 0.0,
+        "energy": 0.03368797880842156,
+        "score": 0.03368797880842156,
+        "traces": 49
+      },
+      "ramp": {
+        "shortfall": 0.00078125,
+        "energy": 0.5503334341680707,
+        "score": 0.5581459341680707,
+        "traces": 44
+      },
+      "staccato": {
+        "shortfall": 0.05616918103448274,
+        "energy": 0.5212672945934431,
+        "score": 1.0829591049382707,
+        "traces": 29
+      },
+      "sawtooth": {
+        "shortfall": 0.006163194444444446,
+        "energy": 0.4837765060585272,
+        "score": 0.5454084505029716,
+        "traces": 27
+      },
+      "bursty": {
+        "shortfall": 0.01662149234693877,
+        "energy": 0.7860856205908292,
+        "score": 0.9523005440602169,
+        "traces": 98
+      },
+      "steady": {
+        "shortfall": 0.002785966981132077,
+        "energy": 0.7383602439654668,
+        "score": 0.7662199137767877,
+        "traces": 53
+      }
+    },
+    "lethe": {
+      "idle": {
+        "shortfall": 0.0,
+        "energy": 0.016685971552972967,
+        "score": 0.016685971552972967,
+        "traces": 49
+      },
+      "ramp": {
+        "shortfall": 0.0023437500000000016,
+        "energy": 0.46967721650094596,
+        "score": 0.49311471650094596,
+        "traces": 44
+      },
+      "staccato": {
+        "shortfall": 0.03677262931034482,
+        "energy": 0.6493398121541076,
+        "score": 1.0170661052575558,
+        "traces": 29
+      },
+      "sawtooth": {
+        "shortfall": 0.01779513888888889,
+        "energy": 0.4176248856881571,
+        "score": 0.595576274577046,
+        "traces": 27
+      },
+      "bursty": {
+        "shortfall": 0.026506696428571428,
+        "energy": 0.6038148802634475,
+        "score": 0.8688818445491618,
+        "traces": 98
+      },
+      "steady": {
+        "shortfall": 0.009507665094339623,
+        "energy": 0.4661923389092711,
+        "score": 0.5612689898526673,
+        "traces": 53
+      }
+    },
+    "always_nominal": {
+      "idle": {
+        "shortfall": 0.0,
+        "energy": 0.9967187499999995,
+        "score": 0.9967187499999995,
+        "traces": 49
+      },
+      "ramp": {
+        "shortfall": 0.0,
+        "energy": 0.9967187499999995,
+        "score": 0.9967187499999995,
+        "traces": 44
+      },
+      "staccato": {
+        "shortfall": 0.00234375,
+        "energy": 0.9967187499999997,
+        "score": 1.0201562499999997,
+        "traces": 29
+      },
+      "sawtooth": {
+        "shortfall": 0.0,
+        "energy": 0.9967187499999997,
+        "score": 0.9967187499999997,
+        "traces": 27
+      },
+      "bursty": {
+        "shortfall": 0.0018973214285714314,
+        "energy": 0.9967187499999995,
+        "score": 1.0156919642857138,
+        "traces": 98
+      },
+      "steady": {
+        "shortfall": 0.0012382075471698104,
+        "energy": 0.9967187499999995,
+        "score": 1.0091008254716975,
+        "traces": 53
+      }
+    },
+    "always_low": {
+      "idle": {
+        "shortfall": 0.0,
+        "energy": 0.09679012345679065,
+        "score": 0.09679012345679065,
+        "traces": 49
+      },
+      "ramp": {
+        "shortfall": 0.274289772727273,
+        "energy": 0.09679012345679062,
+        "score": 2.8396878507295202,
+        "traces": 44
+      },
+      "staccato": {
+        "shortfall": 0.30307112068965514,
+        "energy": 0.09679012345679065,
+        "score": 3.1275013303533417,
+        "traces": 29
+      },
+      "sawtooth": {
+        "shortfall": 0.2442418981481488,
+        "energy": 0.09679012345679067,
+        "score": 2.539209104938279,
+        "traces": 27
+      },
+      "bursty": {
+        "shortfall": 0.3644690688775507,
+        "energy": 0.09679012345679065,
+        "score": 3.741480812232297,
+        "traces": 98
+      },
+      "steady": {
+        "shortfall": 0.28040978773584874,
+        "energy": 0.09679012345679068,
+        "score": 2.9008880008152778,
+        "traces": 53
+      }
+    }
+  },
+  "sensitivity_ramp": {
+    "ramp_0": {
+      "baseline_adr076": {
+        "shortfall": 0.0,
+        "energy": 0.46315702803497855,
+        "score": 0.46315702803497855
+      },
+      "lethe": {
+        "shortfall": 0.0,
+        "energy": 0.4588658452289091,
+        "score": 0.4588658452289091
+      },
+      "hysteresis_tuned": {
+        "shortfall": 0.0,
+        "energy": 0.5756744948398921,
+        "score": 0.5756744948398921
+      }
+    },
+    "ramp_1": {
+      "baseline_adr076": {
+        "shortfall": 0.0,
+        "energy": 0.46315702803497855,
+        "score": 0.46315702803497855
+      },
+      "lethe": {
+        "shortfall": 0.0005260416666666668,
+        "energy": 0.4581500337577157,
+        "score": 0.46341045042438234
+      },
+      "hysteresis_tuned": {
+        "shortfall": 0.0,
+        "energy": 0.5756744948398921,
+        "score": 0.5756744948398921
+      }
+    },
+    "ramp_2": {
+      "baseline_adr076": {
+        "shortfall": 0.017434895833333332,
+        "energy": 0.45368088348765373,
+        "score": 0.6280298418209871
+      },
+      "lethe": {
+        "shortfall": 0.015838541666666678,
+        "energy": 0.4515739627539861,
+        "score": 0.6099593794206528
+      },
+      "hysteresis_tuned": {
+        "shortfall": 0.012020833333333345,
+        "energy": 0.5673786100662294,
+        "score": 0.6875869433995628
+      }
+    },
+    "ramp_4": {
+      "baseline_adr076": {
+        "shortfall": 0.04518489583333336,
+        "energy": 0.43594717721193366,
+        "score": 0.8877961355452673
+      },
+      "lethe": {
+        "shortfall": 0.038260416666666686,
+        "energy": 0.4418503813818157,
+        "score": 0.8244545480484826
+      },
+      "hysteresis_tuned": {
+        "shortfall": 0.03272656249999999,
+        "energy": 0.5516206625353651,
+        "score": 0.878886287535365
+      }
+    },
+    "alpha_1": {
+      "baseline_adr076": {
+        "score": 0.4711157793209871
+      },
+      "eager_park_c2": {
+        "score": 0.4595814324524175
+      },
+      "hysteresis_tuned": {
+        "score": 0.5793994433995627
+      },
+      "lethe": {
+        "score": 0.46741250442065274
+      },
+      "always_nominal": {
+        "score": 0.9977838541666743
+      },
+      "always_low": {
+        "score": 0.3568968942901242
+      }
+    },
+    "alpha_3": {
+      "baseline_adr076": {
+        "score": 0.5059855709876537
+      },
+      "eager_park_c2": {
+        "score": 0.49673247411908417
+      },
+      "hysteresis_tuned": {
+        "score": 0.6034411100662294
+      },
+      "lethe": {
+        "score": 0.49908958775398615
+      },
+      "always_nominal": {
+        "score": 0.9999140625000076
+      },
+      "always_low": {
+        "score": 0.8771104359567906
+      }
+    },
+    "alpha_10": {
+      "baseline_adr076": {
+        "score": 0.6280298418209871
+      },
+      "eager_park_c2": {
+        "score": 0.6267611199524175
+      },
+      "hysteresis_tuned": {
+        "score": 0.6875869433995628
+      },
+      "lethe": {
+        "score": 0.6099593794206528
+      },
+      "always_nominal": {
+        "score": 1.0073697916666742
+      },
+      "always_low": {
+        "score": 2.6978578317901225
+      }
+    }
+  }
+}

@@ -49,6 +49,8 @@ pub mod iommu;
 pub mod ipc;
 pub mod keymap;
 pub mod layout;
+pub mod lethe;
+pub mod lethe_contract;
 pub mod memattr;
 pub mod mlrisk;
 pub mod mlrisk_contract;

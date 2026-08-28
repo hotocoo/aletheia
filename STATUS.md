@@ -1,6 +1,19 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-28 (THE POWER/PERFORMANCE CONTRACT is modeled, not assumed — frequency is
+**As of:** 2026-08-28 (LETHE — the resident performance advisor — advises the
+power/performance contract: `kernel-core/src/lethe.rs` verifies a frozen integer model (two
+decision trees in one `ALTH1` blob, a 12-feature contract hash making moved feature meanings a
+named refusal) and its advised governor path consults it once per domain per step — FREQ advice
+(Coast/Hold/Boost; Boost pins the top of the governor range) from demand history, churn, dwell
+and thermal margin, IDLE advice (Stay/Shallow/Deep) for zero-demand domains; ADVISORY by
+construction: with the advisor absent or abstaining the advised path is bit-identical to the
+ADR-076 baseline governor, with it present the overclock band stays authority-only and demanded
+silicon is never parked; parity with the trainer is a committed fixture replayed through the
+live observer at every boot — 12 boot invariants on all three targets, seven pinned cross-CPU,
+13 host proofs, and a vendored comparative benchmark where Lethe beats the ADR-076 baseline by
+2.88% and a TUNED classic hysteresis by 11.29% under the documented cost model, losing the
+bursty regime and saying so — REQ-ML-006, ADR-077); before that: 2026-08-28 (THE
+POWER/PERFORMANCE CONTRACT is modeled, not assumed — frequency is
 AUTHORITY and heat is a HARD CEILING: `kernel-core/src/pm.rs` gives every domain an honest
 discrete ladder, keeps the governor range free to any caller, gates the overclock band behind
 live per-domain elevation grants that attenuate on delegation and clamp the domain back to
@@ -23,7 +36,54 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..075`.
 
-## Current wave — the power/performance contract is modeled, not assumed (2026-08-28, ADR-076)
+## Current wave — Lethe, the resident performance advisor (2026-08-28, ADR-077)
+
+The power/performance contract (ADR-076) made frequency AUTHORITY and heat a HARD CEILING; this
+wave gives its governor a MEMORY that obeys it. `kernel-core/src/lethe_contract.rs` + `kernel-core/src/lethe.rs`
+define the 12-feature contract (demand history over 16 samples, dwell at the current point,
+churn in the last 16 steps, reported temperature against the trip margin, the point's share of
+the governor range) and the advisor: two decision trees packed into `models/lethe_pm.alth`,
+verified at load against ten named refusals — including a CYCLE check (load walks each tree
+with a visited set, because an evaluate-time loop would be a hang, not an error) and an
+inverted training box (the range guard must be able to fire). `govern_advised` observes the
+live state EXCLUSIVELY (history strictly before the advice acts), consults the advisor, and
+acts only through the contract's own named APIs — `request_index`, `wake`, `enter_idle` — so
+every act is audited and every refusal named.
+
+The advisor proposes; the contract disposes. The suite proves the sharp edges: with a
+full-ceiling grant MINTED and the advisor decisive, no reachable point exceeds nominal; parks
+happen only at zero demand; residency is monotone and wake latency is a sum of real wake costs;
+the census accounts for every consultation; and with the advisor ABSENT — or abstaining on a
+collapsed training box — the advised path drives the machine through the SAME clock sequence as
+the untouched `govern` baseline. `PmEngine::govern` is byte-for-byte unchanged.
+
+Proofs: 13 host tests in kernel-core/tests/lethe.rs (the full mutation table for every named
+refusal, contract/blob agreement, fixture parity with determinism, the absent- and
+abstaining-advisor equivalence sweeps over randomized multi-regime traces, the safety sweep,
+engine-level determinism including the ledger, ledger wraparound, observer bounds with
+features in-domain for arbitrary streams, degenerate-input withholding, a REPORTED advice-cost
+measurement of ~370 ns/advice in a debug build), plus the 12 invariants booting on all three
+targets (`[lethe] ALL 12 LETHE ADVISOR INVARIANTS HOLD`, boot fails 580+i), seven pinned
+cross-CPU in the conformance contract. The marker maps changed deliberately (lethe=12,
+ADR-061).
+
+The benchmark proof is vendored (docs/evidence/lethe006): a deterministic trainer/exporter
+(six workload regimes with a thermal stand-in that heats on the clock each arm ran at;
+cost-sensitive depth-3 CART on expected per-row cost; K=16 class-consistent counterfactual
+rollout labels; two DAgger rounds on the policy's own trajectory) plus the six-arm comparison
+on 300 held-out traces — ADR-076 baseline, eager C2 parker, TUNED classic hysteresis, Lethe,
+always-nominal, always-low — under a documented cost model (ramp 2 steps, wake penalties 1/3
+steps, CV² energy with the ladder's own mV, unmet work weighted 10× energy with the α sweep
+published). Lethe 0.6100 vs baseline 0.6280 (+2.88%) and hysteresis 0.6876 (+11.29%),
+dominating the baseline on BOTH components; the per-regime decomposition shows the lead is the
+idle policy (0.017 vs 0.097 on idle regimes) and Boost's anti-churn pinning (staccato 1.017 vs
+1.083), with the bursty regime honestly LOST (0.869 vs 0.857). Named non-claims, in the
+register: the numbers live in the simulator's cost model (the kernel models transitions as
+free); no live governor thread exists yet (residency = wired into the model's govern path and
+proved at boot, the pre-REQ-ML-003 posture); the corpus is synthetic — this says nothing about
+real silicon or real operating systems.
+
+## Previous wave — the power/performance contract is modeled, not assumed (2026-08-28, ADR-076)
 
 ALET-P2-022 leaves the deferred column. The wave answers the OS's overclocking promise the way
 this kernel answers every privileged act: frequency is AUTHORITY, heat is a HARD CEILING.

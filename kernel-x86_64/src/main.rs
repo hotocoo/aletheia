@@ -467,6 +467,38 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // Lethe (REQ-ML-006, ADR-077): the resident performance advisor for the power/performance
+    // contract - a frozen integer model (two decision trees, ALTH1) consulted by the advised
+    // governor path. The suite proves the advisory discipline on the live path: with Lethe
+    // present the overclock band stays authority-only and demanded silicon is never parked;
+    // with the advisor absent or abstaining the advised path is bit-identical to the ADR-076
+    // baseline governor; every way the blob can be wrong is a named refusal; and parity with
+    // the trainer is a committed fixture replayed through the live observer.
+    kprintln!("");
+    kprintln!("--- lethe advisor selftests (the power governor learns) ---");
+    match kernel_core::lethe::Advisor::load(kernel_core::lethe::BUNDLED_ADVISOR) {
+        Ok(a) => kprintln!(
+            "[lethe] bundled advisor: {} freq nodes, {} idle nodes, worst case {} node visits per walk",
+            a.shape().0,
+            a.shape().1,
+            a.shape().2
+        ),
+        Err(e) => kprintln!("[lethe] bundled advisor REFUSED: {:?}", e),
+    }
+    match kernel_core::lethe::lethe_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[lethe] ALL {} LETHE ADVISOR INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[lethe] FAILED at lethe invariant {}: {}", idx, name);
+            ActiveHal::exit(580 + idx as i32);
+        }
+    }
+
     // the advisory property itself — an abstaining model schedules bit-identically to the model-free
     // kernel, and priority is never traded for risk — alongside exact parity with the trainer and a
     // NAMED refusal for every way a blob can be wrong. The printed invariant NAME is the

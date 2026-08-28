@@ -482,9 +482,9 @@ impl PmEngine {
         offered: &[u64],
         now: u64,
     ) -> Result<(), PmFault> {
-        let (idx, nominal_khz) = match self.domain(domain) {
+        let idx = match self.domain(domain) {
             Some(d) => match d.ladder.iter().position(|p| p.khz == khz) {
-                Some(i) => (i, d.ladder[d.nominal_idx].khz),
+                Some(i) => i,
                 None => {
                     self.record(false, domain, khz, "not-an-operating-point", "");
                     return Err(PmFault::NotAnOperatingPoint { domain, khz });
@@ -495,6 +495,48 @@ impl PmEngine {
                 return Err(PmFault::UnknownDomain(domain));
             }
         };
+        self.request_at(domain, idx, offered, now)
+    }
+
+    /// Request an operating point by LADDER INDEX — the advised path's entry (its advisor
+    /// reasons in indices, not kHz). Same contract, same refusals, same records as
+    /// [`Self::request_point`]; an out-of-range index is refused with `NotAnOperatingPoint`
+    /// carrying the index in the `khz` field.
+    pub fn request_index(
+        &mut self,
+        domain: u32,
+        idx: usize,
+        offered: &[u64],
+        now: u64,
+    ) -> Result<(), PmFault> {
+        match self.domain(domain) {
+            Some(d) => {
+                if d.ladder.get(idx).is_none() {
+                    self.record(false, domain, 0, "not-an-operating-point", "");
+                    return Err(PmFault::NotAnOperatingPoint { domain, khz: 0 });
+                }
+            }
+            None => {
+                self.record(false, domain, 0, "unknown-domain", "");
+                return Err(PmFault::UnknownDomain(domain));
+            }
+        }
+        self.request_at(domain, idx, offered, now)
+    }
+
+    /// The shared body of both request forms: `idx` and its `khz` are already resolved.
+    fn request_at(
+        &mut self,
+        domain: u32,
+        idx: usize,
+        offered: &[u64],
+        now: u64,
+    ) -> Result<(), PmFault> {
+        let khz = self.domain(domain).map(|d| d.ladder[idx].khz).unwrap_or(0);
+        let nominal_khz = self
+            .domain(domain)
+            .map(|d| d.ladder[d.nominal_idx].khz)
+            .unwrap_or(0);
         if khz > nominal_khz {
             // Cooldown gates the band FIRST: even a valid grant waits out the trip.
             if let Some(remaining) = self.cooldown_remaining(domain, now) {
@@ -738,6 +780,46 @@ impl PmEngine {
             .iter()
             .find(|(d, _)| *d == device)
             .map(|(_, s)| *s)
+    }
+
+    // -- observation for the advised path (read-only; ADR-077) ------------------
+    //
+    // The Lethe advisor needs a read view of the live state to derive its features from. These
+    // accessors expose exactly what derivation needs and nothing a caller could MUTATE with —
+    // every act still goes through the named methods above, so the advised path can observe
+    // but never bypass the contract.
+
+    /// The registered domain ids, in registration order.
+    pub fn domain_ids(&self) -> Vec<u32> {
+        self.domains.iter().map(|d| d.id).collect()
+    }
+
+    /// The demand register of a domain (0..=100).
+    pub fn demand(&self, domain: u32) -> Option<u8> {
+        self.domain(domain).map(|d| d.demand_pct)
+    }
+
+    /// Index into the domain's ladder of its current operating point.
+    pub fn point_index(&self, domain: u32) -> Option<usize> {
+        self.domain(domain).map(|d| d.current_idx)
+    }
+
+    /// `(nominal_idx, span)` — the index of the top of the governor range and the number of
+    /// points it contains (`span == nominal_idx + 1`).
+    pub fn governor_shape(&self, domain: u32) -> Option<(usize, usize)> {
+        self.domain(domain)
+            .map(|d| (d.nominal_idx, d.nominal_idx + 1))
+    }
+
+    /// The domain's thermal trip point, in milli-degrees C.
+    pub fn trip_temp_mc(&self, domain: u32) -> Option<i32> {
+        self.domain(domain).map(|d| d.trip_temp_mc)
+    }
+
+    /// The state a domain is parked in, `None` when it is running (C0).
+    pub fn idle_state(&self, domain: u32) -> Option<IdleState> {
+        self.domain(domain)
+            .and_then(|d| d.idle_enter.map(|(s, _)| s))
     }
 
     // -- observation ---------------------------------------------------------
