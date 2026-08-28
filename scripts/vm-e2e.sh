@@ -104,56 +104,59 @@ echo "vm exit code: $CODE"
 
 fail=0
 [ "$CODE" -eq 0 ] || { echo "FAIL: expected exit 0, got $CODE"; fail=1; }
-echo "$OUT" | grep -q "ALL 13 INVARIANTS HOLD"        || { echo "FAIL: spine invariants marker missing"; fail=1; }
-echo "$OUT" | grep -q "ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD" || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
-echo "$OUT" | grep -q "ALL 9 IOMMU-CONTRACT INVARIANTS HOLD" || { echo "FAIL: iommu-contract invariants marker missing (ALET-P1-018, ADR-071)"; fail=1; }
-echo "$OUT" | grep -q "ALL 10 SMMUV3 INVARIANTS HOLD" || { echo "FAIL: smmuv3 invariants marker missing (ALET-P1-018, ADR-074)"; fail=1; }
-echo "$OUT" | grep -q "enforcement LIVE" || { echo "FAIL: smmuv3 enforcement never turned ON"; fail=1; }
+echo "$OUT" | grep "ALL 13 INVARIANTS HOLD" >/dev/null        || { echo "FAIL: spine invariants marker missing"; fail=1; }
+echo "$OUT" | grep "ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD" >/dev/null || { echo "FAIL: capability-lifetime invariants marker missing (REQ-CAP-008)"; fail=1; }
+echo "$OUT" | grep "ALL 9 IOMMU-CONTRACT INVARIANTS HOLD" >/dev/null || { echo "FAIL: iommu-contract invariants marker missing (ALET-P1-018, ADR-071)"; fail=1; }
+# Frequency is authority, heat is a hard ceiling (ALET-P2-022, ADR-076): the OC band needs a
+# live grant, the envelope is absolute, trips clamp and cool, the governor never overclocks.
+echo "$OUT" | grep "ALL 14 POWER-PERFORMANCE INVARIANTS HOLD" >/dev/null || { echo "FAIL: power-performance invariants marker missing (ALET-P2-022, ADR-076)"; fail=1; }
+echo "$OUT" | grep "ALL 10 SMMUV3 INVARIANTS HOLD" >/dev/null || { echo "FAIL: smmuv3 invariants marker missing (ALET-P1-018, ADR-074)"; fail=1; }
+echo "$OUT" | grep "enforcement LIVE" >/dev/null || { echo "FAIL: smmuv3 enforcement never turned ON"; fail=1; }
 # Custody crosses the platform boundary (ALET-P1-034, ADR-072): the firmware-delivered root must
 # open, seal, reopen, rotate, rekey, and refuse every named impostor — on THIS machine.
-echo "$OUT" | grep -q "ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD" || { echo "FAIL: custody-delivery invariants marker missing (ALET-P1-034, ADR-072)"; fail=1; }
-echo "$OUT" | grep -q "platform custody: root DELIVERED over firmware configuration" || { echo "FAIL: the platform did not deliver the custody anchor"; fail=1; }
-echo "$OUT" | grep -q "ALL 22 RISK-ADVISOR INVARIANTS HOLD" || { echo "FAIL: risk-advisor invariants marker missing (REQ-ML-001, ADR-056)"; fail=1; }
+echo "$OUT" | grep "ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD" >/dev/null || { echo "FAIL: custody-delivery invariants marker missing (ALET-P1-034, ADR-072)"; fail=1; }
+echo "$OUT" | grep "platform custody: root DELIVERED over firmware configuration" >/dev/null || { echo "FAIL: the platform did not deliver the custody anchor"; fail=1; }
+echo "$OUT" | grep "ALL 22 RISK-ADVISOR INVARIANTS HOLD" >/dev/null || { echo "FAIL: risk-advisor invariants marker missing (REQ-ML-001, ADR-056)"; fail=1; }
 # The forest under load: cost measured on this machine, and the properties that must hold at
 # any scale. A model that is only verified on 256 fixture rows is verified at a scale no scheduler
 # ever runs at (REQ-ML-002, ADR-056).
-echo "$OUT" | grep -q "ALL 8 STRESS INVARIANTS HOLD" || { echo "FAIL: risk-advisor stress markers missing (REQ-ML-002, ADR-056)"; fail=1; }
-echo "$OUT" | grep -qE "abstaining workload: [0-9]+ tasks, 0 positions move" || { echo "FAIL: an abstaining model moved a scheduling position (ADR-056 fallback broken)"; fail=1; }
-echo "$OUT" | grep -q "ALL 21 MEMORY INVARIANTS HOLD"        || { echo "FAIL: memory invariants marker missing"; fail=1; }
-echo "$OUT" | grep -q "ALL 66 VIRTUAL-MEMORY INVARIANTS HOLD" || { echo "FAIL: virtual-memory invariants marker missing"; fail=1; }
-echo "$OUT" | grep -q "ALL 32 EL0-BOUNDARY INVARIANTS HOLD"  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
-echo "$OUT" | grep -q "VIRTIO-BLK INVARIANTS HOLD"    || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
-echo "$OUT" | grep -q "SMP INVARIANTS HOLD"           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
-echo "$OUT" | grep -q "ALL 15 FILESYSTEM INVARIANTS HOLD" || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
+echo "$OUT" | grep "ALL 8 STRESS INVARIANTS HOLD" >/dev/null || { echo "FAIL: risk-advisor stress markers missing (REQ-ML-002, ADR-056)"; fail=1; }
+echo "$OUT" | grep -E "abstaining workload: [0-9]+ tasks, 0 positions move" >/dev/null || { echo "FAIL: an abstaining model moved a scheduling position (ADR-056 fallback broken)"; fail=1; }
+echo "$OUT" | grep "ALL 21 MEMORY INVARIANTS HOLD" >/dev/null        || { echo "FAIL: memory invariants marker missing"; fail=1; }
+echo "$OUT" | grep "ALL 66 VIRTUAL-MEMORY INVARIANTS HOLD" >/dev/null || { echo "FAIL: virtual-memory invariants marker missing"; fail=1; }
+echo "$OUT" | grep "ALL 32 EL0-BOUNDARY INVARIANTS HOLD" >/dev/null  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
+echo "$OUT" | grep "VIRTIO-BLK INVARIANTS HOLD" >/dev/null    || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
+echo "$OUT" | grep "SMP INVARIANTS HOLD" >/dev/null           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
+echo "$OUT" | grep "ALL 15 FILESYSTEM INVARIANTS HOLD" >/dev/null || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
 # The virtio leg proves the namespace over the REAL device too: 5 driver invariants + the 12 fs ones.
-echo "$OUT" | grep -q "ALL 21 VIRTIO-BLK INVARIANTS HOLD" || { echo "FAIL: virtio-blk count wrong (driver + filesystem over the real device)"; fail=1; }
-echo "$OUT" | grep -q "ALL 9 NETWORK INVARIANTS HOLD" || { echo "FAIL: network invariants marker missing (REQ-NET-001/003; NIC attached, suite must run)"; fail=1; }
+echo "$OUT" | grep "ALL 21 VIRTIO-BLK INVARIANTS HOLD" >/dev/null || { echo "FAIL: virtio-blk count wrong (driver + filesystem over the real device)"; fail=1; }
+echo "$OUT" | grep "ALL 9 NETWORK INVARIANTS HOLD" >/dev/null || { echo "FAIL: network invariants marker missing (REQ-NET-001/003; NIC attached, suite must run)"; fail=1; }
 # Graphics over the REAL device (REQ-GFX-001): display info + the whole 2D resource lifecycle.
-echo "$OUT" | grep -q "ALL 13 VIRTIO-GPU INVARIANTS HOLD" || { echo "FAIL: virtio-gpu invariants marker missing (REQ-GFX-001; GPU attached, suite must run)"; fail=1; }
+echo "$OUT" | grep "ALL 13 VIRTIO-GPU INVARIANTS HOLD" >/dev/null || { echo "FAIL: virtio-gpu invariants marker missing (REQ-GFX-001; GPU attached, suite must run)"; fail=1; }
 # The framebuffer console renders text into REAL backing pages and hands the frame over; detach revokes (REQ-GFX-002).
-echo "$OUT" | grep -q "ALL 6 FRAMEBUFFER-CONSOLE INVARIANTS HOLD" || { echo "FAIL: framebuffer-console invariants marker missing (REQ-GFX-002)"; fail=1; }
-echo "$OUT" | grep -q "ALL 10 DURABLE-STORE INVARIANTS HOLD" || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
+echo "$OUT" | grep "ALL 6 FRAMEBUFFER-CONSOLE INVARIANTS HOLD" >/dev/null || { echo "FAIL: framebuffer-console invariants marker missing (REQ-GFX-002)"; fail=1; }
+echo "$OUT" | grep "ALL 10 DURABLE-STORE INVARIANTS HOLD" >/dev/null || { echo "FAIL: durable-store invariants marker missing (REQ-STOR-003)"; fail=1; }
 # Long-running soak (ALET-P2-009, ADR-063): lifecycles under repetition — journal transactions,
 # namespace mutations, capability grants, task generations — proved on this machine, with its own
 # heap meter holding the allocation-free claim exactly and its own clock reporting throughput.
-echo "$OUT" | grep -q "ALL 12 SOAK INVARIANTS HOLD" || { echo "FAIL: soak invariants marker missing (ALET-P2-009, ADR-063)"; fail=1; }
-echo "$OUT" | grep -qE "\[soak\] journal: [0-9]+ txs .* => [0-9]+ tx/s" || { echo "FAIL: the soak never measured journal throughput on this machine"; fail=1; }
+echo "$OUT" | grep "ALL 12 SOAK INVARIANTS HOLD" >/dev/null || { echo "FAIL: soak invariants marker missing (ALET-P2-009, ADR-063)"; fail=1; }
+echo "$OUT" | grep -E "\[soak\] journal: [0-9]+ txs .* => [0-9]+ tx/s" >/dev/null || { echo "FAIL: the soak never measured journal throughput on this machine"; fail=1; }
 # The machine measures itself (ALET-P2-010, ADR-064, REQ-PERF-002): structural benchmark gates on
 # THIS machine, with its measured costs REPORTED beside them.
-echo "$OUT" | grep -q "ALL 12 BENCHMARK INVARIANTS HOLD" || { echo "FAIL: benchmark invariants marker missing (ALET-P2-010, ADR-064, REQ-PERF-002)"; fail=1; }
-echo "$OUT" | grep -qE "\[bench\] authority: [0-9]+ checks \\| " || { echo "FAIL: the machine never measured its own authority-check cost (REQ-PERF-002)"; fail=1; }
-echo "$OUT" | grep -q "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
-echo "$OUT" | grep -q "ALL 9 INPUT-RING INVARIANTS HOLD" || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
-echo "$OUT" | grep -q "ALL 42 CONSOLE INVARIANTS HOLD" || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
+echo "$OUT" | grep "ALL 12 BENCHMARK INVARIANTS HOLD" >/dev/null || { echo "FAIL: benchmark invariants marker missing (ALET-P2-010, ADR-064, REQ-PERF-002)"; fail=1; }
+echo "$OUT" | grep -E "\[bench\] authority: [0-9]+ checks \\| " >/dev/null || { echo "FAIL: the machine never measured its own authority-check cost (REQ-PERF-002)"; fail=1; }
+echo "$OUT" | grep "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" >/dev/null || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
+echo "$OUT" | grep "ALL 9 INPUT-RING INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
+echo "$OUT" | grep "ALL 42 CONSOLE INVARIANTS HOLD" >/dev/null || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
 # The advisor must be RESIDENT and CONSULTED on this booted machine, not merely verified
 # (REQ-ML-003, ADR-056): the live-path invariants hold, a model is actually resident, the
 # commissioning workload really went through it, and the advised drain was a permutation of the
 # model-free one -- advice reordered equals and did nothing else.
-echo "$OUT" | grep -q "ALL 12 LIVE-ADVISORY INVARIANTS HOLD" || { echo "FAIL: live-advisory invariants marker missing (REQ-ML-003)"; fail=1; }
-echo "$OUT" | grep -q "\[mlsched\] RESIDENT:"            || { echo "FAIL: no model took up residence (REQ-ML-003)"; fail=1; }
-echo "$OUT" | grep -qE "\[mlsched\] commissioning: [0-9]+ tasks admitted over [0-9]+ s" || { echo "FAIL: the resident advisor was never consulted by a workload (REQ-ML-003)"; fail=1; }
-echo "$OUT" | grep -q "advised drain is a permutation of the model-free one" || { echo "FAIL: the advised drain was not proved a permutation of the model-free one (INV-014)"; fail=1; }
-echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlstat did not report a resident advisor (REQ-ML-003)"; fail=1; }
+echo "$OUT" | grep "ALL 12 LIVE-ADVISORY INVARIANTS HOLD" >/dev/null || { echo "FAIL: live-advisory invariants marker missing (REQ-ML-003)"; fail=1; }
+echo "$OUT" | grep "\[mlsched\] RESIDENT:" >/dev/null            || { echo "FAIL: no model took up residence (REQ-ML-003)"; fail=1; }
+echo "$OUT" | grep -E "\[mlsched\] commissioning: [0-9]+ tasks admitted over [0-9]+ s" >/dev/null || { echo "FAIL: the resident advisor was never consulted by a workload (REQ-ML-003)"; fail=1; }
+echo "$OUT" | grep "advised drain is a permutation of the model-free one" >/dev/null || { echo "FAIL: the advised drain was not proved a permutation of the model-free one (INV-014)"; fail=1; }
+echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FAIL: mlstat did not report a resident advisor (REQ-ML-003)"; fail=1; }
 
 # ---- STRUCTURED MARKER MAP (ALET-P2-007, REQ-QUAL-004): the whole family/count surface, held ----
 # against an expected map declared HERE. The per-family greps above stay as named diagnoses; this
@@ -161,11 +164,11 @@ echo "$OUT" | grep -q "risk advisor: RESIDENT"             || { echo "FAIL: mlst
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 selftest=13 smp=22 soak=12 usermode=32 smmu=10 vault=14 virtio=21 vm=66"
+AARCH64_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 pm=14 selftest=13 smp=22 soak=12 usermode=32 smmu=10 vault=14 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
-echo "$OUT" | grep -q "\[e2e\] PASS"                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
-echo "$OUT" | grep -q "PERSISTENT MEDIUM: boot #1, 0 entities verified" || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
+echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
+echo "$OUT" | grep "PERSISTENT MEDIUM: boot #1, 0 entities verified" >/dev/null || { echo "FAIL: first boot did not create the durable store on the persistent medium"; fail=1; }
 
 # ---- SECOND BOOT on the SAME persistent medium: the OS must REMEMBER (REQ-STOR-003) ----
 echo "==> rebooting the same image against the SAME persistent disk (cross-reboot proof)"
@@ -184,7 +187,7 @@ CODE2=$?
 echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
 echo "second boot exit code: $CODE2"
 [ "$CODE2" -eq 0 ] || { echo "FAIL: second boot expected exit 0, got $CODE2"; fail=1; }
-echo "$OUT2" | grep -q "PERSISTENT MEDIUM: boot #2, 1 entities verified" || { echo "FAIL: the OS did not remember across the reboot (boot #2 must verify boot #1's entity)"; fail=1; }
+echo "$OUT2" | grep "PERSISTENT MEDIUM: boot #2, 1 entities verified" >/dev/null || { echo "FAIL: the OS did not remember across the reboot (boot #2 must verify boot #1's entity)"; fail=1; }
 
 # ---- THIRD BOOT, platform silent: custody refuses FAIL-CLOSED, machine continues ----
 # Without the firmware item there is NO root anywhere — not on disk, not compiled in. The vault
@@ -204,9 +207,9 @@ CODE3=$?
 echo "$OUT3" | grep -E "\[vault\]" || true
 echo "third boot exit code: $CODE3"
 [ "$CODE3" -eq 0 ] || { echo "FAIL: third boot expected exit 0, got $CODE3"; fail=1; }
-echo "$OUT3" | grep -q "PLATFORM ROOT ABSENT (RootNotProvided)" || { echo "FAIL: absent platform root was not refused by name"; fail=1; }
-echo "$OUT3" | grep -q "PERSISTENT MEDIUM: boot #3," || { echo "FAIL: third boot did not witness the durable store"; fail=1; }
-echo "$OUT3" | grep -q "\[e2e\] PASS" || { echo "FAIL: third boot did not reach e2e PASS (one sealed vault must not kill the machine)"; fail=1; }
+echo "$OUT3" | grep "PLATFORM ROOT ABSENT (RootNotProvided)" >/dev/null || { echo "FAIL: absent platform root was not refused by name"; fail=1; }
+echo "$OUT3" | grep "PERSISTENT MEDIUM: boot #3," >/dev/null || { echo "FAIL: third boot did not witness the durable store"; fail=1; }
+echo "$OUT3" | grep "\[e2e\] PASS" >/dev/null || { echo "FAIL: third boot did not reach e2e PASS (one sealed vault must not kill the machine)"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then
   echo "VM-E2E: PASS"

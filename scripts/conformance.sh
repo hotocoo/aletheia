@@ -252,6 +252,18 @@ CONTRACT=(
   "soak: journal churn allocates nothing per transaction"
   "soak: a revoked grant is refused by name"
   "soak: a Finished task never runs again"
+  # The power/performance contract (ALET-P2-022, ADR-076). "Who may push a clock" is an
+  # authority question and "how hot may it run" is a ceiling question, so the security-critical
+  # half of the PM boundary is contracted identically on every CPU: elevation is granted,
+  # attenuated, revocable, and envelope-capped; trips clamp and cool; the governor never
+  # overclocks. A target whose PM let an ungranted caller into the OC band would be a
+  # different machine.
+  "pm: a fresh machine idles at its lowest points and elevation without authority is refused by name"
+  "pm: delegation attenuates (never amplifies) and never crosses domains"
+  "pm: a revoked grant clamps the domain back to nominal immediately and cascades"
+  "pm: the thermal envelope is absolute - no grant is minted past it"
+  "pm: a thermal trip clamps every domain and refuses elevation until the cooldown expires"
+  "pm: the demand governor never enters the overclock band"
 )
 
 hr() { printf '========================================================================\n'; }

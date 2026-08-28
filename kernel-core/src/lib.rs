@@ -55,6 +55,7 @@ pub mod mlrisk_contract;
 pub mod mlrisk_stress;
 pub mod mlsched;
 pub mod persist;
+pub mod pm;
 pub mod priosched;
 pub mod ptreclaim;
 pub mod reentry;

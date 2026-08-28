@@ -1,6 +1,15 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-26 (PER-DEVICE DMA WINDOWS are enforced by the real VT-d unit - each driven function
+**As of:** 2026-08-28 (THE POWER/PERFORMANCE CONTRACT is modeled, not assumed — frequency is
+AUTHORITY and heat is a HARD CEILING: `kernel-core/src/pm.rs` gives every domain an honest
+discrete ladder, keeps the governor range free to any caller, gates the overclock band behind
+live per-domain elevation grants that attenuate on delegation and clamp the domain back to
+nominal the moment their grant dies, makes the thermal envelope absolute BY CONSTRUCTION,
+answers a thermal trip with a machine-wide clamp and a tick-exact cooldown that refuses even
+valid grants, never lets the governor overclock or park demanded silicon, accounts idle
+residency and wake latency exactly, moves device power along legal arcs only, and audits every
+act in a bounded monotonic ledger — 14 boot invariants on all three targets, six behaviors
+pinned cross-CPU, 19 host proofs, ADR-076); before that: 2026-08-26 (PER-DEVICE DMA WINDOWS are enforced by the real VT-d unit - each driven function
 translates ONLY the frames its own driver registry granted; a revoked PAGE is denied by name with measured
 reason 6 while sibling windows keep serving - ADR-075); before that: the IOMMU contract crosses the ARM fence — on x86-64 the kernel
 discovers the VT-d unit through ACPI DMAR/DRHD, programs an identity domain over owned frames with
@@ -14,7 +23,41 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..075`.
 
-## Current wave - per-device DMA windows (2026-08-26, ADR-075)
+## Current wave — the power/performance contract is modeled, not assumed (2026-08-28, ADR-076)
+
+ALET-P2-022 leaves the deferred column. The wave answers the OS's overclocking promise the way
+this kernel answers every privileged act: frequency is AUTHORITY, heat is a HARD CEILING.
+`kernel-core/src/pm.rs` defines the contract as a complete software model: every core belongs to
+a frequency DOMAIN with an honest discrete ladder (registration refuses dishonest ladders by
+name); the governor range (at or below nominal) is free to any caller; the OVERCLOCK band above
+nominal exists only through a LIVE, per-domain elevation grant — attenuated on delegation
+(a child ceiling never widens its parent, `Amplification`/`CrossDomain` refused), revoked with
+cascade, and clamping the domain back to nominal the moment its grant dies (a governor-range
+grant clamps nothing); the thermal ENVELOPE is absolute BY CONSTRUCTION — no ladder point above
+it can register and no grant past it can mint, so no reachable state exceeds it, whatever
+authority says; a thermal TRIP clamps every domain to its lowest point and latches a tick-exact
+cooldown that refuses elevation BY NAME even with a valid grant while the governor range keeps
+serving; the demand governor never enters the OC band and never parks demanded silicon
+(`DomainBusy`), parking zero-demand domains instead (the idle machine costs nothing, ADR-056);
+idle residency and wake latency are accounted exactly, with a clock change CLOSING a parked
+span so real time is never lost; device power moves only along legal arcs (D3→D1 refused — wake
+through D0 or not at all); and every accepted act and every refusal lands in a bounded audit
+ledger under a monotonic sequence, the holder named on grant acts.
+
+Proofs: 19 host tests in kernel-core/tests/pm.rs — the full OC-band decision table over every
+point × ceiling × authority state, a 5^3 attenuation-chain sweep, revocation clamps and
+idempotence, envelope absoluteness from registration and mint, cooldown tick-exactness across
+the whole window, idle accounting under transition interference, the complete device-arc table,
+ledger completeness with wraparound, capacity bounds, and bit-identical determinism — plus 14
+in-kernel invariants booting on all three targets (`[pm] ALL 14 POWER-PERFORMANCE INVARIANTS
+HOLD`, boot fails 560+i), six of them pinned cross-CPU in the conformance contract. The marker
+maps changed deliberately (`pm=14`, ADR-061). Named non-claims, in the register: no
+MSR/CPPC/ACPI programming (QEMU TCG exposes no frequency control to the guest — a hardware rung
+attempted today could only prove code ran, not that anything enforced; the ADR-071 posture),
+no battery, no system sleep/wake, no voltage rail enforcement beyond recording mV, no
+thermodynamic simulation — callers report temperatures, the contract decides.
+
+## Previous wave — per-device DMA windows (2026-08-26, ADR-075)
 
 ALET-P1-018 advances to its third hardware rung. The registry-driven narrowing lands on VT-d:
 every DRIVEN function now gets its OWN second-level tree containing exactly the frames ITS

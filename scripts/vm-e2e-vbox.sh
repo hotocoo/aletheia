@@ -103,6 +103,9 @@ REQUIRED=(
   'FILESYSTEM INVARIANTS HOLD'
   # The self-benchmark (ALET-P2-010, ADR-064) needs no device - it must hold on VirtualBox too.
   'ALL 12 BENCHMARK INVARIANTS HOLD'
+  # The power/performance contract (ALET-P2-022, ADR-076) is an arch-independent model - it
+  # must hold wherever the kernel boots, hypervisor or not.
+  'ALL 14 POWER-PERFORMANCE INVARIANTS HOLD'
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'

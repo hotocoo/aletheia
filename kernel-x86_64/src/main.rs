@@ -440,6 +440,33 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // The power/performance contract (ALET-P2-022, ADR-076): frequency is authority, heat is a
+    // hard ceiling. Elevation into the overclock band needs a live per-domain grant (attenuated
+    // on delegation, clamping the domain back to nominal on revocation), the thermal envelope is
+    // absolute, a trip clamps every domain and latches a cooldown, the governor never overclocks
+    // and parks zero-demand domains, device power moves only along legal arcs, and every act
+    // lands in the audit ledger. Modeled in software (the boot heap cannot afford sweep churn -
+    // ADR-063); a hardware rung (MSR/CPPC programming) stays scoped in the gap register.
+    kprintln!("");
+    kprintln!("--- power/performance selftests (frequency is authority, heat is a ceiling) ---");
+    match kernel_core::pm::pm_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[pm] ALL {} POWER-PERFORMANCE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[pm] FAILED at power-performance invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(560 + idx as i32);
+        }
+    }
+
     // the advisory property itself — an abstaining model schedules bit-identically to the model-free
     // kernel, and priority is never traded for risk — alongside exact parity with the trainer and a
     // NAMED refusal for every way a blob can be wrong. The printed invariant NAME is the
