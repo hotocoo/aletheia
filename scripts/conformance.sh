@@ -275,6 +275,16 @@ CONTRACT=(
   "compositor: the painter's order is the z-order and only the owner may change it"
   "compositor: a fill buffer that is not exactly the packed size is refused by name"
   "compositor: an unchanged frame writes zero pixels and a one-pixel change writes exactly its region"
+  # Lethe, the resident performance advisor (REQ-ML-006, ADR-078). The advisory discipline
+  # must not vary by CPU: the bundled blob verifies, wrong blobs are refused BY NAME, parity
+  # with the trainer holds, and the advised path obeys the ADR-076 contract it advises.
+  "lethe: the bundled advisor verifies at boot (both trees present, compare bound exact)"
+  "lethe: every way a blob can be wrong is a named refusal"
+  "lethe: the committed parity fixture replays exactly through the live observer"
+  "lethe: with Lethe present the governor range is never left - the overclock band stays authority-only"
+  "lethe: demanded silicon is never parked; every park happened at zero demand"
+  "lethe: with the advisor absent the advised path is bit-identical to the baseline governor"
+  "lethe: the observer is bounded - slots refuse overflow, rings saturate, no history means no guess"
 )
 
 hr() { printf '========================================================================\n'; }

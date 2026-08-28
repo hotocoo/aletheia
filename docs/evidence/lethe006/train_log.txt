@@ -1,0 +1,42 @@
+== Lethe REQ-ML-006 trainer (deterministic, seeds fixed) ==
+corpus: 300 train / 300 held-out traces x 256 steps
+rows: 62008 freq / 14792 idle
+DAgger round 1: 62008 freq / 14792 idle rows
+DAgger round 2: 62008 freq / 14792 idle rows
+trees: freq 9 nodes / idle 5 nodes
+-- freq tree --
+  if demand_max8 <= 77:
+    leaf -> class 1
+  else:
+    if transitions16 <= 3:
+      if dwell_at_point <= 136:
+        leaf -> class 1
+      else:
+        leaf -> class 2
+    else:
+      if demand_max8 <= 84:
+        leaf -> class 1
+      else:
+        leaf -> class 2
+-- idle tree --
+  if demand_max8 <= 42:
+    if temp_now_mc <= 45019:
+      leaf -> class 2
+    else:
+      leaf -> class 1
+  else:
+    leaf -> class 0
+blob: 376 bytes -> kernel-core/models/lethe_pm.alth
+fixture: 16 rows -> kernel-core/models/lethe_pm_fixture.tsv
+
+== held-out results (lower is better) ==
+  lethe              score 0.60996  (shortfall 0.01584, energy 0.45157)
+  eager_park_c2      score 0.62676  (shortfall 0.01858, energy 0.44101)
+  baseline_adr076    score 0.62803  (shortfall 0.01743, energy 0.45368)
+  hysteresis_tuned   score 0.68759  (shortfall 0.01202, energy 0.56738)
+  always_nominal     score 1.00737  (shortfall 0.00107, energy 0.99672)
+  always_low         score 2.69786  (shortfall 0.26011, energy 0.09679)
+
+lethe vs baseline: +2.88% score
+lethe vs tuned hysteresis: +11.29% score
+wrote /Users/acotech/workspace/Aletheia-lethe/docs/evidence/lethe006/results.json
