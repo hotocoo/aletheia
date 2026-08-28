@@ -1,6 +1,20 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-28 (THE COMPOSITION CONTRACT is modeled, not assumed — pixels are AUTHORITY
+**As of:** 2026-08-28 (THE COMPOSITION CONTRACT IS ON THE SCANOUT — the model's sink is now
+REAL backing pages and the display device carries each composed frame: `kernel-core/src/fbcon.rs`
+gains `ComposeSink`, a `Raster` over the framebuffer console's scatter-gather backing frames
+whose put/refusal counters make "the model's bound and the real raster's bounds agree" a
+MEASURED zero, and `kernel-core/src/virtiogpu.rs` gains `compose_suite`: the composed frame's
+virtio-gpu resource is created, its 150 DMA-gated backing pages attached and scanout 0 bound,
+the first compose is read back pixel-exact from real memory and handed to the device as one
+TRANSFER plus one FLUSH (exactly two commands), a QUIET frame writes zero pixels AND issues
+zero device commands (the idle desktop moves nothing — measured on the driver's command
+counter), a wrong token changes no real byte and no device traffic, a move is visible the same
+frame with no ghost, the z-order flips on real pixels, an overhanging surface lands only its
+intersection and never asks the raster for a pixel it does not have, and the teardown revokes
+every page's DMA registration with the DEVICE confirming the end — 8 boot invariants on all
+three targets (`[compose] ALL 8 REAL-PIXEL COMPOSITION INVARIANTS HOLD`, boot fails 640+i), 5
+host proofs, ADR-078); before that: THE COMPOSITION CONTRACT is modeled, not assumed — pixels are AUTHORITY
 and the scanout is a HARD BOUND: `kernel-core/src/compositor.rs` mints surfaces with
 possession-based owner tokens that gate every op, clips placements exactly to the scanout
 (proved against a guard-band raster), keeps the painter's order as the owner-controlled
@@ -32,7 +46,37 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..075`.
 
-## Current wave — the composition contract is modeled, not assumed (2026-08-28, ADR-077)
+## Current wave — the composition contract meets the scanout (2026-08-28, ADR-078)
+
+ALET-P2-021's real-pixel rung. ADR-077 defined who may draw and where; this wave puts the
+verdict where a human can see it, without giving the device any authority it did not have.
+`ComposeSink` (`kernel-core/src/fbcon.rs`) implements the compositor's `Raster` over the
+framebuffer console's scatter-gather backing frames — the same page list a virtio-gpu 2D
+resource names as its backing store — and counts every put and every REFUSAL: the model's
+structural bound and the raster's bounds must agree EXACTLY, and a non-zero refusal would name
+the disagreement. `compose_suite` (`kernel-core/src/virtiogpu.rs`) then drives the real device:
+resource created, 150 DMA-gated pages attached, scanout bound; the first compose read back
+pixel-exact from real memory and flushed as exactly TWO commands; a quiet frame writing ZERO
+pixels and issuing ZERO device commands; a wrong token changing no real byte and no traffic; a
+move visible the same frame with no ghost; the z-order flipping on real pixels; a window pushed
+160 px past the right edge landing only its intersection with the sink never asked for an
+out-of-bounds pixel; and the teardown revoking every page's DMA registration with the DEVICE
+itself confirming the end (`ERR_INVALID_RESOURCE_ID`).
+
+Proofs: 5 host tests in kernel-core/tests/compfb.rs (composed frames read back pixel-exact,
+moves leave no ghost in real bytes, overhang never asks outside the raster, a wrong token
+changes no real byte, and the device legs — move, clip and z-flip — are visible in real host
+pages without QEMU) plus 8 boot invariants on all three targets (`[compose] ALL 8 REAL-PIXEL
+COMPOSITION INVARIANTS HOLD`, boot fails 640+i), two pinned cross-CPU in the conformance
+contract (152 -> 154). Marker maps changed deliberately (`compose=8` on the three QEMU gates;
+VirtualBox lists the family SKIP with the rest of the graphics stack — no virtio-gpu,
+ADR-061). The unsafe audit grew ten named sites (the live-device ops inside the suite).
+Named non-claims, in the register: the device still enforces nothing about who composes — the
+enforcement lives in the kernel-side contract layered over the DMA registry; one command pair
+per changed frame is not interrupt-driven completion; no alpha beyond the 1-bit model depth, no
+cursors, no input routing, no device-level GPU isolation between surfaces.
+
+## Previous wave — the composition contract is modeled, not assumed (2026-08-28, ADR-077)
 
 ALET-P2-021's compositor rung. The GUI question decomposes into the two questions this kernel
 already knows how to answer: WHO may put pixels on the scanout (an authority question) and

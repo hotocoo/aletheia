@@ -855,6 +855,27 @@ pub extern "C" fn kmain() -> ! {
                     ActiveHal::exit(341 + idx as i32);
                 }
             }
+            // The composition contract meets the scanout (ALET-P2-021, ADR-078): the model's
+            // sink is now REAL backing pages and the composed frame is handed to the display
+            // device itself. A quiet frame moves nothing - zero writes, zero device commands,
+            // measured on the driver's own command counter.
+            match kernel_core::virtiogpu::compose_suite(&mut gpu, |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[compose] ALL {} REAL-PIXEL COMPOSITION INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!(
+                        "[compose] FAILED at real-pixel composition invariant {}: {}",
+                        idx,
+                        name
+                    );
+                    ActiveHal::exit(640 + idx as i32);
+                }
+            }
         }
     }
     // The interactive console (REQ-CON-001, ADR-044): the subsystem that lets the machine stay up

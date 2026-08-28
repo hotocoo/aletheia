@@ -81,6 +81,9 @@ echo "$OUT" | grep "ALL 14 CAPABILITY-LIFETIME INVARIANTS HOLD" >/dev/null || { 
 echo "$OUT" | grep "ALL 9 IOMMU-CONTRACT INVARIANTS HOLD" >/dev/null || { echo "FAIL: iommu-contract invariants marker missing (ALET-P1-018, ADR-071)"; fail=1; }
 # Pixels are authority, the scanout is a hard bound (ALET-P2-021, ADR-077).
 echo "$OUT" | grep "ALL 14 COMPOSITION-CONTRACT INVARIANTS HOLD" >/dev/null || { echo "FAIL: composition-contract invariants marker missing (ALET-P2-021, ADR-077)"; fail=1; }
+# The composed frame reaches the display device: real backing pages, one flush per changed
+# frame, NOTHING on a quiet one (ALET-P2-021, ADR-078).
+echo "$OUT" | grep "ALL 8 REAL-PIXEL COMPOSITION INVARIANTS HOLD" >/dev/null || { echo "FAIL: real-pixel composition invariants marker missing (ALET-P2-021, ADR-078)"; fail=1; }
 # Custody crosses the platform boundary (ALET-P1-034, ADR-072), proved over the SECOND bus.
 echo "$OUT" | grep "ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD" >/dev/null || { echo "FAIL: custody-delivery invariants marker missing (ALET-P1-034, ADR-072)"; fail=1; }
 echo "$OUT" | grep "platform custody: root DELIVERED over firmware configuration" >/dev/null || { echo "FAIL: the platform did not deliver the custody anchor"; fail=1; }
@@ -130,7 +133,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # map by design — the same arch-independent suites must prove the same counts over either bus, and
 # a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
 source "$ROOT/scripts/lib-markers.sh"
-RISCV_EXPECTED="bench=12 cap=14 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 pm=14 selftest=13 smp=22 soak=12 usermode=32 vault=14 virtio=21 vm=66"
+RISCV_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 pm=14 selftest=13 smp=22 soak=12 usermode=32 vault=14 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

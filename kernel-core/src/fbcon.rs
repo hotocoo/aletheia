@@ -123,6 +123,53 @@ impl<'a> Surface<'a> {
     }
 }
 
+/// The bridge between the composition contract ([`crate::compositor`]) and REAL pixels: a
+/// [`Raster`](crate::compositor::Raster) sink whose pixels land in a [`Surface`]'s backing
+/// frames — the same frames a virtio-gpu resource lists as its backing store, so a composed
+/// frame is one TRANSFER+FLUSH away from the display.
+///
+/// The compositor structurally bounds every (x, y) to the scanout it was built with; a
+/// Surface built at exactly that scanout size cannot refuse a put. The doctrine is still
+/// fail-closed: a refusal is COUNTED, never swallowed, and every suite asserts the count is
+/// zero — a non-zero count means the model's bound and the real raster's bounds disagree,
+/// which is exactly the defect class this adapter exists to surface.
+pub struct ComposeSink<'s, 'p> {
+    surf: &'s mut Surface<'p>,
+    puts: u64,
+    refused: u64,
+}
+
+impl<'s, 'p> ComposeSink<'s, 'p> {
+    /// Sink into `surf`, whose geometry must equal the compositor's scanout.
+    pub fn new(surf: &'s mut Surface<'p>) -> Self {
+        ComposeSink {
+            surf,
+            puts: 0,
+            refused: 0,
+        }
+    }
+
+    /// Pixels the compositor asked this sink to write — mirrors `FrameStats::pixels_blitted`.
+    pub fn puts(&self) -> u64 {
+        self.puts
+    }
+
+    /// Puts the surface refused. MUST be zero for any composed frame: the model's structural
+    /// bound and the raster's bounds have to agree exactly.
+    pub fn refusals(&self) -> u64 {
+        self.refused
+    }
+}
+
+impl crate::compositor::Raster for ComposeSink<'_, '_> {
+    fn put(&mut self, x: u32, y: u32, ink: bool) {
+        self.puts += 1;
+        if self.surf.set(x, y, ink).is_err() {
+            self.refused += 1;
+        }
+    }
+}
+
 /// The text console state machine: a cursor over a grid of 8x16 cells, with wrap, scroll,
 /// backspace, and the fail-closed rule for control bytes. Pure layout logic — every pixel goes
 /// through the [`Surface`] it is handed.

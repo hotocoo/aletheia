@@ -275,6 +275,11 @@ CONTRACT=(
   "compositor: the painter's order is the z-order and only the owner may change it"
   "compositor: a fill buffer that is not exactly the packed size is refused by name"
   "compositor: an unchanged frame writes zero pixels and a one-pixel change writes exactly its region"
+  # The real-pixel rung (ADR-078): the contract's sink is real backing pages and the device
+  # only CARRIES the verdict - one flush per changed frame, nothing on a quiet one. The
+  # authority half and the nothing-to-move half are the parts that must not vary by CPU.
+  "compose: a wrong token changes nothing on the real path - no writes, no recomposition, no device traffic"
+  "compose: a quiet frame writes zero pixels and issues zero device commands"
 )
 
 hr() { printf '========================================================================\n'; }

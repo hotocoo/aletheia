@@ -1209,6 +1209,375 @@ pub fn console_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     Ok(n)
 }
 
+/// The composed frame's resource id. The lifecycle suites each own one: gpu_suite drives 7,
+/// the console 9, this leg 10 — no suite can disturb another's resource.
+const COMPOSE_RID: u32 = 10;
+
+/// The real-pixel rung of the composition contract (ALET-P2-021, ADR-078): the model's sink
+/// is now REAL backing pages and the composed frame is handed to the DISPLAY DEVICE itself.
+///
+/// The division of labor is the point. The compositor (ADR-077) decides WHO may draw and
+/// WHERE pixels land; the device path here only carries the verdict — one TRANSFER plus one
+/// FLUSH per changed frame, and NOTHING on a quiet one (the idle desktop moves no device
+/// traffic, measured on the driver's own command counter, not assumed). The fbcon backing
+/// store stays scatter-gather: `ComposeSink` writes through the same page list the resource
+/// names, so what the model composed is byte-for-byte what the device is told to show.
+///
+/// Geometry is the console's (640x240 over 150 single frames) because that is the shape the
+/// allocator reliably hands out at boot; the contract's clipping is geometric, so the rung
+/// proves the same promises any scanout size would.
+pub fn compose_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
+    dev: &mut VirtioGpu<H, T>,
+    mut log: F,
+) -> Result<usize, (usize, &'static str)> {
+    use crate::compositor::{Compositor, FrameStats};
+    use crate::fbcon::{ComposeSink, Surface};
+
+    let mut n = 0usize;
+    macro_rules! check {
+        ($name:expr, $cond:expr) => {{
+            n += 1;
+            let ok = $cond;
+            log(n, ok, $name);
+            if !ok {
+                return Err((n, $name));
+            }
+        }};
+    }
+
+    const W: u32 = CONSOLE_FB_WIDTH;
+    const HGT: u32 = CONSOLE_FB_HEIGHT;
+    const PAGES: usize = CONSOLE_FB_PAGES;
+    /// The wallpaper: full-scanout, ink border 8 px, interior background.
+    const A: u32 = 1;
+    /// The window: 200x80, ink border 4 px, interior background.
+    const B: u32 = 2;
+
+    // SAFETY: alloc_frame hands out identity-mapped frames this kernel owns exclusively; the
+    // device ops below are live-device calls exactly like the two suites above.
+    let mut pages: Vec<usize> = Vec::with_capacity(PAGES);
+    for _ in 0..PAGES {
+        match H::alloc_frame() {
+            Some(f) => pages.push(f),
+            None => break,
+        }
+    }
+    let linked = pages.len() == PAGES
+        && unsafe { dev.create_resource_2d(COMPOSE_RID, W, HGT) }.is_ok()
+        && unsafe { dev.attach_backing(COMPOSE_RID, &pages) }.is_ok()
+        && unsafe { dev.set_scanout(0, COMPOSE_RID) }.is_ok();
+
+    // The model and the real raster, built over the same geometry. The model's surfaces are
+    // its own 1-bit planes in the boot heap; the raster is the DMA-gated backing store.
+    let mut comp = Compositor::new(0x0C0F_FEE1, W, HGT);
+    let surf = Surface::new(&pages, W, HGT);
+    let tok_a = comp.mint_surface(A, W, HGT);
+    let tok_b = comp.mint_surface(B, 200, 80);
+
+    // 1 — the device-side frame exists: resource created, 150 scatter-gather pages attached,
+    //     scanout 0 bound. The registry carries exactly ring + cmd/resp + backing.
+    check!(
+        "compose: the composed frame's resource exists with its backing attached and scanout bound",
+        linked
+            && dev.live_dma_regions() == 3 + PAGES
+            && surf.is_ok()
+            && tok_a.is_ok()
+            && tok_b.is_ok()
+    );
+
+    let mut surf = match surf {
+        Ok(s) => s,
+        Err(_) => return Err((n, "compose: the backing pages did not form a raster")),
+    };
+    let (tok_a, tok_b) = match (tok_a, tok_b) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => return Err((n, "compose: surface minting failed")),
+    };
+
+    // The wallpaper and the window, drawn through their owner tokens only.
+    let painted = comp
+        .fill_rect(
+            A,
+            tok_a,
+            crate::compositor::Rect {
+                x: 0,
+                y: 0,
+                w: W,
+                h: HGT,
+            },
+            true,
+        )
+        .is_ok()
+        && comp
+            .fill_rect(
+                A,
+                tok_a,
+                crate::compositor::Rect {
+                    x: 8,
+                    y: 8,
+                    w: W - 16,
+                    h: HGT - 16,
+                },
+                false,
+            )
+            .is_ok()
+        && comp
+            .fill_rect(
+                B,
+                tok_b,
+                crate::compositor::Rect {
+                    x: 0,
+                    y: 0,
+                    w: 200,
+                    h: 80,
+                },
+                true,
+            )
+            .is_ok()
+        && comp
+            .fill_rect(
+                B,
+                tok_b,
+                crate::compositor::Rect {
+                    x: 4,
+                    y: 4,
+                    w: 192,
+                    h: 72,
+                },
+                false,
+            )
+            .is_ok()
+        && comp.attach(A, tok_a, 0, 0).is_ok()
+        && comp.attach(B, tok_b, 32, 24).is_ok();
+
+    // Count every ink pixel of the raster — the checksum the authority invariant re-reads.
+    let ink_total = |s: &Surface| -> u32 {
+        let mut t = 0u32;
+        for y in 0..HGT {
+            for x in 0..W {
+                if s.get(x, y) == Ok(true) {
+                    t += 1;
+                }
+            }
+        }
+        t
+    };
+
+    // 2 — the first compose lands in REAL memory: the window's ink border shows through the
+    //     model's z-order, the wallpaper shows where nobody covers it, and the sink's own
+    //     counters agree with the model's (every counted write is a real put, none refused).
+    let st = if painted {
+        let composed = {
+            let mut sink = ComposeSink::new(&mut surf);
+            (comp.compose_frame(&mut sink), sink.puts(), sink.refusals())
+        };
+        let reads = (
+            surf.get(0, 0),   // wallpaper border
+            surf.get(4, 4),   // wallpaper border, inner corner
+            surf.get(33, 25), // window border over wallpaper interior
+            surf.get(40, 30), // window interior
+        );
+        (composed.0, composed.1, composed.2, reads)
+    } else {
+        let miss = Err(crate::fbcon::FbError::OffSurface);
+        (FrameStats::default(), 0, 1, (miss, miss, miss, miss))
+    };
+    let (reads_ok, stats_ok) = match st.3 {
+        (Ok(a), Ok(b), Ok(c), Ok(d)) => (a && b && c && !d, st.0.pixels_blitted > 0),
+        _ => (false, false),
+    };
+    check!(
+        "compose: the first compose lands the owned surfaces in REAL backing pages",
+        painted && reads_ok && stats_ok && st.0.pixels_blitted == st.1 && st.2 == 0
+    );
+
+    // 3 — the frame reaches the DISPLAY DEVICE: one transfer plus one flush of the whole
+    //     extent, answered OK, exactly two commands of device traffic.
+    let before = dev.cmds_sent();
+    // SAFETY: live device; the rect is the resource's own full extent.
+    let shown = unsafe {
+        dev.transfer_to_host_2d(COMPOSE_RID, Rect::covering(W, HGT))
+            .is_ok()
+            && dev
+                .resource_flush(COMPOSE_RID, Rect::covering(W, HGT))
+                .is_ok()
+    };
+    check!(
+        "compose: TRANSFER plus FLUSH hand the composed frame to the display device",
+        shown && dev.cmds_sent() == before + 2
+    );
+
+    // 4 — the QUIET frame moves NOTHING: no pixel writes, and because nothing changed, no
+    //     device commands either. The idle desktop costs zero — measured, not assumed.
+    let before = dev.cmds_sent();
+    let quiet = {
+        let mut sink = ComposeSink::new(&mut surf);
+        let st = comp.compose_frame(&mut sink);
+        (st.pixels_blitted, st.pixels_skipped_by_damage, sink.puts())
+    };
+    check!(
+        "compose: a quiet frame writes zero pixels and issues zero device commands",
+        quiet.0 == 0
+            && quiet.1 == W as u64 * HGT as u64
+            && quiet.2 == 0
+            && dev.cmds_sent() == before
+    );
+
+    // 5 — authority holds ON the real path: without the right token nothing about the frame
+    //     may change — no draw, no move, no damage, no recomposition, no device traffic.
+    let ink_before = ink_total(&surf);
+    let before = dev.cmds_sent();
+    let refused = comp.draw_pixel(A, tok_a ^ 1, 1, 1, true).is_err()
+        && comp.move_surface(A, tok_a ^ 1, 0, 0).is_err()
+        && comp.raise(B, tok_b ^ 7).is_err();
+    let after = {
+        let mut sink = ComposeSink::new(&mut surf);
+        let st = comp.compose_frame(&mut sink);
+        (st.pixels_blitted, sink.puts())
+    };
+    check!(
+        "compose: a wrong token changes nothing on the real path - no writes, no recomposition, no device traffic",
+        refused && after.0 == 0 && after.1 == 0 && ink_total(&surf) == ink_before && dev.cmds_sent() == before
+    );
+
+    // 6 — a MOVE is visible the same frame, in real memory: the vacated area loses the
+    //     window's pixels to what the wallpaper paints there, the new area shows the window,
+    //     and the changed frame goes to the device as exactly two commands.
+    let before = dev.cmds_sent();
+    let moved = comp.move_surface(B, tok_b, 400, 120).is_ok();
+    let move_frame = if moved {
+        let mut sink = ComposeSink::new(&mut surf);
+        let st = comp.compose_frame(&mut sink);
+        Some((st, sink.puts(), sink.refusals()))
+    } else {
+        None
+    };
+    let reads = (
+        surf.get(33, 25),   // vacated: wallpaper interior now (no ghost)
+        surf.get(401, 121), // arrived: window border
+        surf.get(430, 150), // arrived: window interior
+    );
+    // SAFETY: live device.
+    let flushed = if move_frame.is_some() {
+        unsafe {
+            dev.transfer_to_host_2d(COMPOSE_RID, Rect::covering(W, HGT))
+                .is_ok()
+                && dev
+                    .resource_flush(COMPOSE_RID, Rect::covering(W, HGT))
+                    .is_ok()
+        }
+    } else {
+        false
+    };
+    check!(
+        "compose: a move is visible the same frame - vacated area reverts, new area shows, device told once",
+        moved && reads == (Ok(false), Ok(true), Ok(false))
+            && flushed
+            && dev.cmds_sent() == before + 2
+            && move_frame.map(|f| f.0.pixels_blitted == f.1 && f.2 == 0).unwrap_or(false)
+    );
+
+    // 7 — the bounds hold at the REAL raster's edge: pushing the window 160 px past the right
+    //     edge and 40 px past the bottom makes only its intersection land, the sink is never
+    //     asked for a pixel the raster does not have (refusals stay zero through a partially-
+    //     off placement), and the clipped frame goes to the device as exactly two commands.
+    let before = dev.cmds_sent();
+    let clipped = comp.move_surface(B, tok_b, 600, 200).is_ok();
+    let clip_frame = if clipped {
+        let mut sink = ComposeSink::new(&mut surf);
+        let st = comp.compose_frame(&mut sink);
+        Some((st, sink.puts(), sink.refusals()))
+    } else {
+        None
+    };
+    let reads = (
+        surf.get(401, 121), // vacated: wallpaper interior where the window used to be
+        surf.get(603, 203), // window border, inside the intersection
+        surf.get(620, 220), // window interior, inside the intersection
+        surf.get(599, 220), // wallpaper interior, the column before the placement
+    );
+    // SAFETY: live device.
+    let flushed = if clip_frame.is_some() {
+        unsafe {
+            dev.transfer_to_host_2d(COMPOSE_RID, Rect::covering(W, HGT))
+                .is_ok()
+                && dev
+                    .resource_flush(COMPOSE_RID, Rect::covering(W, HGT))
+                    .is_ok()
+        }
+    } else {
+        false
+    };
+    check!(
+        "compose: the exact clip holds at the REAL raster - overhang lands only its intersection, nothing asked outside",
+        clipped
+            && reads == (Ok(false), Ok(true), Ok(false), Ok(false))
+            && flushed
+            && dev.cmds_sent() == before + 2
+            && clip_frame.map(|f| f.0.pixels_blitted == f.1 && f.2 == 0).unwrap_or(false)
+    );
+
+    // 8 — the z-order flips are VISIBLE in real memory (raise the wallpaper: the window's
+    //     border pixel disappears under it; lower it: the border reappears), detach reveals
+    //     the wallpaper for good, the final frame reaches the device, and the teardown
+    //     revokes every page's DMA registration — the DEVICE confirms the end.
+    let before = dev.cmds_sent();
+    let raised = comp.raise(A, tok_a).is_ok() && comp.z_order() == [B, A];
+    let raise_read = if raised {
+        let mut sink = ComposeSink::new(&mut surf);
+        comp.compose_frame(&mut sink);
+        surf.get(603, 203) == Ok(false)
+    } else {
+        false
+    };
+    let lowered = comp.lower(A, tok_a).is_ok() && comp.z_order() == [A, B];
+    let lower_read = if lowered {
+        let mut sink = ComposeSink::new(&mut surf);
+        comp.compose_frame(&mut sink);
+        surf.get(603, 203) == Ok(true)
+    } else {
+        false
+    };
+    let detached = comp.detach(B, tok_b).is_ok() && comp.surface_count() == 1;
+    let detach_read = if detached {
+        let mut sink = ComposeSink::new(&mut surf);
+        let st = comp.compose_frame(&mut sink);
+        surf.get(603, 203) == Ok(false) && st.pixels_blitted > 0
+    } else {
+        false
+    };
+    // SAFETY: live device.
+    let shown = if detached {
+        unsafe {
+            dev.transfer_to_host_2d(COMPOSE_RID, Rect::covering(W, HGT))
+                .is_ok()
+                && dev
+                    .resource_flush(COMPOSE_RID, Rect::covering(W, HGT))
+                    .is_ok()
+        }
+    } else {
+        false
+    };
+    // The teardown ops below are device commands too, so the final-frame traffic is measured
+    // HERE — before detach_backing/unref/probe add their own.
+    let shown_cmds = dev.cmds_sent();
+    // SAFETY: live device.
+    let revoked = unsafe { dev.detach_backing(COMPOSE_RID) }.is_ok() && dev.live_dma_regions() == 3;
+    // SAFETY: live device.
+    let gone = unsafe { dev.unref_resource(COMPOSE_RID) }.is_ok()
+        && unsafe { dev.probe_device_error(COMPOSE_RID) } == Ok(RESP_ERR_INVALID_RESOURCE_ID);
+    check!(
+        "compose: the z-order flips are visible in real memory, detach reveals the wallpaper, and the backing revokes with the device confirming the end",
+        raised && raise_read && lowered && lower_read && detached && detach_read
+            && shown
+            && shown_cmds == before + 2
+            && revoked
+            && gone
+    );
+
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
