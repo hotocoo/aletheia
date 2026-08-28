@@ -106,6 +106,8 @@ REQUIRED=(
   # The power/performance contract (ALET-P2-022, ADR-076) is an arch-independent model - it
   # must hold wherever the kernel boots, hypervisor or not.
   'ALL 14 POWER-PERFORMANCE INVARIANTS HOLD'
+  # The composition contract (ALET-P2-021, ADR-077) is an arch-independent model too.
+  'ALL 14 COMPOSITION-CONTRACT INVARIANTS HOLD'
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'

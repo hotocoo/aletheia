@@ -110,6 +110,9 @@ echo "$OUT" | grep "ALL 9 IOMMU-CONTRACT INVARIANTS HOLD" >/dev/null || { echo "
 # Frequency is authority, heat is a hard ceiling (ALET-P2-022, ADR-076): the OC band needs a
 # live grant, the envelope is absolute, trips clamp and cool, the governor never overclocks.
 echo "$OUT" | grep "ALL 14 POWER-PERFORMANCE INVARIANTS HOLD" >/dev/null || { echo "FAIL: power-performance invariants marker missing (ALET-P2-022, ADR-076)"; fail=1; }
+# Pixels are authority, the scanout is a hard bound (ALET-P2-021, ADR-077): owner tokens,
+# exact clipping, painter's z-order, size-honest buffers, and a zero-write quiet frame.
+echo "$OUT" | grep "ALL 14 COMPOSITION-CONTRACT INVARIANTS HOLD" >/dev/null || { echo "FAIL: composition-contract invariants marker missing (ALET-P2-021, ADR-077)"; fail=1; }
 echo "$OUT" | grep "ALL 10 SMMUV3 INVARIANTS HOLD" >/dev/null || { echo "FAIL: smmuv3 invariants marker missing (ALET-P1-018, ADR-074)"; fail=1; }
 echo "$OUT" | grep "enforcement LIVE" >/dev/null || { echo "FAIL: smmuv3 enforcement never turned ON"; fail=1; }
 # Custody crosses the platform boundary (ALET-P1-034, ADR-072): the firmware-delivered root must
@@ -164,7 +167,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="bench=12 cap=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 pm=14 selftest=13 smp=22 soak=12 usermode=32 smmu=10 vault=14 virtio=21 vm=66"
+AARCH64_EXPECTED="bench=12 cap=14 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 pm=14 selftest=13 smp=22 soak=12 usermode=32 smmu=10 vault=14 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

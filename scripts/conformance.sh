@@ -264,6 +264,17 @@ CONTRACT=(
   "pm: the thermal envelope is absolute - no grant is minted past it"
   "pm: a thermal trip clamps every domain and refuses elevation until the cooldown expires"
   "pm: the demand governor never enters the overclock band"
+  # The composition contract (ALET-P2-021, ADR-077). WHO may put pixels on the scanout is an
+  # authority question and WHERE they may land is a bounds question, so the security-critical
+  # half is contracted identically on every CPU: owner tokens gate every op, clipping is
+  # exact, the z-order is owner-controlled, buffers are size-honest, and a quiet frame
+  # writes nothing (measured, not assumed).
+  "compositor: a scanout with no owned surfaces composes nothing and unknown ids are refused by name"
+  "compositor: a surface answers only to its own owner token"
+  "compositor: a surface crossing the scanout edge is clipped exactly - nothing lands outside"
+  "compositor: the painter's order is the z-order and only the owner may change it"
+  "compositor: a fill buffer that is not exactly the packed size is refused by name"
+  "compositor: an unchanged frame writes zero pixels and a one-pixel change writes exactly its region"
 )
 
 hr() { printf '========================================================================\n'; }

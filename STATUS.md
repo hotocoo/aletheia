@@ -1,6 +1,15 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-28 (THE POWER/PERFORMANCE CONTRACT is modeled, not assumed — frequency is
+**As of:** 2026-08-28 (THE COMPOSITION CONTRACT is modeled, not assumed — pixels are AUTHORITY
+and the scanout is a HARD BOUND: `kernel-core/src/compositor.rs` mints surfaces with
+possession-based owner tokens that gate every op, clips placements exactly to the scanout
+(proved against a guard-band raster), keeps the painter's order as the owner-controlled
+z-order, refuses size-dishonest buffer fills with nothing touched, makes placement changes
+visible the same frame through screen-space damage (clear-then-repaint through the z-order,
+so vacated areas lose the pixels of whoever left), coalesces its bounded damage ledgers,
+writes ZERO pixels on an unchanged frame with the cost of every frame REPORTED, and lands
+bit-identical under identical op sequences — 14 boot invariants on all three targets, six
+behaviors pinned cross-CPU, 11 host proofs, ADR-077); before that: THE POWER/PERFORMANCE CONTRACT is modeled, not assumed — frequency is
 AUTHORITY and heat is a HARD CEILING: `kernel-core/src/pm.rs` gives every domain an honest
 discrete ladder, keeps the governor range free to any caller, gates the overclock band behind
 live per-domain elevation grants that attenuate on delegation and clamp the domain back to
@@ -23,7 +32,40 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..075`.
 
-## Current wave — the power/performance contract is modeled, not assumed (2026-08-28, ADR-076)
+## Current wave — the composition contract is modeled, not assumed (2026-08-28, ADR-077)
+
+ALET-P2-021's compositor rung. The GUI question decomposes into the two questions this kernel
+already knows how to answer: WHO may put pixels on the scanout (an authority question) and
+WHERE those pixels may land (a bounds question). `kernel-core/src/compositor.rs` defines the
+contract as a complete software model: surfaces are minted with unforgeable possession-based
+OWNER tokens and every op — attach, move, raise, lower, detach, and each pixel write — is
+refused `NotOwner` without the right one; placements are clipped to the scanout EXACTLY
+(hangs off any edge -> intersection only; could-never-show-a-pixel placements refused at
+attach AND move; the write loops only visit pixels that exist in both surface and scanout —
+the host proofs run against a GUARD-BAND raster whose out-of-bounds-put counter must stay
+zero); the painter's order is the z-order and only the owner may change it; packed buffer
+fills are SIZE-HONEST (short can never overread, long can never smuggle, refused fills leave
+the surface untouched); placement changes are VISIBLE the same frame — attach/move/detach/
+raise/lower damage the screen regions they vacate and cover, and compose clears each damaged
+region to background before repainting it through the z-order, so a moved surface leaves no
+ghost and a damaged bottom surface cannot paint over the windows above it; damage ledgers
+are bounded and coalesce (summarized, never lost); an unchanged frame visits NO region and
+writes ZERO pixels, with every frame's cost REPORTED (`FrameStats` — the measured shape of
+"maximum performance", ADR-064's posture); and identical op sequences land bit-identical.
+
+Proofs: 11 host tests in kernel-core/tests/compositor.rs (four-edge clip sweep with
+per-pixel oracles, the ownership table over every op, the buffer-honesty matrix,
+placement-damage visibility, exact damage accounting, bounds/capacity, token non-reuse,
+determinism) plus 14 in-kernel invariants booting on all three targets (`[compositor] ALL 14
+COMPOSITION-CONTRACT INVARIANTS HOLD`, boot fails 600+i), six pinned cross-CPU in the
+conformance contract (146 -> 152). Marker maps changed deliberately (`compositor=14`,
+ADR-061). Named non-claims, in the register: no real-pixel compositor leg over the virtio-gpu
+flush path yet (QEMU's virtio-gpu can SHOW a frame but enforces nothing about who composes
+it — the ADR-071/076 posture), no alpha blending beyond the 1-bit depth the framebuffer
+console already runs, no cursors, no input routing, no device-level GPU isolation between
+surfaces.
+
+## Previous wave — the power/performance contract is modeled, not assumed (2026-08-28, ADR-076)
 
 ALET-P2-022 leaves the deferred column. The wave answers the OS's overclocking promise the way
 this kernel answers every privileged act: frequency is AUTHORITY, heat is a HARD CEILING.

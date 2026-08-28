@@ -198,6 +198,34 @@ pub extern "C" fn kmain() -> ! {
             semihosting::exit(560 + idx as i32);
         }
     }
+    // The composition contract (ALET-P2-021, ADR-077): pixels are authority, the scanout is
+    // a hard bound. Surfaces answer only to their owner token, placements clip exactly to
+    // the scanout, the painter's order is the z-order, buffers are size-honest, placement
+    // changes are visible the same frame, and an unchanged frame writes ZERO pixels - the
+    // cost of every frame is counted, not assumed. Modeled in software; composing onto REAL
+    // scanout pixels over the virtio-gpu flush path stays scoped in the gap register.
+    kprintln!("");
+    kprintln!("--- compositor selftests (pixels are authority, the scanout is a bound) ---");
+    match kernel_core::compositor::compositor_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!(
+            "[compositor] ALL {} COMPOSITION-CONTRACT INVARIANTS HOLD",
+            n
+        ),
+        Err((idx, name)) => {
+            kprintln!(
+                "[compositor] FAILED at composition-contract invariant {}: {}",
+                idx,
+                name
+            );
+            semihosting::exit(600 + idx as i32);
+        }
+    }
 
     // reorder tasks whose effective priority is already equal, and nothing else. So the suite proves
     // the advisory property itself — an abstaining model schedules bit-identically to the model-free

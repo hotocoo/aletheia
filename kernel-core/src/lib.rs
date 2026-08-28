@@ -30,6 +30,7 @@ pub mod bootroot;
 pub mod capalg;
 pub mod capstore;
 pub mod capvault;
+pub mod compositor;
 pub mod compress;
 pub mod conring;
 pub mod crypto;
