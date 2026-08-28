@@ -1,5 +1,5 @@
 //! The composition contract: pixels are AUTHORITY, the scanout is a HARD BOUND (ALET-P2-021,
-//! ADR-077).
+//! ADR-077); input is AUTHORITY and the cursor is the COMPOSITOR'S OWN (ALET-P2-021, ADR-079).
 //!
 //! A GUI that promises both maximum performance and maximum security is, in this kernel's
 //! grammar, one contract: WHO may put pixels on the scanout (an authority question — ambient
@@ -31,7 +31,29 @@
 //! promises at boot. Named non-claim: this is the CONTRACT — composing onto REAL scanout
 //! pixels over the virtio-gpu flush path (and GPU isolation between surfaces at the device)
 //! stays scoped in the gap register, exactly as the IOMMU contract preceded its silicon.
+//!
+//! # Input (ADR-079)
+//!
+//! A keystroke is an authority decision about WHO may read what the user typed, and a
+//! pointer is a device nobody else may steer. The contract decomposes into the two
+//! questions this module already knows how to answer, plus one new possession: the INPUT
+//! PATH (the driver that stands between the user's hardware and the desktop) mints exactly
+//! ONE session token per compositor and every event post, focus change and cursor move
+//! answers to it — refused BY NAME otherwise, fail-closed like every possession here. At
+//! most ONE surface is focused; events route ONLY to the focused surface's BOUNDED queue,
+//! and only its OWNER TOKEN may drain it — the input path decides WHERE events go, the
+//! owner decides WHO reads them, and neither can act as the other. A surface that stops
+//! draining gets a NAMED refusal and a COUNTED drop, never an unbounded queue (the boot
+//! heap never frees, ADR-063); detaching the focused surface clears focus and its queue
+//! dies with it — events are never resurrected under a re-minted id. The cursor is the
+//! compositor's OWN plane: no token names it, no z-order slot holds it, no surface can
+//! cover or read it; only the input session may move or hide it, it is clipped EXACTLY to
+//! the scanout like every other geometry, it paints ABOVE every surface, its moves are
+//! visible the same frame through the same damage machinery, and its cost is REPORTED in
+//! `FrameStats::cursor_pixels` (ADR-064). And input is not pixels: a keystroke with no
+//! repaint damages NOTHING — a quiet frame stays quiet.
 
+use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -67,6 +89,65 @@ pub enum CompFault {
         expected_bytes: usize,
         got_bytes: usize,
     },
+    /// The input session already exists — a second opener is refused, fail-closed. The
+    /// input path is ONE principal; a second token would be a second opinion about where
+    /// the user's keystrokes go.
+    InputSealed,
+    /// An input op was offered no session token, or a wrong or forged one. Absent, wrong
+    /// and forged are all "not the input path".
+    NotInputSession,
+    /// Focus named a minted surface that is not placed on the scanout — nothing focused
+    /// can be shown, so nothing focused can receive.
+    NotPlaced(u32),
+    /// A keystroke arrived and nothing is focused. The event is refused, not queued into
+    /// limbo — input that goes nowhere must be NAMED as going nowhere.
+    NoFocus,
+    /// The focused surface's bounded input queue is full: the event is refused AND COUNTED
+    /// as dropped. A surface that stops draining loses input loudly, never silently.
+    Backlogged { surface: u32 },
+    /// A cursor move whose glyph could never show a pixel — refused, like a fully-off
+    /// placement. Partially-off cursor positions are legal and clipped exactly.
+    CursorOffScanout { x: u32, y: u32 },
+}
+
+/// Input events per surface before drops are counted instead — a window that stops
+/// draining must not become an unbounded sink (the boot heap never frees, ADR-063).
+pub const MAX_INPUT_EVENTS: usize = 32;
+/// The cursor glyph is 8x8.
+pub const CURSOR_SIZE: u32 = 8;
+/// The cursor glyph, 1-bit rows (bit 7 = leftmost column): a crosshair, transparent where
+/// 0. The compositor owns it outright — it is not a surface, has no token, no z-order slot.
+const CURSOR_GLYPH: [u8; 8] = [0x10, 0x10, 0x10, 0xFE, 0x10, 0x10, 0x10, 0x00];
+
+/// Wrap one input op: run its body, then COUNT a refusal. The closure borrow ends before
+/// the counter moves, so a refusal both changes nothing and is never silent.
+macro_rules! count_refusal {
+    ($self:expr, $ty:ty, $body:expr) => {{
+        let r: Result<$ty, CompFault> = $body;
+        if r.is_err() {
+            $self.input_refusals += 1;
+        }
+        r
+    }};
+}
+
+/// One routed input event. `seq` is a per-compositor monotonic serial — delivery order is
+/// observable and replay/reorder is detectable, because an event stream that could lie
+/// about order would be a second place authority could be laundered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Event {
+    pub seq: u64,
+    pub kind: EventKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventKind {
+    /// A byte of the console's own decoded alphabet (the keymap's output — the same
+    /// alphabet the serial editor already rules on, never a raw device byte).
+    Key(u8),
+    /// Synthesized by the compositor when the surface LOST focus to another. Delivered
+    /// into the surface's own queue like any event; a full queue drops it, counted.
+    FocusLost,
 }
 
 /// One damage rect, in a surface's own coordinates.
@@ -111,6 +192,9 @@ pub struct FrameStats {
     /// Damaged placed pixels a damage-naive compositor would have rewritten that this
     /// frame did not — the damage tracker's measured savings.
     pub pixels_skipped_by_damage: u64,
+    /// Cursor-plane ink pixels this frame — the cursor's cost is REPORTED, not assumed
+    /// (ADR-064); zero on every frame the cursor did not move or repaint under.
+    pub cursor_pixels: u64,
 }
 
 /// A client-owned 1-bit surface: its own pixels, its own damage.
@@ -273,6 +357,23 @@ pub struct Compositor {
     scanout_damage: Vec<Rect>,
     whole_scanout_damage: bool,
     stats: FrameStats,
+    // -- input (ADR-079) ------------------------------------------------------
+    /// The ONE input session, minted once, possession-based. `None` = input never opened,
+    /// and every input op is refused by name — a desktop that never opened its input path
+    /// cannot receive a single keystroke.
+    input_session: Option<u64>,
+    /// The ONE focused surface id — the only one `post_key` routes to.
+    focus: Option<u32>,
+    /// Per-minted-surface bounded event queues; they die with the surface.
+    queues: Vec<(u32, VecDeque<Event>)>,
+    next_event: u64,
+    /// Events DROPPED (a full queue behind a surface that stopped draining) and input-op
+    /// refusals — both counted, never silent.
+    events_dropped: u64,
+    input_refusals: u64,
+    /// The compositor's own cursor plane: the glyph's top-left on the scanout, `None` =
+    /// hidden. No token names it; only the input session moves it.
+    cursor: Option<(u32, u32)>,
 }
 
 impl Compositor {
@@ -287,6 +388,13 @@ impl Compositor {
             scanout_damage: Vec::new(),
             whole_scanout_damage: false,
             stats: FrameStats::default(),
+            input_session: None,
+            focus: None,
+            queues: Vec::new(),
+            next_event: 1,
+            events_dropped: 0,
+            input_refusals: 0,
+            cursor: None,
         }
     }
 
@@ -318,6 +426,7 @@ impl Compositor {
         self.next_serial += 1;
         let token = self.next_serial ^ self.secret;
         self.tokens.push((id, token));
+        self.queues.push((id, VecDeque::new()));
         Ok(token)
     }
 
@@ -415,6 +524,10 @@ impl Compositor {
         self.placed.retain(|p| p.surface != id);
         self.surfaces.retain(|(sid, _)| *sid != id);
         self.tokens.retain(|(sid, _)| *sid != id);
+        self.queues.retain(|(sid, _)| *sid != id);
+        if self.focus == Some(id) {
+            self.focus = None;
+        }
         Ok(())
     }
 
@@ -460,6 +573,250 @@ impl Compositor {
             .ok_or(CompFault::UnknownSurface(id))?
             .clear();
         Ok(())
+    }
+
+    // -- input (ADR-079) -------------------------------------------------------
+
+    /// Mint the ONE input session. Possession-based like every authority here
+    /// (`next_serial ^ secret`); a second opening is refused `InputSealed` — the input
+    /// path is one principal, and a second opinion about where the user's keystrokes go
+    /// is exactly the ambient authority this contract refuses to mint.
+    pub fn open_input_session(&mut self) -> Result<u64, CompFault> {
+        count_refusal!(
+            self,
+            u64,
+            (|| {
+                if self.input_session.is_some() {
+                    return Err(CompFault::InputSealed);
+                }
+                self.next_serial += 1;
+                let s = self.next_serial ^ self.secret;
+                self.input_session = Some(s);
+                Ok(s)
+            })()
+        )
+    }
+
+    /// Focus a PLACED surface (input session only). At most one surface is focused;
+    /// refocusing queues a synthesized `FocusLost` into the surface that lost it —
+    /// delivered through the same bounded queue as any event, dropped AND COUNTED if that
+    /// surface stopped draining. Idempotent on the already-focused surface (nothing was
+    /// lost, so nothing is queued). Focus is a ROUTING decision: it changes no pixel.
+    pub fn set_focus(&mut self, session: u64, id: u32) -> Result<(), CompFault> {
+        count_refusal!(
+            self,
+            (),
+            (|| {
+                self.session_check(session)?;
+                self.surface(id).ok_or(CompFault::UnknownSurface(id))?;
+                if !self.placed.iter().any(|p| p.surface == id) {
+                    return Err(CompFault::NotPlaced(id));
+                }
+                if self.focus == Some(id) {
+                    return Ok(());
+                }
+                if let Some(old) = self.focus.take() {
+                    self.enqueue(
+                        old,
+                        Event {
+                            seq: self.next_event,
+                            kind: EventKind::FocusLost,
+                        },
+                    );
+                    self.next_event += 1;
+                }
+                self.focus = Some(id);
+                Ok(())
+            })()
+        )
+    }
+
+    /// Clear focus (input session only). The surface that had it gets `FocusLost`.
+    pub fn clear_focus(&mut self, session: u64) -> Result<(), CompFault> {
+        count_refusal!(
+            self,
+            (),
+            (|| {
+                self.session_check(session)?;
+                if let Some(old) = self.focus.take() {
+                    self.enqueue(
+                        old,
+                        Event {
+                            seq: self.next_event,
+                            kind: EventKind::FocusLost,
+                        },
+                    );
+                    self.next_event += 1;
+                }
+                Ok(())
+            })()
+        )
+    }
+
+    /// Post one decoded keystroke to the FOCUSED surface's bounded queue (input session
+    /// only). No focus: refused `NoFocus`, the event exists NOWHERE (asserted by the
+    /// suites — nothing is queued into limbo). Full queue: refused `Backlogged` and
+    /// COUNTED as a drop. Input is not pixels: this damages nothing.
+    pub fn post_key(&mut self, session: u64, byte: u8) -> Result<(), CompFault> {
+        count_refusal!(
+            self,
+            (),
+            (|| {
+                self.session_check(session)?;
+                let Some(id) = self.focus else {
+                    return Err(CompFault::NoFocus);
+                };
+                // Bounded: a surface that stopped draining gets its refusal BY NAME and its
+                // drop COUNTED — the event is never queued and never silently swallowed.
+                match self.queues.iter_mut().find(|(sid, _)| *sid == id) {
+                    Some((_, q)) if q.len() < MAX_INPUT_EVENTS => {
+                        q.push_back(Event {
+                            seq: self.next_event,
+                            kind: EventKind::Key(byte),
+                        });
+                    }
+                    Some(_) => {
+                        self.events_dropped += 1;
+                        return Err(CompFault::Backlogged { surface: id });
+                    }
+                    None => return Err(CompFault::UnknownSurface(id)),
+                }
+                self.next_event += 1;
+                Ok(())
+            })()
+        )
+    }
+
+    /// Drain a surface's queue — OWNER TOKEN ONLY. This is the other half of the routing
+    /// authority: the input path decides where events GO, the owner decides who READS
+    /// them, and a wrong token here is the same refusal a forged draw token is. Returns
+    /// the queued events in seq order and empties the queue.
+    pub fn drain_input(&mut self, id: u32, token: u64) -> Result<Vec<Event>, CompFault> {
+        count_refusal!(
+            self,
+            Vec<Event>,
+            (|| {
+                self.owner_check(id, token)?;
+                match self.queues.iter_mut().find(|(sid, _)| *sid == id) {
+                    Some((_, q)) => Ok(q.drain(..).collect()),
+                    None => Ok(Vec::new()),
+                }
+            })()
+        )
+    }
+
+    /// Move the compositor's cursor (input session only). A pointer is a device nobody
+    /// else may steer: no surface token, however legitimate, moves it. A position whose
+    /// glyph could never show a pixel is refused `CursorOffScanout`; a partially-off
+    /// position is legal and clipped exactly at compose time, like every other geometry.
+    /// The move damages the union of the old and new glyph rects — visible the SAME frame
+    /// — and idempotent on the current position (no damage, no wasted frame).
+    pub fn move_cursor(&mut self, session: u64, x: u32, y: u32) -> Result<(), CompFault> {
+        count_refusal!(
+            self,
+            (),
+            (|| {
+                self.session_check(session)?;
+                let (sw, sh) = self.scanout;
+                if x >= sw || y >= sh {
+                    return Err(CompFault::CursorOffScanout { x, y });
+                }
+                if self.cursor == Some((x, y)) {
+                    return Ok(());
+                }
+                self.damage_cursor();
+                self.cursor = Some((x, y));
+                self.damage_cursor();
+                Ok(())
+            })()
+        )
+    }
+
+    /// Hide the cursor (input session only). The vacated glyph region is damaged: what
+    /// was underneath must reappear — the same clear-then-repaint rule a detached surface
+    /// obeys, and the reason hide is visible the same frame.
+    pub fn hide_cursor(&mut self, session: u64) -> Result<(), CompFault> {
+        count_refusal!(
+            self,
+            (),
+            (|| {
+                self.session_check(session)?;
+                self.damage_cursor();
+                self.cursor = None;
+                Ok(())
+            })()
+        )
+    }
+
+    /// The focused surface id, if any — observable so the suites can pin it.
+    pub fn focus(&self) -> Option<u32> {
+        self.focus
+    }
+
+    /// The cursor's glyph top-left, if shown.
+    pub fn cursor(&self) -> Option<(u32, u32)> {
+        self.cursor
+    }
+
+    /// (events dropped, input refusals) — the input ledger's two counters.
+    pub fn input_counters(&self) -> (u64, u64) {
+        (self.events_dropped, self.input_refusals)
+    }
+
+    fn session_check(&self, session: u64) -> Result<(), CompFault> {
+        match self.input_session {
+            Some(s) if s == session => Ok(()),
+            _ => Err(CompFault::NotInputSession),
+        }
+    }
+
+    /// Enqueue one event into a surface's bounded queue. Full queue: the event is DROPPED
+    /// (never queued, never silently) and the drop counter moves; the queue's existing
+    /// contents are untouched — a backlog must not evict events that arrived in order.
+    fn enqueue(&mut self, id: u32, ev: Event) {
+        match self.queues.iter_mut().find(|(sid, _)| *sid == id) {
+            Some((_, q)) if q.len() < MAX_INPUT_EVENTS => q.push_back(ev),
+            _ => self.events_dropped += 1,
+        }
+    }
+
+    /// Damage the screen region the cursor's glyph covers, clipped to the scanout — the
+    /// same bounded screen-space ledger every other placement change uses.
+    fn damage_cursor(&mut self) {
+        let Some((cx, cy)) = self.cursor else {
+            return;
+        };
+        let (sw, sh) = self.scanout;
+        let Some(r) = Rect::intersect(
+            Rect {
+                x: cx,
+                y: cy,
+                w: CURSOR_SIZE,
+                h: CURSOR_SIZE,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                w: sw,
+                h: sh,
+            },
+        ) else {
+            return;
+        };
+        if self.whole_scanout_damage {
+            return;
+        }
+        if self.scanout_damage.len() >= MAX_DAMAGE_RECTS {
+            self.scanout_damage.clear();
+            self.whole_scanout_damage = true;
+            return;
+        }
+        self.scanout_damage.push(r);
+    }
+
+    /// The cursor's glyph bit at glyph-local (gx, gy): true where the crosshair has ink.
+    fn cursor_ink(gx: u32, gy: u32) -> bool {
+        CURSOR_GLYPH[gy as usize] & (0x80u8 >> gx) != 0
     }
 
     // -- composition ----------------------------------------------------------
@@ -527,6 +884,7 @@ impl Compositor {
             }
         }
         let regions: Vec<Rect> = if whole { vec![scanout] } else { regions };
+        let cursor = self.cursor;
 
         for r in &regions {
             let Some(r) = Rect::intersect(*r, scanout) else {
@@ -541,6 +899,30 @@ impl Compositor {
             }
             for p in &order {
                 self.blit_region(p, r, sink, &mut stats);
+            }
+            // The cursor is the compositor's own plane: painted LAST, above every surface,
+            // clipped exactly like every other geometry, transparent where its glyph is 0,
+            // its ink REPORTED in cursor_pixels rather than blended into the count.
+            if let Some((cx, cy)) = cursor {
+                if let Some(cr) = Rect::intersect(
+                    Rect {
+                        x: cx,
+                        y: cy,
+                        w: CURSOR_SIZE,
+                        h: CURSOR_SIZE,
+                    },
+                    r,
+                ) {
+                    for yy in cr.y..cr.y + cr.h {
+                        for xx in cr.x..cr.x + cr.w {
+                            if Self::cursor_ink(xx - cx, yy - cy) {
+                                sink.put(xx, yy, true);
+                                stats.pixels_blitted += 1;
+                                stats.cursor_pixels += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
         stats.pixels_skipped_by_damage = scanout.area().saturating_sub(stats.pixels_blitted);
@@ -1005,6 +1387,285 @@ pub fn compositor_suite(
     check!(
         matches!(refused_move, Err(CompFault::OffScanout { surface: S })) && shadow.get(2, 2),
         "compositor: a move that could never show a pixel is refused and the surface stays where it was"
+    );
+
+    Ok(n)
+}
+
+// ---------------------------------------------------------------------------
+// The input-routing suite (ALET-P2-021, ADR-079). Same posture as the
+// composition suite above: the core promises at boot, the exhaustive sweeps
+// on the host in tests/input.rs.
+// ---------------------------------------------------------------------------
+pub fn input_suite(
+    mut report: impl FnMut(u32, bool, &'static str),
+) -> Result<u32, (u32, &'static str)> {
+    let mut n: u32 = 0;
+    macro_rules! check {
+        ($cond:expr, $name:expr) => {{
+            n += 1;
+            let passed = $cond;
+            report(n, passed, $name);
+            if !passed {
+                return Err((n, $name));
+            }
+        }};
+    }
+
+    // The same exact-sized shadow the composition suite uses: any out-of-bounds write
+    // would panic the suite, not corrupt a neighbor.
+    struct Shadow {
+        bits: Vec<bool>,
+    }
+    impl Shadow {
+        fn new(w: u32, h: u32) -> Self {
+            Shadow {
+                bits: vec![false; w as usize * h as usize],
+            }
+        }
+        fn get(&self, x: u32, y: u32) -> bool {
+            self.bits[y as usize * 64 + x as usize]
+        }
+    }
+    impl Raster for Shadow {
+        fn put(&mut self, x: u32, y: u32, ink: bool) {
+            self.bits[y as usize * 64 + x as usize] = ink;
+        }
+    }
+
+    let mut comp = Compositor::new(0x51CA_1E57, 64, 32);
+    let mut shadow = Shadow::new(64, 32);
+
+    // 1 - the input path is ONE principal: the session mints once, possession-based; a
+    //     second opening is refused by name and mints nothing.
+    let sess = comp.open_input_session().unwrap();
+    let again = comp.open_input_session();
+    check!(
+        matches!(again, Err(CompFault::InputSealed))
+            && comp.focus().is_none()
+            && comp.cursor().is_none(),
+        "input: the input path mints exactly one session and a second opener is refused by name"
+    );
+
+    // 2 - focus answers only for a PLACED surface: unminted and minted-but-unplaced are
+    //     refused by name, and nothing becomes focused by a refusal.
+    let tok = comp.mint_surface(1, 16, 16).unwrap();
+    let unplaced = comp.set_focus(sess, 1);
+    let unknown = comp.set_focus(sess, 9);
+    check!(
+        matches!(unplaced, Err(CompFault::NotPlaced(1)))
+            && matches!(unknown, Err(CompFault::UnknownSurface(9)))
+            && comp.focus().is_none(),
+        "input: focus requires a placed surface - unminted and unplaced ids are refused by name"
+    );
+
+    // 3 - events route to the focused surface and only its OWNER may read them, in seq
+    //     order, exactly once; a wrong owner token is the same refusal a forged draw
+    //     token is, and it changes nothing.
+    comp.attach(1, tok, 8, 8).unwrap();
+    comp.set_focus(sess, 1).unwrap();
+    comp.post_key(sess, b'a').unwrap();
+    comp.post_key(sess, b'b').unwrap();
+    let stranger = comp.drain_input(1, tok ^ 1);
+    let events = comp.drain_input(1, tok).unwrap();
+    let re_drain = comp.drain_input(1, tok).unwrap();
+    check!(
+        matches!(stranger, Err(CompFault::NotOwner { surface: 1 }))
+            && events.len() == 2
+            && events[0].kind == EventKind::Key(b'a')
+            && events[1].kind == EventKind::Key(b'b')
+            && events[0].seq < events[1].seq
+            && re_drain.is_empty(),
+        "input: events route to the focused surface and only its owner drains them - in order, exactly once"
+    );
+
+    // 4 - at most ONE focus: refocusing moves it, the loser is told through its own queue
+    //     (FocusLost, after the events it never read), and refocusing the already-focused
+    //     surface is idempotent — nothing lost, nothing queued.
+    let tok2 = comp.mint_surface(2, 16, 16).unwrap();
+    comp.attach(2, tok2, 32, 8).unwrap();
+    comp.set_focus(sess, 2).unwrap();
+    comp.post_key(sess, b'x').unwrap();
+    comp.set_focus(sess, 1).unwrap();
+    let lost = comp.drain_input(2, tok2).unwrap();
+    let routed_to_one = comp.drain_input(1, tok).unwrap();
+    let idempotent = comp.set_focus(sess, 1).is_ok();
+    let nothing_more = comp.drain_input(2, tok2).unwrap().is_empty();
+    check!(
+        lost.len() == 2
+            && lost[0].kind == EventKind::Key(b'x')
+            && lost[1].kind == EventKind::FocusLost
+            && routed_to_one.len() == 1
+            && routed_to_one[0].kind == EventKind::FocusLost
+            && idempotent
+            && nothing_more,
+        "input: exactly one surface is focused - each loser is told through its own queue and an idempotent refocus queues nothing"
+    );
+
+    // 5 - a keystroke with nothing focused is refused NoFocus and exists NOWHERE: the
+    //     clear told the old focus through its queue, but no queue anywhere holds the
+    //     keystroke — input that goes nowhere is NAMED as going nowhere.
+    comp.clear_focus(sess).unwrap();
+    let no_focus = comp.post_key(sess, b'q');
+    let told = comp.drain_input(1, tok).unwrap();
+    let q2 = comp.drain_input(2, tok2).unwrap();
+    check!(
+        matches!(no_focus, Err(CompFault::NoFocus))
+            && told.len() == 1
+            && told[0].kind == EventKind::FocusLost
+            && q2.is_empty()
+            && !told.iter().any(|e| e.kind == EventKind::Key(b'q')),
+        "input: a keystroke with nothing focused is refused by name and queued nowhere"
+    );
+
+    // 6 - a WRONG session token changes nothing on any input op: no focus move, no event,
+    //     no cursor change — and the refusals are counted, not silent.
+    let (focus0, cursor0) = (comp.focus(), comp.cursor());
+    let bad_session = comp.set_focus(sess ^ 0xA5, 2).is_err()
+        && comp.post_key(sess ^ 0xA5, b'z').is_err()
+        && comp.move_cursor(sess ^ 0xA5, 0, 0).is_err()
+        && comp.hide_cursor(sess ^ 0xA5).is_err()
+        && comp.clear_focus(sess ^ 0xA5).is_err();
+    check!(
+        bad_session
+            && comp.focus() == focus0
+            && comp.cursor() == cursor0
+            && comp.drain_input(1, tok).unwrap().is_empty()
+            && comp.drain_input(2, tok2).unwrap().is_empty(),
+        "input: a wrong session token changes nothing - absent, wrong and forged are all not-the-input-path"
+    );
+
+    // 7 - the queue is BOUNDED: at MAX_INPUT_EVENTS the next keystroke is refused
+    //     Backlogged AND counted as dropped; draining restores capacity exactly.
+    comp.set_focus(sess, 1).unwrap();
+    for _ in 0..MAX_INPUT_EVENTS {
+        comp.post_key(sess, b'k').unwrap();
+    }
+    let overflow = comp.post_key(sess, b'k');
+    let (dropped, _) = comp.input_counters();
+    let drained = comp.drain_input(1, tok).unwrap();
+    let after_drain = comp.post_key(sess, b'k').is_ok();
+    comp.drain_input(1, tok).unwrap();
+    check!(
+        matches!(overflow, Err(CompFault::Backlogged { surface: 1 }))
+            && dropped == 1
+            && drained.len() == MAX_INPUT_EVENTS
+            && after_drain,
+        "input: a backlogged surface is refused and counted by name - draining restores capacity exactly"
+    );
+
+    // 8 - detaching the FOCUSED surface clears focus and the queue dies with it: the
+    //     owner token goes dead and no event outlives its surface.
+    comp.set_focus(sess, 1).unwrap();
+    comp.post_key(sess, b'p').unwrap();
+    comp.detach(1, tok).unwrap();
+    check!(
+        comp.focus().is_none()
+            && matches!(comp.drain_input(1, tok), Err(CompFault::UnknownSurface(1))),
+        "input: detaching the focused surface clears focus and the queue dies with its surface"
+    );
+
+    // 9 - a re-minted surface id starts with an EMPTY queue (events are never resurrected
+    //     under a fresh mint) and the OLD token is dead: not the owner of anything.
+    let tok1b = comp.mint_surface(1, 16, 16).unwrap();
+    comp.attach(1, tok1b, 0, 0).unwrap();
+    check!(
+        comp.drain_input(1, tok1b).unwrap().is_empty()
+            && matches!(
+                comp.drain_input(1, tok),
+                Err(CompFault::NotOwner { surface: 1 })
+            ),
+        "input: a re-minted surface id starts empty and its old token is dead - events are never resurrected"
+    );
+
+    // 10 - the cursor is the compositor's own plane: only the session moves it, a
+    //      position that could never show a pixel is refused by name, and a partially-off
+    //      glyph lands EXACTLY its clipped ink — 36 background puts over the one damaged
+    //      6x6 region plus the 11 crosshair bits inside it, measured on the frame. (The
+    //      settle frame first: the earlier invariants' placement damage must not leak
+    //      into this measured one.)
+    comp.compose_frame(&mut shadow);
+    comp.move_cursor(sess, 58, 26).unwrap();
+    let off = comp.move_cursor(sess, 64, 31);
+    let st = comp.compose_frame(&mut shadow);
+    check!(
+        matches!(
+            comp.move_cursor(sess ^ 1, 0, 0),
+            Err(CompFault::NotInputSession)
+        )
+            && matches!(off, Err(CompFault::CursorOffScanout { x: 64, y: 31 }))
+            && comp.cursor() == Some((58, 26))
+            && st.pixels_blitted == 36 + 11
+            && st.cursor_pixels == 11,
+        "input: the cursor is the compositor's - session-moved, fully-off refused by name, partially-off clipped exactly"
+    );
+
+    // 11 - the cursor paints ABOVE every surface (a zero-ink window under it cannot
+    //      unpaint it — its ink is the only source), moves are visible the SAME frame at
+    //      an exact measured cost, and hiding reveals what was below, the same frame.
+    comp.move_surface(2, tok2, 56, 24).unwrap();
+    comp.compose_frame(&mut shadow); // settle the surface move; cursor repaints on top
+    comp.move_cursor(sess, 60, 28).unwrap();
+    let st2 = comp.compose_frame(&mut shadow);
+    let above = shadow.get(63, 28);
+    comp.hide_cursor(sess).unwrap();
+    let st3 = comp.compose_frame(&mut shadow);
+    check!(
+        above && !shadow.get(63, 28)
+            && st2.pixels_blitted == 118
+            && st2.cursor_pixels == 14
+            && st3.pixels_blitted == 32
+            && st3.cursor_pixels == 0,
+        "input: the cursor paints above every surface, moves are visible the same frame, and hide reveals what was below"
+    );
+
+    // 12 - input is not pixels, and the whole contract is deterministic: a keystroke on a
+    //      quiet frame writes nothing, and two engines fed the same input sequence land
+    //      bit-identical with identical counters.
+    comp.set_focus(sess, 2).unwrap();
+    comp.post_key(sess, b'm').unwrap();
+    let quiet = comp.compose_frame(&mut shadow);
+    let run = || {
+        let mut c = Compositor::new(0x51CA_1E57, 64, 32);
+        let mut sh = Shadow::new(64, 32);
+        let s = c.open_input_session().unwrap();
+        let t1 = c.mint_surface(1, 16, 16).unwrap();
+        let t2 = c.mint_surface(2, 16, 16).unwrap();
+        c.attach(1, t1, 4, 4).unwrap();
+        c.attach(2, t2, 30, 10).unwrap();
+        c.fill_rect(
+            1,
+            t1,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 8,
+                h: 8,
+            },
+            true,
+        )
+        .unwrap();
+        c.set_focus(s, 1).unwrap();
+        c.post_key(s, b'a').unwrap();
+        c.post_key(s, b'b').unwrap();
+        c.move_cursor(s, 44, 20).unwrap();
+        c.compose_frame(&mut sh);
+        c.set_focus(s, 2).unwrap();
+        c.post_key(s, b'c').unwrap();
+        let st = c.compose_frame(&mut sh);
+        (
+            sh.bits.clone(),
+            st,
+            c.focus(),
+            c.cursor(),
+            c.input_counters(),
+        )
+    };
+    let r1 = run();
+    let r2 = run();
+    check!(
+        quiet.pixels_blitted == 0 && quiet.cursor_pixels == 0 && r1 == r2,
+        "input: a keystroke is not a pixel - a quiet frame stays quiet, and identical input sequences land bit-identical"
     );
 
     Ok(n)

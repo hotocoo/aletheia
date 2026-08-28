@@ -280,6 +280,13 @@ CONTRACT=(
   # authority half and the nothing-to-move half are the parts that must not vary by CPU.
   "compose: a wrong token changes nothing on the real path - no writes, no recomposition, no device traffic"
   "compose: a quiet frame writes zero pixels and issues zero device commands"
+  # Input routing (ADR-079): the authority halves that must not vary by CPU - one input
+  # session, one focus, the owner alone reads, the cursor is nobody's to steer but the
+  # input path's, and a keystroke is not a pixel.
+  "input: the input path mints exactly one session and a second opener is refused by name"
+  "input: events route to the focused surface and only its owner drains them - in order, exactly once"
+  "input: a wrong session token changes nothing - absent, wrong and forged are all not-the-input-path"
+  "input: the cursor is the compositor's - session-moved, fully-off refused by name, partially-off clipped exactly"
 )
 
 hr() { printf '========================================================================\n'; }

@@ -495,6 +495,29 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // Input routing and the cursor plane (ALET-P2-021, ADR-079): the input path is ONE
+    // session, focus is ONE surface, the owner alone drains, the cursor is the
+    // compositor's own — and a keystroke is not a pixel.
+    kprintln!("");
+    kprintln!("--- input selftests (focus is authority, the cursor is the compositor's) ---");
+    match kernel_core::compositor::input_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[input] ALL {} INPUT-ROUTING INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[input] FAILED at input-routing invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(660 + idx as i32);
+        }
+    }
+
     // the advisory property itself — an abstaining model schedules bit-identically to the model-free
     // kernel, and priority is never traded for risk — alongside exact parity with the trainer and a
     // NAMED refusal for every way a blob can be wrong. The printed invariant NAME is the

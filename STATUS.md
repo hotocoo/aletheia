@@ -1,6 +1,22 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-28 (THE COMPOSITION CONTRACT IS ON THE SCANOUT — the model's sink is now
+**As of:** 2026-08-29 (THE COMPOSED DESKTOP MEETS INPUT — focus is AUTHORITY and the cursor is
+the COMPOSITOR'S OWN: `kernel-core/src/compositor.rs` mints exactly ONE possession-based input
+session whose every event post, focus change and cursor move answers to it (`InputSealed` on a
+second opener, `NotInputSession` on absent/wrong/forged), focuses at most ONE placed surface
+and tells the loser `FocusLost` through its own bounded queue, routes keystrokes to the focused
+surface only and empties them only through the surface's OWNER token — the input path decides
+WHERE events go, the owner decides WHO reads them, and neither can act as the other — with
+seq-monotonic exactly-once delivery, `MAX_INPUT_EVENTS`-bounded queues whose overflow is
+refused `Backlogged` AND counted, capacity restored exactly on drain, queues and focus dying
+with detach and never resurrected under a re-minted id, and the cursor as a compositor-owned
+8x8 transparent crosshair that no token names and no surface can cover: session-moved only,
+fully-off refused `CursorOffScanout` with the position named, partially-off clipped EXACTLY,
+painted above every surface, hide visible the same frame, its cost REPORTED in the new
+`FrameStats::cursor_pixels` — and input is not pixels: a keystroke with no repaint writes
+nothing — 12 boot invariants on all three targets (`[input] ALL 12 INPUT-ROUTING INVARIANTS
+HOLD`, boot fails 660+i), 8 host proofs, ADR-079); before that: 2026-08-28 (THE COMPOSITION
+CONTRACT IS ON THE SCANOUT — the model's sink is now
 REAL backing pages and the display device carries each composed frame: `kernel-core/src/fbcon.rs`
 gains `ComposeSink`, a `Raster` over the framebuffer console's scatter-gather backing frames
 whose put/refusal counters make "the model's bound and the real raster's bounds agree" a
@@ -44,9 +60,52 @@ a restored grant returns to silence, and enforcement stays latched until halt �
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..075`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..078`.
 
-## Current wave — the composition contract meets the scanout (2026-08-28, ADR-078)
+## Current wave — the composed desktop meets input (2026-08-29, ADR-079)
+
+ALET-P2-021's input-routing rung. ADR-078 made the composed frame visible; this wave makes the
+desktop ANSWER, by decomposing input into the two questions this kernel already knows how to
+answer plus one new possession. The input path is ONE principal: `open_input_session` mints
+exactly one session token per compositor and every event post, focus change and cursor move
+answers to it — a second opening is refused `InputSealed`, absent/wrong/forged tokens are all
+`NotInputSession`, refused by name and counted. At most ONE surface is focused, only a placed
+one; refocusing tells the loser `FocusLost` through its own bounded queue (dropped and counted
+if it stopped draining); refocusing the already-focused surface queues nothing. `post_key`
+routes a decoded keystroke — the keymap's own alphabet, never a raw device byte — to the
+focused surface's `MAX_INPUT_EVENTS`-bounded queue; `drain_input` empties it, OWNER TOKEN
+ONLY: the input path decides WHERE events go, the owner decides WHO reads them, and a wrong
+owner token here is the same refusal a forged draw token is. Delivery is seq-monotonic and
+exactly-once; a keystroke with nothing focused is refused `NoFocus` and exists nowhere; an
+overflow is refused `Backlogged` and counted without evicting the backlog; draining restores
+capacity exactly; detaching the focused surface clears focus and the queue dies with the
+surface — a re-minted id starts empty and the old token is dead. The cursor is the
+compositor's OWN plane — not a surface, no token, no z-order slot: an 8x8 transparent
+crosshair that only the session may move or hide, refused `CursorOffScanout` with the position
+named when its glyph could never show a pixel, clipped exactly when partially off (the
+guard-band proofs hold through every edge), painted LAST above every surface as a mask (window
+ink shows through the transparent bits; raising a window changes nothing), visible the SAME
+frame through the same damage machinery, free when it does not move, and REPORTED —
+`FrameStats` gained `cursor_pixels`. And input is not pixels: a keystroke with no repaint
+damages nothing; a quiet frame stays quiet.
+
+Proofs: 8 host tests in kernel-core/tests/input.rs (the boot suite host-run first; the session
+table swept fail-closed; the focus decision table over every reachable state × every op target;
+the routing/reading split swept over a four-surface alphabet delivery with zero raster puts
+across a whole post/drain cycle; the bounded-queue matrix at capacity; the cursor's authority
+and exact clipped geometry against a guard-band raster; the punch-through matrix; determinism
+over a mixed input sequence) plus 12 boot invariants on all three targets (`[input] ALL 12
+INPUT-ROUTING INVARIANTS HOLD`, boot fails 660+i), four pinned cross-CPU in the conformance
+contract (154 -> 158). Marker maps changed deliberately (`input=12` on the three QEMU gates;
+VirtualBox adds the family to its REQUIRED list — the suite is arch-neutral and proves there
+too, unlike the virtio-gpu families it lists SKIP, ADR-061). The unsafe audit is UNCHANGED:
+the rung adds no unsafe site. Named non-claims, in the register: no REAL input device is wired
+through the session yet (the console's PS/2/serial path still feeds the serial console; the
+hardware rung is next), no pointer hardware (the cursor moves through the session API), no
+flow control beyond the bounded queue, no text rendering, no IME, no alpha, no device-level
+GPU isolation, no interrupt-driven completion.
+
+## Previous wave — the composition contract meets the scanout (2026-08-28, ADR-078)
 
 ALET-P2-021's real-pixel rung. ADR-077 defined who may draw and where; this wave puts the
 verdict where a human can see it, without giving the device any authority it did not have.
