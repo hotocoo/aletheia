@@ -145,6 +145,14 @@ pub unsafe fn find_virtio_gpu_nth(nth: usize) -> Option<Bdf> {
     unsafe { virtiopci::find_virtio_nth(&Ports, &[virtiopci::DEVICE_GPU_MODERN], nth) }
 }
 
+/// Scan bus 0 for the nth virtio INPUT function (ALET-P2-021 hardware rung, ADR-080).
+///
+/// # Safety
+/// Touches the PCI configuration ports.
+pub unsafe fn find_virtio_input_nth(nth: usize) -> Option<Bdf> {
+    unsafe { virtiopci::find_virtio_nth(&Ports, &[virtiopci::DEVICE_INPUT_MODERN], nth) }
+}
+
 /// Enumerate EVERY present function on bus 0 — \`(bdf, vendor, device id)\`, slot order. The
 /// VT-d programming path needs the whole picture: a context table is per-FUNCTION, and a
 /// function the programmer never saw is a function DMA-ing outside the contract.

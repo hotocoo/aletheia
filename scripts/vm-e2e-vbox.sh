@@ -108,7 +108,7 @@ REQUIRED=(
   'ALL 14 POWER-PERFORMANCE INVARIANTS HOLD'
   # The composition contract (ALET-P2-021, ADR-077) is an arch-independent model too.
   'ALL 14 COMPOSITION-CONTRACT INVARIANTS HOLD'
-  'ALL 12 INPUT-ROUTING INVARIANTS HOLD'
+  'ALL 13 INPUT-ROUTING INVARIANTS HOLD'
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'
@@ -124,6 +124,7 @@ SKIPPED=(
   'NETWORK INVARIANTS HOLD   (this VM is provisioned with no NIC)'
   'VIRTIO-GPU INVARIANTS HOLD   (VirtualBox emulates no virtio-gpu device)'
   'FRAMEBUFFER-CONSOLE INVARIANTS HOLD   (needs the virtio-gpu device)'
+  'INPUT-HARDWARE INVARIANTS HOLD   (VirtualBox emulates no virtio-input device)'
   'CUSTODY-DELIVERY INVARIANTS HOLD   (needs a persistent virtio-blk disk AND the QEMU fw_cfg channel)'
   'VT-D INVARIANTS HOLD   (VirtualBox declares no DMAR table - the kernel skips the suite green and says why)'
 )

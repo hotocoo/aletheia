@@ -880,6 +880,51 @@ pub extern "C" fn kmain() -> ! {
             }
         }
     }
+
+    // Input HARDWARE (ALET-P2-021's device rung, ADR-080): the REAL devices through the input
+    // session. The keyboard and pointer answer for their identity from their own config space
+    // (pinned), the event path is DMA-gated, armed silence is MEASURED, and the decode->route
+    // path the live desktop pumps is driven end to end with synthetic records — the same
+    // shared functions, so what the suite proves is what the machine runs.
+    kprintln!("");
+    kprintln!("--- input hardware selftests (virtio-input: a real keyboard and pointer through the session) ---");
+    match virtio::input_pair() {
+        None => kprintln!("[vinput] no input device attached (skipped)"),
+        Some(Err(e)) => {
+            kprintln!("[vinput] device init FAILED: {:?}", e);
+            semihosting::exit(679);
+        }
+        Some(Ok((mut kb, mut tab))) => {
+            // The machine's own input facts on the boot log (the gpu display-info line's twin):
+            // what the devices DECLARE, read from their config space, before anything is driven.
+            kprintln!(
+                "[vinput] keyboard '{}' keybits={:#x}; tablet '{}' absbits={:#x} axes {:?} {:?}",
+                kb.device_name(),
+                kb.ev_bits(1),
+                tab.device_name(),
+                tab.ev_bits(3),
+                tab.abs_info(kernel_core::vinput::ABS_X),
+                tab.abs_info(kernel_core::vinput::ABS_Y)
+            );
+            match kernel_core::vinput::vinput_suite(&mut kb, &mut tab, |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[vinput] ALL {} INPUT-HARDWARE INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!(
+                        "[vinput] FAILED at input-hardware invariant {}: {}",
+                        idx,
+                        name
+                    );
+                    semihosting::exit(680 + idx as i32);
+                }
+            }
+        }
+    }
     // The interactive console (REQ-CON-001, ADR-044). Every gate above ends in a verdict and an
     // exit; this is the subsystem that lets the machine STAY up and answer a human. It is proved
     // here the same way everything else is — a scripted session against a real namespace — so the

@@ -65,7 +65,8 @@ OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
-  -device virtio-gpu-device)"
+  -device virtio-gpu-device \
+  -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE=$?
 
 echo "----------------------------------------"
@@ -85,7 +86,9 @@ echo "$OUT" | grep "ALL 14 COMPOSITION-CONTRACT INVARIANTS HOLD" >/dev/null || {
 # frame, NOTHING on a quiet one (ALET-P2-021, ADR-078).
 echo "$OUT" | grep "ALL 8 REAL-PIXEL COMPOSITION INVARIANTS HOLD" >/dev/null || { echo "FAIL: real-pixel composition invariants marker missing (ALET-P2-021, ADR-078)"; fail=1; }
 # Focus is authority, the cursor is the compositor's own (ALET-P2-021, ADR-079).
-echo "$OUT" | grep "ALL 12 INPUT-ROUTING INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-routing invariants marker missing (ALET-P2-021, ADR-079)"; fail=1; }
+echo "$OUT" | grep "ALL 13 INPUT-ROUTING INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-routing invariants marker missing (ALET-P2-021, ADR-079)"; fail=1; }
+# The input HARDWARE rung (ALET-P2-021, ADR-080): real virtio-input devices through the session.
+echo "$OUT" | grep "ALL 10 INPUT-HARDWARE INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-hardware invariants marker missing (ALET-P2-021, ADR-080)"; fail=1; }
 # Custody crosses the platform boundary (ALET-P1-034, ADR-072), proved over the SECOND bus.
 echo "$OUT" | grep "ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD" >/dev/null || { echo "FAIL: custody-delivery invariants marker missing (ALET-P1-034, ADR-072)"; fail=1; }
 echo "$OUT" | grep "platform custody: root DELIVERED over firmware configuration" >/dev/null || { echo "FAIL: the platform did not deliver the custody anchor"; fail=1; }
@@ -135,7 +138,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # map by design — the same arch-independent suites must prove the same counts over either bus, and
 # a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
 source "$ROOT/scripts/lib-markers.sh"
-RISCV_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 input=12 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 pm=14 selftest=13 smp=22 soak=12 usermode=32 vault=14 virtio=21 vm=66"
+RISCV_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=12 mm=21 net=9 persist=10 pm=14 selftest=13 smp=22 soak=12 usermode=32 vault=14 vinput=10 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
@@ -151,7 +154,8 @@ OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
-  -device virtio-gpu-device)"
+  -device virtio-gpu-device \
+  -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE2=$?
 echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
 echo "second boot exit code: $CODE2"
@@ -169,7 +173,8 @@ OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
-  -device virtio-gpu-device)"
+  -device virtio-gpu-device \
+  -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE3=$?
 echo "$OUT3" | grep -E "\[vault\]" || true
 echo "third boot exit code: $CODE3"

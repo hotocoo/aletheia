@@ -42,14 +42,22 @@ static mut KEYBOARD_ARMED: bool = false;
 /// `kernel_core::keymap` is the arch-independent meaning of a code, not this machine's keyboard.
 static mut KEYS: Keymap = Keymap::new();
 
-/// Turn on the console's interrupt: quiet the timer, enable the UART's receive bit, unmask IRQ4,
-/// then set IF.
+/// Turn on the console's interrupt: settle the timer (quiet unless the live desktop is pumped from
+/// it), enable the UART's receive bit, unmask IRQ4, then set IF.
 ///
-/// Order matters. Unmasking the console before silencing the PIT would still work; setting IF before
+/// Order matters. Unmasking the console before settling the PIT would still work; setting IF before
 /// either would not — the timer would fire first and keep firing.
 #[cfg(feature = "interactive")]
 pub fn init() {
-    crate::pic::mask_timer();
+    // The PIT is the live desktop's pump (ADR-080): a machine that installed a desktop keeps IRQ0
+    // through the console so the pump keeps draining the input devices and showing changed frames;
+    // a console-only machine quiets it as before — a tick nobody consumes is interrupt entry for
+    // nothing. `idt::restore_timer` already put the plain tick handler back after the ring-3 suite.
+    if crate::desktop::is_live() {
+        crate::pic::unmask_timer();
+    } else {
+        crate::pic::mask_timer();
+    }
     serial::rx_interrupt_enable();
     crate::pic::unmask_serial();
     // SAFETY: single-core console; the vector is installed by `idt::init` before this runs.

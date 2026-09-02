@@ -104,7 +104,7 @@ fn risk_of(name: &str) -> Risk {
         "write" | "append" | "touch" | "cp" | "mv" | "rm" | "reboot" | "halt" => Risk::Destructive,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
-        | "history" | "echo" | "clear" => Risk::Safe,
+        | "history" | "echo" | "clear" | "input" => Risk::Safe,
         // Unknown to this file: fail closed. An unclassified command is refused by the validator
         // below rather than being planned as harmless.
         _ => Risk::Destructive,
@@ -319,6 +319,7 @@ mod tests {
                     | "history"
                     | "echo"
                     | "clear"
+                    | "input"
             );
             assert!(named, "{verb} has no explicit risk classification");
         }

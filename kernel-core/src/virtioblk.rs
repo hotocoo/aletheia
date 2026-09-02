@@ -394,6 +394,19 @@ impl Transport for MmioTransport {
     }
 }
 
+/// The config-space write, for the one driver that needs it (virtio-input's select/subsel
+/// pair, ADR-080). virtio-mmio config bytes live in one 32-bit-wide register window, so the
+/// byte write is a read-modify-write of the ALIGNED word containing it: the neighboring
+/// bytes are written back exactly as they were read, and the select field's idempotence
+/// makes the two-write select/subsel sequence safe.
+impl crate::vinput::ConfigWrite for MmioTransport {
+    unsafe fn set_config_u32(&mut self, off: usize, value: u32) {
+        // SAFETY: `base + R_CONFIG` is the mapped config window (the same window
+        // `config_u64` reads); virtio-mmio config accesses are 32-bit wide by spec.
+        w32(self.base, R_CONFIG + off, value);
+    }
+}
+
 /// A live virtio-blk device: its transport, the identity-mapped addresses of its single virtqueue's
 /// rings and request buffers (the DMA targets handed to the device), its capacity, and whether FLUSH
 /// was negotiated.

@@ -159,6 +159,10 @@ extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, _err: u64) ->
 
 extern "x86-interrupt" fn timer(_frame: InterruptStackFrame) {
     crate::pit::tick();
+    // The live desktop's pump (ADR-080): drains the input devices, routes through the
+    // session, and shows a changed frame. One relaxed atomic load when no desktop was
+    // installed, so calling it unconditionally during the whole boot is free.
+    crate::desktop::tick_pump();
     crate::pic::eoi(TIMER_VECTOR);
 }
 
@@ -213,5 +217,20 @@ pub fn restore_fatal_traps() {
         idt.invalid_opcode.set_handler_fn(invalid_opcode);
         idt.general_protection_fault
             .set_handler_fn(general_protection);
+    }
+}
+
+/// Give IRQ0 back to the plain [`timer`] handler installed by [`init`] (ADR-080).
+///
+/// The ring-3 suite points the timer vector at its register-exact preemption entry, which ends by
+/// resuming a scheduler that exists only while that suite runs. After it, the only legitimate work
+/// on the tick is the PIT count and the live desktop's pump — both done by [`timer`]. Leaving the
+/// preemption entry installed would turn the desktop's tick into a jump into a stale kernel context
+/// the moment the console re-enables interrupts; the first live run of `scripts/vinput-e2e.sh`
+/// found exactly that gap (a pump that never ran), which is why this is a separate, named step.
+pub fn restore_timer() {
+    // SAFETY: single-core, IF=0; re-installs the same handler `init` did.
+    unsafe {
+        IDT.get_mut()[TIMER_VECTOR].set_handler_fn(timer);
     }
 }

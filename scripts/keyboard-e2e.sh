@@ -22,6 +22,10 @@
 # Exit 0 = PASS. SKIP (exit 0, never a silent pass) when the host lacks QEMU/OVMF/mtools.
 set -uo pipefail
 
+# Honor the per-crate nightly toolchain via the rustup shim (a Homebrew/system cargo earlier in
+# PATH ignores rust-toolchain.toml and fails cross-compilation with E0463).
+if [ -x "$HOME/.cargo/bin/cargo" ]; then export PATH="$HOME/.cargo/bin:$PATH"; fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 X86="$ROOT/kernel-x86_64"
 BUILD="$X86/build"

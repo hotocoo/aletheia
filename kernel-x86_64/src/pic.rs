@@ -58,6 +58,17 @@ pub fn mask_timer() {
     }
 }
 
+/// Unmask IRQ0 (PIT) on the master PIC, keeping every other bit (ADR-080). The live desktop is
+/// pumped from the timer tick, so a machine that installed one KEEPS its tick through the console
+/// instead of quieting it; read-modify-write for the same reason `mask_timer` is.
+#[cfg(feature = "interactive")]
+pub fn unmask_timer() {
+    unsafe {
+        let cur = Port::<u8>::new(PIC1_DATA).read();
+        Port::<u8>::new(PIC1_DATA).write(cur & !1);
+    }
+}
+
 /// Unmask IRQ4 (COM1) on the master PIC, keeping whatever else is already unmasked (REQ-CON-002).
 /// Read-modify-write rather than a fresh mask byte: clobbering the timer's IRQ0 here would stop
 /// preemption as a side effect of turning on the console.

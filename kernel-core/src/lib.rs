@@ -76,6 +76,7 @@ pub mod taskfeat;
 pub mod teardown;
 pub mod udpv4;
 pub mod usermem;
+pub mod vinput;
 pub mod virtioblk;
 pub mod virtiogpu;
 pub mod virtionet;

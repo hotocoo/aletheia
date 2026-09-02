@@ -64,7 +64,7 @@ fn the_boot_suite_holds_on_the_host() {
             panic!("boot input suite failed at {}: {}", _n, name);
         }
     });
-    assert_eq!(ok.unwrap(), 12);
+    assert_eq!(ok.unwrap(), 13);
     assert_eq!(failures, 0);
 }
 
@@ -479,4 +479,122 @@ fn identical_input_sequences_land_bit_identical() {
     let a = run();
     let b = run();
     assert_eq!(a, b);
+}
+
+// ---------------------------------------------------------------------------
+// The quiet tick (ADR-080): the live pump asks `has_pending_damage` before it composes, so
+// the question must be exact — false the moment a compose has drained every owed repaint,
+// true for a surface's ink, for a cursor move, for a placement, and false again after each
+// compose. (An idle tick that composed would clone the z-order on a heap that never frees.)
+// ---------------------------------------------------------------------------
+#[test]
+fn a_quiet_desktop_owes_no_repaint_until_something_changes() {
+    let mut c = Compositor::new(0xD1DE, W, H);
+    let mut r = Guard::new(W, H);
+    let sess = c.open_input_session().unwrap();
+    let t1 = c.mint_surface(1, 40, 20).unwrap();
+    c.attach(1, t1, 0, 0).unwrap();
+    assert!(c.has_pending_damage(), "a placement owes a repaint");
+    c.compose_frame(&mut r);
+    assert!(
+        !c.has_pending_damage(),
+        "a compose drains every owed repaint"
+    );
+    c.compose_frame(&mut r);
+    assert!(
+        !c.has_pending_damage(),
+        "a second quiet compose owes nothing either"
+    );
+    c.fill_rect(
+        1,
+        t1,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 4,
+        },
+        true,
+    )
+    .unwrap();
+    assert!(c.has_pending_damage(), "a surface's ink owes a repaint");
+    c.compose_frame(&mut r);
+    assert!(!c.has_pending_damage());
+    c.move_cursor(sess, 10, 10).unwrap();
+    assert!(
+        c.has_pending_damage(),
+        "a cursor move owes a repaint (both glyph rects)"
+    );
+    c.compose_frame(&mut r);
+    assert!(!c.has_pending_damage());
+    c.move_cursor(sess, 10, 10).unwrap();
+    assert!(!c.has_pending_damage(), "a no-op cursor move owes nothing");
+    // Routing is not pixels: a click and a keystroke owe no repaint.
+    c.focus_at(sess, 1, 1).unwrap();
+    c.post_key(sess, b'x').unwrap();
+    assert!(
+        !c.has_pending_damage(),
+        "a click and a keystroke are routing, not pixels"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Click-to-focus (ALET-P2-021's hardware rung, ADR-080): the routing decision a
+// pointer click carries, swept over the reachable (z-order x point) table.
+// ---------------------------------------------------------------------------
+#[test]
+fn a_click_routes_to_the_topmost_surface_under_the_point() {
+    let mut c = Compositor::new(0x0A80_0001, W, H);
+    let s = c.open_input_session().unwrap();
+    let t1 = c.mint_surface(1, 40, 30).unwrap();
+    let t2 = c.mint_surface(2, 40, 30).unwrap();
+    let t3 = c.mint_surface(3, 40, 30).unwrap();
+    c.attach(1, t1, 0, 0).unwrap();
+    c.attach(2, t2, 30, 10).unwrap();
+    c.attach(3, t3, 60, 20).unwrap(); // overlaps 2 in [30,70) x [20,40)
+                                      // z-order [1, 2, 3]: every point covered by several surfaces answers to the TOP one.
+                                      // (60, 25) is covered by 1 (no: 60>=40), 2 (yes) and 3 (yes) -> 3, the top.
+    for point in [(60u32, 25u32), (62, 22)] {
+        assert_eq!(c.focus_at(s, point.0, point.1), Ok(Some(3)));
+    }
+    // Raise 1 to the top: z-order [2, 3, 1]. (10, 10) is covered by 1 and 2 -> 1 now wins.
+    c.raise(1, t1).unwrap();
+    assert_eq!(c.focus_at(s, 10, 10), Ok(Some(1)));
+    // The click is a ROUTE, not a pixel: nothing changed on the scanout.
+    assert_eq!(c.z_order(), vec![2u32, 3, 1]);
+    // A partially-off surface answers only for its VISIBLE part: 3 hangs 10 px past the
+    // right edge; (95, 25) is visible ink, (95, 25) is inside the scanout (W=96).
+    assert_eq!(c.focus_at(s, 95, 25), Ok(Some(3)));
+    // Empty space clears focus - and the cleared surface is told through its own queue.
+    assert_eq!(c.focus_at(s, 20, 50), Ok(None));
+    assert!(c.focus().is_none());
+    let told = c.drain_input(1, t1).unwrap();
+    assert!(told.iter().any(|e| e.kind == EventKind::FocusLost));
+    // Keystrokes follow the click: nothing is focused, so a key is refused by name and
+    // exists nowhere.
+    assert_eq!(c.post_key(s, b'q'), Err(CompFault::NoFocus));
+    // A forged session token is the same refusal every input op gives.
+    assert_eq!(c.focus_at(s ^ 0xA0, 0, 0), Err(CompFault::NotInputSession));
+    // An idempotent click on the already-focused surface queues nothing anywhere.
+    assert_eq!(c.focus_at(s, 10, 10), Ok(Some(1)));
+    assert_eq!(c.focus_at(s, 11, 11), Ok(Some(1)));
+    assert!(c.drain_input(1, t1).unwrap().is_empty());
+}
+
+#[test]
+fn a_click_respects_the_exact_clip_and_the_painter_order() {
+    // Overhang: a surface pushed past the right edge focuses only where it SHOWS.
+    let mut c = Compositor::new(0x0A80_0002, W, H);
+    let s = c.open_input_session().unwrap();
+    let t = c.mint_surface(7, 40, 30).unwrap();
+    c.attach(7, t, (W - 10) as i32, 0).unwrap(); // hangs 30 px past the right edge
+    assert_eq!(c.focus_at(s, W - 1, 5), Ok(Some(7))); // visible part
+    assert_eq!(c.focus_at(s, W - 11, 5), Ok(None)); // past the right edge: nobody covers
+                                                    // The refused placement cannot be clicked either: a fully-off surface is not placed.
+    let t2 = c.mint_surface(8, 8, 8).unwrap();
+    assert!(matches!(
+        c.attach(8, t2, 200, 200),
+        Err(CompFault::OffScanout { surface: 8 })
+    ));
+    assert_eq!(c.focus_at(s, 200, 200), Ok(None));
 }

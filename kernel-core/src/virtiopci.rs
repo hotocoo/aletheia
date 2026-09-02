@@ -66,6 +66,8 @@ pub const DEVICE_NET_TRANSITIONAL: u16 = 0x1000;
 pub const DEVICE_BLK_MODERN: u16 = 0x1042;
 pub const DEVICE_BLK_TRANSITIONAL: u16 = 0x1001;
 pub const DEVICE_GPU_MODERN: u16 = 0x1050;
+/// virtio-input (18) over PCI — the input-hardware rung (ADR-080).
+pub const DEVICE_INPUT_MODERN: u16 = 0x1052;
 
 /// PCI capability id for vendor-specific caps, and virtio's cfg_type values (VIRTIO 1.1 4.1.4).
 pub const CAP_ID_VENDOR: u8 = 0x09;
@@ -487,5 +489,16 @@ impl Transport for PciTransport {
         let lo = read_volatile((self.device_cfg.addr + off) as *const u32) as u64;
         let hi = read_volatile((self.device_cfg.addr + off + 4) as *const u32) as u64;
         (hi << 32) | lo
+    }
+}
+
+/// The config-space write, for the one driver that needs it (virtio-input's select/subsel
+/// pair, ADR-080). The device config capability region is mapped device memory that the
+/// device decodes byte-wise, so a one-byte volatile store is the whole story.
+impl crate::vinput::ConfigWrite for PciTransport {
+    unsafe fn set_config_u32(&mut self, off: usize, value: u32) {
+        // SAFETY: the DEVICE_CFG region was resolved and mapped by `resolve_virtio_regions`
+        // with the rest of the transport's regions; `off` names an aligned config word in it.
+        write_volatile((self.device_cfg.addr + off) as *mut u32, value);
     }
 }

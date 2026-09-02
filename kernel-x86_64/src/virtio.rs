@@ -175,3 +175,73 @@ pub fn graphics_device() -> Option<Result<Gpu, virtiogpu::GpuError>> {
         Some(VirtioGpu::init(transport))
     }
 }
+
+/// This target's concrete input devices (ALET-P2-021 hardware rung, ADR-080): the shared
+/// virtio-input driver, over PCI.
+pub type Input = kernel_core::vinput::VirtioInput<X86Virtio, PciTransport>;
+
+use kernel_core::vinput::{self as virtioinput, Role, VirtioInput};
+
+/// One brought-up input function together with ITS bus address — the VT-d window builder
+/// programs per-FUNCTION domains, so the function's grants must stay paired with its BDF.
+pub struct InputDev {
+    pub dev: Input,
+    pub bdf: Bdf,
+}
+
+/// Bring up the machine's input functions and classify them by their OWN declared names —
+/// slot order on the bus is an attachment artifact of the emulator command line; what a
+/// device IS is what it says it is. Returns `(keyboard, tablet)`. `None` = no input device
+/// at all (the graceful-skip path); `Some(Err(_))` = a device that failed bring-up, a LONE
+/// device (this rung's suite needs the pair), or a device that will not say what it is.
+pub fn input_pair() -> Option<Result<(InputDev, InputDev), virtioinput::InputError>> {
+    let dev_at = |nth: usize| -> Option<Result<InputDev, virtioinput::InputError>> {
+        // SAFETY: the BDF names a virtio input function; `PciTransport::new` resolves and
+        // MAPS its register regions (refusing RAM), and the frames handed to the device are
+        // identity-mapped and exclusively ours.
+        unsafe {
+            let bdf = pci::find_virtio_input_nth(nth)?;
+            let transport = match pci::transport_new(bdf) {
+                Ok(t) => t,
+                Err(e) => {
+                    kprintln!("[vinput] transport setup failed: {}", e);
+                    return Some(Err(virtioinput::InputError::Unsupported("transport")));
+                }
+            };
+            kprintln!(
+                "[vinput] virtio-input #{} @ PCI {:02x}:{:02x}.{}",
+                nth,
+                bdf.bus,
+                bdf.device,
+                bdf.function
+            );
+            Some(VirtioInput::init(transport).map(|dev| InputDev { dev, bdf }))
+        }
+    };
+    let a = dev_at(0)?;
+    let b = match dev_at(1) {
+        Some(d) => d,
+        None => {
+            return Some(Err(virtioinput::InputError::Unsupported(
+                "a lone input device — this rung brings up the pair",
+            )))
+        }
+    };
+    let (mut a, mut b) = match (a, b) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+    };
+    let name_a = a.dev.device_name();
+    let name_b = b.dev.device_name();
+    kprintln!("[vinput] devices: '{}' and '{}'", name_a, name_b);
+    match (
+        virtioinput::classify(&name_a),
+        virtioinput::classify(&name_b),
+    ) {
+        (Some(Role::Keyboard), Some(Role::Tablet)) => Some(Ok((a, b))),
+        (Some(Role::Tablet), Some(Role::Keyboard)) => Some(Ok((b, a))),
+        _ => Some(Err(virtioinput::InputError::Unsupported(
+            "an input device this rung cannot classify",
+        ))),
+    }
+}

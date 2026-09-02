@@ -29,6 +29,7 @@ mod console;
 mod acpi;
 mod cell;
 mod conirq;
+mod desktop;
 mod exit;
 mod framebuffer;
 mod frames;
@@ -764,6 +765,10 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             ActiveHal::exit(80 + idx as i32);
         }
     }
+    // The ring-3 suite pointed IRQ0 at its preemption entry; give the tick back to the plain
+    // handler (PIT count + the live desktop's pump, ADR-080) before anything can re-enable
+    // interrupts. IF stays 0 here — the console's own bring-up is what sets it.
+    idt::restore_timer();
 
     // Every PCI device this boot will EVER drive comes up NOW - before the VT-d gate below turns
     // enforcement on - and stays live across it. That is how a real platform meets an IOMMU: the
@@ -1153,6 +1158,93 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             }
         }
     }
+    // The grant table: every DRIVEN function contributes what ITS registry vouches for. The
+    // input functions are pushed by the hardware rung below; the GPU by the desktop install
+    // (its backing pages must be in the window BEFORE enforcement turns on).
+    let mut dma_grants: alloc::vec::Vec<vtd::DeviceGrant> = alloc::vec::Vec::new();
+    let mut desktop_gpu_grants: Option<alloc::vec::Vec<kernel_core::dma::Grant>> = None;
+
+    // Input HARDWARE (ALET-P2-021's device rung, ADR-080): the REAL devices through the input
+    // session. The keyboard and pointer answer for their identity from their own config space
+    // (pinned), the event path is DMA-gated, armed silence is MEASURED, and the decode->route
+    // path the live desktop pumps is driven end to end with synthetic records — the same
+    // shared functions, so what the suite proves is what the machine runs.
+    kprintln!("");
+    kprintln!("--- input hardware selftests (virtio-input: a real keyboard and pointer through the session) ---");
+    let mut desktop_devices: Option<(virtio::InputDev, virtio::InputDev)> = None;
+    match virtio::input_pair() {
+        None => kprintln!("[vinput] no input device attached (skipped)"),
+        Some(Err(e)) => {
+            kprintln!("[vinput] device init FAILED: {:?}", e);
+            ActiveHal::exit(679);
+        }
+        Some(Ok((kb, tab))) => {
+            // The input functions' DMA windows, captured from their registries as they stand
+            // after bring-up. The pump never registers or revokes, so this stays exact.
+            dma_grants.push(vtd::DeviceGrant::new(kb.bdf, kb.dev.dma_grants()));
+            dma_grants.push(vtd::DeviceGrant::new(tab.bdf, tab.dev.dma_grants()));
+            let (mut kb, mut tab) = (kb, tab);
+            // The machine's own input facts on the boot log (the gpu display-info line's twin):
+            // what the devices DECLARE, read from their config space, before anything is driven.
+            kprintln!(
+                "[vinput] keyboard '{}' keybits={:#x} ok={} unplugged={}; tablet '{}' absbits={:#x} axes {:?} {:?} ok={} unplugged={}",
+                kb.dev.device_name(),
+                kb.dev.ev_bits(1),
+                kb.dev.reached_driver_ok(),
+                kb.dev.unplugged(),
+                tab.dev.device_name(),
+                tab.dev.ev_bits(3),
+                tab.dev.abs_info(kernel_core::vinput::ABS_X),
+                tab.dev.abs_info(kernel_core::vinput::ABS_Y),
+                tab.dev.reached_driver_ok(),
+                tab.dev.unplugged()
+            );
+            match kernel_core::vinput::vinput_suite(&mut kb.dev, &mut tab.dev, |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[vinput] ALL {} INPUT-HARDWARE INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!(
+                        "[vinput] FAILED at input-hardware invariant {}: {}",
+                        idx,
+                        name
+                    );
+                    ActiveHal::exit(680 + idx as i32);
+                }
+            }
+            desktop_devices = Some((kb, tab));
+        }
+    }
+
+    // The LIVE desktop (ALET-P2-021's hardware rung, ADR-080): one compositor over the real
+    // scanout, ONE input session, the real devices behind it, pumped from the PIT tick from
+    // here on. Installed BEFORE the VT-d gate below — every page the desktop will ever touch
+    // must be inside the granted window when enforcement turns on (the ADR-073 ordering).
+    match (gpu_dev.take(), desktop_devices.take()) {
+        (Some(Ok(gpu)), Some((kb, tab))) => match desktop::install(gpu, kb, tab) {
+            Ok(grants) => {
+                desktop_gpu_grants = Some(grants);
+                kprintln!("[desktop] LIVE: one compositor, one input session, real devices (pumped from the PIT tick)");
+            }
+            Err(e) => kprintln!(
+                "[desktop] install refused: {} — the machine continues on the serial console",
+                e
+            ),
+        },
+        (gpu, Some((kb, tab))) => {
+            kprintln!(
+                "[desktop] no usable graphics device ({:?}) — the live desktop stays down, named",
+                gpu.is_some()
+            );
+            let _ = (kb, tab);
+        }
+        _ => kprintln!("[desktop] not installed (no input hardware attached)"),
+    }
+
     // The interactive console (REQ-CON-001, ADR-044): the subsystem that lets the machine stay up
     // and answer a human, proved here the same way everything else is — a scripted session against
     // a real namespace, so the gate covers the code an interactive boot runs.
@@ -1194,7 +1286,6 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // The grant table: every DRIVEN function contributes what ITS registry vouches for. Block
     // devices are alive right here; the GPU console too; the network device was consumed by its
     // suite, which captured its grants before the move (identical - idle queues never change).
-    let mut dma_grants: alloc::vec::Vec<vtd::DeviceGrant> = alloc::vec::Vec::new();
     if let (Some(b), Some(d)) = (unsafe { pci::find_virtio_blk() }, blk_scratch.as_ref()) {
         dma_grants.push(vtd::DeviceGrant::new(b, d.dma_grants()));
     }
@@ -1204,7 +1295,15 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     if let (Some(b), Some(w)) = (unsafe { pci::find_virtio_net_nth(0) }, net_windows.as_ref()) {
         dma_grants.push(vtd::DeviceGrant::from_grants(b, w));
     }
-    if let (Some(b), Some(Ok(g))) = (unsafe { pci::find_virtio_gpu_nth(0) }, gpu_dev.as_ref()) {
+    if let Some(grants) = desktop_gpu_grants.take() {
+        // The desktop owns the GPU now; its grant list INCLUDES the compose suites' leftovers
+        // state (they were revoked) plus the desktop's own backing pages.
+        if let Some(b) = unsafe { pci::find_virtio_gpu_nth(0) } {
+            dma_grants.push(vtd::DeviceGrant::from_grants(b, &grants));
+        }
+    } else if let (Some(b), Some(Ok(g))) =
+        (unsafe { pci::find_virtio_gpu_nth(0) }, gpu_dev.as_ref())
+    {
         dma_grants.push(vtd::DeviceGrant::new(b, g.dma_grants()));
     }
     match vtd::dmar_suite(&dma_grants, blk_scratch.as_mut(), blk_persist.as_mut()) {

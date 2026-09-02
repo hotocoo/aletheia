@@ -72,6 +72,12 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// The live desktop's session facts (ALET-P2-021's hardware rung, ADR-080), read from
+    /// the pump's atomic ledger — one machine word per fact, so a concurrent PIT pump cannot
+    /// tear a readout. `None` = no desktop was installed, and the command says so.
+    fn input_facts(&self) -> Option<shell::InputFacts> {
+        crate::desktop::facts()
+    }
     /// `sti; hlt` — safe here because this target's console is interrupt-driven through the 8259A on
     /// IRQ4 (REQ-CON-002), and the UART interrupt is what ends the wait.
     ///

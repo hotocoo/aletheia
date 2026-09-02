@@ -188,3 +188,60 @@ pub fn graphics_device() -> Option<Result<Gpu, virtiogpu::GpuError>> {
         Some(VirtioGpu::init(transport))
     }
 }
+
+/// This target's concrete input devices (ALET-P2-021 hardware rung, ADR-080): the shared
+/// virtio-input driver, same transport seam.
+pub type Input = kernel_core::vinput::VirtioInput<RiscvVirtio, MmioTransport>;
+
+use kernel_core::vinput::{self as virtioinput, Role, VirtioInput};
+
+/// Bring up the machine's input devices and classify them by their OWN declared names —
+/// slot order is an attachment artifact of the emulator command line; what a device IS is
+/// what it says it is. Returns `(keyboard, tablet)`. `None` = no input device at all (the
+/// graceful-skip path); `Some(Err(_))` = a device that failed bring-up, a LONE device (this
+/// rung's suite needs the pair), or a device that will not say what it is.
+pub fn input_pair() -> Option<Result<(Input, Input), virtioinput::InputError>> {
+    let dev_at = |nth: usize| -> Option<Result<Input, virtioinput::InputError>> {
+        // SAFETY: the slot addresses are inside the device gigapage; `new_for` refuses
+        // anything that is not a modern input device, and the frames handed to the device
+        // are identity-mapped and exclusively ours.
+        unsafe {
+            let base = virtioblk::probe_nth_kind(&LAYOUT, virtioinput::VIRTIO_ID_INPUT, nth)?;
+            let transport = match MmioTransport::new_for(base, virtioinput::VIRTIO_ID_INPUT) {
+                Ok(t) => t,
+                Err(e) => {
+                    kprintln!("[vinput] transport setup failed: {}", e);
+                    return Some(Err(virtioinput::InputError::Unsupported("transport")));
+                }
+            };
+            kprintln!("[vinput] virtio-input #{} @ {:#x}", nth, base);
+            Some(VirtioInput::init(transport))
+        }
+    };
+    let a = dev_at(0)?;
+    let b = match dev_at(1) {
+        Some(d) => d,
+        None => {
+            return Some(Err(virtioinput::InputError::Unsupported(
+                "a lone input device — this rung brings up the pair",
+            )))
+        }
+    };
+    let (mut a, mut b) = match (a, b) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+    };
+    let name_a = a.device_name();
+    let name_b = b.device_name();
+    kprintln!("[vinput] devices: '{}' and '{}'", name_a, name_b);
+    match (
+        virtioinput::classify(&name_a),
+        virtioinput::classify(&name_b),
+    ) {
+        (Some(Role::Keyboard), Some(Role::Tablet)) => Some(Ok((a, b))),
+        (Some(Role::Tablet), Some(Role::Keyboard)) => Some(Ok((b, a))),
+        _ => Some(Err(virtioinput::InputError::Unsupported(
+            "an input device this rung cannot classify",
+        ))),
+    }
+}

@@ -653,6 +653,75 @@ impl Compositor {
         )
     }
 
+    /// Focus the topmost placed surface under the screen point `(x, y)` (input session only)
+    /// — the routing decision a pointer CLICK carries (ALET-P2-021, ADR-080). The z-order is
+    /// scanned front to back and the first placed surface whose VISIBLE area covers the point
+    /// wins, with the same FocusLost-through-its-own-queue courtesy `set_focus` gives; a
+    /// click on empty space (no placed surface covers the point) CLEARS focus, because
+    /// "nowhere" is a place the user pointed at. Routing only: this changes no pixel.
+    pub fn focus_at(&mut self, session: u64, x: u32, y: u32) -> Result<Option<u32>, CompFault> {
+        count_refusal!(
+            self,
+            Option<u32>,
+            (|| {
+                self.session_check(session)?;
+                let (sw, sh) = self.scanout;
+                let mut target = None;
+                for p in self.placed.iter().rev() {
+                    let Some(s) = self.surface(p.surface) else {
+                        continue;
+                    };
+                    let vis_w = s.width.saturating_sub(p.x.min(0).unsigned_abs());
+                    let vis_h = s.height.saturating_sub(p.y.min(0).unsigned_abs());
+                    let px = p.x.max(0) as u32;
+                    let py = p.y.max(0) as u32;
+                    // The same visible-rect math `blit_region` uses: what is on screen is
+                    // what can be clicked, and what is clipped away cannot.
+                    if x >= px
+                        && y >= py
+                        && x < px.saturating_add(vis_w)
+                        && y < py.saturating_add(vis_h)
+                        && px < sw
+                        && py < sh
+                    {
+                        target = Some(p.surface);
+                        break;
+                    }
+                }
+                match target {
+                    Some(id) if self.focus == Some(id) => Ok(Some(id)),
+                    Some(id) => {
+                        if let Some(old) = self.focus.take() {
+                            self.enqueue(
+                                old,
+                                Event {
+                                    seq: self.next_event,
+                                    kind: EventKind::FocusLost,
+                                },
+                            );
+                            self.next_event += 1;
+                        }
+                        self.focus = Some(id);
+                        Ok(Some(id))
+                    }
+                    None => {
+                        if let Some(old) = self.focus.take() {
+                            self.enqueue(
+                                old,
+                                Event {
+                                    seq: self.next_event,
+                                    kind: EventKind::FocusLost,
+                                },
+                            );
+                            self.next_event += 1;
+                        }
+                        Ok(None)
+                    }
+                }
+            })()
+        )
+    }
+
     /// Post one decoded keystroke to the FOCUSED surface's bounded queue (input session
     /// only). No focus: refused `NoFocus`, the event exists NOWHERE (asserted by the
     /// suites — nothing is queued into limbo). Full queue: refused `Backlogged` and
@@ -761,6 +830,28 @@ impl Compositor {
     /// (events dropped, input refusals) — the input ledger's two counters.
     pub fn input_counters(&self) -> (u64, u64) {
         (self.events_dropped, self.input_refusals)
+    }
+
+    /// How many events sit in a surface's queue right now — observable so the live desktop
+    /// can report what the hardware has delivered that the surface has not yet read (ADR-080).
+    /// A detached id reports 0: its queue died with it.
+    pub fn queued_len(&self, id: u32) -> usize {
+        self.queues
+            .iter()
+            .find(|(sid, _)| *sid == id)
+            .map(|(_, q)| q.len())
+            .unwrap_or(0)
+    }
+
+    /// Does anything owe a repaint — a surface's damage, the cursor plane's, or the scanout's?
+    /// Read-only and ALLOCATION-FREE (ADR-080): the live desktop's pump asks this every tick so
+    /// that a QUIET tick composes nothing at all. `compose_frame` clones the z-order to walk it,
+    /// and on a heap that never frees (ADR-063) an allocation per idle tick is a leak by another
+    /// name; a changed frame still pays that clone, once, for the change that caused it.
+    pub fn has_pending_damage(&self) -> bool {
+        self.whole_scanout_damage
+            || !self.scanout_damage.is_empty()
+            || self.surfaces.iter().any(|(_, s)| s.has_damage())
     }
 
     fn session_check(&self, session: u64) -> Result<(), CompFault> {
@@ -1666,6 +1757,40 @@ pub fn input_suite(
     check!(
         quiet.pixels_blitted == 0 && quiet.cursor_pixels == 0 && r1 == r2,
         "input: a keystroke is not a pixel - a quiet frame stays quiet, and identical input sequences land bit-identical"
+    );
+
+    // 13 - a pointer CLICK is a routing decision (ALET-P2-021, ADR-080): the topmost placed
+    //      surface under the point takes focus (the loser told through its own queue), a
+    //      click on empty space CLEARS focus, a click on the already-focused surface queues
+    //      nothing, and a wrong session token is the same refusal every input op gives.
+    //      Scene at this point: 1 at (0,0), 2 at (56,24) focused, z-order [1, 2]. 3 is
+    //      attached at (8,16) -> z-order [1, 2, 3], so 3 is the TOP surface. The point
+    //      (60,28) is covered by 2 only, so the click on the already-focused surface is
+    //      idempotent; (12,20) is covered only by the TOP 3, so the focus is STOLEN there
+    //      (and 2 is told through its own queue); (4,4) only by 1; (63,0) by nobody.
+    let tok3 = comp.mint_surface(3, 16, 16).unwrap();
+    comp.attach(3, tok3, 8, 16).unwrap();
+    let already = comp.focus_at(sess, 60, 28);
+    let queued_noise = comp.drain_input(2, tok2).unwrap();
+    let steal = comp.focus_at(sess, 12, 20);
+    let told_two = comp.drain_input(2, tok2).unwrap();
+    let underneath = comp.focus_at(sess, 4, 4);
+    let told_three = comp.drain_input(3, tok3).unwrap();
+    let empty = comp.focus_at(sess, 63, 0);
+    let stays_cleared = comp.focus().is_none() && comp.drain_input(3, tok3).unwrap().is_empty();
+    let forged = comp.focus_at(sess ^ 0x5A, 0, 0);
+    check!(
+        matches!(already, Ok(Some(2)))
+            && queued_noise.iter().any(|e| e.kind == EventKind::Key(b'm'))
+            && matches!(steal, Ok(Some(3)))
+            && told_two.iter().any(|e| e.kind == EventKind::FocusLost)
+            && matches!(underneath, Ok(Some(1)))
+            && told_three.len() == 1
+            && told_three[0].kind == EventKind::FocusLost
+            && matches!(empty, Ok(None))
+            && stays_cleared
+            && matches!(forged, Err(CompFault::NotInputSession)),
+        "input: a pointer click focuses the topmost surface under the point and a click on empty space clears focus"
     );
 
     Ok(n)

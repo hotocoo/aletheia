@@ -687,6 +687,29 @@ pub fn authorize_with_capabilities(
     ) == crate::spine::Decision::Allow
 }
 
+/// What the machine's live input session reports to a human (ALET-P2-021's hardware rung,
+/// ADR-080). Every field is a counter or a state the SESSION already tracks — this type
+/// invents nothing; it is the session's ledger, rendered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputFacts {
+    /// Keystroke bytes the session routed into a focused surface's queue.
+    pub events_posted: u64,
+    /// Events DROPPED (a full queue behind a surface that stopped draining).
+    pub dropped: u64,
+    /// Input ops refused, by name, since boot.
+    pub refusals: u64,
+    /// Events the focused surface has not read yet.
+    pub queued: usize,
+    /// The cursor's glyph top-left, if shown.
+    pub cursor: Option<(u32, u32)>,
+    /// The focused surface id, if any.
+    pub focus: Option<u32>,
+    /// Raw events the keyboard device has delivered since boot.
+    pub kb_events: u64,
+    /// Raw events the pointer device has delivered since boot.
+    pub pt_events: u64,
+}
+
 /// The facts a command may ask of the running target. Everything here is already established by the
 /// boot the console runs after; the trait exists so the dispatcher never names an architecture.
 pub trait ShellHost {
@@ -714,6 +737,12 @@ pub trait ShellHost {
     /// loss they will blame on the command they typed.
     fn input_dropped(&self) -> u64 {
         0
+    }
+    /// The machine's live input session, if the target installed one (ALET-P2-021's hardware
+    /// rung, ADR-080). Default `None` — a target with no desktop says so instead of reporting
+    /// zeros that would look like a session nobody can steer.
+    fn input_facts(&self) -> Option<InputFacts> {
+        None
     }
     /// Processors this kernel brought up. Defaulted to one because a target that has not answered
     /// the question has exactly one core it is sure about, and claiming more would be a claim about
@@ -766,6 +795,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("uptime", "time since boot"),
     ("mem", "physical memory, in frames and bytes"),
     ("faults", "supervisor containment and escalation counters"),
+    (
+        "input",
+        "the machine's input session: cursor, focus, counters",
+    ),
     (
         "mlstat",
         "the resident risk advisor: what it is, and what it has done since boot",
@@ -1004,6 +1037,35 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 host.supervisor_terminated(),
                 host.supervisor_escalations()
             ));
+        }
+        // The machine's input session, reported the way every other fact here is reported: read
+        // LIVE from the session the machine is running (ALET-P2-021's hardware rung, ADR-080).
+        // A target with no desktop says so — absence is named, never rendered as zeros.
+        "input" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            match host.input_facts() {
+                Some(f) => {
+                    out(&format!(
+                        "session: held; events posted {} dropped {} refused {}",
+                        f.events_posted, f.dropped, f.refusals
+                    ));
+                    match f.cursor {
+                        Some((x, y)) => out(&format!("cursor: ({}, {}) shown", x, y)),
+                        None => out("cursor: hidden"),
+                    }
+                    match f.focus {
+                        Some(id) => out(&format!("focus: surface {} ({} queued)", id, f.queued)),
+                        None => out("focus: none"),
+                    }
+                    out(&format!(
+                        "devices: keyboard {} events, pointer {} events",
+                        f.kb_events, f.pt_events
+                    ));
+                }
+                None => out("input: no machine input session on this target"),
+            }
         }
         // The command that makes "the model is running" a question a human can ask the machine
         // instead of a claim a README makes on its behalf (REQ-ML-003, ADR-056). Everything printed

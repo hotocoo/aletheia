@@ -1,6 +1,23 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-29 (THE COMPOSED DESKTOP MEETS INPUT — focus is AUTHORITY and the cursor is
+**As of:** 2026-09-02 (REAL DEVICES THROUGH THE INPUT SESSION — the input HARDWARE rung, and the
+desktop goes LIVE: `kernel-core/src/vinput.rs` is one virtio-input driver over both buses (virtio-mmio on
+aarch64/RISC-V, virtio-pci on x86-64) with the one config WRITE the transports never needed named as the
+`ConfigWrite` seam, devices classified by their OWN declared names (a lone or unclassifiable device refused
+by name), a Linux-keycode decoder whose WHOLE output space is the console's alphabet (host-swept over every
+keycode in every modifier state, modifier state held separately from the PS/2 decoder's), an absolute-axis
+pointer decoder committing on SYN with the device's OWN pinned axis range mapped exactly onto the scanout,
+and the click as a ROUTING decision — `Compositor::focus_at` focuses the topmost placed surface under the
+point, an empty click clears focus, the loser is told, a forged session is refused — with `route_key` /
+`route_pointer` shared between the boot suite and the live pump; `kernel-x86_64/src/desktop.rs` installs
+the LIVE desktop before the VT-d gate (one compositor, one session, panel + window, the tablet steering the
+cursor) and pumps it from the PIT tick at 100 Hz, bounded, composing only when pixels changed and issuing
+exactly one TRANSFER + one FLUSH per changed frame, its facts published as single machine words the new
+`input` console command reads LIVE — 10 boot invariants against the REAL devices on all three targets
+(`[vinput] ALL 10 INPUT-HARDWARE INVARIANTS HOLD`, init fails 679, suite fails 680+i; `input_suite` grows
+12 -> 13 with click-as-routing), 10 + 2 host proofs, seven cross-CPU conformance behaviors (158 -> 165), a
+LIVE gate `scripts/vinput-e2e.sh` driving the pump with QMP-injected real device events, unsafe audit
+CHANGED (+14/+1/+12/+1) and counted, ADR-080); before that: 2026-08-29 (THE COMPOSED DESKTOP MEETS INPUT — focus is AUTHORITY and the cursor is
 the COMPOSITOR'S OWN: `kernel-core/src/compositor.rs` mints exactly ONE possession-based input
 session whose every event post, focus change and cursor move answers to it (`InputSealed` on a
 second opener, `NotInputSession` on absent/wrong/forged), focuses at most ONE placed surface
@@ -60,9 +77,71 @@ a restored grant returns to silence, and enforcement stays latched until halt �
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..078`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..080`.
 
-## Current wave — the composed desktop meets input (2026-08-29, ADR-079)
+## Current wave — real devices through the input session (2026-09-02, ADR-080)
+
+ALET-P2-021's input HARDWARE rung. ADR-079 built the input path as an authority question and
+named its own limit: no REAL device was wired through it. This wave wires two, on every CPU,
+and on x86-64 lets the machine RUN the whole graphics stack at once. `kernel-core/src/vinput.rs`
+is one virtio-input driver body (VIRTIO 1.2 §5.8, device id 18) over the existing transport
+seam on both buses: the eventq the device fills with `{type, code, value}` records, the statusq
+created, armed and never fed, identity/event-bits/axis geometry read from the config space
+through the select/subsel pair — the one config WRITE this kernel's transports had never
+needed, now the `ConfigWrite` seam (a read-modify-write of the aligned word on virtio-mmio, a
+volatile store into the device-config capability on virtio-pci). Devices are classified by
+their OWN names, never by slot order; a lone device, a failed bring-up, an unclassifiable
+device are refused by name. `KeyDecoder` turns Linux keycodes into `keymap::Keys` under the
+ONE rule the PS/2 decoder already obeys — only bytes the editor has a rule for — swept on the
+host over the whole keycode space in every reachable modifier state, sharing the grammar
+(`csi`/`csi_delete` public now) but never the modifier STATE with the PS/2 decoder.
+`PointerDecoder` commits absolute-axis batches on SYN (half-batches refused), maps the
+device's OWN pinned range (0..32767) onto the scanout exactly and monotonically, and treats a
+LEFT press as a FOCUS decision: `Compositor::focus_at` focuses the topmost PLACED surface
+whose VISIBLE area covers the point, clears focus on empty space, tells the loser through its
+own queue, queues nothing on the already-focused surface, refuses a forged session, and
+ignores button autorepeat. `route_key`/`route_pointer` are the shared functions the boot suite
+drives with synthetic records and the live desktop pumps with hardware records.
+`kernel-x86_64/src/desktop.rs` installs the LIVE desktop BEFORE the VT-d gate (its GPU and input
+grants inside the per-device windows), one compositor over the console's geometry, one
+session, a panel and a window under owner tokens, the cursor over the window; the IRQ0 (PIT)
+handler pumps it at 100 Hz — at most one queue depth per device per tick, a compose only when
+something owes a repaint, a device command only when the model reports pixels written, exactly
+one TRANSFER + one FLUSH per changed frame, nothing at all on a quiet tick — with exactly ONE writer and facts published as single machine words the new
+`input` console command (`shell::InputFacts`, `Safe` in the hosted operator) reads LIVE; a
+target without a desktop says so instead of printing zeros. Proof: 10 host tests in
+`kernel-core/tests/vinput.rs` plus the click-to-focus routing table and the quiet-tick proof in
+`tests/input.rs` (the pump composes only when `has_pending_damage`, allocation-free — an idle
+tick touches no heap on a heap that never frees); 10 boot
+invariants against the REAL devices on all three targets (`[vinput] ALL 10 INPUT-HARDWARE
+INVARIANTS HOLD` — identity pinned from config space, DMA-gated queues, armed silence
+MEASURED over 10 000 polls, keyboard record through the decoder into the focused queue,
+pointer record to the exactly mapped position, click routes focus, unknown records counted,
+whole-alphabet proof, axis edges and clamps, keystroke composes nothing; init fails 679, suite
+fails 680+i; `input_suite` 12 -> 13); seven cross-CPU conformance behaviors (158 -> 165); the
+LIVE gate `scripts/vinput-e2e.sh` (its own CI job) drives the pump with QMP-injected events —
+typed over the serial wire (COM1 a socket the harness attaches before the guest runs) — the
+hardware wire starts silent, the cursor lands where the device's axis range says, click focuses
+/ empty click clears with the loser told (one FocusLost in its queue) / clicks post no keystroke,
+one virtio keystroke posts exactly one byte
+queued behind the focused window while the console sees nothing (QEMU hands injected keys to
+the virtio keyboard once it is DRIVER_OK, so the two wires are distinct by construction), quiet
+counters hold still. Marker
+maps changed deliberately (`input=13`, `vinput=10` on the three QEMU gates; VirtualBox requires
+the routing marker and lists the hardware marker SKIP — it emulates no virtio-input). The
+unsafe audit CHANGED and is counted: kernel-core +14, kernel +1, kernel-x86_64 +12,
+kernel-riscv64 +1, every site with its SAFETY argument. The first live run found the tick
+never reached the pump (the ring-3 suite leaves IRQ0 on its preemption entry and the console
+masked it): `idt::restore_timer` re-points IRQ0 at the plain tick handler after that suite, and
+`conirq::init` keeps IRQ0 unmasked when `desktop::is_live` — a console-only machine quiets it
+as before. Both UEFI e2e scripts now put the
+rustup shim first on PATH (E0463 under a Homebrew cargo — how this gate first failed locally).
+Named non-claims, in the register: the live pump is x86-64's (aarch64/RISC-V prove the path in
+the boot suite, install no desktop yet), input is polled from the tick, the PS/2 wire stays the
+console's, no relative pointers, no hotplug, statusq unused, right button counted not routed,
+no device-level GPU isolation, no alpha, no text/IME.
+
+## Previous wave — the composed desktop meets input (2026-08-29, ADR-079)
 
 ALET-P2-021's input-routing rung. ADR-078 made the composed frame visible; this wave makes the
 desktop ANSWER, by decomposing input into the two questions this kernel already knows how to
@@ -298,7 +377,8 @@ scripts/check-ci-parity.sh against this file: scripts/build-all.sh (every crate 
 toolchain, host crates tested), scripts/check-boundary-docs.sh, scripts/check-ci-parity.sh,
 scripts/check-register.sh, scripts/check-traceability.sh, scripts/comparative-bench.sh,
 scripts/conformance.sh (the cross-CPU core contract), scripts/console-agent-e2e.sh,
-scripts/console-ai-e2e.sh, scripts/console-e2e.sh, scripts/keyboard-e2e.sh,
+scripts/console-ai-e2e.sh, scripts/console-e2e.sh, scripts/keyboard-e2e.sh, scripts/vinput-e2e.sh (the live
+input-hardware rung),
 scripts/quality-gate.sh, and the four VM gates — scripts/vm-e2e.sh (aarch64),
 scripts/vm-e2e-riscv.sh (RISC-V), scripts/vm-e2e-x86.sh (x86-64 under OVMF) and
 scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung).

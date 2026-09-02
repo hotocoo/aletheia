@@ -287,6 +287,16 @@ CONTRACT=(
   "input: events route to the focused surface and only its owner drains them - in order, exactly once"
   "input: a wrong session token changes nothing - absent, wrong and forged are all not-the-input-path"
   "input: the cursor is the compositor's - session-moved, fully-off refused by name, partially-off clipped exactly"
+
+  # Input hardware (ADR-080): real devices through the session, and the click that routes -
+  # the authority halves that must not vary by CPU.
+  "input: a pointer click focuses the topmost surface under the point and a click on empty space clears focus"
+  "vinput: real devices answer for their identity by name and reach DRIVER_OK"
+  "vinput: the event path is DMA-gated - unregistered addresses are refused, grants carry their owner"
+  "vinput: an armed input device sends nothing uninvited - the silence is measured"
+  "vinput: a real keyboard record routes through the decoder into the focused surface's queue"
+  "vinput: a real pointer record moves the compositor's cursor to the exactly mapped position"
+  "vinput: no keycode in any modifier state emits a byte the console refuses"
 )
 
 hr() { printf '========================================================================\n'; }

@@ -95,9 +95,17 @@ impl Keys {
     }
 }
 
-/// `ESC [ A` and friends: the cursor keys, in the language the editor parses.
-const fn csi(final_byte: u8) -> Keys {
+/// `ESC [ A` and friends: the cursor keys, in the language the editor parses. Public since
+/// the input-hardware rung (ADR-080): the virtio keyboard's decoder speaks the SAME editor
+/// grammar from a different wire, and two decoders must not grow two grammars.
+pub const fn csi(final_byte: u8) -> Keys {
     Keys::seq([0x1b, b'[', final_byte, 0], 3)
+}
+
+/// `ESC [ 3 ~` — the one navigation sequence that carries a parameter (Delete). Same reason
+/// as [`csi`]: one grammar, whichever wire the keystroke came in on.
+pub const fn csi_delete() -> Keys {
+    Keys::seq([0x1b, b'[', b'3', b'~'], 4)
 }
 
 // Set-1 make codes for the keys that are not characters.
