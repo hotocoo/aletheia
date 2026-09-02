@@ -127,11 +127,11 @@ pub fn parse_ipv4<'a>(buf: &'a [u8]) -> Result<Ipv4View<'a>, IpError> {
 /// datagram re-addressed in flight fails its check instead of parsing.
 fn pseudo_sum(src: [u8; 4], dst: [u8; 4], protocol: u8, upper: &[u8]) -> u32 {
     let mut sum: u32 = 0;
-    for pair in src.chunks_exact(2) {
-        sum += (((pair[0] as u16) << 8) | pair[1] as u16) as u32;
+    for pair in src.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*pair) as u32;
     }
-    for pair in dst.chunks_exact(2) {
-        sum += (((pair[0] as u16) << 8) | pair[1] as u16) as u32;
+    for pair in dst.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*pair) as u32;
     }
     sum += protocol as u32;
     sum += upper.len() as u32;
@@ -166,11 +166,11 @@ pub fn udp_checksum(src: [u8; 4], dst: [u8; 4], datagram_with_zeroed_ck: &[u8]) 
 fn verify_checksum(src: [u8; 4], dst: [u8; 4], datagram: &[u8]) -> bool {
     // Protocol byte + UDP length are the pseudo-header's tail; the addresses follow.
     let mut sum: u32 = PROTOCOL_UDP as u32 + datagram.len() as u32;
-    for pair in src.chunks_exact(2) {
-        sum += (((pair[0] as u16) << 8) | pair[1] as u16) as u32;
+    for pair in src.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*pair) as u32;
     }
-    for pair in dst.chunks_exact(2) {
-        sum += (((pair[0] as u16) << 8) | pair[1] as u16) as u32;
+    for pair in dst.as_chunks::<2>().0 {
+        sum += u16::from_be_bytes(*pair) as u32;
     }
     let mut i = 0;
     while i + 1 < datagram.len() {

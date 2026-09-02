@@ -98,7 +98,10 @@ GIT_SHA="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 cat > "$STAGE/README.txt" <<EOF
 Aletheia $VERSION — x86-64 VMware package (built from $GIT_SHA)
 
-Two UEFI disks, ready for VMware Fusion / Workstation (firmware = EFI, never legacy BIOS):
+Two UEFI disks for x86-64 hosts, ready for VMware Workstation / Fusion (firmware = EFI, never
+legacy BIOS). x86-64 ONLY: there is no arm64 VMware image — VMware Fusion on Apple Silicon runs
+arm64 guests and cannot boot these disks; Aletheia's aarch64 kernel targets QEMU's virt machine
+(docs/BOOT.md).
 
   aletheia-x86_64.vmx / aletheia-x86_64.vmdk
       The OS you sit in front of: Aletheia boots as its own kernel, runs its boot invariants,
@@ -125,8 +128,6 @@ booted under QEMU+OVMF from these very VMDKs before it was published.
 
 https://github.com/hotocoo/aletheia
 EOF
-( cd "$STAGE" && SHA aletheia-x86_64.vmdk aletheia-x86_64-selftest.vmdk aletheia-x86_64.vmx \
-    aletheia-x86_64-selftest.vmx README.txt > SHA256SUMS )
 
 hr; echo "==> [5/6] verify the PACKAGED disks boot (QEMU + OVMF, from the VMDKs themselves)"; hr
 verify_skip=0
@@ -146,7 +147,12 @@ elif ! command -v qemu-system-x86_64 >/dev/null 2>&1 || [ -z "$OVMF_CODE_PATH" ]
   echo "SKIP: verify needs qemu-system-x86_64 + OVMF (the package is UNVERIFIED on this host)"; verify_skip=1
 else
   VARS="$BUILD/release-verify-vars.fd"
-  boot_vmdk() { # $1 = vmdk, $2 = serial log, $3 = timeout seconds
+  # Launch one packaged disk in the background; the caller decides how long to let it run. The
+  # serial log is removed HERE, in the foreground, before QEMU starts: a stale log from an earlier
+  # run once satisfied the prompt poll below before the fresh boot had written a byte, and the
+  # poll then killed a machine that was three seconds from its prompt. QPID is the QEMU pid — the
+  # only thing ever killed, by pid, never by pattern.
+  launch_vmdk() { # $1 = vmdk, $2 = serial log
     cp "$OVMF_VARS_PATH" "$VARS"
     rm -f "$2"
     qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep \
@@ -155,37 +161,35 @@ else
       -drive format=vmdk,file="$1" \
       -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
       -serial file:"$2" -display none -no-reboot &
-    local qpid=$!
-    ( sleep "$3"; kill -9 "$qpid" 2>/dev/null ) &
-    local wpid=$!
-    wait "$qpid" 2>/dev/null; local rc=$?
-    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
-    return $rc
+    QPID=$!
   }
   SLOG="$BUILD/release-verify-selftest.log"
-  set +e; boot_vmdk "$STAGE/aletheia-x86_64-selftest.vmdk" "$SLOG" 240; RC=$?; set -e
+  launch_vmdk "$STAGE/aletheia-x86_64-selftest.vmdk" "$SLOG"
+  ( sleep 240; kill -9 "$QPID" 2>/dev/null ) & WPID=$!
+  set +e; wait "$QPID" 2>/dev/null; RC=$?; set -e
+  kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null || true
   echo "selftest disk: QEMU exit code $RC (expect 33)"
   [ "$RC" -eq 33 ] || { tail -20 "$SLOG" 2>/dev/null; fail "the packaged selftest disk did not exit 33"; }
   grep -q '\[e2e\] PASS' "$SLOG" || fail "the packaged selftest disk did not print [e2e] PASS"
   echo "  PASS: the packaged selftest VMDK boots and proves its suites ([e2e] PASS, exit 33)"
   ILOG="$BUILD/release-verify-interactive.log"
-  # The interactive disk stays up; it is killed by the watchdog once the prompt has been seen.
-  set +e; boot_vmdk "$STAGE/aletheia-x86_64.vmdk" "$ILOG" 240 & BP=$!
+  # The interactive disk stays up: poll its serial log for the prompt, then stop the machine.
+  launch_vmdk "$STAGE/aletheia-x86_64.vmdk" "$ILOG"
   waited=0
   while ! grep -q 'aletheia> ' "$ILOG" 2>/dev/null; do
     sleep 1; waited=$((waited + 1))
     [ "$waited" -ge 240 ] && break
-    kill -0 "$BP" 2>/dev/null || break
+    kill -0 "$QPID" 2>/dev/null || break
   done
-  pkill -9 -f "file=$STAGE/aletheia-x86_64.vmdk" 2>/dev/null || true
-  wait "$BP" 2>/dev/null; set -e
+  kill -9 "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null || true
   grep -q 'Aletheia interactive console' "$ILOG" || { tail -20 "$ILOG" 2>/dev/null; fail "the packaged interactive disk never opened its console"; }
   grep -q 'aletheia> ' "$ILOG" || fail "the packaged interactive disk never printed a prompt"
-  echo "  PASS: the packaged interactive VMDK boots to its console prompt"
+  echo "  PASS: the packaged interactive VMDK boots to its console prompt (${waited}s)"
   cp "$SLOG" "$STAGE/verify-selftest-boot.log"
 fi
 
-hr; echo "==> [6/6] zip + digest + release notes"; hr
+hr; echo "==> [6/6] checksums (over EVERY shipped file, the boot log included), zip, digest, release notes"; hr
+( cd "$STAGE" && rm -f SHA256SUMS && SHA $(ls | grep -v '^SHA256SUMS$' | sort) > SHA256SUMS )
 ( cd "$OUT" && zip -q -r -X "$NAME.zip" "$NAME" )
 ( cd "$OUT" && SHA "$NAME.zip" > "$NAME.zip.sha256" )
 {

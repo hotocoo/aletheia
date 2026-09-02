@@ -68,7 +68,12 @@ printf 'aletheia-capvault-root-0123456789abcdef' | head -c 32 > "$ROOTBIN"
 # convenience - it is the only declaration the guest can discover.
 DTBRAW="$KDIR/target/virt-dtb-raw.bin"
 DTBT="$KDIR/target/virt-dtb.bin"
-qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+# `-global arm-smmuv3.stage=2`: QEMU 8.1..9.x create the virt machine's SMMUv3 as a STAGE-1-ONLY unit
+# unless told otherwise (IDR0.S2P clear -> the kernel's probe refuses `Stage2Missing`, ADR-074), which
+# is exactly how this gate went red on the ubuntu-24.04 runner (QEMU 8.2). Newer QEMU (10+/11)
+# advertises both stages regardless and ignores the knob. The property has existed since 8.1, so this
+# is safe on every emulator that has the stage-2 model at all.
+qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -global arm-smmuv3.stage=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
@@ -86,7 +91,7 @@ head -c "$TSZ" "$DTBRAW" > "$DTBT"
 
 echo "==> booting in QEMU (120s watchdog, virtio-blk attached, -smp 4 for the SMP suite)"
 OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
-  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -global arm-smmuv3.stage=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
@@ -187,7 +192,7 @@ echo "$OUT" | grep "PERSISTENT MEDIUM: boot #1, 0 entities verified" >/dev/null 
 # ---- SECOND BOOT on the SAME persistent medium: the OS must REMEMBER (REQ-STOR-003) ----
 echo "==> rebooting the same image against the SAME persistent disk (cross-reboot proof)"
 OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
-  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -global arm-smmuv3.stage=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
@@ -209,7 +214,7 @@ echo "$OUT2" | grep "PERSISTENT MEDIUM: boot #2, 1 entities verified" >/dev/null
 # stays sealed BY NAME while every other subsystem keeps working (ADR-072).
 echo "==> third boot WITHOUT the firmware root (absence must be a named refusal, not a crash)"
 OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
-  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
+  qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -global arm-smmuv3.stage=2 -cpu cortex-a72 -smp 4 -m 128M -nographic \
   -semihosting-config enable=on,target=native -kernel "$ELF" \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
