@@ -1,0 +1,57 @@
+# Every stable version ships a VMware package, and the package is PUSHED TO GITHUB as release
+# assets on the tag (REQ-REL-001, from v0.1.0 on). The package is built by scripts/release-vmware.sh
+# — the same script the main pipeline runs on every push as a dev package, so this job never runs
+# code the gates have not — and it is BOOTED from its own VMDKs under QEMU+OVMF before anything is
+# uploaded. Idempotent: re-running on the same tag replaces the assets (`--clobber`), never fails on
+# "release exists".
+name: Release (VMware package -> GitHub release assets)
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing vX.Y.Z tag to (re)package and publish'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  vmware-package:
+    name: Build, boot-verify and publish the VMware package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Install QEMU + OVMF + qemu-img + zip
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils ovmf zip
+      - name: Install Rust nightly + x86_64-unknown-uefi target
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup target add x86_64-unknown-uefi --toolchain nightly-2026-08-09
+      - name: Build the package and BOOT it from its own VMDKs
+        run: ./scripts/release-vmware.sh --version "${TAG}"
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      - name: Keep the package as a workflow artifact too
+        uses: actions/upload-artifact@v4
+        with:
+          name: aletheia-vmware-${{ github.event.inputs.tag || github.ref_name }}
+          path: dist/
+      - name: Publish as GitHub release assets on the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "Aletheia $TAG" --notes-file dist/RELEASE-NOTES.md
+          else
+            gh release edit "$TAG" --notes-file dist/RELEASE-NOTES.md
+          fi
+          gh release upload "$TAG" dist/*.zip dist/*.zip.sha256 dist/SHA256SUMS --clobber
+          gh release view "$TAG"

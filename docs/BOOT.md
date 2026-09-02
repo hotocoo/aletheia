@@ -212,6 +212,13 @@ qemu-system-x86_64 -machine q35 -m 256 \
 
 ### Boot it — VMware
 
+**Prefer the released package.** Every stable version ships
+`aletheia-vX.Y.Z-x86_64-vmware.zip` on the GitHub release for its tag
+(<https://github.com/hotocoo/aletheia/releases>): two ready `.vmx` + `.vmdk` pairs (the interactive
+console, and a selftest disk that boots, proves every suite and halts), boot-verified from those very
+VMDKs before publishing — see `docs/RELEASING.md`. Open the `.vmx` in VMware and power on. To build the
+same package locally: `scripts/release-vmware.sh --version dev`. Building by hand instead:
+
 1. Create a new VM, **Firmware type = UEFI** (not BIOS).
 2. Remove the default disk; **attach `build/aletheia-x86_64.vmdk`** as the hard disk.
    (`kernel-x86_64/aletheia-x86_64.vmx` is a ready-made config referencing it.)

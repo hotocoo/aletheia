@@ -13,6 +13,11 @@ Read it before quoting anything below.
 
 ## 0. Which path works on your machine
 
+**No toolchain at all?** Every stable version ships a ready VMware package on the GitHub release for its
+tag (<https://github.com/hotocoo/aletheia/releases>): open `aletheia-x86_64.vmx` in VMware Fusion/Workstation
+and power on (UEFI). The zip also holds a selftest disk that boots, proves every suite on its serial log and
+halts — the artifact proving itself on your machine. Details: `docs/RELEASING.md`.
+
 The one thing that trips people up first, so it is first:
 
 | Your machine | Use | Why |

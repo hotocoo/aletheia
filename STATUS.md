@@ -78,6 +78,8 @@ a restored grant returns to silence, and enforcement stays latched until halt �
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..080`.
+**Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
+release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
 ## Current wave — real devices through the input session (2026-09-02, ADR-080)
 
@@ -379,6 +381,9 @@ scripts/check-register.sh, scripts/check-traceability.sh, scripts/comparative-be
 scripts/conformance.sh (the cross-CPU core contract), scripts/console-agent-e2e.sh,
 scripts/console-ai-e2e.sh, scripts/console-e2e.sh, scripts/keyboard-e2e.sh, scripts/vinput-e2e.sh (the live
 input-hardware rung),
-scripts/quality-gate.sh, and the four VM gates — scripts/vm-e2e.sh (aarch64),
+scripts/quality-gate.sh, scripts/release-vmware.sh (the VMware package — both disks built,
+packaged and BOOTED from their own VMDKs on every push; on every `vX.Y.Z` tag
+.github/workflows/release.yml publishes the same package as GitHub release assets, REQ-REL-001,
+docs/RELEASING.md), and the four VM gates — scripts/vm-e2e.sh (aarch64),
 scripts/vm-e2e-riscv.sh (RISC-V), scripts/vm-e2e-x86.sh (x86-64 under OVMF) and
 scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung).
