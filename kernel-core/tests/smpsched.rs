@@ -30,19 +30,34 @@ fn exactly_once_under_cross_cpu_contention() {
         sched.enqueue_on(1, t as u64);
     }
 
+    // Progress-gated, never a race against the thread scheduler: CPU 1 - the only CPU with local
+    // work - does not pop its first task until some other CPU has already STOLEN one. On a
+    // two-vCPU runner CPU 1's thread can otherwise drain all 4000 tasks before CPUs 0/2/3 are
+    // scheduled at all, and "the others must have stolen" becomes a claim about the host's
+    // scheduler rather than about this one (it flaked exactly that way in CI on 2026-09-03).
+    // Once the first steal has happened the four race freely, which is the contention the
+    // exactly-once proof is about.
+    let steals = Arc::new(AtomicUsize::new(0));
     let workers: Vec<_> = (0..NCPUS)
         .map(|cpu| {
             let sched = Arc::clone(&sched);
             let seen = Arc::clone(&seen);
             let executed = Arc::clone(&executed);
+            let steals = Arc::clone(&steals);
             std::thread::spawn(move || {
                 let mut stolen = 0usize;
                 let start = Instant::now();
+                if cpu == 1 {
+                    while steals.load(Ordering::SeqCst) == 0 && start.elapsed() < DEADLINE {
+                        std::hint::spin_loop();
+                    }
+                }
                 while executed.load(Ordering::SeqCst) < TASKS && start.elapsed() < DEADLINE {
                     if let Some(d) = sched.next_for(cpu) {
                         seen[d.task as usize].fetch_add(1, Ordering::SeqCst);
                         if d.stolen_from.is_some() {
                             stolen += 1;
+                            steals.fetch_add(1, Ordering::SeqCst);
                         }
                         executed.fetch_add(1, Ordering::SeqCst);
                     } else {
