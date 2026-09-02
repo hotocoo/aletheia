@@ -81,12 +81,17 @@ LX_BOOT_MS=""; LX_IDLE=""; LX_BYTES=""; LX_STATUS="SKIP"; LX_WL_MS=""
 # meaningful share of the result.
 typed_workload() {
   local label="$1" log="$2" t0 t1 i deadline
+  local cr=$'\r'
   [ "$WORKLOAD_OPS" -gt 0 ] || return 0
   t0="$(python3 -c 'import time;print(int(time.time()*1000))')"
   for i in $(seq 1 "$WORKLOAD_OPS"); do
     printf 'echo WL-%s-%s\n' "$label" "$i" >&9
     deadline=$((SECONDS + 60))
-    until grep -qE "^WL-$label-$i\r*$" "$log"; do
+    # A REAL carriage-return byte in the pattern, not `\r`: GNU grep reads `\r` in an ERE as a
+    # literal `r` (macOS grep reads it as CR), so `\r*$` matched the guest's `WL-...\r\r\n` on the
+    # workstation and never on the runner - the only reason this leg was red in CI while both
+    # guests answered every op (their bytes are in the failure dump below).
+    until grep -qE "^WL-$label-$i${cr}*"'$' "$log"; do
       if [ "$SECONDS" -ge "$deadline" ]; then
         echo "    FAIL [$label] workload op $i was never answered by the guest"
         # Show what the guest DID say, bytes visible: a harness failure and a guest failure look
