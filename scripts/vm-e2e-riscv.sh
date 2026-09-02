@@ -88,6 +88,7 @@ echo "$OUT" | grep "ALL 8 REAL-PIXEL COMPOSITION INVARIANTS HOLD" >/dev/null || 
 # Focus is authority, the cursor is the compositor's own (ALET-P2-021, ADR-079).
 echo "$OUT" | grep "ALL 13 INPUT-ROUTING INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-routing invariants marker missing (ALET-P2-021, ADR-079)"; fail=1; }
 # The input HARDWARE rung (ALET-P2-021, ADR-080): real virtio-input devices through the session.
+echo "$OUT" | grep "ALL 6 TEXT-GRID INVARIANTS HOLD" >/dev/null || { echo "FAIL: text-grid invariants marker missing (ALET-P2-021, ADR-083)"; fail=1; }
 echo "$OUT" | grep "ALL 10 INPUT-HARDWARE INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-hardware invariants marker missing (ALET-P2-021, ADR-080)"; fail=1; }
 # Custody crosses the platform boundary (ALET-P1-034, ADR-072), proved over the SECOND bus.
 echo "$OUT" | grep "ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD" >/dev/null || { echo "FAIL: custody-delivery invariants marker missing (ALET-P1-034, ADR-072)"; fail=1; }
@@ -131,7 +132,12 @@ echo "$OUT" | grep "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" >/dev/null || { echo "FA
 # anything was admitted through it, and commissioning was refused nothing.
 echo "$OUT" | grep "\[mlsched\] memory: .* frames free - bounded admission ON" >/dev/null || { echo "FAIL: the allocator's reading never reached the resident advisor (ADR-081)"; fail=1; }
 echo "$OUT" | grep "commissioning: .*, 0 refused at the memory boundary" >/dev/null || { echo "FAIL: commissioning was refused at the memory boundary (ADR-081)"; fail=1; }
-echo "$OUT" | grep "ALL 17 LIVE-ADVISORY INVARIANTS HOLD" >/dev/null || { echo "FAIL: live-advisory invariants marker missing (REQ-ML-003)"; fail=1; }
+echo "$OUT" | grep "ALL 17 LIVE-ADVISORY INVARIANTS HOLD" >/dev/null || { echo "FAIL: live-advisory invariants marker missing (REQ-ML-003, ADR-056)"; fail=1; }
+# Reclaim under pressure (REQ-ML-005 wired, ADR-082): the policy suite, and the REAL storm on this
+# machine's allocator that entered pressure and came back with every frame.
+echo "$OUT" | grep "ALL 9 RECLAIM INVARIANTS HOLD" >/dev/null || { echo "FAIL: reclaim invariants marker missing (REQ-ML-005, ADR-082)"; fail=1; }
+echo "$OUT" | grep "storm: pressure entered and cleared, every frame back EXACTLY" >/dev/null || { echo "FAIL: the reclaim storm did not come back (ADR-082)"; fail=1; }
+true || { echo "FAIL: live-advisory invariants marker missing (REQ-ML-003)"; fail=1; }
 echo "$OUT" | grep "\[mlsched\] RESIDENT:" >/dev/null            || { echo "FAIL: no model took up residence (REQ-ML-003)"; fail=1; }
 echo "$OUT" | grep -E "\[mlsched\] commissioning: [0-9]+ tasks admitted over [0-9]+ s" >/dev/null || { echo "FAIL: the resident advisor was never consulted by a workload (REQ-ML-003)"; fail=1; }
 echo "$OUT" | grep "advised drain is a permutation of the model-free one" >/dev/null || { echo "FAIL: the advised drain was not proved a permutation of the model-free one (INV-014)"; fail=1; }
@@ -142,7 +148,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # map by design — the same arch-independent suites must prove the same counts over either bus, and
 # a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
 source "$ROOT/scripts/lib-markers.sh"
-RISCV_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 selftest=13 smp=22 soak=12 usermode=32 vault=14 vinput=10 virtio=21 vm=66"
+RISCV_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 reclaim=9 selftest=13 smp=22 soak=12 textgrid=6 usermode=32 vault=14 vinput=10 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

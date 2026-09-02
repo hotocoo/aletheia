@@ -143,6 +143,16 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
 #[cfg(feature = "interactive")]
 fn emit(s: &str) {
     kprint!("{}", s);
+    // The console's SECOND surface (ADR-083): the same bytes land in the live desktop's terminal
+    // window, painted by the compositor. No desktop, no-op.
+    crate::desktop::term_write(s.as_bytes());
+}
+
+/// The console's input: the serial/PS-2 ring first, then the terminal window's queue - the
+/// virtio keyboard's keystrokes that the input session routed to the focused window (ADR-083).
+#[cfg(feature = "interactive")]
+fn getc() -> Option<u8> {
+    crate::conirq::pop().or_else(crate::desktop::term_getc)
 }
 
 /// Mount the console's namespace, formatting only a device that carries none. A device that mounts
@@ -170,13 +180,7 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
     // Interrupt-driven from here (REQ-CON-002, ADR-045): COM1 raises IRQ4, the handler moves the
     // bytes into the ring, and the loop reads the ring instead of polling a mostly-empty register.
     crate::conirq::init();
-    shell::run_loop(
-        &host,
-        &mut fs,
-        &mut device,
-        &mut crate::conirq::pop,
-        &mut emit,
-    );
+    shell::run_loop(&host, &mut fs, &mut device, &mut getc, &mut emit);
     ActiveHal::exit(0)
 }
 

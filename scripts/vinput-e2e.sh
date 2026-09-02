@@ -16,9 +16,13 @@
 #   4. a click focuses the surface under the point; a click on empty space
 #      clears focus and the loser is TOLD through its own queue; clicks post
 #      no keystroke                                                           (routing)
-#   5. a keystroke on the virtio keyboard reaches the SESSION — posted and
-#      queued behind the focused window, exactly one byte — and NOT the
-#      console: the hardware wire and the console wire are distinct           (keyboard)
+#   5. a keystroke on the virtio keyboard reaches the SESSION (posted, exactly
+#      one byte), the window's owner - the console - drains it and ECHOES it:
+#      the terminal window is the console's second surface (ADR-083); a whole
+#      `help` typed on the virtio keyboard is answered by the same shell        (keyboard)
+#   5b. the `input` readout shows the window's placement and the terminal's
+#      last line; a drag by the title band moves the window by the pointer's
+#      delta                                                                  (window)
 #   6. with nothing happening, the counters hold still                        (quiet)
 #
 # Two wires, on purpose. QEMU routes injected key events to its ACTIVE keyboard handler,
@@ -207,6 +211,8 @@ def click():
 FACTS_RE = re.compile(r'events posted (\d+) dropped (\d+) refused (\d+)')
 CURSOR_RE = re.compile(r'cursor: \((\d+), (\d+)\) (shown|hidden)')
 FOCUS_RE = re.compile(r'focus: surface (\d+) \((\d+) queued\)|focus: none')
+WIN_RE = re.compile(r'window: at \((-?\d+), (-?\d+)\)')
+TERM_RE = re.compile(r'terminal: (\d+) lines, last "([^"]*)"')
 
 def run_input():
     """Type `input` + Enter on the serial wire and return the parsed readout."""
@@ -285,8 +291,8 @@ chunk, (posted4, _d4, _r4, _c4, focus4, queued4) = run_input()
 check(focus4 == 'surface 2', 'pointer: a click takes focus back to the window (%r)' % (focus4,))
 # Routing, not typing: no byte was posted by any click — but the window that LOST focus to the
 # empty-space click was TOLD, through its own queue, so exactly one FocusLost waits there.
-check(posted4 == 0 and queued4 == 1,
-      'pointer: clicks post no keystroke, and the window was told it lost focus (posted %r queued %r)' % (posted4, queued4))
+check(posted4 == 0 and queued4 == 0,
+      'pointer: clicks post no keystroke, and the window read what it was told (posted %r queued %r)' % (posted4, queued4))
 
 # 5 — a keystroke on the virtio keyboard reaches the SESSION and not the console: one press of
 #     `a` posts exactly ONE byte into the focused window's queue (where it stays — the window is
@@ -296,13 +302,58 @@ mark = len(log_text())
 press(['a'])
 time.sleep(0.5)
 between = log_text()[mark:]
+# The `a` now sits on the console's line (the window IS the console); repair it with a virtio
+# backspace before asking `input`, so the readout is a command and not `ainput`. Two bytes
+# were routed: the letter and the backspace.
+press(['backspace'])
+time.sleep(0.3)
 chunk, (posted5, _d5, _r5, _c5, focus5, queued5) = run_input()
-check(posted5 == posted4 + 1,
-      'keyboard: one virtio keystroke posted exactly one byte to the session (posted %s -> %s)' % (posted4, posted5))
-check(queued5 == queued4 + 1 and focus5 == 'surface 2',
-      "keyboard: the byte sits in the focused window's queue until its owner drains it (queued %s -> %s)" % (queued4, queued5))
-check(between.strip() == '',
-      "keyboard: the console saw nothing - the hardware wire is the session's, not the console's (%r)" % (between[:40],))
+check(posted5 == posted4 + 2,
+      'keyboard: the virtio keystroke and its backspace each posted exactly one byte (posted %s -> %s)' % (posted4, posted5))
+check(queued5 == 0 and focus5 == 'surface 2',
+      "keyboard: the window's owner - the console - drained the byte (queued %s -> %s)" % (queued4, queued5))
+check('a' in between and 'aletheia>' not in between,
+      "keyboard: the console ECHOED the virtio keystroke - the terminal window is the console's second surface (%r)" % (between[:40],))
+# 5b - a whole command typed on the virtio keyboard runs at the same shell the serial line
+#      drives: repair the line, type `help`, and the console answers on the serial log while
+#      the terminal window's own last line shows the prompt again.
+mark = len(log_text())
+for k in ['h', 'e', 'l', 'p']:
+    press([k])
+press(['ret'])
+wait_for('commands:', timeout=30)
+answered = 'commands:' in log_text()[mark:]
+check(answered, 'keyboard: `help` typed on the virtio keyboard was answered by the console')
+chunk, facts6 = run_input()
+term_line = TERM_RE.search(chunk)
+win = WIN_RE.search(chunk)
+# The grid's last non-blank line at the moment `input` composes its answer is the prompt line
+# with the command just typed - `aletheia> input` - and the line count grows with every readout.
+lines6 = int(term_line.group(1)) if term_line else None
+check(term_line is not None and term_line.group(2) == 'aletheia> input',
+      'terminal: the window shows the console (last line %r)' % (term_line.group(2) if term_line else None,))
+chunk, _f = run_input()
+term_again = TERM_RE.search(chunk)
+check(term_again is not None and lines6 is not None and int(term_again.group(1)) > lines6,
+      'terminal: the grid grows with the console (%s -> %s lines)' % (lines6, term_again.group(1) if term_again else None))
+check(win is not None and (int(win.group(1)), int(win.group(2))) == (300, 60),
+      'window: placed where the desktop put it (%r)' % ((win.group(1), win.group(2)) if win else None,))
+
+# 5c - drag by the title band: press on the band, move, release; the window follows the
+#      pointer by exactly the pointer's delta and keeps focus.
+PRESS, DROP = (20480, 8740), (21504, 12288)     # (400, 64) in the title band -> (420, 90)
+abs_move(*PRESS)
+pointer([{'type': 'btn', 'data': {'button': 'left', 'down': True}}])
+abs_move(*DROP)
+pointer([{'type': 'btn', 'data': {'button': 'left', 'down': False}}])
+chunk, facts7 = run_input()
+win2 = WIN_RE.search(chunk)
+# Expected from the SAME axis mapping the kernel uses, never a hardcoded pixel: the window moves
+# by exactly the mapped pointer delta.
+expect = (300 + map_axis(DROP[0], SCAN_W) - map_axis(PRESS[0], SCAN_W),
+          60 + map_axis(DROP[1], SCAN_H) - map_axis(PRESS[1], SCAN_H))
+check(win2 is not None and (int(win2.group(1)), int(win2.group(2))) == expect and facts7[4] == 'surface 2',
+      'window: a drag by the title band moved it by the mapped pointer delta (%r, expected %r)' % ((win2.group(1), win2.group(2)) if win2 else None, expect))
 
 # 6 — quiet: with nothing happening, the ledger holds still.
 chunk, (posted6, dropped6, refused6, cursor6, _f6, queued6) = run_input()

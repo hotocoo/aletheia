@@ -1075,6 +1075,15 @@ impl Compositor {
         self.stats
     }
 
+    /// Where a placed surface's top-left sits on the scanout (ADR-083: the live desktop reports
+    /// its window's position through `input`). `None` for minted-but-unplaced or unknown ids.
+    pub fn placement(&self, id: u32) -> Option<(i32, i32)> {
+        self.placed
+            .iter()
+            .find(|p| p.surface == id)
+            .map(|p| (p.x, p.y))
+    }
+
     pub fn scanout_size(&self) -> (u32, u32) {
         self.scanout
     }

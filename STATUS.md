@@ -1,6 +1,35 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-02, later the same day (MEMORY IS A BOUNDARY THE ADVISOR CANNOT CROSS — the
+**As of:** 2026-09-02, night (THE TERMINAL WINDOW IS THE CONSOLE'S SECOND SURFACE — the live
+desktop's window shows the console and types at it: `kernel-core/src/textgrid.rs` is a pixel-exact
+grid of the console's own alphabet (printable bytes in cells, exact scroll, wrap as newline, backspace
+erases one, the editor's `ESC [` sequences consumed unpainted, unknown bytes refused and counted)
+rendered by a pure function into the 1-bpp buffer `fill_packed` consumes, allocated once; the x86-64
+desktop's window is that grid under a title band, every byte the console emits lands in it
+(`desktop::term_write`), every keystroke the input session routed to the focused window is drained by
+its OWNER into the console's `getc` (`desktop::term_getc`) — one shell, two surfaces — and a LEFT press
+on the title band drags the window by the pointer's delta and raises it (`route_pointer_batch`,
+`Compositor::placement`); two contexts (IRQ0 pump, main thread under `without_interrupts`) serialized
+by the interrupt flag, no lock; `input` prints the window's placement and the terminal's last line —
+6 boot invariants on all three targets (`textgrid=6`, fails 700+i, VirtualBox requires it), three
+cross-CPU conformance behaviors (175 -> 178), 7 host proofs, the live gate grows 17 -> 22 (a virtio
+keystroke ECHOED by the console, `help` typed on the virtio keyboard answered, the window's last line
+carries the prompt, a drag by the title band moves the window by exactly the mapped pointer delta), unsafe audit +1,
+ADR-083); before that, the same evening: (RECLAIM UNDER PRESSURE — the allocator triggers, the policy chooses,
+the forest advises: `kernel-core/src/reclaim.rs` wires the eviction-event forest (REQ-ML-005,
+`memrisk`, verified by the SAME loader and contract as the risk forest) into a reclaim round that
+only a `MemoryMeter` under the watermark opens (`NotUnderPressure` refused by name otherwise), whose
+NEED is the shortfall to twice the watermark, whose candidates are ranked in a TOTAL order — protected
+never chosen and counted even when it leaves a named SHORTFALL, then the forest's tier
+(eviction-likely first, completion-likely last, abstain/out-of-box/no-model in between so a machine
+without the blob ranks bit-identically to one whose forest abstains), then largest footprint, lowest
+priority, oldest, id — and whose evictions go through one `ReclaimOps` seam the policy asks once per
+chosen task and whose returned frame count it COUNTS rather than trusting the candidate; and on every
+target a REAL storm takes frames from the machine's own allocator until the meter is under pressure,
+the reclaimer takes them back through the real ownership table, and the free count is restored
+EXACTLY — 9 boot invariants on all three targets (`reclaim=9`, boot fails 700+i / 699 on a storm
+that did not come back), five cross-CPU conformance behaviors (170 -> 175), 7 host proofs, unsafe
+audit UNCHANGED, ADR-082); before that, the same afternoon: (MEMORY IS A BOUNDARY THE ADVISOR CANNOT CROSS — the
 allocator decides admissibility, the forest advises order: `kernel-core/src/mlsched.rs` gains
 `MemoryMeter` (the frame allocator's own reading, refused `MeterInvalid` by name when it cannot be
 true), a pressure ledger (last reading, exact low-water mark, crossings of the 10 % watermark counted
@@ -92,11 +121,83 @@ a restored grant returns to silence, and enforcement stays latched until halt �
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..081`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..083`.
 **Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
 release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
-## Current wave — memory is a boundary the advisor cannot cross (2026-09-02, ADR-081)
+## Current wave — the terminal window is the console's second surface (2026-09-02, ADR-083)
+
+ALET-P2-021's text rung. ADR-080 left the live desktop with a window nobody could read:
+keystrokes reached its queue, the queue was drained by nobody, and the window showed a border.
+This wave makes the window a TERMINAL without inventing a second shell, session or alphabet.
+`kernel-core/src/textgrid.rs` is a `cols x rows` grid of the console's OUTPUT bytes: printable
+ASCII lands in a cell, `\n` ends the line (scrolling exactly one row on the last row), `\r`
+returns to the column, a wrap at the right edge is a newline, backspace erases exactly one cell,
+the editor's `ESC [ ... <final>` sequences are consumed unpainted (a teletype for the console's
+stream, not a terminal emulator — named), anything else refused and COUNTED. `render_packed` is
+a pure function of the cells into the row-major 1-bpp buffer `Compositor::fill_packed` consumes
+(one 8x8 `font8x8` glyph per cell) into a caller-owned buffer allocated once — a changed grid is
+one `fill_packed` and no allocation on a heap that never frees; above the text a `TITLE_H` band,
+solid ink with the name knocked out, is the strip the pointer drags by. The x86-64 desktop
+(`kernel-x86_64/src/desktop.rs`) makes the window that grid: every byte the console emits also
+lands in it (`term_write` from the console's `emit`), the console's `getc` asks the serial/PS-2
+ring and then the window (`term_getc` — the keystrokes the session routed to the focused window,
+drained by their OWNER token into a bounded line), so a virtio keyboard types at the same shell a
+serial line does and the answer is painted where the keystroke landed. `vinput::route_pointer_batch`
+hands the committed batch back after the cursor move and the click-as-focus, so a LEFT press in
+the title band starts a drag (offset from the window's origin) and raises the window, motion
+moves it by exactly the pointer's delta (`move_surface`; a fully-off placement is refused and the
+window stays), a release ends and counts it; `Compositor::placement` reports where it sits. Two
+contexts touch the desktop and never overlap — the IRQ0 pump (IF=0) and the main thread through
+`with_desktop` inside `without_interrupts` — serialized by the interrupt flag, no lock, because
+the main thread holds console locks an IRQ path must never spin on. `input` prints `window: at
+(x, y)` and `terminal: N lines, last "..."` from the grid the compositor paints. Proof: 7 host
+tests in `kernel-core/tests/textgrid.rs`; `textgrid_suite` — 6 invariants on all three targets
+(`textgrid=6`, fails 700+i; VirtualBox requires the marker); three cross-CPU conformance
+behaviors (175 -> 178); the live gate `scripts/vinput-e2e.sh` grows 17 -> 22 — a virtio
+keystroke is ECHOED by the console (its owner drained it, `queued` back to zero), `help` typed on
+the virtio keyboard is answered (`commands:` on the serial log), the window's last non-blank line is the console's own at (300, 60), and a press on the title band at (400, 64), a move to (420, 90), a
+release move the window by exactly the mapped pointer delta with focus kept. Unsafe audit +1 (kernel-x86_64
+271: `with_desktop`). Named non-claims, in the register: the grid is a teletype (no cursor
+addressing, colors, attributes); one window, no resize/close/second application; the live pump
+and the terminal are x86-64's; the i8042 wire still reaches the console directly; input polled
+from the tick; alpha, IME, device-level GPU isolation open.
+
+## Previous wave — reclaim under pressure (2026-09-02, ADR-082)
+
+REQ-ML-005, wired. ADR-081 refused a task at the door; the machine ALREADY under pressure still had
+to decide whose frames go, and the register had carried the raw material for weeks: `memrisk`, the
+second forest trained on the eviction event, measured, exported, "NOT CLAIMED AND NOT WIRED".
+`kernel-core/src/reclaim.rs` wires it the way ADR-056 wired the first forest — as an ORDERING, never
+a verdict with authority. Three parties, three jobs: the ALLOCATOR triggers (only a `MemoryMeter`
+under the watermark opens a round, `NotUnderPressure` refused by name otherwise, the NEED being the
+shortfall to `HEADROOM_FACTOR` x the watermark); the POLICY chooses (a total order — protected
+candidates never chosen and counted even when that leaves a SHORTFALL the round names rather than
+hides, then tier, then largest footprint, then lowest priority, then oldest, then id — so two rounds
+over the same inputs evict the same tasks in the same sequence); the FOREST advises the tier
+(`Elevated` = the trace says this task would have been evicted anyway, cheapest to lose, first;
+`Low` = likely to complete, taking its frames destroys work, last; abstain / out-of-box / degenerate
+/ NO MODEL = the middle tier, so a machine without the blob or with one the loader refused by name
+ranks bit-identically to one whose forest abstains about everyone). The blob is verified by the SAME
+`RiskAdvisor::load` — no second loader, no second contract hash. Execution is one seam,
+`ReclaimOps::evict(task, owner) -> frames`, asked exactly once per chosen task, whose ANSWER the
+policy counts (a stingy seam makes the round keep evicting until the need is met). On every target
+a REAL storm: a storm owner takes frames from the machine's own allocator until the meter is under
+the watermark (the resident advisor's pressure ledger counts the crossing), the reclaimer is handed
+the storm as its one candidate and the real ops seam walks the ownership table, and the free count
+is restored EXACTLY — `StormReport::holds` is the verdict, and a storm that took nothing proves
+nothing (~25 800 frames on the 128 MiB `virt` machines, ~58 000 on the 256 MiB q35). Proof: 7 host
+tests in `kernel-core/tests/reclaim.rs`; `reclaim_suite` with 9 invariants on all three targets
+(`reclaim=9`, boot fails 700+i / 699; the three QEMU gates also require the storm's verdict line);
+five cross-CPU conformance behaviors (170 -> 175). Unsafe audit UNCHANGED. Named non-claims, in the
+register: the reclaimer is not yet RESIDENT (it runs at boot — suite and storm — and is not consulted
+by a running machine's allocator on its own pressure; that seam, and which live tasks are candidates
+or protected, is the next rung); the forest sees submission-time vectors only (frozen contract); whole
+tasks only, no swap, no compression; constants for watermark and headroom; the storm's candidate
+carries a zero vector so the live path exercises the policy, the seam and the allocator while the
+forest's opinion is exercised by invariant 7 over ADR-056-shaped tasks.
+
+## Previous wave — memory is a boundary the advisor cannot cross (2026-09-02, ADR-081)
 
 REQ-ML-006. The resident advisor (ADR-056) answered "is this task going to die if I admit it?"
 with an ordering hint; nothing asked whether the task could be admitted at all — its requested

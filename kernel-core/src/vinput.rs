@@ -854,12 +854,16 @@ pub fn route_key(
 /// FOCUS decision through `focus_at`: the topmost placed surface under the point, or a click
 /// on empty space clearing focus. A right press is decoded and NOT routed — there is no
 /// context menu to open, and inventing one would be inventing authority.
-pub fn route_pointer(
+/// Route one pointer record and hand the committed batch back (ADR-083): the live desktop
+/// needs the press/release and the position to drag a window by its title band, and it must
+/// not decode the record twice. Everything `route_pointer` did — the cursor move, the click as
+/// a focus decision — happens here first.
+pub fn route_pointer_batch(
     dec: &mut PointerDecoder,
     comp: &mut Compositor,
     sess: u64,
     ev: RawEvent,
-) -> Result<(), CompFault> {
+) -> Result<PointerBatch, CompFault> {
     let batch = dec.feed(ev);
     if let Some((x, y)) = batch.move_to {
         comp.move_cursor(sess, x, y)?;
@@ -873,7 +877,16 @@ pub fn route_pointer(
             comp.focus_at(sess, x, y)?;
         }
     }
-    Ok(())
+    Ok(batch)
+}
+
+pub fn route_pointer(
+    dec: &mut PointerDecoder,
+    comp: &mut Compositor,
+    sess: u64,
+    ev: RawEvent,
+) -> Result<(), CompFault> {
+    route_pointer_batch(dec, comp, sess, ev).map(|_| ())
 }
 
 // ===========================================================================

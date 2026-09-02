@@ -762,6 +762,54 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         kernel_core::shell::report_risk_advisor(&mut |line: &str| kprintln!("  {}", line));
     }
 
+    // Reclaim under pressure (REQ-ML-005 wired, ADR-082): the eviction-event forest verified by
+    // the same loader as the risk forest, the policy proved on synthetic candidates, then a REAL
+    // storm on this machine's own allocator - frames taken until the meter is under the
+    // watermark, the reclaimer asked, every frame back, the free count restored EXACTLY.
+    kprintln!("");
+    kprintln!("--- reclaim under pressure (the allocator triggers, the policy chooses, the forest advises) ---");
+    {
+        let r = kernel_core::reclaim::Reclaimer::load(kernel_core::reclaim::BUNDLED_RECLAIM_MODEL);
+        match r.model() {
+            Some(m) => kprintln!(
+                "[reclaim] forest: RESIDENT - {} trees, {} nodes (eviction-event model, same loader, same contract)",
+                m.trees(),
+                m.nodes()
+            ),
+            None => kprintln!("[reclaim] forest: REFUSED - {:?}", r.model_error()),
+        }
+    }
+    match kernel_core::reclaim::reclaim_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[reclaim] ALL {} RECLAIM INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[reclaim] FAILED at reclaim invariant {}: {}", idx, name);
+            ActiveHal::exit(700 + idx as i32);
+        }
+    }
+    {
+        let report = reclaim_storm();
+        kprintln!(
+            "[reclaim] storm: {} frames taken until pressure ({} of {} free), {} reclaimed, free restored to {} (was {})",
+            report.taken,
+            report.free_at_pressure,
+            report.total,
+            report.frames_reclaimed,
+            report.free_after,
+            report.free_before
+        );
+        if !report.holds() {
+            kprintln!("[reclaim] FAILED: the storm did not come back to where it started");
+            ActiveHal::exit(699);
+        }
+        kprintln!("[reclaim] storm: pressure entered and cleared, every frame back EXACTLY");
+    }
+
     // SMP: discover the APs from the ACPI MADT, wake them with INIT-SIPI-SIPI through the
     // real-mode trampoline, and prove the 13-invariant cross-core substrate (REQ-SMP-002 parity
     // with aarch64/RISC-V). MUST run before the ring-3 suite: that suite repoints IRQ0 at its own
@@ -1201,6 +1249,24 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // (pinned), the event path is DMA-gated, armed silence is MEASURED, and the decode->route
     // path the live desktop pumps is driven end to end with synthetic records — the same
     // shared functions, so what the suite proves is what the machine runs.
+    // The terminal window's text grid (ALET-P2-021's text rung, ADR-083): arch-neutral,
+    // pixel-exact, allocation-bounded - proved on every CPU, painted on the one with a desktop.
+    kprintln!("");
+    kprintln!("--- text-grid selftests (the terminal window's text, pixel-exact) ---");
+    match kernel_core::textgrid::textgrid_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[textgrid] ALL {} TEXT-GRID INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[textgrid] FAILED at text-grid invariant {}: {}", idx, name);
+            ActiveHal::exit(700 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("--- input hardware selftests (virtio-input: a real keyboard and pointer through the session) ---");
     let mut desktop_devices: Option<(virtio::InputDev, virtio::InputDev)> = None;
@@ -1364,4 +1430,72 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     kprintln!("[KERNEL PANIC] {}", info);
     exit::exit(101)
+}
+
+/// The live storm (ADR-082): take frames from this machine's OWN allocator under a storm owner
+/// until the meter is under the watermark, then let the reclaimer take them back through the real
+/// ownership table. The free count must come back EXACTLY to where it started.
+fn reclaim_storm() -> kernel_core::reclaim::StormReport {
+    use kernel_core::frameown::Owner;
+    use kernel_core::mlsched::MemoryMeter;
+    use kernel_core::reclaim::{Candidate, ReclaimOps, Reclaimer, StormReport};
+    struct RealOps;
+    impl ReclaimOps for RealOps {
+        fn evict(&mut self, _task: kernel_core::sched::TaskId, owner: Owner) -> u64 {
+            // Return every frame the owner holds through the ownership table - the primitive
+            // address-space teardown uses (ADR-032) - walked frame by frame so the count is the
+            // TABLE's, not the storm's memory of itself.
+            let base = frames::base();
+            let total = frames::total_count();
+            let mut freed = 0u64;
+            for i in 0..total {
+                let pa = base + i * kernel_core::vmaddr::PAGE_SIZE;
+                if frames::owner_of(pa) == Some(owner) && frames::free_addr_as(pa, owner) {
+                    freed += 1;
+                }
+            }
+            freed
+        }
+    }
+    let owner = Owner::address_space(199).expect("the storm owner tag is in range");
+    let total = frames::total_count() as u64;
+    let free_before = frames::free_count() as u64;
+    let meter = |free: u64| MemoryMeter {
+        total_pages: total,
+        free_pages: free,
+    };
+    let mut taken = 0u64;
+    while !meter(frames::free_count() as u64).under_pressure() {
+        match frames::alloc_as(owner) {
+            Some(_) => taken += 1,
+            None => break,
+        }
+    }
+    let free_at_pressure = frames::free_count() as u64;
+    // The resident advisor sees the pressure too: its ledger counts the crossing (ADR-081).
+    let _ = kernel_core::mlsched::resident::observe_memory(meter(free_at_pressure));
+    let mut r = Reclaimer::load(kernel_core::reclaim::BUNDLED_RECLAIM_MODEL);
+    let storm = Candidate {
+        task: kernel_core::sched::TaskId(0x5701),
+        owner,
+        footprint_pages: taken,
+        priority: kernel_core::priosched::Priority(11),
+        submitted_secs: 0,
+        protected: false,
+        features: [0; kernel_core::mlrisk_contract::N_FEATURES],
+    };
+    let frames_reclaimed = match r.reclaim(meter(free_at_pressure), &[storm], &mut RealOps) {
+        Ok(out) => out.frames_reclaimed,
+        Err(_) => 0,
+    };
+    let free_after = frames::free_count() as u64;
+    let _ = kernel_core::mlsched::resident::observe_memory(meter(free_after));
+    StormReport {
+        free_before,
+        total,
+        taken,
+        free_at_pressure,
+        frames_reclaimed,
+        free_after,
+    }
 }

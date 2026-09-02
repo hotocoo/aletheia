@@ -708,6 +708,13 @@ pub struct InputFacts {
     pub kb_events: u64,
     /// Raw events the pointer device has delivered since boot.
     pub pt_events: u64,
+    /// The terminal window's top-left on the scanout, if placed (ADR-083).
+    pub window: Option<(i32, i32)>,
+    /// Lines the terminal window has completed since boot.
+    pub term_lines: u64,
+    /// The terminal window's current line (trailing blanks trimmed), and its length.
+    pub term_last: [u8; 48],
+    pub term_last_len: u8,
 }
 
 /// The facts a command may ask of the running target. Everything here is already established by the
@@ -1081,6 +1088,18 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     out(&format!(
                         "devices: keyboard {} events, pointer {} events",
                         f.kb_events, f.pt_events
+                    ));
+                    // The terminal window (ADR-083): where it sits and what its last line says,
+                    // read from the same grid the compositor paints - not a second copy.
+                    match f.window {
+                        Some((x, y)) => out(&format!("window: at ({}, {})", x, y)),
+                        None => out("window: not placed"),
+                    }
+                    let n = (f.term_last_len as usize).min(f.term_last.len());
+                    let last = core::str::from_utf8(&f.term_last[..n]).unwrap_or("?");
+                    out(&format!(
+                        "terminal: {} lines, last \"{}\"",
+                        f.term_lines, last
                     ));
                 }
                 None => out("input: no machine input session on this target"),

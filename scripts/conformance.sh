@@ -304,6 +304,17 @@ CONTRACT=(
   "mlsched: a task asking for more than is free is refused by name before the model is asked - the scheduler untouched"
   "mlsched: the meter is a ledger - low-water exact, a pressure crossing counted once per entry"
   "mlsched: the boundary follows the latest reading and refuses deterministically"
+
+  # Reclaim under pressure (ADR-082): the same policy, the same forest, the same order on every CPU.
+  "reclaim: the eviction-event forest verifies under the risk forest's own loader and contract"
+  "reclaim: a machine not under pressure reclaims nothing - refused by name, counted"
+  "reclaim: with nothing evictable the round is refused by name and no frame moves"
+  "reclaim: the largest footprint goes first and the round stops the moment the need is met"
+  "reclaim: the same pressure over the same tasks evicts the same tasks in the same order"
+  # The terminal window's text (ADR-083): the console's alphabet, exact scrolling, exact pixels.
+  "textgrid: printable bytes land in cells, carriage return returns, backspace erases one"
+  "textgrid: a newline on the last row scrolls exactly one row"
+  "textgrid: rendering is pixel-exact - solid title band, glyph bits at the cell, blank elsewhere"
 )
 
 hr() { printf '========================================================================\n'; }
