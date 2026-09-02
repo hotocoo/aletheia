@@ -361,3 +361,192 @@ fn there_is_no_silence_before_the_first_advice() {
     assert_eq!(s.last_tick_secs, 1_500);
     assert_eq!(s.silence_secs(), 0);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The memory boundary (ADR-081): admission is bounded by what the allocator says, before the model
+// is asked, and the resident seam carries the same door.
+// ---------------------------------------------------------------------------------------------
+use kernel_core::mlsched::{AdmitRefusal, MemoryMeter, LOW_WATERMARK_PERMILLE};
+
+#[test]
+fn an_unmetered_service_admits_nothing_through_the_bounded_door() {
+    let mut svc = RiskService::load(BUNDLED_MODEL, SUITE_MACHINE);
+    let mut sched = PriorityScheduler::default();
+    for i in 0..5u64 {
+        let r = svc.admit_bounded(&mut sched, TaskId(i), Priority(3), i, &task(1, i as u32, 1));
+        assert_eq!(r, Err(AdmitRefusal::Unmetered));
+    }
+    let s = svc.stats();
+    assert_eq!(s.unmetered_refusals, 5);
+    assert_eq!(
+        s.advices, 0,
+        "the model is never consulted about a task the door refused"
+    );
+    assert!(
+        sched.schedule_next().is_none(),
+        "nothing reached the scheduler"
+    );
+    assert_eq!(
+        svc.source().tracked(),
+        (0, 0),
+        "a refused task never entered the history"
+    );
+}
+
+#[test]
+fn a_reading_that_is_not_a_meter_is_refused_and_recorded_nowhere() {
+    let mut svc = RiskService::without_model(SUITE_MACHINE);
+    assert_eq!(
+        svc.observe_memory(MemoryMeter {
+            total_pages: 0,
+            free_pages: 0
+        }),
+        Err(AdmitRefusal::MeterInvalid {
+            total_pages: 0,
+            free_pages: 0
+        })
+    );
+    assert_eq!(
+        svc.observe_memory(MemoryMeter {
+            total_pages: 10,
+            free_pages: 11
+        }),
+        Err(AdmitRefusal::MeterInvalid {
+            total_pages: 10,
+            free_pages: 11
+        })
+    );
+    assert_eq!(svc.meter(), None);
+    assert_eq!(svc.stats().memory_samples, 0);
+}
+
+#[test]
+fn the_boundary_refuses_by_name_and_leaves_scheduler_and_history_untouched() {
+    let mut svc = RiskService::load(BUNDLED_MODEL, SUITE_MACHINE);
+    let mut sched = PriorityScheduler::default();
+    svc.observe_memory(MemoryMeter {
+        total_pages: 1 << 20,
+        free_pages: 4_096,
+    })
+    .unwrap();
+    let mut big = task(9, 0, 9);
+    big.memory_pages = 4_097;
+    let r = svc.admit_bounded(&mut sched, TaskId(1), Priority(5), 10, &big);
+    assert_eq!(
+        r,
+        Err(AdmitRefusal::MemoryExhausted {
+            requested_pages: 4_097,
+            free_pages: 4_096
+        })
+    );
+    let s = svc.stats();
+    assert_eq!((s.memory_refusals, s.advices), (1, 0));
+    assert!(sched.state(TaskId(1)).is_none());
+    assert_eq!(svc.source().tracked(), (0, 0));
+    // Exactly the free count is admissible: the boundary is <=, not <.
+    let mut fits = task(9, 0, 9);
+    fits.memory_pages = 4_096;
+    assert!(svc
+        .admit_bounded(&mut sched, TaskId(2), Priority(5), 11, &fits)
+        .is_ok());
+    assert_eq!(svc.stats().advices, 1);
+    assert_eq!(sched.schedule_next(), Some(TaskId(2)));
+}
+
+#[test]
+fn the_meter_is_a_ledger_with_an_exact_low_water_mark_and_counted_crossings() {
+    let mut svc = RiskService::without_model(SUITE_MACHINE);
+    let total = 10_000u64;
+    let watermark = total * LOW_WATERMARK_PERMILLE / 1000; // 1_000 frames
+    let readings = [
+        total,
+        watermark,     // AT the watermark is not below it
+        watermark - 1, // enters the band: crossing 1
+        1,             // stays in the band: nothing
+        watermark,     // leaves
+        watermark - 1, // enters again: crossing 2
+        total / 2,
+    ];
+    for &f in &readings {
+        svc.observe_memory(MemoryMeter {
+            total_pages: total,
+            free_pages: f,
+        })
+        .unwrap();
+    }
+    let s = svc.stats();
+    assert_eq!(s.memory_samples, readings.len() as u64);
+    assert_eq!(s.low_free_pages, 1);
+    assert_eq!(s.last_free_pages, total / 2);
+    assert_eq!(s.pressure_events, 2);
+    assert!(!s.in_pressure);
+}
+
+#[test]
+fn the_boundary_follows_the_latest_reading_deterministically() {
+    let run = || {
+        let mut svc = RiskService::load(BUNDLED_MODEL, SUITE_MACHINE);
+        let mut sched = PriorityScheduler::default();
+        let mut verdicts = Vec::new();
+        for (i, free) in [10u64, 3, 7, 5, 6].into_iter().enumerate() {
+            svc.observe_memory(MemoryMeter {
+                total_pages: 100,
+                free_pages: free,
+            })
+            .unwrap();
+            let mut t = task(2, i as u32, 2);
+            t.memory_pages = 6;
+            verdicts.push(
+                svc.admit_bounded(&mut sched, TaskId(i as u64), Priority(4), i as u64, &t)
+                    .is_ok(),
+            );
+        }
+        (verdicts, svc.stats())
+    };
+    let (v1, s1) = run();
+    let (v2, s2) = run();
+    assert_eq!(v1, vec![true, false, true, false, true]);
+    assert_eq!(v1, v2);
+    assert_eq!(s1, s2);
+    assert_eq!((s1.memory_refusals, s1.advices), (2, 3));
+}
+
+#[test]
+fn the_resident_seam_carries_the_same_door() {
+    use kernel_core::mlsched::resident;
+    resident::uninstall();
+    resident::install_without_model(SUITE_MACHINE);
+    let mut sched = PriorityScheduler::default();
+    // Unmetered first: nothing admitted, refusal named.
+    assert_eq!(
+        resident::admit(&mut sched, TaskId(1), Priority(5), 1, &task(1, 0, 1)),
+        Err(AdmitRefusal::Unmetered)
+    );
+    assert_eq!(resident::meter(), None);
+    assert_eq!(
+        resident::observe_memory(MemoryMeter {
+            total_pages: 1_000,
+            free_pages: 500
+        }),
+        Ok(true)
+    );
+    let mut t = task(1, 1, 1);
+    t.memory_pages = 501;
+    assert_eq!(
+        resident::admit(&mut sched, TaskId(2), Priority(5), 2, &t),
+        Err(AdmitRefusal::MemoryExhausted {
+            requested_pages: 501,
+            free_pages: 500
+        })
+    );
+    t.memory_pages = 500;
+    assert!(resident::admit(&mut sched, TaskId(3), Priority(5), 3, &t).is_ok());
+    let s = resident::stats().unwrap();
+    assert_eq!((s.unmetered_refusals, s.memory_refusals), (1, 1));
+    // Commissioning against this meter: every arrival fits under the reading, none refused.
+    let c = kernel_core::mlsched::commission(256, 7);
+    assert_eq!(c.refused, 0);
+    assert_eq!(c.admitted, 256);
+    assert!(c.permutation);
+    resident::uninstall();
+}

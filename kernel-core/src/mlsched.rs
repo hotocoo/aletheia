@@ -32,6 +32,20 @@
 //! arrives, so an advisor that fell silent an hour ago still reports the small gaps it managed while
 //! it was busy; the silence does not, and grows with the machine.
 //!
+//! **Memory is a boundary the advisor cannot cross (ADR-081).** The forest advises ORDER among
+//! admissible tasks; whether a task is admissible at all is decided by the machine's own frame
+//! allocator, reported through [`MemoryMeter`] and enforced by [`RiskService::admit_bounded`]: a
+//! task asking for more frames than are free RIGHT NOW is refused [`AdmitRefusal::MemoryExhausted`]
+//! with both numbers named, BEFORE the model is consulted and without touching the scheduler; a
+//! service no allocator has reported to admits nothing through the bounded door
+//! ([`AdmitRefusal::Unmetered`] — fail closed, never "unbounded until told"); a meter that is not
+//! a meter is refused by name and records nothing. The meter's low-water mark, the last reading,
+//! every refusal and every crossing of the pressure watermark are counted in [`AdviceStats`] and
+//! printed by `mlstat`. What this rung does NOT do is make memory a forest feature: the 20-column
+//! contract is frozen by the trainer and hash-checked by `mlrisk_contract`, so RAM pressure
+//! reaches the DECISION as a hard bound, not as an opinion — and the second forest trained on the
+//! eviction event (REQ-ML-005) stays unwired, stated in the register.
+//!
 //! **Still advisory (INV-014).** Residency changes how often the model is asked, not what its answer
 //! may do. `admit` calls [`crate::priosched::PriorityScheduler::admit_with_advice`], whose verdict is
 //! an equal-priority tiebreak; base priority, capability checks and every invariant are evaluated
@@ -91,6 +105,23 @@ pub struct AdviceStats {
     /// consulted an hour ago still reports the small gaps it managed while it was busy. Comparing
     /// this against [`Self::last_advice_secs`] is what exposes that.
     pub last_tick_secs: u64,
+    /// Allocator readings taken through [`RiskService::observe_memory`] (0 = unmetered).
+    pub memory_samples: u64,
+    /// Frames the allocator manages, as of the last reading.
+    pub total_pages: u64,
+    /// Free frames as of the last reading.
+    pub last_free_pages: u64,
+    /// The fewest free frames any reading has shown — the low-water mark.
+    pub low_free_pages: u64,
+    /// Bounded admissions refused `MemoryExhausted` (the task asked for more than was free).
+    pub memory_refusals: u64,
+    /// Bounded admissions refused `Unmetered` (no allocator had reported yet).
+    pub unmetered_refusals: u64,
+    /// Readings that ENTERED the pressure band (free below the watermark); staying in it counts
+    /// nothing, leaving and re-entering counts again.
+    pub pressure_events: u64,
+    /// Whether the last reading was inside the pressure band.
+    pub in_pressure: bool,
 }
 
 impl AdviceStats {
@@ -122,6 +153,45 @@ impl AdviceStats {
 
 /// The machine-lifetime advisor. Borrows the blob it was verified from (`include_bytes!`, or a
 /// capability-scoped file read) and allocates nothing per advice.
+/// What the machine's frame allocator says about itself at one instant (ADR-081): the frames it
+/// manages and how many are free. The advisor never estimates memory — it is TOLD, by the
+/// allocator, and refuses to admit past what it was told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryMeter {
+    pub total_pages: u64,
+    pub free_pages: u64,
+}
+
+/// Below this share of free frames (permille of total) the machine is UNDER PRESSURE.
+pub const LOW_WATERMARK_PERMILLE: u64 = 100;
+
+impl MemoryMeter {
+    /// A meter a boundary can be built on: at least one frame, and no more free than exist.
+    pub fn valid(&self) -> bool {
+        self.total_pages > 0 && self.free_pages <= self.total_pages
+    }
+    /// Free frames below the watermark share of the total.
+    pub fn under_pressure(&self) -> bool {
+        self.free_pages.saturating_mul(1000)
+            < self.total_pages.saturating_mul(LOW_WATERMARK_PERMILLE)
+    }
+}
+
+/// Why a bounded admission was refused (ADR-081). Every variant names the numbers it was judged on,
+/// so a refusal on the boot log or the console is an explanation, not a verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmitRefusal {
+    /// No allocator has reported: the boundary cannot be enforced, so nothing passes through it.
+    Unmetered,
+    /// The reading offered was not a meter (zero total, or more free than exist); nothing recorded.
+    MeterInvalid { total_pages: u64, free_pages: u64 },
+    /// The task asks for more frames than the allocator has free right now.
+    MemoryExhausted {
+        requested_pages: u64,
+        free_pages: u64,
+    },
+}
+
 pub struct RiskService<'a> {
     model: Option<RiskAdvisor<'a>>,
     error: Option<ModelError>,
@@ -253,6 +323,69 @@ impl<'a> RiskService<'a> {
     }
 
     /// Report that the scheduler dispatched a task.
+    /// Record what the allocator says (ADR-081). An invalid meter is refused by name and changes
+    /// nothing; a valid one updates the last reading, the low-water mark, and counts a pressure
+    /// event exactly when the reading ENTERS the band below the watermark.
+    pub fn observe_memory(&mut self, meter: MemoryMeter) -> Result<(), AdmitRefusal> {
+        if !meter.valid() {
+            return Err(AdmitRefusal::MeterInvalid {
+                total_pages: meter.total_pages,
+                free_pages: meter.free_pages,
+            });
+        }
+        let s = &mut self.stats;
+        s.total_pages = meter.total_pages;
+        s.last_free_pages = meter.free_pages;
+        if s.memory_samples == 0 || meter.free_pages < s.low_free_pages {
+            s.low_free_pages = meter.free_pages;
+        }
+        s.memory_samples = s.memory_samples.saturating_add(1);
+        let low = meter.under_pressure();
+        if low && !s.in_pressure {
+            s.pressure_events = s.pressure_events.saturating_add(1);
+        }
+        s.in_pressure = low;
+        Ok(())
+    }
+
+    /// The last reading, or `None` while no allocator has reported.
+    pub fn meter(&self) -> Option<MemoryMeter> {
+        if self.stats.memory_samples == 0 {
+            None
+        } else {
+            Some(MemoryMeter {
+                total_pages: self.stats.total_pages,
+                free_pages: self.stats.last_free_pages,
+            })
+        }
+    }
+
+    /// Admission through the memory boundary (ADR-081): refused `Unmetered` while no allocator has
+    /// reported, refused `MemoryExhausted` when the task asks for more frames than are free — in
+    /// both cases BEFORE the model is consulted and without touching the scheduler or the feature
+    /// history (a refused task never existed). Otherwise exactly [`RiskService::admit`].
+    pub fn admit_bounded(
+        &mut self,
+        sched: &mut PriorityScheduler,
+        id: TaskId,
+        base: Priority,
+        now_secs: u64,
+        task: &TaskSubmission,
+    ) -> Result<Option<Advice>, AdmitRefusal> {
+        let Some(m) = self.meter() else {
+            self.stats.unmetered_refusals = self.stats.unmetered_refusals.saturating_add(1);
+            return Err(AdmitRefusal::Unmetered);
+        };
+        if task.memory_pages > m.free_pages {
+            self.stats.memory_refusals = self.stats.memory_refusals.saturating_add(1);
+            return Err(AdmitRefusal::MemoryExhausted {
+                requested_pages: task.memory_pages,
+                free_pages: m.free_pages,
+            });
+        }
+        Ok(self.admit(sched, id, base, now_secs, task))
+    }
+
     pub fn observe_schedule(&mut self) {
         self.stats.schedules = self.stats.schedules.saturating_add(1);
         self.source.observe_schedule();
@@ -596,6 +729,170 @@ pub fn mlsched_suite(
         );
     }
 
+    // 13 — a reading that is not a meter is refused BY NAME and records nothing: zero frames, or
+    //      more free than exist. The boundary is built on the allocator's word, so a word that
+    //      cannot be true is not written down.
+    {
+        let mut svc = RiskService::without_model(SUITE_MACHINE);
+        let zero = svc.observe_memory(MemoryMeter {
+            total_pages: 0,
+            free_pages: 0,
+        });
+        let over = svc.observe_memory(MemoryMeter {
+            total_pages: 100,
+            free_pages: 101,
+        });
+        let s = svc.stats();
+        check!(
+            matches!(
+                zero,
+                Err(AdmitRefusal::MeterInvalid {
+                    total_pages: 0,
+                    free_pages: 0
+                })
+            ) && matches!(
+                over,
+                Err(AdmitRefusal::MeterInvalid {
+                    total_pages: 100,
+                    free_pages: 101
+                })
+            ) && s.memory_samples == 0
+                && svc.meter().is_none(),
+            "mlsched: a reading that is not a meter is refused by name and records nothing"
+        );
+    }
+
+    // 14 — fail closed: before any allocator has reported, the bounded door admits NOTHING. The
+    //      refusal is counted, the scheduler has no task, and the model was not consulted.
+    {
+        let mut svc = RiskService::load(BUNDLED_MODEL, SUITE_MACHINE);
+        let mut sched = PriorityScheduler::default();
+        let r = svc.admit_bounded(
+            &mut sched,
+            TaskId(1),
+            Priority(5),
+            100,
+            &suite_task(1, 0, 1),
+        );
+        let s = svc.stats();
+        check!(
+            matches!(r, Err(AdmitRefusal::Unmetered))
+                && s.unmetered_refusals == 1
+                && s.advices == 0
+                && sched.state(TaskId(1)).is_none()
+                && sched.schedule_next().is_none(),
+            "mlsched: with no allocator reading the bounded door admits nothing - fail closed, counted"
+        );
+    }
+
+    // 15 — the boundary: with F frames free, a task asking for F+1 is refused `MemoryExhausted`
+    //      naming both numbers, before the model is consulted (advices unchanged), with the
+    //      scheduler untouched and the feature history unmoved (a refused task never existed);
+    //      a task asking for exactly F is admitted, advised, and Ready.
+    {
+        let mut svc = RiskService::load(BUNDLED_MODEL, SUITE_MACHINE);
+        let mut sched = PriorityScheduler::default();
+        svc.observe_memory(MemoryMeter {
+            total_pages: SUITE_MACHINE.memory_pages,
+            free_pages: 131_072,
+        })
+        .unwrap();
+        let mut big = suite_task(2, 0, 2);
+        big.memory_pages = 131_073;
+        let refused = svc.admit_bounded(&mut sched, TaskId(2), Priority(5), 200, &big);
+        let after_refusal = svc.stats();
+        let history_after_refusal = svc.source().tracked();
+        let fits = suite_task(3, 0, 3); // asks for exactly 131_072 pages
+        let admitted = svc.admit_bounded(&mut sched, TaskId(3), Priority(5), 201, &fits);
+        let s = svc.stats();
+        check!(
+            matches!(
+                refused,
+                Err(AdmitRefusal::MemoryExhausted {
+                    requested_pages: 131_073,
+                    free_pages: 131_072
+                })
+            ) && after_refusal.memory_refusals == 1
+                && after_refusal.advices == 0
+                && history_after_refusal == (0, 0)
+                && sched.state(TaskId(2)).is_none()
+                && admitted.is_ok()
+                && s.advices == 1
+                && sched.state(TaskId(3)).is_some()
+                && sched.schedule_next() == Some(TaskId(3)),
+            "mlsched: a task asking for more than is free is refused by name before the model is asked - the scheduler untouched"
+        );
+    }
+
+    // 16 — the meter is a ledger: last reading, low-water mark and sample count follow the
+    //      readings exactly, and a crossing INTO the pressure band counts once - staying counts
+    //      nothing, leaving and re-entering counts again.
+    {
+        let mut svc = RiskService::without_model(SUITE_MACHINE);
+        let t = 1_000u64;
+        let seq = [500u64, 250, 90, 80, 300, 50, 600];
+        let mut ok = true;
+        for &f in &seq {
+            ok &= svc
+                .observe_memory(MemoryMeter {
+                    total_pages: t,
+                    free_pages: f,
+                })
+                .is_ok();
+        }
+        let s = svc.stats();
+        check!(
+            ok && s.memory_samples == 7
+                && s.total_pages == 1_000
+                && s.last_free_pages == 600
+                && s.low_free_pages == 50
+                && s.pressure_events == 2
+                && !s.in_pressure
+                && svc.meter()
+                    == Some(MemoryMeter {
+                        total_pages: 1_000,
+                        free_pages: 600
+                    }),
+            "mlsched: the meter is a ledger - low-water exact, a pressure crossing counted once per entry"
+        );
+    }
+
+    // 17 — the boundary follows the LATEST reading, and refusals are deterministic: the same
+    //      readings and the same requests give the same verdicts and the same counters on two
+    //      services, and a request that was refused becomes admissible the moment the allocator
+    //      reports enough free frames.
+    {
+        let run = || {
+            let mut svc = RiskService::without_model(SUITE_MACHINE);
+            let mut sched = PriorityScheduler::default();
+            let mut t = suite_task(4, 0, 4);
+            t.memory_pages = 1_000;
+            svc.observe_memory(MemoryMeter {
+                total_pages: 10_000,
+                free_pages: 999,
+            })
+            .unwrap();
+            let a = svc
+                .admit_bounded(&mut sched, TaskId(4), Priority(5), 300, &t)
+                .is_err();
+            svc.observe_memory(MemoryMeter {
+                total_pages: 10_000,
+                free_pages: 1_000,
+            })
+            .unwrap();
+            let b = svc
+                .admit_bounded(&mut sched, TaskId(4), Priority(5), 301, &t)
+                .is_ok();
+            (a, b, svc.stats())
+        };
+        let (a1, b1, s1) = run();
+        let (a2, b2, s2) = run();
+        check!(
+            a1 && b1 && a2 && b2 && s1 == s2 && s1.memory_refusals == 1 && s1.advices == 1,
+            "mlsched: the boundary follows the latest reading and refuses deterministically"
+        );
+    }
+
     Ok(n)
 }
 
@@ -613,7 +910,7 @@ const PRESSURE_BIN_SEC_I64: i64 = crate::taskfeat::PRESSURE_BIN_SEC as i64;
 /// It lives in `kernel-core` rather than in each target's `main.rs` for the same reason the spine
 /// does (ADR-019): three copies of a residency are three chances for one of them to quietly stop.
 pub mod resident {
-    use super::{AdviceStats, RiskService};
+    use super::{AdmitRefusal, AdviceStats, MemoryMeter, RiskService};
     use crate::mlrisk::Advice;
     use crate::priosched::{Priority, PriorityScheduler};
     use crate::sched::TaskId;
@@ -665,23 +962,39 @@ pub mod resident {
     }
 
     /// Admit a task through the resident advisor. This is the kernel's admission path; there is no
-    /// second one that bypasses it.
+    /// second one that bypasses it — and since ADR-081 it is the BOUNDED path: refused by name when
+    /// no allocator has reported or when the task asks for more frames than are free.
     pub fn admit(
         sched: &mut PriorityScheduler,
         id: TaskId,
         base: Priority,
         now_secs: u64,
         task: &TaskSubmission,
-    ) -> Option<Advice> {
+    ) -> Result<Option<Advice>, AdmitRefusal> {
         match *RESIDENT.lock() {
-            Some(ref mut s) => s.admit(sched, id, base, now_secs, task),
+            Some(ref mut s) => s.admit_bounded(sched, id, base, now_secs, task),
             // No advisor installed: the deterministic policy stands, exactly as it would in a kernel
-            // built without one.
+            // built without one. The boundary is the SERVICE's; a machine that never installed one
+            // has said so on its boot log.
             None => {
                 sched.admit(id, base);
-                None
+                Ok(None)
             }
         }
+    }
+
+    /// Tell the resident service what the allocator says (ADR-081). `Ok(true)` recorded,
+    /// `Ok(false)` no service installed, `Err` the reading was not a meter.
+    pub fn observe_memory(meter: MemoryMeter) -> Result<bool, AdmitRefusal> {
+        match *RESIDENT.lock() {
+            Some(ref mut s) => s.observe_memory(meter).map(|_| true),
+            None => Ok(false),
+        }
+    }
+
+    /// The resident service's last allocator reading, if any.
+    pub fn meter() -> Option<MemoryMeter> {
+        RESIDENT.lock().as_ref().and_then(|s| s.meter())
     }
 
     /// Age the cell census. Called from the scheduler tick so pressure ages on a machine that is
@@ -727,6 +1040,10 @@ pub struct Commissioning {
     /// Whether the advised drain was a permutation of the model-free one — no task invented,
     /// dropped or starved.
     pub permutation: bool,
+    /// Arrivals the memory boundary refused (ADR-081). Zero on a machine whose allocator reported
+    /// before commissioning; every one of them is a target that forgot to, or a request the
+    /// workload sized wrongly — both are boot failures, not statistics.
+    pub refused: u64,
 }
 
 /// Put the advisor into residence and prove, on this machine, that it is being consulted.
@@ -748,6 +1065,13 @@ pub fn commission(tasks: u64, secs_per_task: u64) -> Commissioning {
     let mut sched = PriorityScheduler::default();
     let mut plain = PriorityScheduler::default();
     let mut span = 0u64;
+    // The memory ceiling of this workload is the machine's OWN free frames as its allocator last
+    // reported them (ADR-081): every arrival below asks for a share of THAT, from a rounding error
+    // to all of it, so the bounded door admits each one on a machine that reported and refuses
+    // every one on a machine that did not - which `refused` then says on the boot log.
+    let ceiling = resident::meter().map(|m| m.free_pages).unwrap_or(0);
+    let mut admitted = 0u64;
+    let mut refused = 0u64;
 
     for i in 0..tasks {
         let now = i * secs_per_task;
@@ -759,7 +1083,7 @@ pub fn commission(tasks: u64, secs_per_task: u64) -> Commissioning {
         t.priority = (i % 12) as u8;
         t.sched_class = (i % 4) as u8;
         t.cpu_millis = 50 + (i as u32 % 61) * 20;
-        t.memory_pages = 4_096 + (i % 97) * 4_096;
+        t.memory_pages = 1 + (i % 97) * (ceiling / 128);
         t.diff_machine = i % 7 == 0;
         // **This machine has no per-task disk request to report, and says so.** It is not a
         // convenience: the shipped borg2019 blob's `disk_request` training range is literally
@@ -775,11 +1099,20 @@ pub fn commission(tasks: u64, secs_per_task: u64) -> Commissioning {
         // never prove the kernel declines to guess outside it.
         if i % 11 == 0 {
             t.cpu_millis = 7_900;
-            t.memory_pages = 1_000_000;
+            t.memory_pages = ceiling; // every free frame the machine has - admissible, and large
         }
         let band = Priority((i % 8) as u8);
-        resident::admit(&mut sched, TaskId(i + 1), band, now, &t);
-        plain.admit(TaskId(i + 1), band);
+        match resident::admit(&mut sched, TaskId(i + 1), band, now, &t) {
+            Ok(_) => {
+                admitted += 1;
+                plain.admit(TaskId(i + 1), band);
+            }
+            Err(_) => {
+                refused += 1;
+                resident::tick(now);
+                continue;
+            }
+        }
 
         // The feedback edge, driven by nothing the model said: a fixed pattern of outcomes, so the
         // history is real without being the model's own opinion echoed back at it.
@@ -807,10 +1140,11 @@ pub fn commission(tasks: u64, secs_per_task: u64) -> Commissioning {
     b.sort();
 
     Commissioning {
-        admitted: tasks,
+        admitted,
         span_secs: span,
         bins: span / crate::taskfeat::PRESSURE_BIN_SEC,
         stats: resident::stats().unwrap_or_default(),
-        permutation: a == b && a.len() as u64 == tasks,
+        permutation: a == b && a.len() as u64 == admitted,
+        refused,
     }
 }

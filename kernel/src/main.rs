@@ -401,6 +401,28 @@ pub extern "C" fn kmain() -> ! {
             kernel_core::mlsched::resident::model_error()
         );
     }
+    // The memory boundary (ADR-081): the allocator's own count goes to the resident service BEFORE
+    // anything is admitted through it, and the boot log carries the reading the door will judge by.
+    {
+        let meter = kernel_core::mlsched::MemoryMeter {
+            total_pages: frames::total_count() as u64,
+            free_pages: frames::free_count() as u64,
+        };
+        match kernel_core::mlsched::resident::observe_memory(meter) {
+            Ok(true) => kprintln!(
+                "[mlsched] memory: {} of {} frames free - bounded admission ON",
+                meter.free_pages,
+                meter.total_pages
+            ),
+            Ok(false) => {
+                kprintln!("[mlsched] memory: no resident service - bounded admission has no door")
+            }
+            Err(e) => kprintln!(
+                "[mlsched] memory: the allocator's reading was refused: {:?}",
+                e
+            ),
+        }
+    }
     match kernel_core::mlsched::mlsched_suite(|n, passed, name| {
         if passed {
             kprintln!("  [pass {:>2}] {}", n, name);
@@ -421,11 +443,21 @@ pub extern "C" fn kmain() -> ! {
     {
         let c = kernel_core::mlsched::commission(4_096, 7);
         kprintln!(
-            "[mlsched] commissioning: {} tasks admitted over {} s of machine time ({} cell bins)",
+            "[mlsched] commissioning: {} tasks admitted over {} s of machine time ({} cell bins), {} refused at the memory boundary",
             c.admitted,
             c.span_secs,
-            c.bins
+            c.bins,
+            c.refused
         );
+        // A refusal during commissioning is a target that did not report its allocator, or a
+        // workload sized past it - a boot failure either way, never a statistic (ADR-081).
+        if c.refused != 0 {
+            kprintln!(
+                "[mlsched] FAILED: {} commissioning arrivals were refused at the memory boundary",
+                c.refused
+            );
+            semihosting::exit(187);
+        }
         kprintln!(
             "[mlsched] live census: {} advices — {} low / {} elevated / {} abstain ({} in band), {} out-of-box",
             c.stats.advices,

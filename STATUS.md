@@ -1,6 +1,21 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-02 (REAL DEVICES THROUGH THE INPUT SESSION — the input HARDWARE rung, and the
+**As of:** 2026-09-02, later the same day (MEMORY IS A BOUNDARY THE ADVISOR CANNOT CROSS — the
+allocator decides admissibility, the forest advises order: `kernel-core/src/mlsched.rs` gains
+`MemoryMeter` (the frame allocator's own reading, refused `MeterInvalid` by name when it cannot be
+true), a pressure ledger (last reading, exact low-water mark, crossings of the 10 % watermark counted
+once per entry) and the BOUNDED admission door — `Unmetered` while no allocator has reported (fail
+closed), `MemoryExhausted { requested, free }` when a task asks for more than is free, both refused
+BEFORE the model is consulted with the scheduler and the feature history untouched, exactly-free
+admissible; the resident seam IS that door, every target reads its allocator before each real
+admission, commissioning is sized by the machine's own free frames and refused nothing (boot fails
+187 otherwise), `mlstat` prints the ledger — 5 more boot invariants on all three targets
+(`mlsched=17`), five cross-CPU conformance behaviors (165 -> 170), 6 host proofs, unsafe audit
+UNCHANGED, ADR-081; the same day v0.1.0 was RELEASED as the first stable version with a boot-verified
+VMware package on its GitHub release, and three CI jobs red since ADR-074 for runner-only reasons —
+QEMU 8.2's stage-1-only SMMUv3, a newer clippy's `chunks_exact` lint, GNU grep reading `\r` as `r` —
+were fixed, giving the first fully green pipeline on this lineage); before that, the same morning:
+(REAL DEVICES THROUGH THE INPUT SESSION — the input HARDWARE rung, and the
 desktop goes LIVE: `kernel-core/src/vinput.rs` is one virtio-input driver over both buses (virtio-mmio on
 aarch64/RISC-V, virtio-pci on x86-64) with the one config WRITE the transports never needed named as the
 `ConfigWrite` seam, devices classified by their OWN declared names (a lone or unclassifiable device refused
@@ -77,11 +92,56 @@ a restored grant returns to silence, and enforcement stays latched until halt �
 **Maturity:** `docs/MATURITY.md` grades every subsystem Proved / Implemented / Architecture and states
 plainly that **nothing here is production-ready** — read it before quoting any claim below.
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
-`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..080`.
+`docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..081`.
 **Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
 release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
-## Current wave — real devices through the input session (2026-09-02, ADR-080)
+## Current wave — memory is a boundary the advisor cannot cross (2026-09-02, ADR-081)
+
+REQ-ML-006. The resident advisor (ADR-056) answered "is this task going to die if I admit it?"
+with an ordering hint; nothing asked whether the task could be admitted at all — its requested
+frames were a FEATURE, never a BOUND. This wave makes memory reach the decision the only honest
+way available today: as a hard boundary the allocator states and the forest cannot cross.
+`MemoryMeter { total_pages, free_pages }` is one reading of the machine's own frame allocator;
+`RiskService::observe_memory` records it or refuses it by name (`MeterInvalid` — zero frames, or
+more free than exist — records nothing), keeping the last reading, the exact low-water mark and a
+pressure ledger that counts a crossing INTO the band below `LOW_WATERMARK_PERMILLE` (10 %) once
+per entry. `RiskService::admit_bounded` — and the resident seam `resident::admit`, which IS that
+door, there being no second admission path — refuses `Unmetered` while no allocator has reported
+(fail closed, never "unbounded until told") and `MemoryExhausted { requested, free }` when the task
+asks for more frames than are free, both BEFORE the model is consulted (the advice census does
+not move), without touching the scheduler (no state, nothing dispatched) and without touching the
+feature history (a refused task never existed); exactly-free is admissible (`<=`). Every target
+reads `frames::free_count`/`total_count` into the service before anything is admitted and prints
+the reading the door judges by; the real ring-3 tasks read the allocator immediately before each
+admission and a refusal there is printed and fails the suite; `commission` sizes its synthetic
+workload against the machine's OWN free frames (a rounding error to every free frame) and reports
+refusals — a target whose allocator never reported exits 187 rather than reporting a census of
+nothing. `mlstat` prints the ledger or names the unmetered state. Proof: 6 host tests in
+`kernel-core/tests/mlsched.rs` (unmetered door admits nothing; invalid meter recorded nowhere;
+by-name refusal with scheduler and history untouched and exactly-free admitted; ledger with exact
+low-water and once-per-entry crossings; deterministic latest-reading boundary; the resident seam
+carries the same door with a 256-task commissioning refused nothing); `mlsched_suite` 12 -> 17 on
+all three targets (`mlsched=17`; the three QEMU gates also require the allocator's reading line
+and a commissioning refused nothing); five cross-CPU conformance behaviors (165 -> 170). Unsafe
+audit UNCHANGED: the rung adds no unsafe site. Named non-claims, in the register: RAM pressure is
+not a forest feature (the 20-column contract is frozen and hash-checked; a column means
+retraining); the eviction-event forest (REQ-ML-005, `memrisk`) stays UNWIRED — nothing reclaims
+on the advisor's opinion; the boundary is per-admission against the latest reading and reserves
+nothing (the allocator refuses the actual allocation, ADR-030); the watermark is a constant; the
+service is still installed with the suite machine's capacity for feature normalisation.
+
+Same day, before this wave: v0.1.0 was cut on `a52d48b` and RELEASED — `scripts/release-vmware.sh`
+built both disks, booted the packaged VMDKs under QEMU+OVMF on the runner and
+`.github/workflows/release.yml` published the zip, its digest and SHA256SUMS as the tag's release
+assets (REQ-REL-001, `docs/RELEASING.md`); and three CI jobs red since ADR-074 for reasons only the
+runner could see were fixed — the ubuntu-24.04 runner's QEMU 8.2 creates the virt machine's SMMUv3
+stage-1-only (`-global arm-smmuv3.stage=2` in `scripts/vm-e2e.sh`), a newer stable clippy rejects
+`chunks_exact(2)` (`kernel-core/src/udpv4.rs` uses `as_chunks`), and GNU grep reads `\r` in an ERE
+as the letter `r` (`scripts/comparative-bench.sh` carries a real CR byte) — the first fully green
+`aletheia-ci` on this lineage.
+
+## Previous wave — real devices through the input session (2026-09-02, ADR-080)
 
 ALET-P2-021's input HARDWARE rung. ADR-079 built the input path as an authority question and
 named its own limit: no REAL device was wired through it. This wave wires two, on every CPU,

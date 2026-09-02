@@ -1120,13 +1120,26 @@ fn run_advised_scheduler() -> (bool, bool, bool) {
             job: JobId(1),
             user: UserId(0),
         };
-        resident::admit(
+        // The allocator's word first (ADR-081): the bounded door judges this REAL task against the
+        // frames actually free right now, and a refusal here is a kernel that is out of memory for
+        // a two-page task - a failure to be named, never routed around.
+        let _ = resident::observe_memory(kernel_core::mlsched::MemoryMeter {
+            total_pages: frames::total_count() as u64,
+            free_pages: frames::free_count() as u64,
+        });
+        if let Err(refusal) = resident::admit(
             &mut policy,
             TaskId(i as u64),
             Priority(5),
             now_secs,
             &submission,
-        );
+        ) {
+            kprintln!(
+                "[usermode] the memory boundary refused a real task: {:?}",
+                refusal
+            );
+            return (false, false, false);
+        }
     }
 
     let mut order: Vec<usize> = Vec::new();

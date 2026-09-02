@@ -929,6 +929,25 @@ pub fn report_risk_advisor(out: &mut dyn FnMut(&str)) {
                 s.silence_secs(),
                 s.last_tick_secs
             ));
+            // The memory boundary (ADR-081): what the allocator last said, the least it ever said,
+            // and how often the bounded door said no. Unmetered is a state, printed as one.
+            if s.memory_samples == 0 {
+                out(&format!(
+                    "memory: UNMETERED - no allocator reading yet, bounded admission refuses everything ({} refused so far)",
+                    s.unmetered_refusals
+                ));
+            } else {
+                out(&format!(
+                    "memory: {} of {} frames free (low-water {}, {} reading(s)); {} admission(s) refused MemoryExhausted, {} pressure crossing(s){}",
+                    s.last_free_pages,
+                    s.total_pages,
+                    s.low_free_pages,
+                    s.memory_samples,
+                    s.memory_refusals,
+                    s.pressure_events,
+                    if s.in_pressure { " - UNDER PRESSURE now" } else { "" }
+                ));
+            }
         }
     }
 }

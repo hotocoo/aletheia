@@ -297,6 +297,13 @@ CONTRACT=(
   "vinput: a real keyboard record routes through the decoder into the focused surface's queue"
   "vinput: a real pointer record moves the compositor's cursor to the exactly mapped position"
   "vinput: no keycode in any modifier state emits a byte the console refuses"
+
+  # The memory boundary (ADR-081): admission is bounded by the allocator's word on every CPU.
+  "mlsched: a reading that is not a meter is refused by name and records nothing"
+  "mlsched: with no allocator reading the bounded door admits nothing - fail closed, counted"
+  "mlsched: a task asking for more than is free is refused by name before the model is asked - the scheduler untouched"
+  "mlsched: the meter is a ledger - low-water exact, a pressure crossing counted once per entry"
+  "mlsched: the boundary follows the latest reading and refuses deterministically"
 )
 
 hr() { printf '========================================================================\n'; }
