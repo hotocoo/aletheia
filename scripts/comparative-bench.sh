@@ -89,6 +89,11 @@ typed_workload() {
     until grep -qE "^WL-$label-$i\r*$" "$log"; do
       if [ "$SECONDS" -ge "$deadline" ]; then
         echo "    FAIL [$label] workload op $i was never answered by the guest"
+        # Show what the guest DID say, bytes visible: a harness failure and a guest failure look
+        # identical from the verdict line alone, and this leg has failed on a runner nobody could
+        # watch (both legs at op 1, which indicts the wire, not either guest).
+        echo "    --- last 400 bytes of the guest log (od -c) ---"
+        tail -c 400 "$log" 2>/dev/null | od -c | tail -12 | sed 's/^/    /'
         return 1
       fi
       sleep 0.005
@@ -224,7 +229,7 @@ dd if=/dev/zero of="$WORK/al-s.img" bs=1048576 count=1 2>/dev/null
 dd if=/dev/zero of="$WORK/al-p.img" bs=1048576 count=1 2>/dev/null
 
 if boot_median aletheia "aletheia> " \
-    qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -nographic \
+    qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -display none -serial stdio -monitor none \
     -drive "if=pflash,format=raw,unit=0,file=$OVMF_CODE_F,readonly=on" \
     -drive "if=pflash,format=raw,unit=1,file=$WORK/al-vars.fd" \
     -drive "format=raw,file=$IMG" \
@@ -264,7 +269,7 @@ else
       echo "    bootable payload: vmlinuz + initramfs — $LX_BYTES bytes"
       echo "    kernel: $(file "$WORK/vmlinuz" | sed -n 's/.*version \([^ ]*\).*/\1/p')"
       if boot_median linux "LINUX-BENCH-PROMPT-READY" \
-          qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64 -nographic -no-reboot \
+          qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64 -display none -serial stdio -monitor none -no-reboot \
           -kernel "$WORK/vmlinuz" -initrd "$WORK/initramfs.gz" \
           -append "console=ttyS0 quiet rdinit=/init"; then
         LX_BOOT_MS="$BOOT_MS"; LX_IDLE="$IDLE_CPU"; LX_STATUS="OK"; LX_WL_MS="$WORKLOAD_MS"
@@ -304,7 +309,7 @@ if [ "${WITH_REDOX:-0}" = "1" ]; then
     # than a shell prompt because the image boots to a getty, and forcing it further would be
     # measuring how well this script can drive somebody else's OS.
     if boot_median redox "login:" \
-        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -nographic -no-reboot \
+        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -display none -serial stdio -monitor none -no-reboot \
         -drive "format=raw,file=$WORK/redox.img"; then
       RX_BOOT_MS="$BOOT_MS"; RX_IDLE="$IDLE_CPU"
     else
