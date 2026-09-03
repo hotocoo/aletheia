@@ -203,12 +203,14 @@ impl WindowManager {
     /// cannot be clicked, exactly as they cannot be seen.
     pub fn window_at(&self, comp: &Compositor, x: u32, y: u32) -> Option<(u32, i32, i32)> {
         let (sw, sh) = comp.scanout_size();
-        for id in comp.z_order().into_iter().rev() {
+        // Front to back over the compositor's own placement table, WITHOUT allocating: a pointer
+        // event must not cost a `Vec` on a heap that never frees (ADR-086).
+        for i in (0..comp.placed_len()).rev() {
+            let Some((id, px, py)) = comp.placed_at(i) else {
+                continue;
+            };
             let Some(w) = self.wins.iter().find(|w| w.id == id) else {
                 continue; // a surface this manager does not own (the wallpaper, a suite's)
-            };
-            let Some((px, py)) = comp.placement(id) else {
-                continue;
             };
             let vis_w = w.width.saturating_sub(px.min(0).unsigned_abs());
             let vis_h = w.height.saturating_sub(py.min(0).unsigned_abs());
@@ -296,10 +298,9 @@ impl WindowManager {
         self.closes += 1;
         // Focus falls to the topmost survivor this manager owns; nothing left means NOTHING
         // focused, so the next keystroke is refused `NoFocus` instead of routed to a corpse.
-        let next = comp
-            .z_order()
-            .into_iter()
+        let next = (0..comp.placed_len())
             .rev()
+            .filter_map(|i| comp.placed_at(i).map(|(sid, _, _)| sid))
             .find(|sid| self.wins.iter().any(|w| w.id == *sid));
         match next {
             Some(sid) => {

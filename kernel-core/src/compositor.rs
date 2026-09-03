@@ -1096,6 +1096,36 @@ impl Compositor {
         self.placed.len()
     }
 
+    /// How many surfaces are placed — the allocation-free half of [`Compositor::z_order`].
+    pub fn placed_len(&self) -> usize {
+        self.placed.len()
+    }
+
+    /// The `i`th placed surface back to front, as (id, x, y) — allocation-free (ADR-086). A
+    /// window manager asking "what is under this point" on every pointer event must not pay a
+    /// `Vec` per event on a heap that never frees; `z_order` still exists for the suites, which
+    /// ask once and compare.
+    pub fn placed_at(&self, i: usize) -> Option<(u32, i32, i32)> {
+        self.placed.get(i).map(|p| (p.surface, p.x, p.y))
+    }
+
+    /// Take ONE event from a surface's queue — OWNER TOKEN ONLY, allocation-free (ADR-086). The
+    /// same authority `drain_input` enforces; the difference is only that a pump draining every
+    /// tick can do it without building a `Vec` it immediately throws away.
+    pub fn pop_input(&mut self, id: u32, token: u64) -> Result<Option<Event>, CompFault> {
+        count_refusal!(
+            self,
+            Option<Event>,
+            (|| {
+                self.owner_check(id, token)?;
+                match self.queues.iter_mut().find(|(sid, _)| *sid == id) {
+                    Some((_, q)) => Ok(q.pop_front()),
+                    None => Ok(None),
+                }
+            })()
+        )
+    }
+
     /// The z-order as surface ids, back to front — observable so the suite can pin it.
     pub fn z_order(&self) -> Vec<u32> {
         self.placed.iter().map(|p| p.surface).collect()

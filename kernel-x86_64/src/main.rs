@@ -1289,6 +1289,38 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // The desktop under a merciless storm (ALET-P2-021 / REQ-QUAL-007, ADR-086): thousands of
+    // events against the window stack, held to what an OS must actually do at volume - closed
+    // lifecycles, an honest bounded backlog, a steady state that allocates NOTHING on a heap
+    // that never frees, a settled desktop that goes quiet, and the same storm twice.
+    kprintln!("");
+    kprintln!("--- window-storm selftests (the desktop at event volume, measured on this machine's own heap) ---");
+    kernel_core::STORM_REPORT.set(|before, after| {
+        kprintln!(
+            "[wmstorm] heap watermark across the storm: {} -> {} bytes ({} moved)",
+            before,
+            after,
+            after.saturating_sub(before)
+        )
+    });
+    match kernel_core::wmstorm::storm_suite(&mut || crate::heap::used_bytes(), |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[wmstorm] ALL {} WINDOW-STORM INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[wmstorm] FAILED at window-storm invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(740 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("--- input hardware selftests (virtio-input: a real keyboard and pointer through the session) ---");
     let mut desktop_devices: Option<(virtio::InputDev, virtio::InputDev)> = None;

@@ -352,13 +352,18 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         let Some(tok) = self.wm.token(WINDOW) else {
             return; // the terminal window was closed: there is no queue to drain
         };
-        if let Ok(events) = self.comp.drain_input(WINDOW, tok) {
-            for e in events {
-                if let EventKind::Key(b) = e.kind {
-                    if self.term_input.len() < TERM_INPUT_CAP {
-                        self.term_input.push(b);
-                    }
+        // Allocation-free (ADR-086): the pump drains every tick, and a `Vec` per tick on a heap
+        // that never frees is a leak with a nicer name. The storm suite holds this claim.
+        while let Ok(Some(e)) = self.comp.pop_input(WINDOW, tok) {
+            if let EventKind::Key(b) = e.kind {
+                if self.term_input.len() < TERM_INPUT_CAP {
+                    self.term_input.push(b);
+                } else {
+                    break;
                 }
+            }
+            if self.term_input.len() >= TERM_INPUT_CAP {
+                break;
             }
         }
     }

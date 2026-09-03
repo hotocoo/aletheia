@@ -324,6 +324,13 @@ CONTRACT=(
   "wm: the close box detaches the window and its owner token dies with it"
   "wm: closing the focused window hands focus to the topmost survivor, which receives"
   "wm: closing the last window clears focus and a keystroke is refused by name"
+
+  # The desktop at EVENT VOLUME (ADR-086): the same storm, the same answers, on every CPU.
+  "storm: a thousand open/close cycles leave the compositor exactly as they found it"
+  "storm: a window that stops draining backs up to exactly its cap, and every loss is named and counted"
+  "storm: four thousand pointer events in the steady state allocate NOTHING"
+  "storm: a settled desktop repaints once and then writes nothing at all"
+  "storm: the same storm told twice lands bit-identically, down to the frame's cost"
 )
 
 hr() { printf '========================================================================\n'; }

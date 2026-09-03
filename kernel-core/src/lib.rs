@@ -88,6 +88,47 @@ pub mod virtq;
 pub mod vmaddr;
 pub mod vtd;
 pub mod wm;
+pub mod wmstorm;
+
+/// The storm's own measurement channel: the caller installs a reporter so the boot log can carry
+/// the two numbers behind the allocation claim (ADR-086). Absent, the claim is still enforced —
+/// it is only quieter.
+pub static STORM_REPORT: spin_report::Slot = spin_report::Slot::new();
+
+/// A one-slot function pointer with no lock: written once at boot before any suite runs.
+pub mod spin_report {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    pub struct Slot(AtomicUsize);
+
+    impl Default for Slot {
+        fn default() -> Self {
+            Slot::new()
+        }
+    }
+
+    impl Slot {
+        pub const fn new() -> Self {
+            Slot(AtomicUsize::new(0))
+        }
+        /// Install the reporter. Called once, before the suites run.
+        pub fn set(&self, f: fn(usize, usize)) {
+            self.0.store(f as usize, Ordering::Relaxed);
+        }
+        pub(crate) fn call(&self, a: usize, b: usize) {
+            let p = self.0.load(Ordering::Relaxed);
+            if p != 0 {
+                // SAFETY: the slot only ever holds a `fn(usize, usize)` stored by `set`.
+                let f: fn(usize, usize) = unsafe { core::mem::transmute(p) };
+                f(a, b);
+            }
+        }
+    }
+}
+
+pub(crate) fn kprintln_storm(before: usize, after: usize) {
+    STORM_REPORT.call(before, after);
+}
 
 /// The arch-independent hardware primitives the Aletheia kernel needs from a target backend. Every
 /// target implements this for its own `…Hal` struct; the kernel is written against the trait, never

@@ -1,6 +1,13 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-03, later (ONE DESKTOP, THREE CPUs — `kernel-core/src/desktop.rs` makes the live
+**As of:** 2026-09-03, night (THE DESKTOP UNDER A MERCILESS STORM — `kernel-core/src/wmstorm.rs` is a
+boot suite on all three CPUs measured on the platform's own heap: a thousand open/close cycles close
+exactly, a window that stops draining backs up to exactly its cap with every loss named and counted,
+a drain restores exactly that capacity, four thousand pointer events in the steady state move the
+heap watermark by ZERO bytes (printed pass or fail), a settled desktop repaints once and then writes
+nothing, and the same storm twice lands bit-identically. The storm FOUND two per-event allocations on
+a heap that never frees — the manager's `z_order()` per event and the pump's `drain_input()` per tick
+— and both are now allocation-free; ADR-086); before that: (ONE DESKTOP, THREE CPUs — `kernel-core/src/desktop.rs` makes the live
 desktop a value generic over the same `VirtioHal`+`Transport` seams the drivers cross, so aarch64,
 RISC-V and x86-64 install and pump the SAME compositor, input session, window manager, terminal and
 monitor: each kernel keeps only its own static, its own way of shutting the pump out (IF / `DAIF.I` /
@@ -144,7 +151,40 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
 release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
-## Current wave — one desktop, three CPUs (2026-09-03, ADR-085)
+## Current wave — the desktop under a merciless storm (2026-09-03, ADR-086)
+
+Every window invariant so far was proved on a handful of events: one press, one drag, one close.
+That proves the RULES; it says nothing about the ten-thousandth event, when a queue nobody drained
+is full and a heap that never frees (ADR-063) has had every chance to grow by a few bytes per
+event forever. `kernel-core/src/wmstorm.rs` is the storm, and it is a BOOT suite on all three
+CPUs measured on the platform's OWN heap — not a host benchmark.
+
+Six claims: a thousand open/close cycles return the compositor to EXACTLY its starting surface,
+placement and window counts with zero refusals; a window that stops draining backs up to exactly
+`MAX_INPUT_EVENTS` with every further event refused `Backlogged` AND counted, the drop ledger
+equal to `flood - cap` to the event; a drain restores exactly that capacity and not one event
+more; four thousand pointer events in the STEADY STATE move the heap watermark by ZERO bytes
+(both numbers printed on the boot log, pass or fail); a settled desktop repaints once and then
+writes nothing at all, damage ledger empty; and the same storm told twice lands bit-identically,
+down to the frame's cost.
+
+**What the storm found.** Claim 4 failed on its first run. The window manager asked
+`Compositor::z_order()` on every pointer event — a `Vec` per event — and the live desktop's pump
+called `drain_input()` every tick — another `Vec`, thrown away immediately. On a heap that never
+frees those are leaks with polite names. Both paths are now allocation-free: `placed_len`/
+`placed_at` walk the compositor's own placement table in place, and `pop_input` takes one event
+under the same owner-token authority `drain_input` enforces. Measured on x86-64 afterwards:
+`[wmstorm] heap watermark across the storm: 7550448 -> 7550448 bytes (0 moved)`.
+
+Proofs: `[wmstorm] ALL 6 WINDOW-STORM INVARIANTS HOLD` on all three targets (marker `wmstorm=6`,
+boot fails 740+i), five cross-CPU conformance behaviours, and a host proof under a counting
+allocator that IGNORES frees — because the kernel heap cannot give bytes back, and a net-bytes
+measurement would let a doubling `Vec` through. NAMED: opening a window allocates by design (its
+pixels and its queue), so the allocation round does not press close boxes and a user who opens and
+closes windows without end still grows the never-freeing heap — ADR-063's posture, stated rather
+than hidden by a suite that avoids it.
+
+## Previous wave — one desktop, three CPUs (2026-09-03, ADR-085)
 
 ALET-P2-021's portability rung. Every contract under the desktop was arch-neutral and proved on
 all three CPUs; the thing that RAN them was one target's module. aarch64 and RISC-V proved every
