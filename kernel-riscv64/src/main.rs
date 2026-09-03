@@ -25,6 +25,7 @@ global_asm!(include_str!("boot.s"));
 mod console;
 mod arch;
 mod conirq;
+mod desktop;
 mod exit;
 mod frames;
 mod fwcfg;
@@ -913,6 +914,7 @@ pub extern "C" fn kmain() -> ! {
     // DEVICE's own error grammar, not our bookkeeping.
     kprintln!("");
     kprintln!("--- graphics selftests (virtio-gpu: display info + 2D resource lifecycle) ---");
+    let mut desktop_gpu: Option<virtio::Gpu> = None;
     match virtio::graphics_device() {
         None => kprintln!("[gpu] no graphics device attached (skipped)"),
         Some(Err(e)) => {
@@ -979,6 +981,9 @@ pub extern "C" fn kmain() -> ! {
                     ActiveHal::exit(640 + idx as i32);
                 }
             }
+            // The device the suites just qualified is the device the desktop will run on
+            // (ADR-085): one bring-up, one owner, no second probe.
+            desktop_gpu = Some(gpu);
         }
     }
 
@@ -1029,6 +1034,7 @@ pub extern "C" fn kmain() -> ! {
 
     kprintln!("");
     kprintln!("--- input hardware selftests (virtio-input: a real keyboard and pointer through the session) ---");
+    let mut desktop_devices: Option<(virtio::Input, virtio::Input)> = None;
     match virtio::input_pair() {
         None => kprintln!("[vinput] no input device attached (skipped)"),
         Some(Err(e)) => {
@@ -1064,7 +1070,29 @@ pub extern "C" fn kmain() -> ! {
                     ActiveHal::exit(680 + idx as i32);
                 }
             }
+            desktop_devices = Some((kb, tab));
         }
+    }
+
+    // The LIVE desktop (ALET-P2-021, ADR-085): the SAME desktop the other two CPUs run, on this
+    // one's own devices. A machine that cannot bring it up says so and keeps going on the serial
+    // console - the console is the session that matters.
+    match (desktop_gpu.take(), desktop_devices.take()) {
+        (Some(gpu), Some((kb, tab))) => match desktop::install(gpu, kb, tab) {
+            Ok(windows) => kprintln!(
+                "[desktop] LIVE: one compositor, one input session, real devices, {} managed windows (pumped from the S-mode timer)",
+                windows
+            ),
+            Err(e) => kprintln!(
+                "[desktop] install refused: {} - the machine continues on the serial console",
+                e
+            ),
+        },
+        (gpu, devs) => kprintln!(
+            "[desktop] not installed (graphics {}, input {}) - named, not silent",
+            gpu.is_some(),
+            devs.is_some()
+        ),
     }
     // The interactive console (REQ-CON-001, ADR-044): the subsystem that lets the machine stay up
     // and answer a human, proved here the same way everything else is — a scripted session against

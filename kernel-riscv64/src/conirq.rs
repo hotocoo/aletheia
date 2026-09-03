@@ -86,6 +86,13 @@ pub fn init() {
     // Threshold is a strict floor: a source is delivered only if its priority is GREATER than it.
     plic_w32(PLIC_THRESHOLD + 0x1000 * ctx, 0);
     console::rx_interrupt_enable();
+    // The desktop's tick, if this machine brought a desktop up (ADR-085): `sie.STIE` plus the
+    // first armed deadline. A machine with no desktop never enables it and never traps for it.
+    if crate::desktop::is_live() {
+        // SAFETY: setting sie.STIE affects only this hart's interrupt enables.
+        unsafe { asm!("csrs sie, {}", in(reg) 1usize << 5, options(nomem, nostack)) };
+        timer_arm();
+    }
     // SAFETY: single-core console; the trap vector is installed before this runs.
     unsafe { ARMED = true };
     // SAFETY: setting sie.SEIE and sstatus.SIE only affects this hart's interrupt enables.
@@ -93,6 +100,50 @@ pub fn init() {
         asm!("csrs sie, {}", in(reg) 1usize << 9, options(nomem, nostack));
         asm!("csrsi sstatus, 2", options(nomem, nostack));
     }
+}
+
+/// Mask interrupts for a caller outside this module (the desktop's door, ADR-085), reporting
+/// whether they had been enabled.
+#[cfg(feature = "interactive")]
+pub fn mask_irqs_pub() -> bool {
+    mask_irqs()
+}
+
+/// Unmask interrupts for a caller outside this module (ADR-085).
+#[cfg(feature = "interactive")]
+pub fn unmask_irqs_pub() {
+    restore_irqs(true);
+}
+
+/// `scause` for a supervisor TIMER interrupt: the interrupt bit plus cause 5. It wakes the live
+/// desktop's pump (ADR-085); a desktop nobody ticks shows its first frame and nothing after it.
+#[cfg(feature = "interactive")]
+pub const SCAUSE_S_TIMER: usize = (1 << 63) | 5;
+
+/// Timer slice in `time`-CSR ticks: QEMU virt's timebase is 10 MHz, so one hundredth of a second
+/// is 100_000 ticks — the same 100 Hz the x86-64 PIT pump and the aarch64 timer PPI run at.
+#[cfg(feature = "interactive")]
+const TIMER_SLICE: u64 = 100_000;
+
+/// Program the next timer interrupt one slice from now, through SBI.
+#[cfg(feature = "interactive")]
+pub fn timer_arm() {
+    let now: u64;
+    // SAFETY: reading the `time` CSR is side-effect free.
+    unsafe { asm!("csrr {}, time", out(reg) now, options(nomem, nostack)) };
+    crate::sbi::set_timer(now + TIMER_SLICE);
+}
+
+/// The desktop's tick, taken from the trap handler: rearm first (so a slow pump cannot silently
+/// stop the clock), then pump. Returns whether this cause was ours.
+#[cfg(feature = "interactive")]
+pub fn on_timer_irq() -> bool {
+    if !crate::desktop::is_live() {
+        return false;
+    }
+    timer_arm();
+    crate::desktop::tick_pump();
+    true
 }
 
 /// Clear `sstatus.SIE`, returning whether it had been set.

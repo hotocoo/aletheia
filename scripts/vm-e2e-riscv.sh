@@ -90,6 +90,10 @@ echo "$OUT" | grep "ALL 13 INPUT-ROUTING INVARIANTS HOLD" >/dev/null || { echo "
 # The input HARDWARE rung (ALET-P2-021, ADR-080): real virtio-input devices through the session.
 echo "$OUT" | grep "ALL 7 TEXT-GRID INVARIANTS HOLD" >/dev/null || { echo "FAIL: text-grid invariants marker missing (ALET-P2-021, ADR-083)"; fail=1; }
 echo "$OUT" | grep "ALL 12 WINDOW-MANAGER INVARIANTS HOLD" >/dev/null || { echo "FAIL: window-manager invariants marker missing (ALET-P2-021, ADR-084)"; fail=1; }
+# The desktop this CPU actually RUNS (ADR-085): the shared desktop, on this target's own devices,
+# with both managed windows up. A machine that only PROVES the contracts is not a machine that
+# shows them, so the gate holds the live line, not just the suites.
+echo "$OUT" | grep "\[desktop\] LIVE: .* 2 managed windows" >/dev/null || { echo "FAIL: the live desktop did not come up with its two windows (ALET-P2-021, ADR-085)"; fail=1; }
 echo "$OUT" | grep "ALL 10 INPUT-HARDWARE INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-hardware invariants marker missing (ALET-P2-021, ADR-080)"; fail=1; }
 # Custody crosses the platform boundary (ALET-P1-034, ADR-072), proved over the SECOND bus.
 echo "$OUT" | grep "ALL 14 CUSTODY-DELIVERY INVARIANTS HOLD" >/dev/null || { echo "FAIL: custody-delivery invariants marker missing (ALET-P1-034, ADR-072)"; fail=1; }

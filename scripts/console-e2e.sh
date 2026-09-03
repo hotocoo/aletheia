@@ -120,6 +120,15 @@ check_session() {
     # DIFFERENT path through the namespace - read-modify-write, copy, rename, create, search,
     # non-text inspection - and a console that only writes and reads is not one you can work in.
     grep -q "capability-secure microkernel" <<<"$log" || { echo "  FAIL [$label/first] ver did not answer"; bad=1; }
+    # The LIVE desktop, if this machine brought one up (ADR-085): `input` is answered from the
+    # model the PUMP is mutating, so a readout naming both windows and the focused terminal is
+    # evidence that the timer fired and the pump ran without taking the fatal branch of an IRQ
+    # path that is fatal by default for everything it does not name.
+    if grep -q "\[desktop\] LIVE" <<<"$log"; then
+      grep -q "windows: 2 open" <<<"$log" || { echo "  FAIL [$label/first] the live desktop did not report its two windows"; bad=1; }
+      grep -q "focus: surface 2" <<<"$log" || { echo "  FAIL [$label/first] the terminal window did not hold focus"; bad=1; }
+      grep -q "session: held" <<<"$log" || { echo "  FAIL [$label/first] the input session was not reported"; bad=1; }
+    fi
     grep -q "blocks of "  <<<"$log" || { echo "  FAIL [$label/first] lsblk did not report the device"; bad=1; }
     grep -q "manifesto is now" <<<"$log" || { echo "  FAIL [$label/first] append did not extend the object"; bad=1; }
     grep -q "manifesto -> copy" <<<"$log" || { echo "  FAIL [$label/first] cp did not copy"; bad=1; }
@@ -163,17 +172,23 @@ mmio_leg() {
   rm -f "$pimg"
   dd if=/dev/zero of="$pimg" bs=1048576 count=1 2>/dev/null
 
+  # The graphics and input devices the LIVE desktop needs (ADR-085). They are here so this gate
+  # covers what an interactive boot on this CPU actually runs: the desktop comes up, the timer
+  # arms, the pump ticks under the console, and the machine still answers. A leg without them
+  # would prove the console and say nothing about the desktop that now shares the machine.
   SESSION_ARGV=("${QEMU[@]}" -kernel "$elf"
     -global virtio-mmio.force-legacy=false
     -drive "if=none,format=raw,file=$img,id=blk0" -device virtio-blk-device,drive=blk0
     -drive "if=none,format=raw,file=$pimg,id=blk1" -device virtio-blk-device,drive=blk1
+    -device virtio-gpu-device
+    -device virtio-keyboard-device -device virtio-tablet-device
     -netdev user,id=n0 -device virtio-net-device,netdev=n0)
   local log; log="$(mktemp)"
 
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
@@ -250,7 +265,7 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?

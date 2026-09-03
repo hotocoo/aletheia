@@ -35,6 +35,7 @@ pub mod compress;
 pub mod conring;
 pub mod crypto;
 pub mod deadva;
+pub mod desktop;
 pub mod device;
 pub mod dhcp;
 pub mod dma;

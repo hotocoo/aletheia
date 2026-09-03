@@ -130,6 +130,10 @@ echo "$OUT" | grep "ALL 13 INPUT-ROUTING INVARIANTS HOLD" >/dev/null || { echo "
 # decode->route path the live desktop pumps driven end to end.
 echo "$OUT" | grep "ALL 7 TEXT-GRID INVARIANTS HOLD" >/dev/null || { echo "FAIL: text-grid invariants marker missing (ALET-P2-021, ADR-083)"; fail=1; }
 echo "$OUT" | grep "ALL 12 WINDOW-MANAGER INVARIANTS HOLD" >/dev/null || { echo "FAIL: window-manager invariants marker missing (ALET-P2-021, ADR-084)"; fail=1; }
+# The desktop this CPU actually RUNS (ADR-085): the shared desktop, on this target's own devices,
+# with both managed windows up. A machine that only PROVES the contracts is not a machine that
+# shows them, so the gate holds the live line, not just the suites.
+echo "$OUT" | grep "\[desktop\] LIVE: .* 2 managed windows" >/dev/null || { echo "FAIL: the live desktop did not come up with its two windows (ALET-P2-021, ADR-085)"; fail=1; }
 echo "$OUT" | grep "ALL 10 INPUT-HARDWARE INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-hardware invariants marker missing (ALET-P2-021, ADR-080)"; fail=1; }
 echo "$OUT" | grep "ALL 10 SMMUV3 INVARIANTS HOLD" >/dev/null || { echo "FAIL: smmuv3 invariants marker missing (ALET-P1-018, ADR-074)"; fail=1; }
 echo "$OUT" | grep "enforcement LIVE" >/dev/null || { echo "FAIL: smmuv3 enforcement never turned ON"; fail=1; }

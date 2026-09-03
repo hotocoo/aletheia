@@ -1,6 +1,12 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-03 (WINDOWS ARE A MANAGED SET, NOT ONE PRIVILEGED SURFACE — `kernel-core/src/wm.rs`
+**As of:** 2026-09-03, later (ONE DESKTOP, THREE CPUs — `kernel-core/src/desktop.rs` makes the live
+desktop a value generic over the same `VirtioHal`+`Transport` seams the drivers cross, so aarch64,
+RISC-V and x86-64 install and pump the SAME compositor, input session, window manager, terminal and
+monitor: each kernel keeps only its own static, its own way of shutting the pump out (IF / `DAIF.I` /
+`sstatus.SIE`), its own 100 Hz timer (PIT / generic timer PPI / SBI `set_timer`) and its own frame
+ledger, handed to `pump(free, total)`; the console's second surface reaches all three; all three
+gates assert `[desktop] LIVE ... 2 managed windows`; ADR-085); before that: (WINDOWS ARE A MANAGED SET, NOT ONE PRIVILEGED SURFACE — `kernel-core/src/wm.rs`
 gives the desktop a window manager that owns every window's owner token (unknown, duplicate and
 over-ceiling opens refused BY NAME and counted), chrome whose geometry is the painter's (the close box
 `textgrid` paints and `wm::hit_at` hit-tests from the same constants), a press that is a routing
@@ -138,7 +144,42 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
 release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
-## Current wave — windows are a managed set, not one privileged surface (2026-09-03, ADR-084)
+## Current wave — one desktop, three CPUs (2026-09-03, ADR-085)
+
+ALET-P2-021's portability rung. Every contract under the desktop was arch-neutral and proved on
+all three CPUs; the thing that RAN them was one target's module. aarch64 and RISC-V proved every
+invariant and then showed a black screen, so "Aletheia has a GUI" was true of one target and a
+claim about the other two.
+
+`kernel-core/src/desktop.rs` is the desktop as a VALUE, generic over the same seams the drivers
+already cross (`Desktop<H: VirtioHal, T: Transport + ConfigWrite>`): the compositor, the input
+session, the window manager, both windows' grids, the GPU resource and the pump. Each kernel
+keeps only what a CPU can answer for:
+
+* **Ownership and the concurrency posture** — x86-64 masks IF, aarch64 masks `DAIF.I`, RISC-V
+  clears `sstatus.SIE`. The shared desktop takes no lock and knows no interrupt flag, so no
+  platform's rule is imposed on another.
+* **The wake-up** — the PIT (IRQ0) on x86-64, the generic timer PPI (INTID 30, armed from
+  `CNTFRQ_EL0/100`) on aarch64, the S-mode timer through SBI `set_timer` on RISC-V. All three
+  tick at 100 Hz. Both DT targets' fatal-by-default IRQ paths gained exactly ONE new named
+  source, gated to interactive builds and rearmed BEFORE the pump runs, so a slow pump cannot
+  silently stop the clock; everything else stays fatal.
+* **The frame allocator's reading** — `pump(free, total)` is handed the machine's memory ledger
+  rather than calling an allocator.
+
+The DT targets also gained the console's SECOND SURFACE (ADR-083): `emit` writes to the UART and
+to the terminal window, `getc` reads the UART ring and then the window's queue, and `input`
+answers on all three machines. On aarch64 the desktop is installed BEFORE the SMMUv3 gate, so its
+backing frames sit inside the stage-2 identity domain enforcement covers.
+
+Proofs: all three VM gates assert `[desktop] LIVE: ... 2 managed windows` beside the suites they
+already ran; `console-e2e` (a scripted operator on all three targets) and `vinput-e2e` (real
+QMP-injected device events on x86-64) stay green; `kernel-x86_64/src/desktop.rs` shrank 627 ->
+~120 lines and its atomics ledger went with it. NAMED non-claims: the DT desktops pump only on
+interactive builds (a gate build composes the first frame and stands still — nothing is claimed
+about motion nobody is there to see), and the live injected-input gate still runs on x86-64 only.
+
+## Previous wave — windows are a managed set, not one privileged surface (2026-09-03, ADR-084)
 
 ALET-P2-021's window rung. After ADR-083 the desktop had exactly ONE window, and the code that
 decided what a click meant lived in `kernel-x86_64/src/desktop.rs`, written for that one surface

@@ -26,6 +26,31 @@ use crate::uart;
 
 /// PL011 UART0 on QEMU `virt`: SPI 1 → INTID 33.
 const UART_INTID: u32 = 33;
+/// The EL1 physical timer's PPI on this platform (INTID 30, banked per CPU). It wakes the live
+/// desktop's pump (ADR-085): a desktop nobody ticks shows the first frame and nothing after it.
+#[cfg(feature = "interactive")]
+const TIMER_INTID: u32 = 30;
+/// Timer slice: one hundredth of the counter's own frequency — the 100 Hz the x86-64 PIT pump
+/// already runs at, so both machines pump their desktop at the same rate.
+#[cfg(feature = "interactive")]
+fn timer_slice() -> u64 {
+    let freq: u64;
+    // SAFETY: CNTFRQ_EL0 is readable at EL1 and has no side effects.
+    unsafe { asm!("mrs {f}, cntfrq_el0", f = out(reg) freq, options(nomem, nostack)) };
+    (freq / 100).max(1)
+}
+
+/// Arm the EL1 physical timer for one slice.
+#[cfg(feature = "interactive")]
+fn timer_arm() {
+    let slice = timer_slice();
+    // SAFETY: CNTP_TVAL_EL0 / CNTP_CTL_EL0 are accessible at EL1 (NS-EL1, no EL2 here).
+    unsafe {
+        asm!("msr cntp_tval_el0, {v}", v = in(reg) slice, options(nomem, nostack));
+        asm!("msr cntp_ctl_el0, {v}", v = in(reg) 1u64, options(nomem, nostack));
+        // ENABLE, IMASK=0
+    }
+}
 
 #[cfg(feature = "interactive")]
 const GICD_BASE: usize = 0x0800_0000;
@@ -101,9 +126,26 @@ pub fn init() {
         GICD_ISENABLER + (UART_INTID as usize / 32) * 4,
         1 << (UART_INTID % 32),
     );
+    // The desktop's tick, if this machine brought a desktop up (ADR-085). The PPI is banked per
+    // CPU, so it is enabled in ISENABLER0 without a target register; its priority sits ABOVE the
+    // console's, because a pump that misses its slice is a desktop that stutters while a
+    // keystroke can wait one interrupt.
+    if crate::desktop::is_live() {
+        // SAFETY: IPRIORITYR is byte-addressed per INTID and is a valid Device register.
+        unsafe {
+            core::ptr::write_volatile(
+                (GICD_BASE + GICD_IPRIORITYR + TIMER_INTID as usize) as *mut u8,
+                0x00,
+            );
+        }
+        gicd_w32(GICD_ISENABLER, 1 << TIMER_INTID);
+    }
     gicc_w32(GICC_PMR, 0xF0);
     gicc_w32(GICC_CTLR, 1);
     uart::rx_interrupt_enable();
+    if crate::desktop::is_live() {
+        timer_arm();
+    }
     // SAFETY: single-core console; the handler is installed at vector 0x280 by vectors.s.
     unsafe { ARMED = true };
     unmask_irqs();
@@ -114,6 +156,19 @@ pub fn init() {
 fn unmask_irqs() {
     // SAFETY: `msr daifclr` only changes this CPU's interrupt mask.
     unsafe { asm!("msr daifclr, #2", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Mask IRQs at EL1 for a caller outside this module (the desktop's door, ADR-085), reporting
+/// whether they had been enabled — the caller unmasks again only if they were.
+#[cfg(feature = "interactive")]
+pub fn mask_irqs_pub() -> bool {
+    mask_irqs()
+}
+
+/// Unmask IRQs at EL1 for a caller outside this module (ADR-085).
+#[cfg(feature = "interactive")]
+pub fn unmask_irqs_pub() {
+    unmask_irqs();
 }
 
 /// Mask IRQs at EL1 and report whether they had been enabled.
@@ -171,6 +226,15 @@ pub extern "C" fn el1_irq() {
     let intid = iar & 0x3FF;
     if intid == SPURIOUS {
         return; // the GIC's "nothing to see here" — no EOI is owed for a spurious read
+    }
+    // The desktop's tick: rearm first (so a slow pump cannot silently stop the clock), pump,
+    // then acknowledge. A machine with no desktop never enabled this PPI and never gets here.
+    #[cfg(feature = "interactive")]
+    if intid == TIMER_INTID {
+        timer_arm();
+        crate::desktop::tick_pump();
+        gicc_w32(GICC_EOIR, iar);
+        return;
     }
     // SAFETY: single-core; ARMED is written once before interrupts are unmasked.
     let armed = unsafe { ARMED };

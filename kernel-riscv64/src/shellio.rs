@@ -74,6 +74,13 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// The live desktop's session facts (ADR-080/084/085), read from the model this machine is
+    /// running. `None` = no desktop was installed, and the command says so rather than
+    /// inventing zeros.
+    #[cfg(feature = "interactive")]
+    fn input_facts(&self) -> Option<shell::InputFacts> {
+        crate::desktop::facts()
+    }
     /// `wfi` — safe here because this target's console is interrupt-driven through the PLIC
     /// (REQ-CON-002), and the UART's external interrupt is what ends the wait. On RISC-V `wfi` is
     /// permitted to return spuriously, which the surrounding `loop` already handles: a spurious wake
@@ -116,9 +123,19 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     })
 }
 
+/// Print one string to the serial console, and to the live desktop's terminal window when this
+/// machine brought one up (ADR-083/085) — one shell, two surfaces. No desktop, no-op.
 #[cfg(feature = "interactive")]
 fn emit(s: &str) {
     console::puts(s);
+    crate::desktop::term_write(s.as_bytes());
+}
+
+/// The console's input: the UART ring first, then the terminal window's queue — the virtio
+/// keyboard's keystrokes that the input session routed to the focused window (ADR-083/085).
+#[cfg(feature = "interactive")]
+fn getc() -> Option<u8> {
+    crate::conirq::pop().or_else(crate::desktop::term_getc)
 }
 
 /// Mount the console's namespace, formatting only a device that carries none. A device that mounts
@@ -148,13 +165,7 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
     // handler would be read as an unexpected user trap.
     crate::trap::init();
     crate::conirq::init();
-    shell::run_loop(
-        &host,
-        &mut fs,
-        &mut device,
-        &mut crate::conirq::pop,
-        &mut emit,
-    );
+    shell::run_loop(&host, &mut fs, &mut device, &mut getc, &mut emit);
     ActiveHal::exit(0)
 }
 

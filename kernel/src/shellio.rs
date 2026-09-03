@@ -74,6 +74,13 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// The live desktop's session facts (ADR-080/084/085), read from the model this machine is
+    /// running. `None` = no desktop was installed, and the command says so rather than
+    /// inventing zeros.
+    #[cfg(feature = "interactive")]
+    fn input_facts(&self) -> Option<shell::InputFacts> {
+        crate::desktop::facts()
+    }
     /// `wfi` — safe here because this target's console is interrupt-driven (REQ-CON-002): the UART
     /// IRQ that fills the ring is exactly the event that ends the wait, and `scripts/console-e2e.sh`
     /// is what proves it, because a target that got this wrong stops answering the first thing typed
@@ -133,10 +140,20 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     })
 }
 
-/// Print one string to the serial console (`puts` already translates `\n` to CRLF).
+/// Print one string to the serial console (`puts` already translates `\n` to CRLF), and to the
+/// live desktop's terminal window when this machine brought one up (ADR-083/085) — one shell,
+/// two surfaces. No desktop, no-op.
 #[cfg(feature = "interactive")]
 fn emit(s: &str) {
     uart::puts(s);
+    crate::desktop::term_write(s.as_bytes());
+}
+
+/// The console's input: the UART ring first, then the terminal window's queue — the virtio
+/// keyboard's keystrokes that the input session routed to the focused window (ADR-083/085).
+#[cfg(feature = "interactive")]
+fn getc() -> Option<u8> {
+    crate::conirq::pop().or_else(crate::desktop::term_getc)
 }
 
 #[cfg(feature = "interactive")]
@@ -165,13 +182,7 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
     // the handler moves it into the ring, and the loop reads the ring instead of spinning on a
     // register that is empty almost every time.
     crate::conirq::init();
-    shell::run_loop(
-        &host,
-        &mut fs,
-        &mut device,
-        &mut crate::conirq::pop,
-        &mut emit,
-    );
+    shell::run_loop(&host, &mut fs, &mut device, &mut getc, &mut emit);
     ActiveHal::exit(0)
 }
 

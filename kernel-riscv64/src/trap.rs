@@ -73,6 +73,12 @@ extern "C" fn _trap_handler() {
     if scause == crate::conirq::SCAUSE_S_EXTERNAL && crate::conirq::on_external_irq() {
         return;
     }
+    // The live desktop's tick (ADR-085). Only an interactive boot ever enables `sie.STIE`, so a
+    // gate build reaching this cause would be the bug this vector is fatal for.
+    #[cfg(feature = "interactive")]
+    if scause == crate::conirq::SCAUSE_S_TIMER && crate::conirq::on_timer_irq() {
+        return;
+    }
     kprintln!(
         "[TRAP] unexpected S-mode trap: scause={:#x} sepc={:#x} stval={:#x}",
         scause,

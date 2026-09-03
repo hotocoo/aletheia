@@ -34,7 +34,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 |------|-------|--------------------------|
 | `kernel/src/arch.rs` | 3 | aarch64 system-register read/write, fence + wfe/sev, counter reads |
 | `kernel/src/bench.rs` | 4 | cycle-counter and barrier instructions for the boot benchmark family |
-| `kernel/src/conirq.rs` | 3 | GIC interrupt acknowledge/EOI sequencing for the console input path |
+| `kernel/src/conirq.rs` | 6 | GIC interrupt acknowledge/EOI sequencing for the console input path, plus the generic-timer PPI the live desktop is pumped from (ADR-085): CNTFRQ read, CNTP_TVAL/CNTP_CTL arm |
 | `kernel/src/main.rs` | 2 | entry hand-off from the `_start` stub; boot stack/exception-level setup |
 | `kernel/src/semihosting.rs` | 2 | ARM semihosting call sequence (HLT instruction) |
 | `kernel/src/shellio.rs` | 2 | polled PL011 UART read/write for early console output |
@@ -43,7 +43,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel/src/virtio.rs` | 1 | MMIO notify write with device-memory fence |
 | `kernel/src/vm.rs` | 13 | TTBR0 load, TLBI shootdown variants, DSB/ISB barriers, descriptor walks |
 | `kernel-riscv64/src/arch.rs` | 1 | csrrw/csrr system-register access |
-| `kernel-riscv64/src/conirq.rs` | 4 | PLIC claim/complete sequencing for console interrupts |
+| `kernel-riscv64/src/conirq.rs` | 6 | PLIC claim/complete sequencing for console interrupts, plus the S-mode timer the live desktop is pumped from (ADR-085): the `time` CSR read and the `sie.STIE` enable |
 | `kernel-riscv64/src/exit.rs` | 1 | QEMU test-finish exit path |
 | `kernel-riscv64/src/main.rs` | 1 | entry hand-off from the SBI-booted start stub |
 | `kernel-riscv64/src/sbi.rs` | 2 | SBI ecall wrappers (console putchar, system reset) |
