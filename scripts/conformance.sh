@@ -338,6 +338,13 @@ CONTRACT=(
   "schedstorm: the advised drain is a PERMUTATION of the model-free one - same tasks, each once, different order"
   "schedstorm: four thousand admit-dispatch-finish cycles allocate NOTHING"
   "schedstorm: the same storm told twice dispatches the same tasks in the same order"
+
+  # The NAMESPACE at write volume (ADR-088): the same answers on every CPU.
+  "fsstorm: five hundred writes in the steady state allocate NOTHING"
+  "fsstorm: two thousand create/remove cycles leak no block and lose no slot"
+  "fsstorm: every removed object's blocks read back zero - erase on delete, at volume"
+  "fsstorm: a fault at every position of a commit leaves the object wholly old or wholly new"
+  "fsstorm: the same storm told twice leaves the namespace byte-for-byte identical"
 )
 
 hr() { printf '========================================================================\n'; }

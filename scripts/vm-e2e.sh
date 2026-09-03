@@ -132,6 +132,7 @@ echo "$OUT" | grep "ALL 7 TEXT-GRID INVARIANTS HOLD" >/dev/null || { echo "FAIL:
 echo "$OUT" | grep "ALL 12 WINDOW-MANAGER INVARIANTS HOLD" >/dev/null || { echo "FAIL: window-manager invariants marker missing (ALET-P2-021, ADR-084)"; fail=1; }
 echo "$OUT" | grep "ALL 6 WINDOW-STORM INVARIANTS HOLD" >/dev/null || { echo "FAIL: window-storm invariants marker missing (REQ-QUAL-007, ADR-086)"; fail=1; }
 echo "$OUT" | grep "ALL 5 SCHEDULER-STORM INVARIANTS HOLD" >/dev/null || { echo "FAIL: scheduler-storm invariants marker missing (REQ-QUAL-007, ADR-087)"; fail=1; }
+echo "$OUT" | grep "ALL 5 FILESYSTEM-STORM INVARIANTS HOLD" >/dev/null || { echo "FAIL: filesystem-storm invariants marker missing (REQ-QUAL-007, ADR-088)"; fail=1; }
 # The desktop this CPU actually RUNS (ADR-085): the shared desktop, on this target's own devices,
 # with both managed windows up. A machine that only PROVES the contracts is not a machine that
 # shows them, so the gate holds the live line, not just the suites.
@@ -200,7 +201,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 gpu=13 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 reclaim=9 selftest=13 smp=22 soak=12 textgrid=7 schedstorm=5 wm=12 wmstorm=6 usermode=32 smmu=10 vault=14 vinput=10 virtio=21 vm=66"
+AARCH64_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 fsstorm=5 gpu=13 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 reclaim=9 selftest=13 smp=22 soak=12 textgrid=7 schedstorm=5 wm=12 wmstorm=6 usermode=32 smmu=10 vault=14 vinput=10 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

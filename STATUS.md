@@ -1,6 +1,12 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-03, late (THE SCHEDULER UNDER A MERCILESS STORM — `kernel-core/src/schedstorm.rs`
+**As of:** 2026-09-03, latest (THE FILESYSTEM UNDER A MERCILESS STORM — the third hot path measured,
+and the worst: 16 498 bytes per write, enough to kill a twelve-megabyte never-freeing heap in about
+seven hundred writes. A fresh `Vec` of whole 4 KiB blocks per transaction and an owning `String` per
+directory slot scanned; closed by a resident staging buffer that starts empty and in-place slot reads,
+measured after at 0 bytes per write with boot heap use down 7.55 -> 6.81 MB. `fsstorm` holds the
+namespace to five claims on every CPU including a fault at every sampled commit position landing
+wholly old or wholly new; ADR-088); before that: (THE SCHEDULER UNDER A MERCILESS STORM — `kernel-core/src/schedstorm.rs`
 floods the priority scheduler as a boot suite on all three CPUs, measured on the platform's own heap:
 strict priority on every one of 8192 dispatches, FIFO service inside a band, an advised drain that is
 a PERMUTATION of the model-free one, four thousand admit-dispatch-finish cycles moving the heap
@@ -158,7 +164,43 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
 release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
-## Current wave — the scheduler under a merciless storm (2026-09-03, ADR-087)
+## Current wave — the filesystem under a merciless storm (2026-09-03, ADR-088)
+
+Two storms had already found per-event allocations the machine could not afford. The filesystem is
+the third hot path a real machine hammers — every console `write`, every component that persists
+anything, every transaction — and it was by far the worst: **16 498 bytes per write**. A
+twelve-megabyte heap that never frees (ADR-063) survives about seven hundred writes. An
+interactive session that saved files would have killed the machine, and nothing in the tree would
+have said why.
+
+Two causes, both invisible without measuring: every transaction built a fresh
+`Vec<(usize, [u8; BLOCK_SIZE])>` — a vector of whole 4 KiB blocks — and dropped it; and every
+directory lookup called `decode`, which builds an owning `DirEntry` with a `String`, once per slot
+scanned. A lookup that allocates is a write that costs memory.
+
+Closed by two changes and a suite that would have caught it: a RESIDENT staging buffer that starts
+EMPTY (reserving the journal's 64-entry ceiling would be 262 KiB per mount, paid by every boot
+that mounts a namespace it never writes) and settles at the largest transaction that filesystem
+actually commits; and IN-PLACE slot reads (`slot_is`, `slot_used`, `slot_extent`), leaving
+`decode` exactly as it was for `list`/`stat` where the caller keeps the answer.
+
+`kernel-core/src/fsstorm.rs` holds the namespace to five claims on all three CPUs, measured on the
+platform's own heap: five hundred steady-state writes allocate NOTHING; two thousand create/remove
+cycles leak no block and lose no slot; every removed object's blocks read back ZERO
+(erase-on-delete at volume); a fault at EVERY sampled position of a commit leaves the object
+wholly old or wholly new (the ADR-062 adversary); and the same storm twice leaves the namespace
+byte-for-byte identical. It threads ONE 96-block device through every claim and reformats it,
+because a suite that allocated a fresh two-megabyte device per claim would be the disease it
+exists to catch.
+
+Measured after: **0 bytes per write**, and the boot's total heap use at the desktop storm fell
+from 7.55 MB to 6.81 MB — the old cost was being paid by every suite that touched storage.
+`[fsstorm] ALL 5 FILESYSTEM-STORM INVARIANTS HOLD` on all three targets (marker `fsstorm=5`, boot
+fails 780+i), five cross-CPU conformance behaviours. NAMED: mounting still allocates (a lifecycle
+operation, not a hot path), there is no fragmentation or compaction claim, and the fault sweep
+walks eight commit positions rather than every write in a large transaction.
+
+## Previous wave — the scheduler under a merciless storm (2026-09-03, ADR-087)
 
 ADR-086 stormed the desktop and found two per-event allocations. The scheduler is the other half
 of that question and the more serious one: it runs on EVERY dispatch, it is where the machine

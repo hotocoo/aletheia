@@ -1070,6 +1070,29 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // The FILESYSTEM under the same merciless storm (REQ-QUAL-007 / REQ-FS-001, ADR-088): a write
+    // that costs no memory, a namespace that closes, erase-on-delete at volume, a crash landing on
+    // one side wherever it falls, and the same storm leaving the same device.
+    kprintln!("");
+    kprintln!("--- filesystem-storm selftests (the namespace at write volume, measured on this machine's own heap) ---");
+    match kernel_core::fsstorm::storm_suite(&mut || crate::heap::used_bytes(), |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[fsstorm] ALL {} FILESYSTEM-STORM INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[fsstorm] FAILED at filesystem-storm invariant {}: {}",
+                idx,
+                name
+            );
+            semihosting::exit(780 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("--- input hardware selftests (virtio-input: a real keyboard and pointer through the session) ---");
     let mut desktop_devices: Option<(virtio::Input, virtio::Input)> = None;

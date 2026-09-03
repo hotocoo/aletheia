@@ -147,6 +147,14 @@ impl DirEntry {
 /// of the same device sees exactly what the last committed transaction left.
 pub struct Filesystem {
     journal: Journal,
+    /// The transaction staging buffer, GROWN ONCE and reused by every commit (ADR-088). Each
+    /// entry is a whole block, so building a fresh `Vec` per write cost about sixteen kilobytes
+    /// of a heap that never frees (ADR-063) — a few hundred writes and an interactive session had
+    /// eaten the machine. It starts EMPTY rather than reserving the journal's 64-entry ceiling:
+    /// that reservation would be 262 KiB per mount, and a boot that mounts a dozen namespaces
+    /// would pay for transactions it never runs. It settles at the largest transaction this
+    /// filesystem actually commits, and never grows again.
+    staging: Vec<(usize, [u8; BLOCK_SIZE])>,
 }
 
 impl Filesystem {
@@ -186,7 +194,10 @@ impl Filesystem {
         if le64(&dir, 0) != FS_MAGIC || le64(&dir, 8) != FS_VERSION {
             return Err(FsError::NotFormatted);
         }
-        Ok(Filesystem { journal })
+        Ok(Filesystem {
+            journal,
+            staging: Vec::new(),
+        })
     }
 
     fn dir<D: BlockDevice>(&self, dev: &D) -> Result<[u8; BLOCK_SIZE], FsError> {
@@ -240,12 +251,43 @@ impl Filesystem {
         Err(FsError::NotFound)
     }
 
+    /// Is `slot` live, and is its name exactly `name`? Read IN PLACE (ADR-088): `decode` builds
+    /// an owning `DirEntry` with a `String`, which is right for `list`/`stat` (the caller keeps
+    /// the answer) and wrong for a lookup that scans up to `MAX_FILES` slots on every write — on
+    /// a heap that never frees, a scan that allocates is a write that costs memory.
+    fn slot_is(dir: &[u8; BLOCK_SIZE], slot: usize, name: &str) -> bool {
+        let off = slot * SLOT;
+        if le64(dir, off + E_FLAGS) & F_USED == 0 {
+            return false;
+        }
+        let raw = &dir[off + E_NAME..off + E_NAME + MAX_NAME];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(MAX_NAME);
+        raw[..end] == *name.as_bytes()
+    }
+
+    fn slot_used(dir: &[u8; BLOCK_SIZE], slot: usize) -> bool {
+        le64(dir, slot * SLOT + E_FLAGS) & F_USED != 0
+    }
+
+    /// A live slot's extent (start block, length) WITHOUT its name — the half of `decode` the
+    /// write path needs, and the half that costs nothing (ADR-088).
+    fn slot_extent(dir: &[u8; BLOCK_SIZE], slot: usize) -> Option<(usize, usize)> {
+        if !Self::slot_used(dir, slot) {
+            return None;
+        }
+        let off = slot * SLOT;
+        Some((
+            le64(dir, off + E_START) as usize,
+            le64(dir, off + E_LEN) as usize,
+        ))
+    }
+
     fn find_slot(dir: &[u8; BLOCK_SIZE], name: &str) -> Option<usize> {
-        (1..=MAX_FILES).find(|&slot| Self::decode(dir, slot).is_some_and(|e| e.name == name))
+        (1..=MAX_FILES).find(|&slot| Self::slot_is(dir, slot, name))
     }
 
     fn free_slot(dir: &[u8; BLOCK_SIZE]) -> Option<usize> {
-        (1..=MAX_FILES).find(|&slot| Self::decode(dir, slot).is_none())
+        (1..=MAX_FILES).find(|&slot| !Self::slot_used(dir, slot))
     }
 
     fn bit(bitmap: &[u8; BLOCK_SIZE], b: usize) -> bool {
@@ -313,7 +355,9 @@ impl Filesystem {
         let first = Self::find_extent(&bitmap, cap, nblocks).ok_or(FsError::NoSpace)?;
 
         // The data blocks (zero-padded to the block size — a short tail never leaks adjacent bytes).
-        let mut updates: Vec<(usize, [u8; BLOCK_SIZE])> = Vec::with_capacity(nblocks + 2);
+        let Filesystem { journal, staging } = self;
+        staging.clear();
+        let updates = staging;
         for i in 0..nblocks {
             let mut blk = [0u8; BLOCK_SIZE];
             let off = i * BLOCK_SIZE;
@@ -332,7 +376,7 @@ impl Filesystem {
 
         updates.push((BITMAP_BLOCK, bitmap));
         updates.push((DIR_BLOCK, dir));
-        self.journal.commit(dev, &updates)?;
+        journal.commit(dev, updates)?;
         Ok(())
     }
 
@@ -362,9 +406,9 @@ impl Filesystem {
             Some(s) => s,
             None => return self.create(dev, name, data), // nothing to replace
         };
-        let old = Self::decode(&dir, slot).ok_or(FsError::Corrupt)?;
-        let old_blocks = old.blocks();
-        if old.start < FILE_DATA_START || old.start + old_blocks > dev.num_blocks() {
+        let (old_start, old_len) = Self::slot_extent(&dir, slot).ok_or(FsError::Corrupt)?;
+        let old_blocks = old_len.div_ceil(BLOCK_SIZE);
+        if old_start < FILE_DATA_START || old_start + old_blocks > dev.num_blocks() {
             return Err(FsError::Corrupt);
         }
         let new_blocks = data.len().div_ceil(BLOCK_SIZE);
@@ -375,7 +419,7 @@ impl Filesystem {
         // Free the old extent in a WORKING copy of the bitmap first, so the new extent may reuse those
         // very blocks — an in-place update of the same size is then the common, cheap case.
         let mut bitmap = self.bitmap(dev)?;
-        let old_first = old.start - FILE_DATA_START;
+        let old_first = old_start - FILE_DATA_START;
         for i in 0..old_blocks {
             Self::set_bit(&mut bitmap, old_first + i, false);
         }
@@ -385,8 +429,9 @@ impl Filesystem {
             None => return Err(FsError::NoSpace), // nothing written: the bitmap copy is discarded
         };
 
-        let mut updates: Vec<(usize, [u8; BLOCK_SIZE])> =
-            Vec::with_capacity(new_blocks + old_blocks + 2);
+        let Filesystem { journal, staging } = self;
+        staging.clear();
+        let updates = staging;
         // Old blocks the new extent does NOT reuse are erased in this same transaction.
         for i in 0..old_blocks {
             let b = old_first + i;
@@ -411,7 +456,7 @@ impl Filesystem {
 
         updates.push((BITMAP_BLOCK, bitmap));
         updates.push((DIR_BLOCK, dir));
-        self.journal.commit(dev, &updates)?;
+        journal.commit(dev, updates)?;
         Ok(())
     }
 
@@ -441,17 +486,19 @@ impl Filesystem {
         }
         let mut dir = self.dir(dev)?;
         let slot = Self::find_slot(&dir, name).ok_or(FsError::NotFound)?;
-        let e = Self::decode(&dir, slot).ok_or(FsError::Corrupt)?;
-        let nblocks = e.blocks();
-        if e.start < FILE_DATA_START || e.start + nblocks > dev.num_blocks() {
+        let (e_start, e_len) = Self::slot_extent(&dir, slot).ok_or(FsError::Corrupt)?;
+        let nblocks = e_len.div_ceil(BLOCK_SIZE);
+        if e_start < FILE_DATA_START || e_start + nblocks > dev.num_blocks() {
             return Err(FsError::Corrupt);
         }
         let mut bitmap = self.bitmap(dev)?;
-        let first = e.start - FILE_DATA_START;
+        let first = e_start - FILE_DATA_START;
 
-        let mut updates: Vec<(usize, [u8; BLOCK_SIZE])> = Vec::with_capacity(nblocks + 2);
+        let Filesystem { journal, staging } = self;
+        staging.clear();
+        let updates = staging;
         for i in 0..nblocks {
-            updates.push((e.start + i, [0u8; BLOCK_SIZE])); // erase on delete
+            updates.push((e_start + i, [0u8; BLOCK_SIZE])); // erase on delete
             Self::set_bit(&mut bitmap, first + i, false);
         }
         let off = slot * SLOT;
@@ -459,7 +506,7 @@ impl Filesystem {
 
         updates.push((BITMAP_BLOCK, bitmap));
         updates.push((DIR_BLOCK, dir));
-        self.journal.commit(dev, &updates)?;
+        journal.commit(dev, updates)?;
         Ok(())
     }
 }

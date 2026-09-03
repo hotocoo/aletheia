@@ -45,6 +45,7 @@ pub mod fbcon;
 pub mod font8x8;
 pub mod frameown;
 pub mod fs;
+pub mod fsstorm;
 pub mod fwcfg;
 pub mod grant;
 pub mod iommu;
