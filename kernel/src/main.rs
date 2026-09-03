@@ -1017,9 +1017,10 @@ pub extern "C" fn kmain() -> ! {
     // that never frees, a settled desktop that goes quiet, and the same storm twice.
     kprintln!("");
     kprintln!("--- window-storm selftests (the desktop at event volume, measured on this machine's own heap) ---");
-    kernel_core::STORM_REPORT.set(|before, after| {
+    kernel_core::STORM_REPORT.set(|family, before, after| {
         kprintln!(
-            "[wmstorm] heap watermark across the storm: {} -> {} bytes ({} moved)",
+            "[{}] heap watermark across the storm: {} -> {} bytes ({} moved)",
+            family,
             before,
             after,
             after.saturating_sub(before)
@@ -1040,6 +1041,32 @@ pub extern "C" fn kmain() -> ! {
                 name
             );
             semihosting::exit(740 + idx as i32);
+        }
+    }
+
+    // The SCHEDULER under the same merciless storm (REQ-QUAL-007 / REQ-ML-002, ADR-087): strict
+    // priority at volume, FIFO fairness inside a band, the advisor reordering without ever
+    // changing membership, a workload lifecycle that allocates NOTHING, and the same storm twice.
+    kprintln!("");
+    kprintln!("--- scheduler-storm selftests (dispatch at volume, measured on this machine's own heap) ---");
+    match kernel_core::schedstorm::storm_suite(
+        &mut || crate::heap::used_bytes(),
+        |n, passed, name| {
+            if passed {
+                kprintln!("  [pass {:>2}] {}", n, name);
+            } else {
+                kprintln!("  [FAIL {:>2}] {}", n, name);
+            }
+        },
+    ) {
+        Ok(n) => kprintln!("[schedstorm] ALL {} SCHEDULER-STORM INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[schedstorm] FAILED at scheduler-storm invariant {}: {}",
+                idx,
+                name
+            );
+            semihosting::exit(760 + idx as i32);
         }
     }
 

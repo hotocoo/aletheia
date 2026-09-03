@@ -331,6 +331,13 @@ CONTRACT=(
   "storm: four thousand pointer events in the steady state allocate NOTHING"
   "storm: a settled desktop repaints once and then writes nothing at all"
   "storm: the same storm told twice lands bit-identically, down to the frame's cost"
+
+  # The SCHEDULER at dispatch volume (ADR-087): the same answers on every CPU.
+  "schedstorm: over eight thousand dispatches, no ready task of higher priority was ever passed over"
+  "schedstorm: inside one priority band every task is served, and no task is served twice before another once"
+  "schedstorm: the advised drain is a PERMUTATION of the model-free one - same tasks, each once, different order"
+  "schedstorm: four thousand admit-dispatch-finish cycles allocate NOTHING"
+  "schedstorm: the same storm told twice dispatches the same tasks in the same order"
 )
 
 hr() { printf '========================================================================\n'; }

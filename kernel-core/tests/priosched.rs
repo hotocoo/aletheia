@@ -591,3 +591,38 @@ fn the_advisory_tiebreak_among_equals_follows_adr_056_exactly() {
     s.admit_with_advice(t(2), MED, adv(Verdict::Low));
     assert_eq!(s.schedule_next(), Some(t(1)));
 }
+
+/// The band's decisive-`Low` census survives EMPTYING (ADR-087). The census is kept when its last
+/// member leaves — deleting it there cost a fresh `BTreeSet` on the next `Low` admission, about
+/// sixty bytes per dispatch on a heap that never frees. What must stay true behaviourally is
+/// this: after the band empties and a new `Low` arrives, that task still displaces an `Elevated`
+/// leader exactly as ADR-056 says. A kept-but-stale census would break this; so would a deleted
+/// one that came back wrong.
+#[test]
+fn a_band_census_that_emptied_still_displaces_an_elevated_leader() {
+    use kernel_core::mlrisk::{Advice, Verdict};
+
+    let adv = |v: Verdict| Advice {
+        verdict: v,
+        margin: 0,
+        out_of_range: false,
+        degenerate: false,
+    };
+
+    let mut s = PriorityScheduler::new(ACQ);
+    s.admit_with_advice(t(1), MED, adv(Verdict::Elevated));
+    s.admit_with_advice(t(2), MED, adv(Verdict::Low));
+    // The Low member displaces the Elevated leader, then leaves: the band's census is now empty.
+    assert_eq!(s.schedule_next(), Some(t(2)));
+    s.finish(t(2));
+    // With nobody Low left, the Elevated leader runs — an empty census is "no Low member".
+    assert_eq!(s.schedule_next(), Some(t(1)));
+    s.finish(t(1));
+
+    // A new Low arrival at the SAME priority must displace a new Elevated leader, proving the
+    // census that emptied is still the census that works.
+    s.admit_with_advice(t(3), MED, adv(Verdict::Elevated));
+    s.admit_with_advice(t(4), MED, adv(Verdict::Low));
+    assert_eq!(s.schedule_next(), Some(t(4)));
+    assert_eq!(s.risk_of(t(4)), Some(Verdict::Low));
+}

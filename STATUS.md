@@ -1,6 +1,13 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-03, night (THE DESKTOP UNDER A MERCILESS STORM — `kernel-core/src/wmstorm.rs` is a
+**As of:** 2026-09-03, late (THE SCHEDULER UNDER A MERCILESS STORM — `kernel-core/src/schedstorm.rs`
+floods the priority scheduler as a boot suite on all three CPUs, measured on the platform's own heap:
+strict priority on every one of 8192 dispatches, FIFO service inside a band, an advised drain that is
+a PERMUTATION of the model-free one, four thousand admit-dispatch-finish cycles moving the heap
+watermark by ZERO bytes, and the same storm twice in the same order. It FOUND ~66 bytes per dispatch
+— a band's decisive-Low census was deleted the moment it emptied and reallocated on the next Low
+admission — and the census is now kept, so a dispatch costs nothing; ADR-087); before that:
+(THE DESKTOP UNDER A MERCILESS STORM — `kernel-core/src/wmstorm.rs` is a
 boot suite on all three CPUs measured on the platform's own heap: a thousand open/close cycles close
 exactly, a window that stops draining backs up to exactly its cap with every loss named and counted,
 a drain restores exactly that capacity, four thousand pointer events in the steady state move the
@@ -151,7 +158,37 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
 release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
-## Current wave — the desktop under a merciless storm (2026-09-03, ADR-086)
+## Current wave — the scheduler under a merciless storm (2026-09-03, ADR-087)
+
+ADR-086 stormed the desktop and found two per-event allocations. The scheduler is the other half
+of that question and the more serious one: it runs on EVERY dispatch, it is where the machine
+learning actually touches the machine (ADR-056 — the forest advises the ORDER, it never invents a
+task), and a bug there is not a stutter but a task nobody ever runs.
+
+`kernel-core/src/schedstorm.rs` floods the priority scheduler with the same deterministic stream,
+as a BOOT suite on all three CPUs, measured on the platform's own heap. Five claims: strict
+priority holds on EVERY one of 8192 dispatches (no ready task of higher effective priority ever
+passed over — checked per dispatch, not sampled); inside a band service is FIFO and counts differ
+by at most one turn; a full drain WITH a decisive advisor is a PERMUTATION of the model-free drain
+(same tasks, each exactly once, different order — the model decides what runs FIRST, never what
+runs); four thousand admit → dispatch → finish cycles move the heap watermark by ZERO bytes; and
+the same storm twice dispatches the same tasks in the same order, the whole sequence folded into
+one number.
+
+**What the storm found.** Claim 4 failed at about sixty bytes per dispatch.
+`PriorityScheduler::ready_dequeue` deleted a band's decisive-`Low` census the moment it emptied,
+and the next `Low` admission at that priority allocated a whole fresh `BTreeSet`. On a bump heap
+that never frees, that is a machine that dies of its own scheduling. The census is now KEPT when
+it empties — an empty census costs one map entry per priority band (bounded by the 256 that can
+exist), `pick` already reads an empty band as "no Low member", and a dispatch now costs zero.
+
+Proofs: `[schedstorm] ALL 5 SCHEDULER-STORM INVARIANTS HOLD` on all three targets (marker
+`schedstorm=5`, boot fails 760+i) with the heap measurement printed beside it, five cross-CPU
+conformance behaviours, and a host proof under a counting allocator that ignores frees. NAMED:
+no preemption or context switch is measured here (that is the SMP/user-mode gates' business), and
+there is no cross-band starvation claim — strict priority is the policy, aging is not implemented.
+
+## Previous wave — the desktop under a merciless storm (2026-09-03, ADR-086)
 
 Every window invariant so far was proved on a handful of events: one press, one drag, one close.
 That proves the RULES; it says nothing about the ten-thousandth event, when a queue nobody drained

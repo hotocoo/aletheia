@@ -63,6 +63,7 @@ pub mod ptreclaim;
 pub mod reclaim;
 pub mod reentry;
 pub mod sched;
+pub mod schedstorm;
 pub mod selftest;
 pub mod shell;
 pub mod shootdown;
@@ -111,23 +112,26 @@ pub mod spin_report {
         pub const fn new() -> Self {
             Slot(AtomicUsize::new(0))
         }
-        /// Install the reporter. Called once, before the suites run.
-        pub fn set(&self, f: fn(usize, usize)) {
+        /// Install the reporter. Called once, before the suites run. The family tag is passed
+        /// through so one reporter can serve every storm and each line names ITS suite.
+        pub fn set(&self, f: fn(&'static str, usize, usize)) {
             self.0.store(f as usize, Ordering::Relaxed);
         }
-        pub(crate) fn call(&self, a: usize, b: usize) {
+        pub(crate) fn call(&self, family: &'static str, a: usize, b: usize) {
             let p = self.0.load(Ordering::Relaxed);
             if p != 0 {
-                // SAFETY: the slot only ever holds a `fn(usize, usize)` stored by `set`.
-                let f: fn(usize, usize) = unsafe { core::mem::transmute(p) };
-                f(a, b);
+                // SAFETY: the slot only ever holds a `fn(&'static str, usize, usize)` stored by
+                // `set`.
+                let f: fn(&'static str, usize, usize) = unsafe { core::mem::transmute(p) };
+                f(family, a, b);
             }
         }
     }
 }
 
-pub(crate) fn kprintln_storm(before: usize, after: usize) {
-    STORM_REPORT.call(before, after);
+/// Report one storm's heap measurement, tagged with the family that measured it.
+pub(crate) fn storm_report(family: &'static str, before: usize, after: usize) {
+    STORM_REPORT.call(family, before, after);
 }
 
 /// The arch-independent hardware primitives the Aletheia kernel needs from a target backend. Every

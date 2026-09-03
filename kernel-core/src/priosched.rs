@@ -144,9 +144,12 @@ impl PriorityScheduler {
             if self.risk.get(&id) == Some(&Verdict::Low) {
                 if let Some(band) = self.low_seq.get_mut(&prio) {
                     band.remove(&(seq, id));
-                    if band.is_empty() {
-                        self.low_seq.remove(&prio);
-                    }
+                    // The band's census is KEPT when it empties (ADR-087). Dropping it here
+                    // freed a whole `BTreeSet` and the next decisive-Low admission at this
+                    // priority allocated a fresh one — about sixty bytes per dispatch on a heap
+                    // that never frees (ADR-063), which the scheduler storm measured. An empty
+                    // census costs one map entry per priority band, bounded by the 256 bands
+                    // that exist, and `pick` already reads an empty band as "no Low member".
                 }
             }
         }

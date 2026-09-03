@@ -255,7 +255,7 @@ pub fn storm_suite(
         let after = used_bytes();
         // The measurement is REPORTED whether it passes or not: a claim about allocation that
         // fails silently teaches nobody where the bytes went.
-        crate::kprintln_storm(before, after);
+        crate::storm_report("wmstorm", before, after);
         check!(
             presses == EVENTS as u64 && after == before,
             "storm: four thousand pointer events in the steady state allocate NOTHING"
