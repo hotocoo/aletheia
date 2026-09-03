@@ -124,8 +124,28 @@ session_open() {
   return 0
 }
 
+# Wait until the machine stops talking. The console prints its prompt as part of a banner that
+# is still arriving when the first command is typed, so a `want = prompts + 1` computed mid-burst
+# can be satisfied by a prompt the machine had ALREADY decided to print — the wait then ends
+# before the command ran and the capture misses its output (seen on a CI runner 2026-09-03: the
+# object was written, and the gate said it was not). Settling first makes the count mean what it
+# says: one more prompt than the machine has printed by the time the line goes out.
+session_settle() {
+  local a b spun=0
+  a="$(wc -l < "$SESSION_LOG")"
+  while : ; do
+    sleep 0.5
+    b="$(wc -l < "$SESSION_LOG")"
+    [ "$a" = "$b" ] && return 0
+    a="$b"; spun=$((spun + 1))
+    [ "$spun" -ge 40 ] && return 0   # 20 s of continuous output: type anyway, and let the
+                                      # per-command wait below report what actually happened
+  done
+}
+
 session_type() {
   local line="$1" want cur spun=0 before
+  session_settle
   before="$(wc -l < "$SESSION_LOG")"
   want=$(( $(prompt_count) + 1 ))
   printf '%s\r' "$line" >&3
