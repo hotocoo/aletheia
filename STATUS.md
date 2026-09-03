@@ -1,6 +1,19 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-02, night (THE TERMINAL WINDOW IS THE CONSOLE'S SECOND SURFACE — the live
+**As of:** 2026-09-03 (WINDOWS ARE A MANAGED SET, NOT ONE PRIVILEGED SURFACE — `kernel-core/src/wm.rs`
+gives the desktop a window manager that owns every window's owner token (unknown, duplicate and
+over-ceiling opens refused BY NAME and counted), chrome whose geometry is the painter's (the close box
+`textgrid` paints and `wm::hit_at` hit-tests from the same constants), a press that is a routing
+DECISION reported (`Closed`/`Dragging`/`Focused`/`Empty` over the compositor's own z-order and
+visible-rect math — what is clipped away cannot be clicked — touching no pixel), and CLOSE as a
+LIFECYCLE: surface, input queue and owner token die together, focus falls to the topmost survivor or is
+CLEARED so the next keystroke is refused `NoFocus`, and a re-opened id is a NEW window. ONE authority
+decides a click (`vinput::route_pointer_motion` moves the cursor and hands the press back undecided).
+The x86-64 live desktop runs TWO managed windows — the console's terminal and a system MONITOR that
+repaints when a FACT CHANGES rather than on a timer, so an idle machine still composes nothing — with
+12 boot invariants on all three targets (`wm=12`), `textgrid` 6 -> 7, six cross-CPU conformance
+behaviours (178 -> 185), 11 host proofs, the live gate 22 -> 30, and the x86-64 heap 8 -> 12 MiB;
+ADR-084); before that: (THE TERMINAL WINDOW IS THE CONSOLE'S SECOND SURFACE — the live
 desktop's window shows the console and types at it: `kernel-core/src/textgrid.rs` is a pixel-exact
 grid of the console's own alphabet (printable bytes in cells, exact scroll, wrap as newline, backspace
 erases one, the editor's `ESC [` sequences consumed unpainted, unknown bytes refused and counted)
@@ -125,7 +138,62 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
 release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
-## Current wave — the terminal window is the console's second surface (2026-09-02, ADR-083)
+## Current wave — windows are a managed set, not one privileged surface (2026-09-03, ADR-084)
+
+ALET-P2-021's window rung. After ADR-083 the desktop had exactly ONE window, and the code that
+decided what a click meant lived in `kernel-x86_64/src/desktop.rs`, written for that one surface
+id: a second application could not exist, nothing could be closed, and TWO authorities decided a
+single click (`route_pointer_batch` focused the surface under the pointer before anyone could
+observe that the pointer was over a close box). `kernel-core/src/wm.rs` is the layer that was
+missing between "a compositor with surfaces" and "a desktop with windows".
+
+* **The manager owns the tokens.** `WindowManager::open` mints the surface, places it, and KEEPS
+  the owner token, so "who may move, raise or close this window" has one answer. `UnknownWindow`,
+  `DuplicateWindow` and `TooManyWindows` are refused BY NAME and counted; a window that could not
+  be placed is detached rather than left minted as an unreachable id.
+* **Chrome is geometry, and the geometry is the PAINTER's.** `textgrid` paints the close box
+  (`CLOSE_W`, `has_close_box`) and `wm::hit_at` classifies a window-local point from the SAME
+  constants — painted and clickable cannot disagree — and a window too narrow to carry a name
+  beside a box carries no box at all, because chrome that is nearly all close box destroys a
+  window on every press near its top.
+* **A press is a routing DECISION, reported.** `press` walks the compositor's own z-order front
+  to back with the compositor's own visible-rect math (what is clipped away cannot be clicked)
+  and returns `Closed` / `Dragging` / `Focused` / `Empty`. It touches no pixel.
+* **Close is a LIFECYCLE.** The surface, its input queue and its owner token die together; focus
+  falls to the topmost survivor the manager owns, or is CLEARED when none is left so the next
+  keystroke is refused `NoFocus` rather than routed at a corpse; a re-opened id is a NEW window
+  (fresh token, empty queue, dead old token).
+* **One authority per click.** `vinput::route_pointer_motion` moves the cursor — the session's
+  own plane — and hands the press back UNDECIDED for the manager. `route_pointer_batch` keeps its
+  ADR-080 behaviour for the boot suites.
+
+The x86-64 live desktop now runs TWO managed windows: the console's terminal (ADR-083) and a
+system MONITOR reporting free frames, device events, keystrokes posted, drops, refusals, windows
+open and closed, drags and focus. **The monitor carries no clock, deliberately** — a panel that
+repaints once a second is a compose, a TRANSFER and a FLUSH every second forever on a machine
+where nothing happened, which would quietly end ADR-080's quiet desktop. It repaints when a FACT
+CHANGES (the pump compares every number the panel prints, whole — not a hash), so an idle machine
+still costs two used-ring reads and one damage check per tick. The wallpaper panel stays a plain
+surface, not a window: no chrome, no focus, no close, and a press on it is a press on empty
+desktop.
+
+Proofs: 12 boot invariants on all three targets (`[wm] ALL 12 WINDOW-MANAGER INVARIANTS HOLD`,
+marker `wm=12`, boot fails 720+i), `textgrid` 6 -> 7 for the painted close box, six cross-CPU
+conformance behaviours (178 -> 185), 11 host proofs in `kernel-core/tests/wm.rs` (partially-off
+windows clicked only where visible, a window closed mid-drag, FocusLost across a press, queues
+dying with their window, the ceiling under a long open/close story, and the motion route proved
+NOT to take the click decision), and the live gate `scripts/vinput-e2e.sh` 22 -> 30 checks: two
+managed windows up, a click focusing the second, a keystroke queued behind it while the console
+sees nothing, the CLOSE BOX ending that window, focus falling to the surviving terminal, and the
+keyboard typing there again. `InputFacts` gained `windows`/`closes`/`drags` and now reports the
+FOCUSED surface's backlog rather than the terminal's. The x86-64 heap grew 8 -> 12 MiB (the
+ADR-072 posture): this heap never frees, and at 8 MiB the vt-d gate's page tables were the
+allocation that found the ceiling. NAMED non-claims: no resize (a window's grid and surface are
+allocated once on a heap that never frees), no minimise/maximise/window list, no keyboard focus
+cycling, no live desktop on aarch64/RISC-V (they prove the manager in their boot suites), no
+user-mode application owning a window, and close is immediate — what a window held is gone.
+
+## Previous wave — the terminal window is the console's second surface (2026-09-02, ADR-083)
 
 ALET-P2-021's text rung. ADR-080 left the live desktop with a window nobody could read:
 keystrokes reached its queue, the queue was drained by nobody, and the window showed a border.

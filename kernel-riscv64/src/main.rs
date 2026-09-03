@@ -1005,6 +1005,28 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // The window manager (ALET-P2-021's window rung, ADR-084): windows are a managed SET -
+    // chrome the painter and the hit test agree on, a press that routes to the topmost window
+    // alone, a close that ends a window's surface, queue and token together, and focus that
+    // falls to a survivor or to nobody. Arch-neutral, so every CPU proves it.
+    kprintln!("");
+    kprintln!(
+        "--- window-manager selftests (a managed set of windows: raise, drag, close, focus) ---"
+    );
+    match kernel_core::wm::wm_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[wm] ALL {} WINDOW-MANAGER INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[wm] FAILED at window-manager invariant {}: {}", idx, name);
+            ActiveHal::exit(720 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("--- input hardware selftests (virtio-input: a real keyboard and pointer through the session) ---");
     match virtio::input_pair() {

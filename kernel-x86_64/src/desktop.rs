@@ -40,6 +40,7 @@
 //! buffer is allocated once at install and reused (ADR-063's heap never frees; that cost is
 //! per install, never per frame).
 
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::vec::Vec;
@@ -48,6 +49,7 @@ use kernel_core::fbcon::{ComposeSink, Surface};
 use kernel_core::textgrid::{TextGrid, TITLE_H};
 use kernel_core::vinput::{self, Button, KeyDecoder, PointerDecoder};
 use kernel_core::virtiogpu::{self, Rect as GpuRect};
+use kernel_core::wm::{Press, WindowManager};
 
 use crate::virtio::{Gpu, Input, InputDev};
 
@@ -60,9 +62,11 @@ const W: u32 = virtiogpu::CONSOLE_FB_WIDTH;
 const H: u32 = virtiogpu::CONSOLE_FB_HEIGHT;
 const PAGES: usize = virtiogpu::CONSOLE_FB_PAGES;
 
-/// Surface ids: the wallpaper panel and the terminal window.
+/// Surface ids: the wallpaper panel (the desktop's own, not a window) and the two WINDOWS the
+/// manager holds — the terminal and the system monitor (ADR-084).
 const PANEL: u32 = 1;
 const WINDOW: u32 = 2;
+const MONITOR: u32 = 3;
 /// The terminal grid: 40 columns x 12 rows of the console's alphabet (320 x 106 pixels with
 /// the title band), placed so a gap of empty scanout remains for an "empty space" click.
 const TERM_COLS: u32 = 40;
@@ -70,8 +74,31 @@ const TERM_ROWS: u32 = 12;
 const WINDOW_X: i32 = 300;
 const WINDOW_Y: i32 = 60;
 const TITLE: &[u8] = b"aletheia";
+/// The system monitor: a second application, on the same contract, repainting what the machine
+/// knows about itself once a second (ADR-084).
+const MON_COLS: u32 = 30;
+const MON_ROWS: u32 = 6;
+const MON_X: i32 = 20;
+const MON_Y: i32 = 140;
+const MON_TITLE: &[u8] = b"monitor";
 /// Keystrokes the main thread may hold between drains (the console pops one per loop turn).
 const TERM_INPUT_CAP: usize = 64;
+
+/// Every number the monitor window prints. Compared whole, so "nothing changed" is a fact
+/// about the panel's contents rather than about a hash of them (ADR-084).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MonitorFacts {
+    free: u64,
+    kb_ev: u64,
+    pt_ev: u64,
+    posted: u64,
+    dropped: u64,
+    refused: u64,
+    windows: u64,
+    closes: u64,
+    drags: u64,
+    focus: u64,
+}
 
 /// The desktop: its devices, its decoders, its compositor and session, its surfaces' owner
 /// tokens, its terminal grid, and its GPU resource.
@@ -82,20 +109,23 @@ pub struct Desktop {
     pt_dec: PointerDecoder,
     comp: Compositor,
     sess: u64,
-    tok_win: u64,
+    /// The window manager: it owns every window's token, and every press is its decision.
+    wm: WindowManager,
     gpu: Gpu,
     pages: Vec<usize>,
     posted: u64,
     term: TextGrid,
     packed: Vec<u8>,
+    /// The system monitor window's grid and its own render buffer (allocated once, reused).
+    mon: TextGrid,
+    mon_packed: Vec<u8>,
+    /// The facts the monitor last painted: the panel repaints when one of them CHANGES, never
+    /// on a timer, so an idle machine still composes nothing (ADR-084).
+    mon_sig: MonitorFacts,
     /// Keystrokes drained from the window's queue, waiting for the console's `getc`.
     term_input: Vec<u8>,
-    /// A drag in progress: the pointer's offset from the window's top-left at the press.
-    drag: Option<(i32, i32)>,
     /// Where the pointer last was (the cursor's own position, mirrored so a press knows it).
     pointer: (u32, u32),
-    /// Drags completed (press on the title band, release anywhere), for the ledger.
-    drags: u64,
 }
 
 static mut DESKTOP: Option<Desktop> = None;
@@ -150,10 +180,14 @@ pub fn install(
             .map_err(|_| "the desktop's scanout bind was refused")?;
     }
 
-    // The model: the same contract, the same geometry — a wallpaper panel and the terminal
-    // window, each drawn through its OWN token.
+    // The model: the same contract, the same geometry — a wallpaper panel the desktop paints
+    // directly, and TWO WINDOWS the manager holds (ADR-084). The panel is deliberately not a
+    // window: it has no chrome, cannot take focus, and cannot be closed, so a press that lands
+    // on it is a press on empty desktop.
     let term = TextGrid::new(TERM_COLS, TERM_ROWS);
     let (tw, th) = term.pixel_size();
+    let mon = TextGrid::new(MON_COLS, MON_ROWS);
+    let (mw, mh) = mon.pixel_size();
     let mut comp = Compositor::new(0x0D3A_1D05, W, H);
     let sess = comp
         .open_input_session()
@@ -161,9 +195,6 @@ pub fn install(
     let tok_panel = comp
         .mint_surface(PANEL, 400, 200)
         .map_err(|_| "the desktop's panel surface was refused")?;
-    let tok_win = comp
-        .mint_surface(WINDOW, tw, th)
-        .map_err(|_| "the desktop's window surface was refused")?;
     let _ = comp.fill_rect(
         PANEL,
         tok_panel,
@@ -186,15 +217,25 @@ pub fn install(
         },
         false,
     );
+    comp.attach(PANEL, tok_panel, 0, 0)
+        .map_err(|_| "the panel placement was refused")?;
+
+    let mut wm = WindowManager::new();
+    let tok_win = wm
+        .open(&mut comp, WINDOW, tw, th, WINDOW_X, WINDOW_Y)
+        .map_err(|_| "the terminal window was refused")?;
+    let tok_mon = wm
+        .open(&mut comp, MONITOR, mw, mh, MON_X, MON_Y)
+        .map_err(|_| "the monitor window was refused")?;
     let mut packed = Vec::new();
     term.render_packed(TITLE, &mut packed);
     comp.fill_packed(WINDOW, tok_win, &packed)
         .map_err(|_| "the terminal window's first paint was refused")?;
-    comp.attach(PANEL, tok_panel, 0, 0)
-        .map_err(|_| "the panel placement was refused")?;
-    comp.attach(WINDOW, tok_win, WINDOW_X, WINDOW_Y)
-        .map_err(|_| "the window placement was refused")?;
-    // The window holds focus until somebody clicks elsewhere; the cursor starts over it.
+    let mut mon_packed = Vec::new();
+    mon.render_packed(MON_TITLE, &mut mon_packed);
+    comp.fill_packed(MONITOR, tok_mon, &mon_packed)
+        .map_err(|_| "the monitor window's first paint was refused")?;
+    // The terminal holds focus until somebody clicks elsewhere; the cursor starts over it.
     comp.set_focus(sess, WINDOW)
         .map_err(|_| "focusing the window was refused")?;
     comp.move_cursor(sess, 320, 120)
@@ -230,16 +271,17 @@ pub fn install(
             pt_dec: PointerDecoder::new(W, H),
             comp,
             sess,
-            tok_win,
+            wm,
             gpu,
             pages,
             posted: 0,
             term,
             packed,
+            mon,
+            mon_packed,
+            mon_sig: MonitorFacts::default(),
             term_input: Vec::with_capacity(TERM_INPUT_CAP),
-            drag: None,
             pointer: (320, 120),
-            drags: 0,
         });
         let d = (*core::ptr::addr_of_mut!(DESKTOP)).as_mut().unwrap();
         d.pt_dec.set_axis(x_max, y_max); // device-declared range, qualified by vinput_suite
@@ -278,39 +320,98 @@ impl Desktop {
     /// anything owes a repaint. Both contexts call this; both hold the interrupt flag clear.
     fn repaint(&mut self) {
         if self.term.take_dirty() {
-            self.term.render_packed(TITLE, &mut self.packed);
-            let _ = self.comp.fill_packed(WINDOW, self.tok_win, &self.packed);
+            if let Some(tok) = self.wm.token(WINDOW) {
+                self.term.render_packed(TITLE, &mut self.packed);
+                let _ = self.comp.fill_packed(WINDOW, tok, &self.packed);
+            }
+        }
+        if self.mon.take_dirty() {
+            if let Some(tok) = self.wm.token(MONITOR) {
+                self.mon.render_packed(MON_TITLE, &mut self.mon_packed);
+                let _ = self.comp.fill_packed(MONITOR, tok, &self.mon_packed);
+            }
         }
         if self.comp.has_pending_damage() {
             let _ = show_frame(&mut self.comp, &self.pages, &mut self.gpu);
         }
     }
 
-    /// A pointer batch on top of what `route_pointer_batch` already did (cursor move, click as
-    /// a focus decision): a press on the terminal's title band starts a DRAG and raises the
-    /// window; motion while dragging moves the window by the pointer's delta (the compositor
-    /// refuses a fully-off placement, and the window then simply stays); a release ends it.
+    /// Repaint the monitor window from what the machine knows about itself — but ONLY when one
+    /// of those facts actually changed (ADR-084). A panel on a timer would quietly end the
+    /// quiet desktop of ADR-080: a clock ticking once a second is a compose, a TRANSFER and a
+    /// FLUSH every second forever, on a machine where nothing happened. So the monitor carries
+    /// no clock: it reports the counters, and an idle machine still costs two used-ring reads
+    /// and one damage check per tick, exactly as it did before this window existed.
+    fn refresh_monitor(&mut self) {
+        if !self.wm.is_open(MONITOR) {
+            return;
+        }
+        let (dropped, refused) = self.comp.input_counters();
+        let (_, closes, drags, wm_refusals) = self.wm.counters();
+        let free = crate::frames::free_count();
+        let (kb_ev, pt_ev) = (self.kb.events_seen(), self.tab.events_seen());
+        let focus = self.comp.focus().unwrap_or(0) as u64;
+        // The signature is every number the panel prints, kept whole rather than mixed into one
+        // word: equal signature, identical pixels — no hash, so no two different truths can ever
+        // agree by accident and leave the panel saying something that stopped being true.
+        let sig = MonitorFacts {
+            free: free as u64,
+            kb_ev,
+            pt_ev,
+            posted: self.posted,
+            dropped,
+            refused: refused + wm_refusals,
+            windows: self.wm.count() as u64,
+            closes,
+            drags,
+            focus,
+        };
+        if sig == self.mon_sig {
+            return;
+        }
+        self.mon_sig = sig;
+        self.mon.clear();
+        let _ = write!(
+            self.mon,
+            "frames  {} of {} free\ninput   kb {} pt {} posted {}\nlost    {} dropped, {} refused\nwindows {} open, {} closed\ndrags   {}\nfocus   {}\n",
+            free,
+            crate::frames::total_count(),
+            kb_ev,
+            pt_ev,
+            self.posted,
+            dropped,
+            refused + wm_refusals,
+            self.wm.count(),
+            closes,
+            drags,
+            focus
+        );
+    }
+
+    /// A pointer batch, decided by the WINDOW MANAGER (ADR-084). The cursor already moved
+    /// (that is the session's own plane); everything else is the manager's call: a press picks
+    /// the topmost window under the point and either closes it, starts a drag on its title
+    /// band, or focuses it, and a press on empty desktop clears focus. Motion while dragging
+    /// moves the window so the grabbed pixel stays under the pointer; a placement fully off
+    /// the scanout is refused and the window simply stays.
     fn pointer_batch(&mut self, batch: vinput::PointerBatch) {
         if let Some(p) = batch.move_to {
             self.pointer = p;
         }
-        let (px, py) = (self.pointer.0 as i32, self.pointer.1 as i32);
+        let (px, py) = self.pointer;
         if let Some((Button::Left, down)) = batch.button {
             if down {
-                if let Some((wx, wy)) = self.comp.placement(WINDOW) {
-                    if self.term.in_title(px - wx, py - wy) {
-                        self.drag = Some((px - wx, py - wy));
-                        let _ = self.comp.raise(WINDOW, self.tok_win);
-                    }
+                // A closed terminal takes its unread keystrokes with it: the bytes the
+                // console had not yet read belonged to a window that no longer exists.
+                if let Press::Closed(WINDOW) = self.wm.press(&mut self.comp, self.sess, px, py) {
+                    self.term_input.clear();
                 }
-            } else if self.drag.take().is_some() {
-                self.drags += 1;
+            } else {
+                let _ = self.wm.release();
             }
         }
-        if let (Some((dx, dy)), Some(_)) = (self.drag, batch.move_to) {
-            let _ = self
-                .comp
-                .move_surface(WINDOW, self.tok_win, px - dx, py - dy);
+        if batch.move_to.is_some() {
+            let _ = self.wm.motion(&mut self.comp, px, py);
         }
     }
 
@@ -320,7 +421,10 @@ impl Desktop {
         if self.term_input.len() >= TERM_INPUT_CAP {
             return;
         }
-        if let Ok(events) = self.comp.drain_input(WINDOW, self.tok_win) {
+        let Some(tok) = self.wm.token(WINDOW) else {
+            return; // the terminal window was closed: there is no queue to drain
+        };
+        if let Ok(events) = self.comp.drain_input(WINDOW, tok) {
             for e in events {
                 if let EventKind::Key(b) = e.kind {
                     if self.term_input.len() < TERM_INPUT_CAP {
@@ -333,7 +437,13 @@ impl Desktop {
 
     fn publish_facts(&self) {
         let (dropped, refused) = self.comp.input_counters();
-        let queued_len = self.comp.queued_len(WINDOW);
+        // The FOCUSED surface's backlog, not the terminal's: with more than one window
+        // (ADR-084) "what has been delivered that nobody has read" is a question about the
+        // window the keystrokes are going to, whichever one that is.
+        let queued_len = match self.comp.focus() {
+            Some(id) => self.comp.queued_len(id),
+            None => 0,
+        };
         FACT_KB_EVENTS.store(self.kb.events_seen(), Ordering::Relaxed);
         FACT_PT_EVENTS.store(self.tab.events_seen(), Ordering::Relaxed);
         FACT_POSTED.store(self.posted, Ordering::Relaxed);
@@ -378,7 +488,7 @@ pub fn tick_pump() {
         match unsafe { d.tab.next_event() } {
             Some(ev) => {
                 if let Ok(batch) =
-                    vinput::route_pointer_batch(&mut d.pt_dec, &mut d.comp, d.sess, ev)
+                    vinput::route_pointer_motion(&mut d.pt_dec, &mut d.comp, d.sess, ev)
                 {
                     d.pointer_batch(batch);
                 }
@@ -389,6 +499,7 @@ pub fn tick_pump() {
     // The keystrokes the session routed to the window are the console's to read: hand them
     // across to the main thread's line now, so `getc` finds them on its next turn.
     d.drain_window();
+    d.refresh_monitor();
     d.repaint();
     d.publish_facts();
 }
@@ -420,6 +531,9 @@ fn with_desktop<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
 #[cfg(feature = "interactive")]
 pub fn term_write(bytes: &[u8]) {
     let _ = with_desktop(|d| {
+        if !d.wm.is_open(WINDOW) {
+            return; // the window a user closed is not a place the console still writes
+        }
         d.term.write(bytes);
         d.repaint();
     });
@@ -456,14 +570,24 @@ pub fn facts() -> Option<kernel_core::shell::InputFacts> {
         u64::MAX => None,
         id => Some(id as u32),
     };
-    let (window, term_lines, term_last, term_last_len) = with_desktop(|d| {
-        let mut last = [0u8; 48];
-        let line = d.term.last_nonblank_line();
-        let n = line.len().min(last.len());
-        last[..n].copy_from_slice(&line[..n]);
-        (d.comp.placement(WINDOW), d.term.lines(), last, n as u8)
-    })
-    .unwrap_or((None, 0, [0u8; 48], 0));
+    let (window, term_lines, term_last, term_last_len, windows, closes, drags) =
+        with_desktop(|d| {
+            let mut last = [0u8; 48];
+            let line = d.term.last_nonblank_line();
+            let n = line.len().min(last.len());
+            last[..n].copy_from_slice(&line[..n]);
+            let (_, closes, drags, _) = d.wm.counters();
+            (
+                d.comp.placement(WINDOW),
+                d.term.lines(),
+                last,
+                n as u8,
+                d.wm.count(),
+                closes,
+                drags,
+            )
+        })
+        .unwrap_or((None, 0, [0u8; 48], 0, 0, 0, 0));
     Some(kernel_core::shell::InputFacts {
         events_posted: FACT_POSTED.load(Ordering::Relaxed),
         dropped: FACT_DROPPED.load(Ordering::Relaxed),
@@ -477,13 +601,26 @@ pub fn facts() -> Option<kernel_core::shell::InputFacts> {
         term_lines,
         term_last,
         term_last_len,
+        windows,
+        closes,
+        drags,
     })
 }
 
-/// Drags completed since install, for the boot log and a human's curiosity.
+/// Windows the manager holds open right now — the boot log names how many came up (ADR-084).
+pub fn window_count() -> usize {
+    with_desktop(|d| d.wm.count()).unwrap_or(0)
+}
+
+/// Drags completed and windows closed since install, for the boot log and a human's curiosity.
 #[allow(dead_code)]
 pub fn drags() -> u64 {
-    with_desktop(|d| d.drags).unwrap_or(0)
+    with_desktop(|d| d.wm.counters().2).unwrap_or(0)
+}
+
+#[allow(dead_code)]
+pub fn closes() -> u64 {
+    with_desktop(|d| d.wm.counters().1).unwrap_or(0)
 }
 
 #[allow(dead_code)]

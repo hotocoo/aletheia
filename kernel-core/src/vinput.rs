@@ -880,6 +880,24 @@ pub fn route_pointer_batch(
     Ok(batch)
 }
 
+/// Route one pointer record WITHOUT taking the click decision (ADR-084): the cursor still
+/// moves (it is the session's plane, and a pointer that does not move is a broken pointer),
+/// but the press is handed back untouched for a window manager to decide. A desktop with
+/// windows must not have two authorities deciding where a click goes — `focus_at` would focus
+/// the surface under the point before the manager could see that the point was a CLOSE BOX.
+pub fn route_pointer_motion(
+    dec: &mut PointerDecoder,
+    comp: &mut Compositor,
+    sess: u64,
+    ev: RawEvent,
+) -> Result<PointerBatch, CompFault> {
+    let batch = dec.feed(ev);
+    if let Some((x, y)) = batch.move_to {
+        comp.move_cursor(sess, x, y)?;
+    }
+    Ok(batch)
+}
+
 pub fn route_pointer(
     dec: &mut PointerDecoder,
     comp: &mut Compositor,

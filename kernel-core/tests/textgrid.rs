@@ -11,7 +11,7 @@ fn the_boot_suite_passes_on_the_host() {
         assert!(ok, "{name}");
     })
     .unwrap();
-    assert_eq!(n, 6);
+    assert_eq!(n, 7);
 }
 
 #[test]

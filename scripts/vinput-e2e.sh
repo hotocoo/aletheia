@@ -213,6 +213,7 @@ CURSOR_RE = re.compile(r'cursor: \((\d+), (\d+)\) (shown|hidden)')
 FOCUS_RE = re.compile(r'focus: surface (\d+) \((\d+) queued\)|focus: none')
 WIN_RE = re.compile(r'window: at \((-?\d+), (-?\d+)\)')
 TERM_RE = re.compile(r'terminal: (\d+) lines, last "([^"]*)"')
+WINDOWS_RE = re.compile(r'windows: (\d+) open, (\d+) closed, (\d+) drags')
 
 def run_input():
     """Type `input` + Enter on the serial wire and return the parsed readout."""
@@ -354,6 +355,61 @@ expect = (300 + map_axis(DROP[0], SCAN_W) - map_axis(PRESS[0], SCAN_W),
           60 + map_axis(DROP[1], SCAN_H) - map_axis(PRESS[1], SCAN_H))
 check(win2 is not None and (int(win2.group(1)), int(win2.group(2))) == expect and facts7[4] == 'surface 2',
       'window: a drag by the title band moved it by the mapped pointer delta (%r, expected %r)' % ((win2.group(1), win2.group(2)) if win2 else None, expect))
+
+# 5d - THE SECOND WINDOW (ADR-084): the desktop came up with two managed windows, and a click
+#      on the monitor window takes focus away from the terminal. Focus is a routing decision:
+#      from here a keystroke lands in the monitor's queue and the console never sees it.
+def axis_for(px, span):
+    """The tablet value that maps to exactly pixel `px` under the kernel's own mapping."""
+    v = (px * (AXIS_MAX + 1)) // span
+    while map_axis(v, span) < px:
+        v += 1
+    assert map_axis(v, span) == px, (px, span, v, map_axis(v, span))
+    return v
+
+def goto(px, py):
+    abs_move(axis_for(px, SCAN_W), axis_for(py, SCAN_H))
+
+chunk, _f = run_input()
+w0 = WINDOWS_RE.search(chunk)
+check(w0 is not None and int(w0.group(1)) == 2 and int(w0.group(2)) == 0,
+      'windows: the desktop came up with two managed windows (%r)' % ((w0.groups() if w0 else None),))
+check('managed windows' in log_text(),
+      'windows: the boot log names how many windows the manager holds')
+goto(100, 170)                                   # the monitor window's client area
+click()
+chunk, (_p8, _d8, _r8, _c8, focus8, _q8) = run_input()
+check(focus8 == 'surface 3', 'windows: a click on the second window focuses it (%r)' % (focus8,))
+mark = len(log_text())
+press(['b'])
+time.sleep(0.4)
+chunk, (_p9, _d9, _r9, _c9, focus9, queued9) = run_input()
+check(queued9 >= 1 and focus9 == 'surface 3',
+      'windows: the keystroke queued behind the focused monitor, unread (queued %r)' % (queued9,))
+check('b' not in log_text()[mark:len(log_text())].split('input')[0],
+      'windows: the console never saw the keystroke that went to the other window')
+
+# 5e - THE CLOSE BOX: pressing it ends the window - its surface, its queue and its token die
+#      together - and focus falls to the survivor, which is the console's terminal again.
+goto(254, 144)                                   # the monitor's close box (top-right corner)
+click()
+chunk, (_pa, _da, _ra, _ca, focusa, _qa) = run_input()
+wa = WINDOWS_RE.search(chunk)
+check(wa is not None and int(wa.group(1)) == 1 and int(wa.group(2)) == 1,
+      'windows: the close box closed the window (%r)' % ((wa.groups() if wa else None),))
+check(focusa == 'surface 2',
+      'windows: focus fell to the surviving window, not to nobody (%r)' % (focusa,))
+
+# 5f - the console is live again on its own window: a keystroke typed now is echoed by the
+#      shell, which proves the survivor is focused in fact and not only in the readout.
+mark = len(log_text())
+press(['c'])
+time.sleep(0.5)
+between = log_text()[mark:]
+press(['backspace'])
+time.sleep(0.3)
+check('c' in between,
+      'windows: after the close, the keyboard types at the surviving terminal again (%r)' % (between[:40],))
 
 # 6 — quiet: with nothing happening, the ledger holds still.
 chunk, (posted6, dropped6, refused6, cursor6, _f6, queued6) = run_input()

@@ -315,6 +315,15 @@ CONTRACT=(
   "textgrid: printable bytes land in cells, carriage return returns, backspace erases one"
   "textgrid: a newline on the last row scrolls exactly one row"
   "textgrid: rendering is pixel-exact - solid title band, glyph bits at the cell, blank elsewhere"
+  "textgrid: the close box is painted exactly where the window manager hit-tests it"
+
+  # Windows are a managed set (ADR-084): the same routing decision on every CPU.
+  "wm: the close box, the drag band and the client area are exactly the painted chrome"
+  "wm: a press in the overlap routes to the topmost window and raises it, alone"
+  "wm: the title band drags the window by the pointer delta and release ends it exactly"
+  "wm: the close box detaches the window and its owner token dies with it"
+  "wm: closing the focused window hands focus to the topmost survivor, which receives"
+  "wm: closing the last window clears focus and a keystroke is refused by name"
 )
 
 hr() { printf '========================================================================\n'; }

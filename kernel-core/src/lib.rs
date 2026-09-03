@@ -86,6 +86,7 @@ pub mod virtiopci;
 pub mod virtq;
 pub mod vmaddr;
 pub mod vtd;
+pub mod wm;
 
 /// The arch-independent hardware primitives the Aletheia kernel needs from a target backend. Every
 /// target implements this for its own `…Hal` struct; the kernel is written against the trait, never

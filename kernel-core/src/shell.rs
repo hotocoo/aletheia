@@ -715,6 +715,12 @@ pub struct InputFacts {
     /// The terminal window's current line (trailing blanks trimmed), and its length.
     pub term_last: [u8; 48],
     pub term_last_len: u8,
+    /// Windows the manager holds open right now (ADR-084).
+    pub windows: usize,
+    /// Windows closed since boot (a close box pressed, or a window closed by the machine).
+    pub closes: u64,
+    /// Drags completed since boot (a press on a title band, then a release).
+    pub drags: u64,
 }
 
 /// The facts a command may ask of the running target. Everything here is already established by the
@@ -1100,6 +1106,12 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     out(&format!(
                         "terminal: {} lines, last \"{}\"",
                         f.term_lines, last
+                    ));
+                    // The managed set (ADR-084): how many windows are open, and what the
+                    // pointer has done to them since boot.
+                    out(&format!(
+                        "windows: {} open, {} closed, {} drags",
+                        f.windows, f.closes, f.drags
                     ));
                 }
                 None => out("input: no machine input session on this target"),

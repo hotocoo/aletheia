@@ -28,6 +28,18 @@ use alloc::vec::Vec;
 pub const CELL: u32 = 8;
 /// Height of the title band above the text rows.
 pub const TITLE_H: u32 = 10;
+/// Width of the CLOSE BOX at the right end of the title band (ADR-084). The band is painted
+/// here and hit-tested in [`crate::wm`] from this same constant, so a user can never click a
+/// close box that is drawn somewhere else.
+pub const CLOSE_W: u32 = 10;
+
+/// Does a window this wide carry a close box? A band with no room for a name beside the box
+/// carries none at all — the alternative is a chrome that is nearly all close box, where every
+/// press near the top destroys the window. One predicate, used by the painter here and by the
+/// hit test in [`crate::wm`], so painted and clickable can never disagree.
+pub fn has_close_box(width: u32) -> bool {
+    width >= CLOSE_W * 2
+}
 
 /// The grid: `cols` x `rows` cells of the console's alphabet, a write cursor, and counters.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +175,19 @@ impl TextGrid {
         }
     }
 
+    /// Blank every cell and put the write cursor home. A panel that REPAINTS itself (the
+    /// desktop's monitor window, ADR-084) is not a teletype: it says what is true now, rather
+    /// than scrolling a history of what was true.
+    pub fn clear(&mut self) {
+        for c in self.cells.iter_mut() {
+            *c = b' ';
+        }
+        self.col = 0;
+        self.row = 0;
+        self.csi = 0;
+        self.dirty = true;
+    }
+
     /// Accept a whole string of the console's output.
     pub fn write(&mut self, s: &[u8]) {
         for &b in s {
@@ -224,7 +249,8 @@ impl TextGrid {
         let mut all_served = true;
         for (k, &ch) in title.iter().enumerate() {
             let x0 = 4 + k as u32 * CELL;
-            if x0 + CELL > w {
+            let title_limit = if has_close_box(w) { w - CLOSE_W } else { w };
+            if x0 + CELL > title_limit {
                 break;
             }
             let g = match font8x8::glyph(ch) {
@@ -238,6 +264,23 @@ impl TextGrid {
                 for bit in 0..8u32 {
                     if bits & (1 << bit) != 0 {
                         set(x0 + bit, 1 + r as u32, false);
+                    }
+                }
+            }
+        }
+        // The close box: an 'x' knocked out of the right end of the band, over a knocked-out
+        // gap that separates it from the name. The manager hit-tests exactly these pixels.
+        if has_close_box(w) {
+            let x0 = w - CLOSE_W;
+            for y in 0..TITLE_H - 1 {
+                set(x0, y, false);
+            }
+            if let Some(g) = font8x8::glyph(b'x') {
+                for (r, bits) in g.iter().enumerate() {
+                    for bit in 0..8u32 {
+                        if bits & (1 << bit) != 0 {
+                            set(x0 + 1 + bit, 1 + r as u32, false);
+                        }
                     }
                 }
             }
@@ -271,6 +314,16 @@ impl TextGrid {
     pub fn in_title(&self, local_x: i32, local_y: i32) -> bool {
         let (w, _) = self.pixel_size();
         local_x >= 0 && (local_x as u32) < w && local_y >= 0 && (local_y as u32) < TITLE_H
+    }
+}
+
+/// A grid accepts formatted output like any writer, so a caller with `write!` needs no
+/// intermediate buffer on a heap that never frees (ADR-063). Every byte still goes through
+/// [`TextGrid::put`], so the alphabet and the refusal counter are exactly the same.
+impl core::fmt::Write for TextGrid {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.write(s.as_bytes());
+        Ok(())
     }
 }
 
@@ -372,6 +425,32 @@ pub fn textgrid_suite(
                 && g.in_title(0, 0)
                 && !g.in_title(0, TITLE_H as i32),
             "textgrid: the render buffer is reused and dirty is a one-shot"
+        );
+    }
+    // 7 — the close box is PAINTED where the window manager hit-tests it (ADR-084): the
+    //     rightmost CLOSE_W pixels of the band carry the knocked-out 'x' glyph, the column
+    //     that separates it from the name is clear, and the title text stops before it.
+    {
+        let g = TextGrid::new(8, 1);
+        let mut out = Vec::new();
+        g.render_packed(b"abcdefgh", &mut out);
+        let (w, _) = g.pixel_size();
+        let px = |x: u32, y: u32| out[((y * w + x) / 8) as usize] & (1 << ((y * w + x) % 8)) != 0;
+        let glyph = font8x8::glyph(b'x').unwrap();
+        let x0 = w - CLOSE_W;
+        let mut box_ok = true;
+        for (r, bits) in glyph.iter().enumerate() {
+            for bit in 0..8u32 {
+                if bits & (1 << bit) != 0 {
+                    box_ok &= !px(x0 + 1 + bit, 1 + r as u32);
+                }
+            }
+        }
+        // The title's last glyph cell must end before the close box begins.
+        let title_clear = (0..TITLE_H - 1).all(|y| !px(x0, y));
+        check!(
+            box_ok && title_clear && (0..TITLE_H - 1).all(|y| px(x0 - 1, y)),
+            "textgrid: the close box is painted exactly where the window manager hit-tests it"
         );
     }
     Ok(n)
