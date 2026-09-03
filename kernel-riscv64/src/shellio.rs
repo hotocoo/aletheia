@@ -102,6 +102,23 @@ impl ShellHost for Host {
 /// Blocks for the console's scratch namespace when no disk is attached.
 const SCRATCH_BLOCKS: usize = fs::FILE_DATA_START + 64;
 
+/// The console under a merciless storm (ADR-089): the dispatcher at command volume, measured on
+/// THIS machine's own heap. Failure returns `(index, name)` → the caller exits `820 + index`.
+pub fn storm() -> Result<u32, (u32, &'static str)> {
+    let host = Host::privileged();
+    kernel_core::shellstorm::storm_suite(
+        &host,
+        &mut || crate::heap::used_bytes(),
+        |n, passed, name| {
+            if passed {
+                kprintln!("  [pass {:>2}] {}", n, name);
+            } else {
+                kprintln!("  [FAIL {:>2}] {}", n, name);
+            }
+        },
+    )
+}
+
 /// Prove the console on this target, in kernel space, over a real namespace. Failure returns
 /// `(index, name)` → the caller exits `250 + index`.
 pub fn selftest() -> Result<u32, (u32, &'static str)> {

@@ -345,6 +345,13 @@ CONTRACT=(
   "fsstorm: every removed object's blocks read back zero - erase on delete, at volume"
   "fsstorm: a fault at every position of a commit leaves the object wholly old or wholly new"
   "fsstorm: the same storm told twice leaves the namespace byte-for-byte identical"
+
+  # The CONSOLE at command volume (ADR-089): the same answers on every CPU.
+  "linebuf: a line that fits comes back byte-for-byte, untruncated"
+  "linebuf: truncation drops a whole character rather than splitting one"
+  "shellstorm: two hundred and fifty-six reporting commands allocate NOTHING"
+  "shellstorm: a thousand submitted lines keep a bounded history and cost only the line itself"
+  "shellstorm: the same session told twice prints byte-for-byte the same answer"
 )
 
 hr() { printf '========================================================================\n'; }

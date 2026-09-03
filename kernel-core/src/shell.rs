@@ -36,6 +36,7 @@
 //!
 //! **What this is not.** The dispatcher runs in kernel space and drives the kernel's own objects
 //! directly; it is not a user-mode shell process over a syscall ABI, and it is not claimed as one.
+use crate::outf;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -447,9 +448,22 @@ impl LineEditor {
             return;
         }
         if self.history.len() == HISTORY_MAX {
-            self.history.remove(0);
+            // Reuse the oldest entry's buffer rather than dropping it and allocating a new one
+            // (ADR-089): on a heap that never frees, a `String` per submitted line is a session
+            // that costs memory for as long as somebody keeps typing.
+            let mut oldest = self.history.remove(0);
+            oldest.clear();
+            oldest.push_str(line);
+            self.history.push(oldest);
+        } else {
+            self.history.push(line.to_string());
         }
-        self.history.push(line.to_string());
+    }
+
+    /// How many lines the history holds right now — observable so a suite can pin the bound
+    /// (ADR-089) without reaching into the editor's internals.
+    pub fn history_len(&self) -> usize {
+        self.history.len()
     }
 
     /// Act on a completed CSI sequence. `final_byte` is the byte that ended it; the parameters are
@@ -680,11 +694,13 @@ pub fn authorize_with_capabilities(
     offered: &[crate::spine::CapToken],
     action: ShellAction,
 ) -> bool {
-    engine.evaluate(
+    // `allows`, not `evaluate` (ADR-089): a console asks this on EVERY command, and a refusal
+    // that builds its reason string costs the heap on a machine that never frees.
+    engine.allows(
         action.capability(),
         &crate::spine::Target::default(),
         offered,
-    ) == crate::spine::Decision::Allow
+    )
 }
 
 /// What the machine's live input session reports to a human (ALET-P2-021's hardware rung,
@@ -874,7 +890,7 @@ fn authorize<H: ShellHost>(host: &H, action: ShellAction, out: &mut dyn FnMut(&s
     if host.authorize(action) {
         true
     } else {
-        out(&format!("permission denied: {}", action.label()));
+        outf!(out, "permission denied: {}", action.label());
         false
     }
 }
@@ -899,58 +915,67 @@ pub fn report_risk_advisor(out: &mut dyn FnMut(&str)) {
         None => out("risk advisor: none installed on this machine"),
         Some(s) => {
             match crate::mlsched::resident::shape() {
-                        Some((trees, nodes, compares)) => out(&format!(
+                        Some((trees, nodes, compares)) => outf!(out,
                             "risk advisor: RESIDENT — {} trees, {} nodes, worst case {} compares per advice",
                             trees, nodes, compares
-                        )),
+                        ),
                         // Named absence: a machine running without advice says which check refused
                         // the model, never merely omits the line.
                         None => match crate::mlsched::resident::model_error() {
-                            Some(e) => out(&format!("risk advisor: REFUSED — {:?}", e)),
+                            Some(e) => outf!(out, "risk advisor: REFUSED — {:?}", e),
                             None => out("risk advisor: installed with no model (control arm)"),
                         },
                     }
-            out(&format!(
+            outf!(
+                out,
                 "advices: {} ({} low / {} elevated / {} abstain: {} band, {} degenerate input)",
-                s.advices, s.low, s.elevated, s.abstain, s.band_abstain, s.degenerate_abstain
-            ));
-            out(&format!(
+                s.advices,
+                s.low,
+                s.elevated,
+                s.abstain,
+                s.band_abstain,
+                s.degenerate_abstain
+            );
+            outf!(
+                out,
                 "decisive: {}.{}% — {} out-of-box arrival(s) declined",
                 s.decisive_permille() / 10,
                 s.decisive_permille() % 10,
                 s.out_of_range
-            ));
-            out(&format!(
+            );
+            outf!(out,
                         "watching: {} dispatch(es), {} finished / {} failed / {} evicted, {} housekeeping tick(s)",
                         s.schedules, s.finished, s.failed, s.evicted, s.ticks
-                    ));
+                    );
             // The falsifiable one. A model consulted in a burst at boot and never since has
             // a longest gap equal to its uptime, and this line says so.
-            out(&format!(
+            outf!(
+                out,
                 "continuity: first advice at {}s, last at {}s (span {}s), longest gap {}s",
                 s.first_advice_secs,
                 s.last_advice_secs,
                 s.span_secs(),
                 s.max_gap_secs
-            ));
+            );
             // The falsifiable line: a historical gap closes only when the NEXT advice
             // arrives, so an advisor that fell silent keeps reporting the small gaps it
             // managed while busy. Silence is measured against the machine's own clock and
             // grows with it.
-            out(&format!(
+            outf!(
+                out,
                 "silence: {}s since the last advice, as of the machine's clock at {}s",
                 s.silence_secs(),
                 s.last_tick_secs
-            ));
+            );
             // The memory boundary (ADR-081): what the allocator last said, the least it ever said,
             // and how often the bounded door said no. Unmetered is a state, printed as one.
             if s.memory_samples == 0 {
-                out(&format!(
+                outf!(out,
                     "memory: UNMETERED - no allocator reading yet, bounded admission refuses everything ({} refused so far)",
                     s.unmetered_refusals
-                ));
+                );
             } else {
-                out(&format!(
+                outf!(out,
                     "memory: {} of {} frames free (low-water {}, {} reading(s)); {} admission(s) refused MemoryExhausted, {} pressure crossing(s){}",
                     s.last_free_pages,
                     s.total_pages,
@@ -959,7 +984,7 @@ pub fn report_risk_advisor(out: &mut dyn FnMut(&str)) {
                     s.memory_refusals,
                     s.pressure_events,
                     if s.in_pressure { " - UNDER PRESSURE now" } else { "" }
-                ));
+                );
             }
         }
     }
@@ -993,7 +1018,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         "help" => {
             out("commands:");
             for (name, doc) in COMMANDS {
-                out(&format!("  {:<18} {}", name, doc));
+                outf!(out, "  {:<18} {}", name, doc);
             }
         }
         "ver" => {
@@ -1001,12 +1026,13 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             out(VERSION);
-            out(&format!(
+            outf!(
+                out,
                 "target {}, {} processor(s), privilege level {}",
                 host.arch(),
                 host.cpu_count(),
                 host.privilege()
-            ));
+            );
             // Said here rather than only in a document, because the person most likely to
             // over-claim about this system is the one sitting in front of it.
             out("this console runs in kernel space over the kernel's own objects; it is not a");
@@ -1016,12 +1042,13 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             if !authorize(host, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
-            out(&format!(
+            outf!(
+                out,
                 "{} (privilege level {}, {} processor(s))",
                 host.arch(),
                 host.privilege(),
                 host.cpu_count()
-            ));
+            );
         }
         "uptime" => {
             if !authorize(host, ShellAction::Inspect, out) {
@@ -1029,13 +1056,14 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
             let ns = host.uptime_ns();
             let secs = ns / 1_000_000_000;
-            out(&format!(
+            outf!(
+                out,
                 "up {}h {:02}m {:02}s ({} ns since boot)",
                 secs / 3600,
                 (secs / 60) % 60,
                 secs % 60,
                 ns
-            ));
+            );
         }
         "mem" => {
             if !authorize(host, ShellAction::Inspect, out) {
@@ -1043,32 +1071,36 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
             let (free, total) = (host.free_frames(), host.total_frames());
             let bytes = host.frame_bytes();
-            out(&format!(
+            outf!(
+                out,
                 "frames: {} free / {} total ({} used)",
                 free,
                 total,
                 total.saturating_sub(free)
-            ));
-            out(&format!(
+            );
+            outf!(
+                out,
                 "memory: {} MiB free / {} MiB managed ({} B per frame)",
                 (free * bytes) / (1024 * 1024),
                 (total * bytes) / (1024 * 1024),
                 bytes
-            ));
-            out(&format!(
+            );
+            outf!(
+                out,
                 "input: {} byte(s) dropped since boot",
                 host.input_dropped()
-            ));
+            );
         }
         "faults" => {
             if !authorize(host, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
-            out(&format!(
+            outf!(
+                out,
                 "supervisor: {} user task(s) contained, {} fault(s) escalated",
                 host.supervisor_terminated(),
                 host.supervisor_escalations()
-            ));
+            );
         }
         // The machine's input session, reported the way every other fact here is reported: read
         // LIVE from the session the machine is running (ALET-P2-021's hardware rung, ADR-080).
@@ -1079,40 +1111,45 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
             match host.input_facts() {
                 Some(f) => {
-                    out(&format!(
+                    outf!(
+                        out,
                         "session: held; events posted {} dropped {} refused {}",
-                        f.events_posted, f.dropped, f.refusals
-                    ));
+                        f.events_posted,
+                        f.dropped,
+                        f.refusals
+                    );
                     match f.cursor {
-                        Some((x, y)) => out(&format!("cursor: ({}, {}) shown", x, y)),
+                        Some((x, y)) => outf!(out, "cursor: ({}, {}) shown", x, y),
                         None => out("cursor: hidden"),
                     }
                     match f.focus {
-                        Some(id) => out(&format!("focus: surface {} ({} queued)", id, f.queued)),
+                        Some(id) => outf!(out, "focus: surface {} ({} queued)", id, f.queued),
                         None => out("focus: none"),
                     }
-                    out(&format!(
+                    outf!(
+                        out,
                         "devices: keyboard {} events, pointer {} events",
-                        f.kb_events, f.pt_events
-                    ));
+                        f.kb_events,
+                        f.pt_events
+                    );
                     // The terminal window (ADR-083): where it sits and what its last line says,
                     // read from the same grid the compositor paints - not a second copy.
                     match f.window {
-                        Some((x, y)) => out(&format!("window: at ({}, {})", x, y)),
+                        Some((x, y)) => outf!(out, "window: at ({}, {})", x, y),
                         None => out("window: not placed"),
                     }
                     let n = (f.term_last_len as usize).min(f.term_last.len());
                     let last = core::str::from_utf8(&f.term_last[..n]).unwrap_or("?");
-                    out(&format!(
-                        "terminal: {} lines, last \"{}\"",
-                        f.term_lines, last
-                    ));
+                    outf!(out, "terminal: {} lines, last \"{}\"", f.term_lines, last);
                     // The managed set (ADR-084): how many windows are open, and what the
                     // pointer has done to them since boot.
-                    out(&format!(
+                    outf!(
+                        out,
                         "windows: {} open, {} closed, {} drags",
-                        f.windows, f.closes, f.drags
-                    ));
+                        f.windows,
+                        f.closes,
+                        f.drags
+                    );
                 }
                 None => out("input: no machine input session on this target"),
             }
@@ -1131,22 +1168,25 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             let n = dev.num_blocks();
-            out(&format!(
+            outf!(
+                out,
                 "{} blocks of {} bytes = {} KiB",
                 n,
                 BLOCK_SIZE,
                 (n * BLOCK_SIZE) / 1024
-            ));
+            );
         }
         "df" => {
             if !authorize(host, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             match fs.free_blocks(dev) {
-                Ok(free) => out(&format!(
+                Ok(free) => outf!(
+                    out,
                     "{} free data blocks of {} bytes each",
-                    free, BLOCK_SIZE
-                )),
+                    free,
+                    BLOCK_SIZE
+                ),
                 Err(e) => out(&fs_error(e)),
             }
         }
@@ -1154,13 +1194,14 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             if !authorize(host, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
-            match fs.list(dev) {
-                Ok(entries) if entries.is_empty() => out("(no objects)"),
-                Ok(entries) => {
-                    for e in entries {
-                        out(&format!("{:>8}  {}", e.len, e.name));
-                    }
-                }
+            // Streamed, not collected (ADR-089): listing the namespace must not cost the heap.
+            let mut seen = 0usize;
+            match fs.for_each(dev, |name, _start, len| {
+                seen += 1;
+                outf!(out, "{:>8}  {}", len, name);
+            }) {
+                Ok(()) if seen == 0 => out("(no objects)"),
+                Ok(()) => {}
                 Err(e) => out(&fs_error(e)),
             }
         }
@@ -1172,13 +1213,14 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 out("usage: stat NAME");
             } else {
                 match fs.stat(dev, rest) {
-                    Ok(e) => out(&format!(
+                    Ok(e) => outf!(
+                        out,
                         "{}: {} bytes, {} block(s) at device block {}",
                         e.name,
                         e.len,
                         e.blocks(),
                         e.start
-                    )),
+                    ),
                     Err(e) => out(&fs_error(e)),
                 }
             }
@@ -1196,7 +1238,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     // that would interpret them as escape sequences.
                     Ok(bytes) => match core::str::from_utf8(&bytes) {
                         Ok(s) => out(s),
-                        Err(_) => out(&format!("<{} bytes, not text>", bytes.len())),
+                        Err(_) => outf!(out, "<{} bytes, not text>", bytes.len()),
                     },
                     Err(e) => out(&fs_error(e)),
                 }
@@ -1213,7 +1255,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 // `replace` rather than remove+create: one transaction, so a crash mid-write leaves
                 // the old contents or the new ones, never a vanished name (ADR-035).
                 match fs.replace(dev, name, text.as_bytes()) {
-                    Ok(()) => out(&format!("wrote {} bytes to {}", text.len(), name)),
+                    Ok(()) => outf!(out, "wrote {} bytes to {}", text.len(), name),
                     Err(e) => out(&fs_error(e)),
                 }
             }
@@ -1226,7 +1268,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 out("usage: rm NAME");
             } else {
                 match fs.remove(dev, rest) {
-                    Ok(()) => out(&format!("removed {}", rest)),
+                    Ok(()) => outf!(out, "removed {}", rest),
                     Err(e) => out(&fs_error(e)),
                 }
             }
@@ -1238,13 +1280,14 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             if rest.is_empty() {
                 out("usage: find PREFIX");
             } else {
-                match fs.list(dev) {
-                    Ok(entries) => {
-                        let mut seen = 0usize;
-                        for e in entries.iter().filter(|e| e.name.starts_with(rest)) {
-                            out(&format!("{:>8}  {}", e.len, e.name));
-                            seen += 1;
-                        }
+                let mut seen = 0usize;
+                match fs.for_each(dev, |name, _start, len| {
+                    if name.starts_with(rest) {
+                        seen += 1;
+                        outf!(out, "{:>8}  {}", len, name);
+                    }
+                }) {
+                    Ok(()) => {
                         if seen == 0 {
                             out("(nothing matches)");
                         }
@@ -1277,7 +1320,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                                     out(line);
                                 }
                             }
-                            Err(_) => out(&format!("<{} bytes, not text>", bytes.len())),
+                            Err(_) => outf!(out, "<{} bytes, not text>", bytes.len()),
                         },
                         Err(e) => out(&fs_error(e)),
                     },
@@ -1297,13 +1340,14 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                         let words = core::str::from_utf8(&bytes)
                             .map(|s| s.split_whitespace().count())
                             .unwrap_or(0);
-                        out(&format!(
+                        outf!(
+                            out,
                             "{:>8} {:>8} {:>8}  {}",
                             lines,
                             words,
                             bytes.len(),
                             rest
-                        ));
+                        );
                     }
                     Err(e) => out(&fs_error(e)),
                 }
@@ -1323,7 +1367,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                             let mut hits = 0usize;
                             for (i, line) in s.lines().enumerate() {
                                 if line.contains(needle) {
-                                    out(&format!("{}: {}", i + 1, line));
+                                    outf!(out, "{}: {}", i + 1, line);
                                     hits += 1;
                                 }
                             }
@@ -1331,7 +1375,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                                 out("(no matching line)");
                             }
                         }
-                        Err(_) => out(&format!("<{} bytes, not text>", bytes.len())),
+                        Err(_) => outf!(out, "<{} bytes, not text>", bytes.len()),
                     },
                     Err(e) => out(&fs_error(e)),
                 }
@@ -1367,19 +1411,24 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                                 let mut hex = String::new();
                                 let mut txt = String::new();
                                 for b in chunk {
-                                    hex.push_str(&format!("{:02x} ", **b));
+                                    let mut byte = crate::linebuf::LineBuf::<4>::new();
+                                    let _ = core::fmt::Write::write_fmt(
+                                        &mut byte,
+                                        format_args!("{:02x} ", **b),
+                                    );
+                                    hex.push_str(byte.as_str());
                                     txt.push(if b.is_ascii_graphic() || **b == b' ' {
                                         **b as char
                                     } else {
                                         '.'
                                     });
                                 }
-                                out(&format!("{:08x}  {:<48} |{}|", row * 16, hex, txt));
+                                outf!(out, "{:08x}  {:<48} |{}|", row * 16, hex, txt);
                             }
                             if bytes.is_empty() {
                                 out("(empty)");
                             } else if bytes.len() > n {
-                                out(&format!("… {} more byte(s)", bytes.len() - n));
+                                outf!(out, "… {} more byte(s)", bytes.len() - n);
                             }
                         }
                         Err(e) => out(&fs_error(e)),
@@ -1407,7 +1456,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                         bytes.extend_from_slice(text.as_bytes());
                         bytes.push(b'\n');
                         match fs.replace(dev, name, &bytes) {
-                            Ok(()) => out(&format!("{} is now {} bytes", name, bytes.len())),
+                            Ok(()) => outf!(out, "{} is now {} bytes", name, bytes.len()),
                             Err(e) => out(&fs_error(e)),
                         }
                     }
@@ -1415,7 +1464,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                         let mut bytes = Vec::from(text.as_bytes());
                         bytes.push(b'\n');
                         match fs.create(dev, name, &bytes) {
-                            Ok(()) => out(&format!("created {} ({} bytes)", name, bytes.len())),
+                            Ok(()) => outf!(out, "created {} ({} bytes)", name, bytes.len()),
                             Err(e) => out(&fs_error(e)),
                         }
                     }
@@ -1434,9 +1483,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     // An existing object is left ALONE — there is no modification time to update,
                     // and truncating someone's data because they typed `touch` would be a disaster
                     // wearing the name of a harmless command.
-                    Ok(e) => out(&format!("{} exists ({} bytes)", e.name, e.len)),
+                    Ok(e) => outf!(out, "{} exists ({} bytes)", e.name, e.len),
                     Err(FsError::NotFound) => match fs.create(dev, rest, b"") {
-                        Ok(()) => out(&format!("created {}", rest)),
+                        Ok(()) => outf!(out, "created {}", rest),
                         Err(e) => out(&fs_error(e)),
                     },
                     Err(e) => out(&fs_error(e)),
@@ -1449,7 +1498,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
             let (src, dst) = split_first(rest);
             if src.is_empty() || dst.is_empty() {
-                out(&format!("usage: {} SRC DST", verb));
+                outf!(out, "usage: {} SRC DST", verb);
             } else if src == dst {
                 out("source and destination are the same name");
             } else {
@@ -1462,15 +1511,13 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                                 // order loses the data. Said out loud because `mv` reads atomic and
                                 // is not.
                                 match fs.remove(dev, src) {
-                                    Ok(()) => out(&format!("{} -> {}", src, dst)),
-                                    Err(e) => out(&format!(
-                                        "copied, but {} remains: {}",
-                                        src,
-                                        fs_error(e)
-                                    )),
+                                    Ok(()) => outf!(out, "{} -> {}", src, dst),
+                                    Err(e) => {
+                                        outf!(out, "copied, but {} remains: {}", src, fs_error(e))
+                                    }
                                 }
                             } else {
-                                out(&format!("{} -> {} ({} bytes)", src, dst, bytes.len()));
+                                outf!(out, "{} -> {} ({} bytes)", src, dst, bytes.len());
                             }
                         }
                         Err(e) => out(&fs_error(e)),
@@ -1485,7 +1532,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
             match dev.flush() {
                 Ok(()) => out("device flushed"),
-                Err(e) => out(&format!("storage: {}", storage_error(e))),
+                Err(e) => outf!(out, "storage: {}", storage_error(e)),
             }
         }
         "history" => {
@@ -1493,7 +1540,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 out("(nothing yet)");
             } else {
                 for (i, line) in history.iter().enumerate() {
-                    out(&format!("{:>4}  {}", i + 1, line));
+                    outf!(out, "{:>4}  {}", i + 1, line);
                 }
             }
         }
@@ -1518,10 +1565,11 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             out("halting.");
             return Outcome::Halt;
         }
-        other => out(&format!(
+        other => outf!(
+            out,
             "unknown command '{}' — try `help`",
             other.escape_debug()
-        )),
+        ),
     }
     Outcome::Continue
 }

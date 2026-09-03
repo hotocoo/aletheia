@@ -88,7 +88,12 @@ pub fn action_covers(pattern: &str, action: &str) -> bool {
         return true;
     }
     if let Some(prefix) = pattern.strip_suffix(".*") {
-        return action == prefix || action.starts_with(&format!("{}.", prefix));
+        // Compared in place (ADR-089): the old `format!("{}.", prefix)` allocated a `String` on
+        // EVERY wildcard capability test, and the console tests one per command a human types.
+        return action == prefix
+            || (action.len() > prefix.len()
+                && action.as_bytes()[prefix.len()] == b'.'
+                && action.starts_with(prefix));
     }
     pattern == action
 }

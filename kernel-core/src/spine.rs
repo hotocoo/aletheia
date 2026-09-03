@@ -304,6 +304,18 @@ impl CapEngine {
     }
 
     /// The core authorization decision. Fail closed: no matching live capability => Deny.
+    /// The YES/NO half of [`CapEngine::evaluate`], allocation-free (ADR-089). `evaluate` names its
+    /// refusal, and naming it costs a `String` — right for an audit line, wrong for a caller that
+    /// only asks "may I?" on every command a human types. Same tokens, same tests, same order.
+    pub fn allows(&self, action: &str, target: &Target, offered: &[CapToken]) -> bool {
+        for &token in offered {
+            if matches!(self.test_token(token, action, target), TokenMatch::Allow) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn evaluate(&self, action: &str, target: &Target, offered: &[CapToken]) -> Decision {
         let mut needs_approval = false;
         for &token in offered {

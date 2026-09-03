@@ -1,6 +1,11 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-03, latest (THE FILESYSTEM UNDER A MERCILESS STORM — the third hot path measured,
+**As of:** 2026-09-03, latest (THE CONSOLE SESSION THAT NEVER GROWS — the fourth hot path measured and
+the only one a human drives: ~453 bytes per command, closed to ZERO by a fixed stack `LineBuf` behind
+`outf!` at all fifty formatting sites, a reused history buffer, streamed `ls`/`find`, an
+allocation-free `CapEngine::allows`, and in-place wildcard matching in `action_covers` — that last one
+invisible until the storm ran ON THE TARGET, where the real capability engine runs; ADR-089); before
+that: (THE FILESYSTEM UNDER A MERCILESS STORM — the third hot path measured,
 and the worst: 16 498 bytes per write, enough to kill a twelve-megabyte never-freeing heap in about
 seven hundred writes. A fresh `Vec` of whole 4 KiB blocks per transaction and an owning `String` per
 directory slot scanned; closed by a resident staging buffer that starts empty and in-place slot reads,
@@ -164,7 +169,40 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Releases:** every stable version (`vX.Y.Z`, from v0.1.0) ships the x86-64 VMware package as GitHub
 release assets, boot-verified from its own VMDKs before publishing — `docs/RELEASING.md`.
 
-## Current wave — the filesystem under a merciless storm (2026-09-03, ADR-088)
+## Current wave — the console session that never grows (2026-09-03, ADR-089)
+
+Three storms had measured the desktop, the scheduler and the filesystem. The console is the fourth
+hot path and the only one a HUMAN drives: a session is exactly a stream of commands, so a console
+that spends memory per command is a machine that dies of being used. Measured before this wave:
+**~453 bytes per command**.
+
+Five changes, each aimed at a specific spender:
+
+* **`LineBuf` + `outf!`** — a fixed stack buffer implementing `core::fmt::Write`. All fifty
+  `out(&format!(...))` sites in the dispatcher became `outf!(out, ...)`: same formatting, no heap.
+  Truncation is NAMED (`truncated()`), never silent, and never splits a character.
+* **A reused history buffer** — the editor rotated its bounded history by dropping the oldest
+  `String` and allocating a new one per line. It now reuses that buffer.
+* **Streamed listings** — `Filesystem::for_each` walks slots in place; `ls` and `find` no longer
+  build a `Vec<DirEntry>` of owned names.
+* **`CapEngine::allows`** — the yes/no half of `evaluate`, without building
+  `Decision::Deny(String)` for a caller that only asks "may I?". The console asks every command.
+* **In-place wildcard matching** — `capalg::action_covers` compared `format!("{}.", prefix)`
+  against the action, a `String` on EVERY wildcard capability test.
+
+That last one is the wave's lesson: the host suite passed at ZERO while the machine still spent
+eight bytes a command, because the host stand-in authorizes without a capability engine. Only the
+storm running ON THE TARGET, against the real `Host::privileged()`, found it — and the boot log's
+per-command breakdown named which command was spending.
+
+`[shellstorm] ALL 4 CONSOLE-STORM INVARIANTS HOLD` and `[linebuf] ALL 4 LINE-BUFFER INVARIANTS
+HOLD` on all three targets (markers `shellstorm=4`, `linebuf=4`; boots fail 820+i and 800+i), five
+cross-CPU conformance behaviours. Measured after: **0 bytes** for a reporting command. NAMED:
+`Edit::Line` still owns its bytes, data-returning commands (`cat`, `wc`, `hexdump`) still allocate
+their data, and `Decision::Deny(String)` is untouched where a refusal is AUDITED — naming a
+refusal is worth an allocation, asking a yes/no question is not.
+
+## Previous wave — the filesystem under a merciless storm (2026-09-03, ADR-088)
 
 Two storms had already found per-event allocations the machine could not afford. The filesystem is
 the third hot path a real machine hammers — every console `write`, every component that persists

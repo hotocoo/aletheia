@@ -223,6 +223,34 @@ impl Filesystem {
         })
     }
 
+    /// Every live entry, streamed to a callback IN PLACE — no `Vec`, no `String` (ADR-089). The
+    /// console lists the namespace on demand, and a listing that allocates is a command that costs
+    /// memory on a heap that never frees. `list` stays for callers that want to keep the answer.
+    pub fn for_each<D: BlockDevice>(
+        &self,
+        dev: &D,
+        mut f: impl FnMut(&str, usize, usize),
+    ) -> Result<(), FsError> {
+        let dir = self.dir(dev)?;
+        for slot in 1..=MAX_FILES {
+            if !Self::slot_used(&dir, slot) {
+                continue;
+            }
+            let off = slot * SLOT;
+            let raw = &dir[off + E_NAME..off + E_NAME + MAX_NAME];
+            let end = raw.iter().position(|&b| b == 0).unwrap_or(MAX_NAME);
+            let Ok(name) = core::str::from_utf8(&raw[..end]) else {
+                continue;
+            };
+            f(
+                name,
+                le64(&dir, off + E_START) as usize,
+                le64(&dir, off + E_LEN) as usize,
+            );
+        }
+        Ok(())
+    }
+
     /// Every live name, in slot order.
     pub fn list<D: BlockDevice>(&self, dev: &D) -> Result<Vec<DirEntry>, FsError> {
         let dir = self.dir(dev)?;

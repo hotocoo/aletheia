@@ -1114,6 +1114,43 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // The CONSOLE under the same merciless storm (REQ-CON-001 / REQ-QUAL-007, ADR-089): a session
+    // is a stream of commands, so a console that spends memory per command is a machine that dies
+    // of being used.
+    kprintln!("");
+    kprintln!("--- line-buffer selftests (formatted output that costs no heap) ---");
+    match kernel_core::linebuf::linebuf_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[linebuf] ALL {} LINE-BUFFER INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[linebuf] FAILED at line-buffer invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(800 + idx as i32);
+        }
+    }
+
+    kprintln!("");
+    kprintln!("--- console-storm selftests (the dispatcher at command volume, on this machine's own heap) ---");
+    match shellio::storm() {
+        Ok(n) => kprintln!("[shellstorm] ALL {} CONSOLE-STORM INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[shellstorm] FAILED at console-storm invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(820 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("--- input hardware selftests (virtio-input: a real keyboard and pointer through the session) ---");
     let mut desktop_devices: Option<(virtio::Input, virtio::Input)> = None;
