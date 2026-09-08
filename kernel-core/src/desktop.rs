@@ -472,7 +472,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
     }
 
-    /// The title band is the desktop's focus indicator. Repaint both managed titles only when
+    /// The title band is the desktop's focus indicator. Repaint all managed titles only when
     /// focus actually changes; the focused title gets a leading `>` while the other title keeps
     /// its plain name. This makes keyboard focus visible without adding a second authority or a
     /// timer-driven repaint path.
@@ -495,6 +495,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 &mut self.mon_packed,
             );
             let _ = self.comp.fill_packed(MONITOR, tok, &self.mon_packed);
+        }
+        if let Some(tok) = self.wm.token(HELP) {
+            self.help.render_packed(
+                if focus == HELP { b">shortcuts" } else { HELP_TITLE },
+                &mut self.help_packed,
+            );
+            let _ = self.comp.fill_packed(HELP, tok, &self.help_packed);
         }
     }
 
@@ -626,7 +633,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             }
             HELP => {
                 self.help_token = token;
-                self.help.render_packed(HELP_TITLE, &mut self.help_packed);
+                self.help.render_packed(
+                    if self.comp.focus() == Some(HELP) { b">shortcuts" } else { HELP_TITLE },
+                    &mut self.help_packed,
+                );
                 let _ = self.comp.fill_packed(HELP, token, &self.help_packed);
             }
             _ => unreachable!(),
