@@ -62,6 +62,7 @@ pub const PAGES: usize = virtiogpu::CONSOLE_FB_PAGES;
 const PANEL: u32 = 1;
 pub const WINDOW: u32 = 2;
 pub const MONITOR: u32 = 3;
+const TASKBAR: u32 = 4;
 
 /// The terminal grid: 40 columns x 12 rows of the console's alphabet, placed so a gap of empty
 /// scanout remains for an "empty space" click.
@@ -76,6 +77,13 @@ const MON_ROWS: u32 = 6;
 const MON_X: i32 = 20;
 const MON_Y: i32 = 140;
 const MON_TITLE: &[u8] = b"monitor";
+const TASKBAR_COLS: u32 = 100;
+const TASKBAR_ROWS: u32 = 1;
+const TASKBAR_X: i32 = 0;
+const TASKBAR_BUTTON_W: u32 = 18 * crate::textgrid::CELL;
+const TASKBAR_Y: i32 = H as i32 - (TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H) as i32;
+const TASKBAR_TERM_X: u32 = 8 * crate::textgrid::CELL;
+const TASKBAR_MON_X: u32 = TASKBAR_TERM_X + TASKBAR_BUTTON_W;
 /// Keystrokes the main thread may hold between drains (the console pops one per loop turn).
 const TERM_INPUT_CAP: usize = 64;
 /// Events drained per device per pump — bounded, so one noisy device cannot own the tick.
@@ -98,6 +106,13 @@ struct MonitorFacts {
     focus: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TaskbarFacts {
+    terminal: u8,
+    monitor: u8,
+    focus: u32,
+}
+
 /// The machine's live desktop: its devices, its decoders, its compositor and input session, its
 /// managed windows, their grids, and the GPU resource it composes into.
 pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
@@ -116,6 +131,10 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     mon: TextGrid,
     mon_packed: Vec<u8>,
     mon_sig: MonitorFacts,
+    taskbar: TextGrid,
+    taskbar_packed: Vec<u8>,
+    taskbar_token: u64,
+    taskbar_sig: TaskbarFacts,
     /// Keystrokes drained from the terminal's queue, waiting for the console's `getc`.
     term_input: Vec<u8>,
     /// Where the pointer last was (mirrored from the cursor, so a press knows it).
@@ -199,6 +218,17 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         mon.render_packed(MON_TITLE, &mut mon_packed);
         comp.fill_packed(MONITOR, tok_mon, &mon_packed)
             .map_err(|_| "the monitor window's first paint was refused")?;
+        let taskbar = TextGrid::new(TASKBAR_COLS, TASKBAR_ROWS);
+        let (tbw, tbh) = taskbar.pixel_size();
+        let tok_taskbar = comp
+            .mint_surface(TASKBAR, tbw, tbh)
+            .map_err(|_| "the taskbar surface was refused")?;
+        comp.attach(TASKBAR, tok_taskbar, TASKBAR_X, TASKBAR_Y)
+            .map_err(|_| "the taskbar placement was refused")?;
+        let mut taskbar_packed = Vec::new();
+        taskbar.render_packed(b"desktop", &mut taskbar_packed);
+        comp.fill_packed(TASKBAR, tok_taskbar, &taskbar_packed)
+            .map_err(|_| "the taskbar's first paint was refused")?;
         comp.set_focus(sess, WINDOW)
             .map_err(|_| "focusing the terminal window was refused")?;
         comp.move_cursor(sess, W / 2, H / 2)
@@ -232,6 +262,10 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
             mon,
             mon_packed,
             mon_sig: MonitorFacts::default(),
+            taskbar,
+            taskbar_packed,
+            taskbar_token: tok_taskbar,
+            taskbar_sig: TaskbarFacts::default(),
             term_input: Vec::with_capacity(TERM_INPUT_CAP),
             pointer: (W / 2, H / 2),
         };
@@ -293,9 +327,79 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                 let _ = self.comp.fill_packed(MONITOR, tok, &self.mon_packed);
             }
         }
+        self.refresh_taskbar();
         if self.comp.has_pending_damage() {
             let _ = self.show_frame();
         }
+    }
+
+    /// Keep the taskbar labels/state aligned with the live window set. The taskbar is a
+    /// compositor surface, not a managed application window, so it never participates in WM
+    /// focus or ownership routing. Its buttons are handled by `taskbar_press` below.
+    fn refresh_taskbar(&mut self) {
+        let state = |id| match self.wm.is_open(id) {
+            false => 0,
+            true if self.wm.is_minimized(&self.comp, id) == Some(true) => 1,
+            true => 2,
+        };
+        let sig = TaskbarFacts {
+            terminal: state(WINDOW),
+            monitor: state(MONITOR),
+            focus: self.comp.focus().unwrap_or(0),
+        };
+        if sig == self.taskbar_sig {
+            return;
+        }
+        self.taskbar_sig = sig;
+        self.taskbar.clear();
+        let _ = write!(
+            self.taskbar,
+            "terminal {}   monitor {}",
+            if self.wm.is_open(WINDOW) {
+                if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
+            } else {
+                "[closed]"
+            },
+            if self.wm.is_open(MONITOR) {
+                if self.wm.is_minimized(&self.comp, MONITOR) == Some(true) { "[hidden]" } else { "[open]" }
+            } else {
+                "[closed]"
+            }
+        );
+        self.taskbar.render_packed(b"desktop", &mut self.taskbar_packed);
+        let _ = self.comp.fill_packed(TASKBAR, self.taskbar_token, &self.taskbar_packed);
+    }
+
+    fn taskbar_press(&mut self, x: u32, y: u32) -> bool {
+        let Some((tx, ty)) = self.comp.placement(TASKBAR) else { return false };
+        let Some((tw, th)) = self.comp.surface_size(TASKBAR) else { return false };
+        let lx = x as i32 - tx;
+        let ly = y as i32 - ty;
+        if lx < 0 || ly < 0 || lx as u32 >= tw || ly as u32 >= th || (ly as u32) < crate::textgrid::TITLE_H {
+            return false;
+        }
+        let lx = lx as u32;
+        let target = if (TASKBAR_TERM_X..TASKBAR_MON_X).contains(&lx) {
+            WINDOW
+        } else if (TASKBAR_MON_X..TASKBAR_MON_X + TASKBAR_BUTTON_W).contains(&lx) {
+            MONITOR
+        } else {
+            return false;
+        };
+        if !self.wm.is_open(target) { return true; }
+        match self.wm.is_minimized(&self.comp, target) {
+            Some(true) => { let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target); }
+            Some(false) if self.comp.focus() == Some(target) => { let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target); }
+            Some(false) => {
+                if let Some(tok) = self.wm.token(target) {
+                    let _ = self.comp.raise(target, tok);
+                    let _ = self.comp.set_focus(self.sess, target);
+                }
+            }
+            None => {}
+        }
+        if target == WINDOW { self.sync_terminal_geometry(); }
+        true
     }
 
     /// Repaint the monitor from what the machine knows about itself — but ONLY when one of
@@ -341,6 +445,9 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         let (px, py) = self.pointer;
         if let Some((Button::Left, down)) = batch.button {
             if down {
+                if self.taskbar_press(px, py) {
+                    return;
+                }
                 // A closed terminal takes its unread keystrokes with it: bytes the console had
                 // not read belonged to a window that no longer exists.
                 if let Press::Closed(WINDOW) = self.wm.press(&mut self.comp, self.sess, px, py) {
