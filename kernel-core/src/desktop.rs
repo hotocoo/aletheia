@@ -55,6 +55,8 @@ const KEY_R: u16 = 19;
 const KEY_ESC: u16 = 1;
 /// Linux keycode for F4, reserved with Alt as the conventional focused-window close shortcut.
 const KEY_F4: u16 = 62;
+/// Linux keycode for F10, reserved with Alt as the conventional focused-window maximize toggle.
+const KEY_F10: u16 = 68;
 /// Linux keycodes for the four cursor directions, reserved with Ctrl+Alt for focused-window snap.
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -202,6 +204,13 @@ fn is_title_double_click(
         && prev_y.abs_diff(y) <= DOUBLE_CLICK_SLOP_PX
 }
 
+/// Recognize the conventional Alt+F10 maximize/restore gesture without depending on the live
+/// keyboard decoder. Keeping the predicate pure makes the desktop shortcut policy testable and
+/// prevents F10 from leaking into the focused application's input queue.
+fn is_maximize_shortcut(ty: u16, code: u16, value: u32, alt: bool) -> bool {
+    ty == vinput::EV_KEY && code == KEY_F10 && value == 1 && alt
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -292,6 +301,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.write(b"F1        toggle this help\n");
         help.write(b"Alt+Tab   cycle focus\n");
         help.write(b"Alt+F4    close focused window\n");
+        help.write(b"Alt+F10   maximize/restore focused\n");
         help.write(b"Ctrl+Tab  cycle focus\n");
         help.write(b"Ctrl+Alt+Arrows  snap focused window\n");
         help.write(b"Ctrl+Alt+Shift+Arrows  nudge window\n");
@@ -829,6 +839,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.code == KEY_F4
                         && ev.value == 1
                         && alt;
+                    let alt_maximize = is_maximize_shortcut(ev.ty, ev.code, ev.value, alt);
                     let resize_toggle = ev.ty == vinput::EV_KEY
                         && ev.code == KEY_R
                         && ev.value == 1
@@ -923,7 +934,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else if let Some(direction) = keyboard_nudge {
                         let _ = self.wm.nudge_focused(&mut self.comp, direction);
                         let _ = self.kb_dec.feed(ev);
-                    } else if maximize {
+                    } else if maximize || alt_maximize {
                         if let Some(id) = self.comp.focus() {
                             if self.wm.is_maximized(id).is_some() {
                                 let _ = self.wm.toggle_maximize(&mut self.comp, self.sess, id);
@@ -1057,7 +1068,15 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_title_double_click;
+    use super::{is_maximize_shortcut, is_title_double_click};
+
+    #[test]
+    fn alt_f10_is_the_conventional_maximize_toggle() {
+        assert!(is_maximize_shortcut(super::vinput::EV_KEY, 68, 1, true));
+        assert!(!is_maximize_shortcut(super::vinput::EV_KEY, 68, 1, false));
+        assert!(!is_maximize_shortcut(super::vinput::EV_KEY, 68, 0, true));
+        assert!(!is_maximize_shortcut(super::vinput::EV_KEY, 67, 1, true));
+    }
 
     #[test]
     fn title_double_click_requires_same_window_and_pointer_slop() {
