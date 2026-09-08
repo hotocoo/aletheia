@@ -493,7 +493,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         } else {
             return false;
         };
-        if !self.wm.is_open(target) { return true; }
+        if !self.wm.is_open(target) {
+            self.reopen_taskbar_window(target);
+            return true;
+        }
         match self.wm.is_minimized(&self.comp, target) {
             Some(true) => { let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target); }
             Some(false) if self.comp.focus() == Some(target) => { let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target); }
@@ -507,6 +510,53 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if target == WINDOW { self.sync_terminal_geometry(); }
         true
+    }
+
+    /// Taskbar buttons are launchers as well as window switches. Closing a managed window must
+    /// not strand its taskbar entry: a later click creates a fresh compositor surface and manager
+    /// token, repaints the retained grid, and gives the new window normal focus/z-order authority.
+    fn reopen_taskbar_window(&mut self, id: u32) {
+        let (w, h, x, y) = match id {
+            WINDOW => {
+                let (w, h) = self.term.pixel_size();
+                (w, h, WINDOW_X, WINDOW_Y)
+            }
+            MONITOR => {
+                let (w, h) = self.mon.pixel_size();
+                (w, h, MON_X, MON_Y)
+            }
+            HELP => {
+                let (w, h) = self.help.pixel_size();
+                (w, h, HELP_X, HELP_Y)
+            }
+            _ => return,
+        };
+        let Ok(token) = self.wm.open(&mut self.comp, id, w, h, x, y) else {
+            return;
+        };
+        match id {
+            WINDOW => {
+                self.term.render_packed(TITLE, &mut self.packed);
+                let _ = self.comp.fill_packed(WINDOW, token, &self.packed);
+                self.term_input.clear();
+            }
+            MONITOR => {
+                self.mon.render_packed(MON_TITLE, &mut self.mon_packed);
+                let _ = self.comp.fill_packed(MONITOR, token, &self.mon_packed);
+                self.mon_sig = MonitorFacts::default();
+            }
+            HELP => {
+                self.help_token = token;
+                self.help.render_packed(HELP_TITLE, &mut self.help_packed);
+                let _ = self.comp.fill_packed(HELP, token, &self.help_packed);
+            }
+            _ => unreachable!(),
+        }
+        let _ = self.comp.raise(id, token);
+        let _ = self.comp.set_focus(self.sess, id);
+        if id == WINDOW {
+            self.sync_terminal_geometry();
+        }
     }
 
     /// Toggle the keyboard reference window through the same manager used by every application
