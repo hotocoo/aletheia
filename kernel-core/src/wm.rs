@@ -109,6 +109,8 @@ struct Window {
     token: u64,
     width: u32,
     height: u32,
+    /// Geometry saved by the maximize toggle. `None` means the window is not maximized.
+    restore: Option<(i32, i32, u32, u32)>,
 }
 
 /// The window manager: the set of open windows, the drag in flight, and the ledger.
@@ -177,6 +179,7 @@ impl WindowManager {
             token,
             width,
             height,
+            restore: None,
         });
         self.opens += 1;
         Ok(token)
@@ -211,6 +214,63 @@ impl WindowManager {
     /// The window currently being dragged, if any.
     pub fn dragging(&self) -> Option<u32> {
         self.drag.map(|(id, _, _, _)| id)
+    }
+
+    /// Whether a managed window currently occupies the full scanout.
+    pub fn is_maximized(&self, id: u32) -> Option<bool> {
+        self.wins
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| w.restore.is_some())
+    }
+
+    /// Toggle a window between its saved geometry and the full scanout. The manager owns the
+    /// geometry transition and token, so callers cannot maximize a window they do not own.
+    /// Existing pixels survive the resize through the compositor's resize contract.
+    pub fn toggle_maximize(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+        id: u32,
+    ) -> Result<bool, WmFault> {
+        let pos = self.wins.iter().position(|w| w.id == id).ok_or_else(|| {
+            self.refusals += 1;
+            WmFault::UnknownWindow(id)
+        })?;
+        let w = self.wins[pos];
+        let (sw, sh) = comp.scanout_size();
+
+        if let Some((x, y, width, height)) = w.restore {
+            comp.resize_surface(id, w.token, width, height)?;
+            comp.move_surface(id, w.token, x, y)?;
+            let entry = &mut self.wins[pos];
+            entry.width = width;
+            entry.height = height;
+            entry.restore = None;
+            comp.raise(id, w.token)?;
+            comp.set_focus(session, id)?;
+            Ok(false)
+        } else {
+            if sw == 0 || sh == 0 {
+                self.refusals += 1;
+                return Err(WmFault::Compositor(CompFault::BadGeometry(id)));
+            }
+            let (x, y) = comp
+                .placement(id)
+                .ok_or(WmFault::Compositor(CompFault::UnknownSurface(id)))?;
+            let restore = (x, y, w.width, w.height);
+            // The desktop's scanout is bounded by the compositor's surface-pixel ceiling.
+            // Let the compositor make the authoritative geometry decision.
+            comp.resize_surface(id, w.token, sw, sh)?;
+            comp.move_surface(id, w.token, 0, 0)?;
+            let entry = &mut self.wins[pos];
+            entry.restore = Some(restore);
+            entry.width = sw;
+            entry.height = sh;
+            comp.raise(id, w.token)?;
+            comp.set_focus(session, id)?;
+            Ok(true)
+        }
     }
 
     /// (opens, closes, drags completed, refusals) — the manager's ledger.
@@ -307,6 +367,7 @@ impl WindowManager {
                         if let Some(w) = self.wins.iter_mut().find(|w| w.id == id) {
                             w.width = width;
                             w.height = height;
+                            w.restore = None;
                         }
                         Some(id)
                     }

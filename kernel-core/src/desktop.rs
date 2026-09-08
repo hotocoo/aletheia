@@ -40,6 +40,9 @@ use crate::wm::{Press, WindowManager};
 /// terminal/editor byte; Ctrl+Tab is consumed here before it can reach the focused application.
 use crate::vinput::KEY_TAB;
 
+/// Linux keycode for Enter, reserved with Ctrl+Alt as the desktop maximize toggle.
+const KEY_ENTER: u16 = 28;
+
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
 pub const DESKTOP_RID: u32 = 11;
@@ -409,7 +412,25 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.code == KEY_TAB
                         && (ev.value == 1 || ev.value == 2)
                         && ctrl;
-                    if focus_cycle {
+                    let (_, _, alt) = self.kb_dec.modifiers();
+                    let maximize = ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_ENTER
+                        && ev.value == 1
+                        && ctrl
+                        && alt;
+                    if maximize {
+                        if let Some(id) = self.comp.focus() {
+                            if self.wm.is_maximized(id).is_some() {
+                                let _ = self.wm.toggle_maximize(&mut self.comp, self.sess, id);
+                                if id == WINDOW {
+                                    self.sync_terminal_geometry();
+                                }
+                            }
+                        }
+                        // Feed the event so Ctrl/Alt state remains faithful, but never route
+                        // the desktop shortcut into the focused application's queue.
+                        let _ = self.kb_dec.feed(ev);
+                    } else if focus_cycle {
                         let _ = self.wm.cycle_focus(&mut self.comp, self.sess, !shift);
                         // Feed the event to the decoder too so its held modifier state remains
                         // faithful. The Tab itself is deliberately not routed to the shell.

@@ -200,6 +200,40 @@ fn the_motion_route_moves_the_cursor_and_leaves_the_click_to_the_manager() {
 }
 
 #[test]
+fn maximize_and_restore_round_trip_the_original_geometry() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(wm.is_maximized(2), Some(false));
+    assert_eq!(wm.size(2), Some((80, 60)));
+    assert_eq!(comp.placement(2), Some((40, 20)));
+
+    assert_eq!(wm.toggle_maximize(&mut comp, sess, 2), Ok(true));
+    assert_eq!(wm.is_maximized(2), Some(true));
+    assert_eq!(wm.size(2), Some(comp.scanout_size()));
+    assert_eq!(comp.placement(2), Some((0, 0)));
+    assert_eq!(comp.focus(), Some(2));
+
+    assert_eq!(wm.toggle_maximize(&mut comp, sess, 2), Ok(false));
+    assert_eq!(wm.is_maximized(2), Some(false));
+    assert_eq!(wm.size(2), Some((80, 60)));
+    assert_eq!(comp.placement(2), Some((40, 20)));
+    assert_eq!(comp.focus(), Some(2));
+}
+
+#[test]
+fn maximize_refuses_an_unknown_window_without_changing_the_desktop() {
+    let (mut comp, mut wm, sess) = desk();
+    let z = comp.z_order();
+    assert_eq!(
+        wm.toggle_maximize(&mut comp, sess, 99),
+        Err(WmFault::UnknownWindow(99))
+    );
+    assert_eq!(comp.z_order(), z);
+    assert_eq!(comp.placement(1), Some((0, 0)));
+    assert_eq!(comp.placement(2), Some((40, 20)));
+    assert_eq!(wm.counters().3, 1);
+}
+
+#[test]
 fn keyboard_focus_cycle_follows_z_order_without_allocating() {
     let (mut comp, mut wm, sess) = desk();
     comp.set_focus(sess, 1).unwrap();
