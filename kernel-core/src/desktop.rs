@@ -1523,14 +1523,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_DOWN
                         && !ctrl && !alt;
                     let menu_home = self.comp.is_visible(MENU) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_HOME && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_HOME
                         && !shift && !ctrl && !alt;
                     let menu_end = self.comp.is_visible(MENU) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_END && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_END
                         && !shift && !ctrl && !alt;
                     let menu_number = if self.comp.is_visible(MENU) == Some(true)
-                        && ev.ty == vinput::EV_KEY
-                        && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value)
                         && !ctrl
                         && !alt
                     {
@@ -1981,6 +1980,14 @@ mod tests {
         assert!(is_key_press_or_repeat(super::vinput::EV_KEY, 2));
         assert!(!is_key_press_or_repeat(super::vinput::EV_KEY, 0));
         assert!(!is_key_press_or_repeat(2, 2));
+    }
+
+    #[test]
+    fn menu_jump_and_number_navigation_accept_key_repeat() {
+        assert!(is_key_press_or_repeat(super::vinput::EV_KEY, 2));
+        assert_eq!(menu_keyboard_jump(true), 0);
+        assert_eq!(menu_keyboard_jump(false), 8);
+        assert_eq!(menu_number_selection(super::KEY_9), Some(8));
     }
 
     #[test]
