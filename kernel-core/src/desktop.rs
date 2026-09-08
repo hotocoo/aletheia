@@ -497,6 +497,13 @@ fn switcher_entry(id: u32, focus: u32) -> Option<&'static str> {
     }
 }
 
+/// Render a bounded empty-state label when no managed window can currently receive focus. The
+/// switcher remains useful feedback after Show Desktop, minimization, or closing the final
+/// application instead of presenting an apparently blank overlay.
+fn switcher_empty_state(has_entries: bool) -> &'static str {
+    if has_entries { "" } else { " no reachable windows" }
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -1064,6 +1071,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 first = false;
             }
         }
+        self.switcher.write(switcher_empty_state(!first).as_bytes());
         self.switcher
             .write(b"\n\nAlt+Tab next  Shift+Alt+Tab previous  Esc/Enter close");
         self.switcher
@@ -1977,6 +1985,7 @@ mod tests {
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
         taskbar_keyboard_jump, taskbar_keyboard_next, menu_number_selection,
         taskbar_keyboard_previous, taskbar_hint, menu_keyboard_jump, switcher_entry,
+        switcher_empty_state,
     };
 
     #[test]
@@ -2163,6 +2172,12 @@ mod tests {
         assert_eq!(switcher_entry(super::MONITOR, super::WINDOW), Some(" monitor"));
         assert_eq!(switcher_entry(super::HELP, super::HELP), Some(">shortcuts"));
         assert_eq!(switcher_entry(super::TASKBAR, super::WINDOW), None);
+    }
+
+    #[test]
+    fn switcher_shows_explicit_empty_state_when_no_window_is_reachable() {
+        assert_eq!(switcher_empty_state(false), " no reachable windows");
+        assert_eq!(switcher_empty_state(true), "");
     }
 
     #[test]
