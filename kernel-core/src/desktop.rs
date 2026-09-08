@@ -47,6 +47,8 @@ const KEY_ENTER: u16 = 28;
 const KEY_BACKSPACE: u16 = 14;
 /// Linux keycode for `m`, reserved with Ctrl+Alt as the focused-window minimize/restore shortcut.
 const KEY_M: u16 = 50;
+/// Linux keycode for `w`, reserved with Ctrl as the conventional focused-window close shortcut.
+const KEY_W: u16 = 17;
 /// Linux keycode for `t`, reserved with Ctrl+Alt as the visible-window tiling shortcut.
 const KEY_T: u16 = 20;
 /// Linux keycode for `c`, reserved with Ctrl+Alt as the visible-window cascade shortcut.
@@ -313,6 +315,16 @@ fn is_maximize_shortcut(ty: u16, code: u16, value: u32, alt: bool) -> bool {
 /// F9 from leaking into the focused application's input queue.
 fn is_minimize_shortcut(ty: u16, code: u16, value: u32, alt: bool) -> bool {
     ty == vinput::EV_KEY && code == KEY_F9 && value == 1 && alt
+}
+
+/// Recognize the conventional focused-window close gestures. Alt+F4 remains the desktop-wide
+/// close shortcut; Ctrl+W adds the familiar application/window close gesture without requiring
+/// a function-key row. Keeping both in one predicate makes the desktop policy explicit and
+/// prevents either gesture from leaking into the focused application's input queue.
+fn is_close_shortcut(ty: u16, code: u16, value: u32, ctrl: bool, alt: bool) -> bool {
+    ty == vinput::EV_KEY
+        && value == 1
+        && ((code == KEY_F4 && alt) || (code == KEY_W && ctrl && !alt))
 }
 
 /// Recognize the standard keyboard context-menu gesture. Shift+F10 is useful when a pointer is
@@ -1566,11 +1578,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.value == 1
                         && ctrl
                         && alt;
-                    let close = ev.ty == vinput::EV_KEY
-                        && ev.code == KEY_BACKSPACE
-                        && ev.value == 1
-                        && ctrl
-                        && alt;
+                    let close = is_close_shortcut(ev.ty, ev.code, ev.value, ctrl, alt)
+                        || (ev.ty == vinput::EV_KEY
+                            && ev.code == KEY_BACKSPACE
+                            && ev.value == 1
+                            && ctrl
+                            && alt);
                     let minimize =
                         ev.ty == vinput::EV_KEY && ev.code == KEY_M && ev.value == 1 && ctrl && alt;
                     let tile =
@@ -1901,8 +1914,9 @@ fn taskbar_put_hovered_workspace(
 #[cfg(test)]
 mod tests {
     use super::{
-        alt_window_launcher, is_context_menu_shortcut, is_key_press_or_repeat,
-        is_maximize_shortcut, is_minimize_shortcut, is_title_double_click, next_menu_selection,
+        alt_window_launcher, is_close_shortcut, is_context_menu_shortcut,
+        is_key_press_or_repeat, is_maximize_shortcut, is_minimize_shortcut,
+        is_title_double_click, next_menu_selection,
         taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
         taskbar_keyboard_jump, taskbar_keyboard_next, menu_number_selection,
@@ -1942,6 +1956,15 @@ mod tests {
         assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 67, 1, false));
         assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 67, 0, true));
         assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 68, 1, true));
+    }
+
+    #[test]
+    fn ctrl_w_is_a_focused_window_close_gesture_alongside_alt_f4() {
+        assert!(is_close_shortcut(super::vinput::EV_KEY, 17, 1, true, false));
+        assert!(is_close_shortcut(super::vinput::EV_KEY, 62, 1, false, true));
+        assert!(!is_close_shortcut(super::vinput::EV_KEY, 17, 1, false, false));
+        assert!(!is_close_shortcut(super::vinput::EV_KEY, 17, 0, true, false));
+        assert!(!is_close_shortcut(super::vinput::EV_KEY, 17, 1, true, true));
     }
 
     #[test]
