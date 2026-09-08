@@ -484,6 +484,19 @@ fn taskbar_hint(target: u8) -> &'static str {
     }
 }
 
+/// Return the switcher's compact label for a managed window. Closed/minimized windows are
+/// omitted by the caller because `WindowManager::cycle_focus` can only select visible windows;
+/// keeping the presentation list aligned with that authority prevents Alt+Tab from advertising
+/// targets that the next focus operation cannot actually reach.
+fn switcher_entry(id: u32, focus: u32) -> Option<&'static str> {
+    match id {
+        WINDOW => Some(if focus == WINDOW { ">aletheia" } else { " aletheia" }),
+        MONITOR => Some(if focus == MONITOR { ">monitor" } else { " monitor" }),
+        HELP => Some(if focus == HELP { ">shortcuts" } else { " shortcuts" }),
+        _ => None,
+    }
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -1039,13 +1052,20 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     fn show_switcher(&mut self) {
         let focus = self.comp.focus().unwrap_or(0);
         self.switcher.clear();
-        let _ = write!(
-            self.switcher,
-            "{}aletheia    {}monitor    {}shortcuts\n\nAlt+Tab next  Shift+Alt+Tab previous",
-            if focus == WINDOW { ">" } else { " " },
-            if focus == MONITOR { ">" } else { " " },
-            if focus == HELP { ">" } else { " " },
-        );
+        let mut first = true;
+        for id in [WINDOW, MONITOR, HELP] {
+            if self.wm.is_open(id) && self.comp.is_visible(id) == Some(true) {
+                if !first {
+                    self.switcher.write(b"    ");
+                }
+                if let Some(label) = switcher_entry(id, focus) {
+                    self.switcher.write(label.as_bytes());
+                }
+                first = false;
+            }
+        }
+        self.switcher
+            .write(b"\n\nAlt+Tab next  Shift+Alt+Tab previous  Esc/Enter close");
         self.switcher
             .render_packed(SWITCHER_TITLE, &mut self.switcher_packed);
         let _ = self.comp.fill_packed(
@@ -1956,7 +1976,7 @@ mod tests {
         taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
         taskbar_keyboard_jump, taskbar_keyboard_next, menu_number_selection,
-        taskbar_keyboard_previous, taskbar_hint, menu_keyboard_jump,
+        taskbar_keyboard_previous, taskbar_hint, menu_keyboard_jump, switcher_entry,
     };
 
     #[test]
@@ -2135,6 +2155,14 @@ mod tests {
         }
         assert_eq!(taskbar_hint(0), "");
         assert_eq!(taskbar_hint(99), "");
+    }
+
+    #[test]
+    fn switcher_entries_only_describe_managed_targets() {
+        assert_eq!(switcher_entry(super::WINDOW, super::WINDOW), Some(">aletheia"));
+        assert_eq!(switcher_entry(super::MONITOR, super::WINDOW), Some(" monitor"));
+        assert_eq!(switcher_entry(super::HELP, super::HELP), Some(">shortcuts"));
+        assert_eq!(switcher_entry(super::TASKBAR, super::WINDOW), None);
     }
 
     #[test]
