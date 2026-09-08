@@ -56,10 +56,27 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()).unwrap_or("demo") {
         "serve" => serve(&args),
+        "gui" => gui_cmd(&args),
         "model" => model_cmd(&args),
         "console" => console_cmd(&args),
         "approvals" => approvals_cmd(&args),
         _ => demo(&args),
+    }
+}
+
+fn gui_cmd(args: &[String]) {
+    let dir = model_dir(args);
+    let bind = arg_value(args, "--bind").unwrap_or_else(|| "127.0.0.1:8787".into());
+    let service = match CoreService::open(&dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("gui: cannot open {dir}: {}", e.message);
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = experience::serve_gui(service, &bind) {
+        eprintln!("gui: {e}");
+        std::process::exit(2);
     }
 }
 
