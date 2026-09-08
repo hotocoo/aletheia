@@ -444,7 +444,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             .open(&mut comp, MONITOR, mw, mh, MON_X, MON_Y)
             .map_err(|_| "the monitor window was refused")?;
         let mut packed = Vec::new();
-        term.render_packed(TITLE, &mut packed);
+        term.render_packed_with_cursor(TITLE, &mut packed);
         comp.fill_packed(WINDOW, tok_win, &packed)
             .map_err(|_| "the terminal window's first paint was refused")?;
         let mut mon_packed = Vec::new();
@@ -619,7 +619,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         self.refresh_window_chrome();
         if self.term.take_dirty() {
             if let Some(tok) = self.wm.token(WINDOW) {
-                self.term.render_packed(TITLE, &mut self.packed);
+                self.term.render_packed_with_cursor(TITLE, &mut self.packed);
                 let _ = self.comp.fill_packed(WINDOW, tok, &self.packed);
             }
         }
@@ -650,7 +650,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         self.chrome_focus = focus;
         if let Some(tok) = self.wm.token(WINDOW) {
-            self.term.render_packed(
+            self.term.render_packed_with_cursor(
                 if focus == WINDOW { b">aletheia" } else { TITLE },
                 &mut self.packed,
             );
@@ -1034,7 +1034,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         };
         match id {
             WINDOW => {
-                self.term.render_packed(TITLE, &mut self.packed);
+                self.term.render_packed_with_cursor(TITLE, &mut self.packed);
                 let _ = self.comp.fill_packed(WINDOW, token, &self.packed);
                 self.term_input.clear();
             }
@@ -1250,7 +1250,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let rows = (h.saturating_sub(crate::textgrid::TITLE_H) / crate::textgrid::CELL).max(1);
         if self.term.cols() != cols || self.term.rows() != rows {
             self.term.resize(cols, rows);
-            self.term.render_packed(TITLE, &mut self.packed);
+            self.term.render_packed_with_cursor(TITLE, &mut self.packed);
             let Some(tok) = self.wm.token(WINDOW) else {
                 return;
             };

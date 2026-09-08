@@ -381,6 +381,23 @@ impl TextGrid {
         all_served
     }
 
+    /// Render the grid and add a small solid caret at the write cursor. The base renderer remains
+    /// unchanged for panels and chrome; the terminal window opts into the caret so its live input
+    /// position is visible without introducing a second cursor authority.
+    pub fn render_packed_with_cursor(&self, title: &[u8], out: &mut Vec<u8>) -> bool {
+        let served = self.render_packed(title, out);
+        let (w, h) = self.pixel_size();
+        let x0 = self.col * CELL;
+        let y0 = TITLE_H + self.row * CELL;
+        if x0 < w && y0 < h {
+            for y in y0..(y0 + CELL).min(h) {
+                let i = (y * w + x0) as usize;
+                out[i / 8] |= 1 << (i % 8);
+            }
+        }
+        served
+    }
+
     /// Is a window-local point inside the title band (the strip a pointer drags by)?
     pub fn in_title(&self, local_x: i32, local_y: i32) -> bool {
         let (w, _) = self.pixel_size();

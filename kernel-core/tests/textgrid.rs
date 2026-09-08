@@ -71,6 +71,25 @@ fn the_rendered_title_knocks_the_name_out_of_solid_ink() {
 }
 
 #[test]
+fn terminal_cursor_rendering_marks_the_write_position_without_changing_geometry() {
+    let mut g = TextGrid::new(4, 2);
+    g.write(b"ab");
+    let mut plain = Vec::new();
+    let mut caret = Vec::new();
+    g.render_packed(b"term", &mut plain);
+    g.render_packed_with_cursor(b"term", &mut caret);
+    assert_eq!(plain.len(), caret.len());
+    let (w, _) = g.pixel_size();
+    let x = g.cursor().0 * CELL;
+    let y = TITLE_H + g.cursor().1 * CELL;
+    for row in y..y + CELL {
+        let i = (row * w + x) as usize;
+        assert_ne!(caret[i / 8] & (1 << (i % 8)), 0);
+    }
+    assert_ne!(plain, caret);
+}
+
+#[test]
 fn pixel_size_and_packed_len_agree_with_fill_packed() {
     use kernel_core::compositor::Compositor;
     let g = TextGrid::new(40, 12);
