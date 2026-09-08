@@ -299,6 +299,12 @@ impl WindowManager {
         self.wins.len()
     }
 
+    /// Count managed windows assigned to one workspace. The taskbar uses this as presentation
+    /// state only; workspace ownership and switching remain manager-owned operations.
+    pub fn workspace_count(&self, workspace: u8) -> usize {
+        self.wins.iter().filter(|w| w.workspace == workspace).count()
+    }
+
     /// Current client geometry for a managed window.
     pub fn size(&self, id: u32) -> Option<(u32, u32)> {
         self.wins

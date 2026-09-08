@@ -95,6 +95,23 @@ fn workspaces_isolate_visibility_and_preserve_window_lifecycle() {
 }
 
 #[test]
+#[test]
+fn workspace_counts_follow_managed_window_ownership() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(wm.workspace_count(1), 2);
+    assert_eq!(wm.workspace_count(2), 0);
+
+    comp.set_focus(sess, 2).unwrap();
+    wm.move_focused_to_workspace(&mut comp, sess, 2).unwrap();
+    assert_eq!(wm.workspace_count(1), 1);
+    assert_eq!(wm.workspace_count(2), 1);
+
+    wm.close(&mut comp, sess, 2).unwrap();
+    assert_eq!(wm.workspace_count(1), 1);
+    assert_eq!(wm.workspace_count(2), 0);
+}
+
+#[test]
 fn workspace_switch_rejects_invalid_numbers_without_changing_state() {
     let (mut comp, mut wm, sess) = desk();
     assert_eq!(wm.switch_workspace(&mut comp, sess, 0), Err(WmFault::UnknownWindow(0)));

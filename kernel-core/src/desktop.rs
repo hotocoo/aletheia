@@ -215,6 +215,7 @@ struct TaskbarFacts {
     keyboard_resize: bool,
     uptime_s: u64,
     workspace: u8,
+    workspace_counts: [u8; MAX_WORKSPACES as usize],
 }
 
 /// The machine's live desktop: its devices, its decoders, its compositor and input session, its
@@ -705,6 +706,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 if hz == 0 { 0 } else { H::timer_ticks() / hz }
             },
             workspace: self.wm.current_workspace(),
+            workspace_counts: core::array::from_fn(|i| self.wm.workspace_count(i as u8 + 1).min(9) as u8),
         };
         if sig == self.taskbar_sig {
             return;
@@ -739,11 +741,18 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         );
         for workspace in 1..=MAX_WORKSPACES {
             if sig.hover == 9 + workspace {
-                taskbar_put_hovered_workspace(&mut self.taskbar, workspace, sig.workspace);
+                taskbar_put_hovered_workspace(
+                    &mut self.taskbar,
+                    workspace,
+                    sig.workspace,
+                    sig.workspace_counts[workspace as usize - 1],
+                );
             } else {
                 let marker = if workspace == sig.workspace { b'*' } else { b'0' + workspace };
                 self.taskbar.put(b'[');
                 self.taskbar.put(marker);
+                self.taskbar.put(b':');
+                self.taskbar.put(b'0' + sig.workspace_counts[workspace as usize - 1]);
                 self.taskbar.put(b']');
             }
             if workspace != MAX_WORKSPACES {
@@ -1662,10 +1671,17 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     }
 }
 
-fn taskbar_put_hovered_workspace(taskbar: &mut TextGrid, workspace: u8, current: u8) {
+fn taskbar_put_hovered_workspace(
+    taskbar: &mut TextGrid,
+    workspace: u8,
+    current: u8,
+    count: u8,
+) {
     taskbar.put(b'>');
     taskbar.put(b'[');
     taskbar.put(if workspace == current { b'*' } else { b'0' + workspace });
+    taskbar.put(b':');
+    taskbar.put(b'0' + count);
     taskbar.put(b']');
 }
 
