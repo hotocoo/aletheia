@@ -128,7 +128,11 @@ const HELP_X: i32 = 95;
 const HELP_Y: i32 = 30;
 const HELP_TITLE: &[u8] = b"shortcuts";
 const TASKBAR_COLS: u32 = 100;
-const TASKBAR_ROWS: u32 = 1;
+/// Two rows keep the taskbar's actionable strip and diagnostics/status text from competing for
+/// the same horizontal budget. The desktop is only 640px wide, so a single 100-cell row was
+/// silently clipping workspace affordances and the right-side status as more GUI features were
+/// added.
+const TASKBAR_ROWS: u32 = 2;
 const TASKBAR_X: i32 = 0;
 const TASKBAR_BUTTON_W: u32 = 18 * crate::textgrid::CELL;
 const TASKBAR_Y: i32 = H as i32 - (TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H) as i32;
@@ -817,7 +821,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let help_focus = sig.focus == HELP;
         let _ = write!(
             self.taskbar,
-            "{}[menu] {}terminal {}   {}monitor {}   {}help {}   ",
+            "{}[menu] {}term {} {}mon {} {}help {} ",
             if sig.hover == 1 || sig.keyboard_target == 1 { ">" } else { " " },
             if terminal_focus || sig.hover == 2 || sig.keyboard_target == 2 { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
@@ -858,9 +862,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 self.taskbar.write(b"   ");
             }
         }
+        // Keep diagnostics on the second row so the actionable application/workspace strip
+        // remains visible on the 640px scanout instead of silently clipping its right edge.
+        self.taskbar.put(b'\n');
         let _ = write!(
             self.taskbar,
-            "   [{}] {}s",
+            "status [{}] {}s  F6 navigate  Space/Enter activate",
             if sig.keyboard_resize { "R" } else { "N" },
             sig.uptime_s.min(999_999_999),
         );
