@@ -111,6 +111,11 @@ const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
 const TERM_INPUT_CAP: usize = 64;
 /// Events drained per device per pump — bounded, so one noisy device cannot own the tick.
 const EVENTS_PER_TICK: usize = 32;
+/// Native desktop double-click window: half a second, expressed in the platform timer's ticks.
+const DOUBLE_CLICK_MS: u64 = 500;
+/// Pointer movement tolerance for a title-bar double click. A second click that moved farther
+/// than this is a new click, not an implicit maximize gesture.
+const DOUBLE_CLICK_SLOP_PX: u32 = 8;
 
 /// Every number the monitor window prints. Compared whole, so "nothing changed" is a fact about
 /// the panel's contents rather than about a hash of them (ADR-084).
@@ -170,6 +175,31 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     term_input: Vec<u8>,
     /// Where the pointer last was (mirrored from the cursor, so a press knows it).
     pointer: (u32, u32),
+    /// Last title-bar click: window id, scanout position and timer tick. Kept as presentation
+    /// input state only; it never becomes window-manager ownership state.
+    last_title_click: Option<(u32, u32, u32, u64)>,
+}
+
+/// Decide whether a title-bar press is the second click of a double click. This pure predicate
+/// keeps timing policy separate from pointer routing and makes the gesture deterministic for a
+/// given timer frequency and event stream.
+fn is_title_double_click(
+    previous: Option<(u32, u32, u32, u64)>,
+    id: u32,
+    x: u32,
+    y: u32,
+    now: u64,
+    hz: u64,
+) -> bool {
+    let Some((prev_id, prev_x, prev_y, prev_tick)) = previous else {
+        return false;
+    };
+    let window = hz.saturating_mul(DOUBLE_CLICK_MS) / 1000;
+    let window = window.max(1);
+    prev_id == id
+        && now.wrapping_sub(prev_tick) <= window
+        && prev_x.abs_diff(x) <= DOUBLE_CLICK_SLOP_PX
+        && prev_y.abs_diff(y) <= DOUBLE_CLICK_SLOP_PX
 }
 
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
@@ -330,6 +360,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             keyboard_resize: false,
             term_input: Vec::with_capacity(TERM_INPUT_CAP),
             pointer: (W / 2, H / 2),
+            last_title_click: None,
         };
         d.show_frame()?;
         Ok(d)
@@ -675,7 +706,40 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         if let Some((Button::Left, down)) = batch.button {
             if down {
                 if self.taskbar_press(px, py) {
+                    self.last_title_click = None;
                     return;
+                }
+                let title_hit = self
+                    .wm
+                    .window_at(&self.comp, px, py)
+                    .and_then(|(id, lx, ly)| {
+                        self.wm.size(id).and_then(|(w, h)| {
+                            if crate::wm::hit_at(w, h, lx, ly) == Some(crate::wm::Hit::Title) {
+                                Some(id)
+                            } else {
+                                None
+                            }
+                        })
+                    });
+                if let Some(id) = title_hit {
+                    let now = H::timer_ticks();
+                    if is_title_double_click(
+                        self.last_title_click,
+                        id,
+                        px,
+                        py,
+                        now,
+                        H::timer_freq_hz(),
+                    ) {
+                        self.last_title_click = None;
+                        let _ = self.wm.toggle_maximize(&mut self.comp, self.sess, id);
+                        self.sync_terminal_geometry();
+                        self.refresh_cursor_shape();
+                        return;
+                    }
+                    self.last_title_click = Some((id, px, py, now));
+                } else {
+                    self.last_title_click = None;
                 }
                 // A closed terminal takes its unread keystrokes with it: bytes the console had
                 // not read belonged to a window that no longer exists.
@@ -988,5 +1052,32 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             closes,
             drags,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_title_double_click;
+
+    #[test]
+    fn title_double_click_requires_same_window_and_pointer_slop() {
+        let previous = Some((7, 100, 40, 1_000));
+        assert!(is_title_double_click(previous, 7, 104, 44, 1_450, 1_000));
+        assert!(!is_title_double_click(previous, 8, 104, 44, 1_450, 1_000));
+        assert!(!is_title_double_click(previous, 7, 109, 40, 1_450, 1_000));
+    }
+
+    #[test]
+    fn title_double_click_has_a_half_second_deadline() {
+        let previous = Some((7, 100, 40, 1_000));
+        assert!(is_title_double_click(previous, 7, 100, 40, 1_499, 1_000));
+        assert!(!is_title_double_click(previous, 7, 100, 40, 1_501, 1_000));
+    }
+
+    #[test]
+    fn uncalibrated_timer_still_accepts_the_next_immediate_click() {
+        let previous = Some((7, 100, 40, 1_000));
+        assert!(is_title_double_click(previous, 7, 100, 40, 1_000, 0));
+        assert!(!is_title_double_click(previous, 7, 100, 40, 1_002, 0));
     }
 }
