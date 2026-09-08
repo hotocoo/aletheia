@@ -467,6 +467,23 @@ fn taskbar_keyboard_previous(current: u8) -> u8 {
     next_taskbar_keyboard_target(current, false)
 }
 
+/// Return a compact second-row hint for the currently highlighted taskbar affordance. The hint
+/// is presentation-only: it describes the same fixed ids used by pointer and keyboard activation
+/// and never introduces another command or focus authority.
+fn taskbar_hint(target: u8) -> &'static str {
+    match target {
+        1 => "open desktop menu",
+        2 => "focus terminal",
+        3 => "focus system monitor",
+        4 => "open shortcut reference",
+        10 => "switch to workspace 1",
+        11 => "switch to workspace 2",
+        12 => "switch to workspace 3",
+        13 => "switch to workspace 4",
+        _ => "",
+    }
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -865,12 +882,24 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         // Keep diagnostics on the second row so the actionable application/workspace strip
         // remains visible on the 640px scanout instead of silently clipping its right edge.
         self.taskbar.put(b'\n');
-        let _ = write!(
-            self.taskbar,
-            "status [{}] {}s  F6 navigate  Space/Enter activate",
-            if sig.keyboard_resize { "R" } else { "N" },
-            sig.uptime_s.min(999_999_999),
-        );
+        let target = if sig.hover != 0 { sig.hover } else { sig.keyboard_target };
+        let hint = taskbar_hint(target);
+        if hint.is_empty() {
+            let _ = write!(
+                self.taskbar,
+                "status [{}] {}s  F6 navigate  Space/Enter activate",
+                if sig.keyboard_resize { "R" } else { "N" },
+                sig.uptime_s.min(999_999_999),
+            );
+        } else {
+            let _ = write!(
+                self.taskbar,
+                "{}  |  status [{}] {}s",
+                hint,
+                if sig.keyboard_resize { "R" } else { "N" },
+                sig.uptime_s.min(999_999_999),
+            );
+        }
         self.taskbar.render_packed(b"desktop", &mut self.taskbar_packed);
         let _ = self.comp.fill_packed(TASKBAR, self.taskbar_token, &self.taskbar_packed);
     }
@@ -1927,7 +1956,7 @@ mod tests {
         taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
         taskbar_keyboard_jump, taskbar_keyboard_next, menu_number_selection,
-        taskbar_keyboard_previous, menu_keyboard_jump,
+        taskbar_keyboard_previous, taskbar_hint, menu_keyboard_jump,
     };
 
     #[test]
@@ -2094,6 +2123,18 @@ mod tests {
         assert_eq!(taskbar_keyboard_previous(2), 1);
         assert_eq!(taskbar_keyboard_previous(max), max - 1);
         assert_eq!(taskbar_keyboard_previous(0), max);
+    }
+
+    #[test]
+    fn taskbar_hints_cover_every_actionable_affordance() {
+        for target in 1..=4 {
+            assert!(!taskbar_hint(target).is_empty());
+        }
+        for target in 10..=13 {
+            assert!(!taskbar_hint(target).is_empty());
+        }
+        assert_eq!(taskbar_hint(0), "");
+        assert_eq!(taskbar_hint(99), "");
     }
 
     #[test]
