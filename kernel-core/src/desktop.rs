@@ -124,6 +124,11 @@ const TASKBAR_MENU_W: u32 = 8 * crate::textgrid::CELL;
 const TASKBAR_TERM_X: u32 = 8 * crate::textgrid::CELL;
 const TASKBAR_MON_X: u32 = TASKBAR_TERM_X + TASKBAR_BUTTON_W;
 const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
+/// Four fixed workspace buttons occupy the taskbar immediately after the application buttons.
+/// Seven cells per button leave room for a visible `[n]` label and a separator while keeping
+/// the hit map independent from the taskbar's status text.
+const TASKBAR_WS_X: u32 = TASKBAR_HELP_X + TASKBAR_BUTTON_W;
+const TASKBAR_WS_W: u32 = 7 * crate::textgrid::CELL;
 const MENU_COLS: u32 = 18;
 const MENU_ROWS: u32 = 9;
 const MENU_MARGIN: i32 = 4;
@@ -331,6 +336,29 @@ fn taskbar_target(x: u32) -> Option<u32> {
         Some(HELP)
     } else {
         None
+    }
+}
+
+/// Resolve the taskbar's workspace strip to the user-facing workspace number. This is separate
+/// from `taskbar_target` because workspaces are desktop state, not managed application windows.
+fn taskbar_workspace_target(x: u32) -> Option<u8> {
+    if x < TASKBAR_WS_X || x >= TASKBAR_WS_X + TASKBAR_WS_W * MAX_WORKSPACES as u32 {
+        return None;
+    }
+    Some(((x - TASKBAR_WS_X) / TASKBAR_WS_W + 1) as u8)
+}
+
+/// Paint the four workspace buttons at the same fixed cell positions used by the pointer hit
+/// map. The current workspace is marked with `*`; all four buttons retain identical hit widths.
+fn write_workspace_buttons(taskbar: &mut TextGrid, current: u8) {
+    for workspace in 1..=MAX_WORKSPACES {
+        let marker = if workspace == current { b'*' } else { b'0' + workspace };
+        taskbar.put(b'[');
+        taskbar.put(marker);
+        taskbar.put(b']');
+        if workspace != MAX_WORKSPACES {
+            taskbar.write(b"   ");
+        }
     }
 }
 
@@ -668,7 +696,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let help_focus = sig.focus == HELP;
         let _ = write!(
             self.taskbar,
-            "[menu] {}terminal {}   {}monitor {}   {}help {}   ws {}/{}   {}   up {}s",
+            "[menu] {}terminal {}   {}monitor {}   {}help {}   ",
             if terminal_focus { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
                 if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
@@ -687,10 +715,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             } else {
                 "[closed]"
             },
-            sig.workspace,
-            MAX_WORKSPACES,
-            if sig.keyboard_resize { "[resize-mode]" } else { "[normal]" },
-            sig.uptime_s,
+        );
+        write_workspace_buttons(&mut self.taskbar, sig.workspace);
+        let _ = write!(
+            self.taskbar,
+            "   [{}] {}s",
+            if sig.keyboard_resize { "R" } else { "N" },
+            sig.uptime_s.min(999_999_999),
         );
         self.taskbar.render_packed(b"desktop", &mut self.taskbar_packed);
         let _ = self.comp.fill_packed(TASKBAR, self.taskbar_token, &self.taskbar_packed);
@@ -705,6 +736,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             return false;
         }
         let lx = lx as u32;
+        if let Some(workspace) = taskbar_workspace_target(lx) {
+            if workspace != self.wm.current_workspace() {
+                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+            }
+            return true;
+        }
         let Some(target) = taskbar_target(lx) else { return false };
         if target == MENU {
             self.open_start_menu();
@@ -1006,8 +1043,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             };
             let lx = x as i32 - tx;
             let ly = y as i32 - ty;
-            if lx >= TASKBAR_TERM_X as i32
+            if (lx >= TASKBAR_TERM_X as i32
                 && lx < (TASKBAR_HELP_X + TASKBAR_BUTTON_W) as i32
+                || lx >= TASKBAR_WS_X as i32
+                    && lx < (TASKBAR_WS_X + TASKBAR_WS_W * MAX_WORKSPACES as u32) as i32)
                 && ly >= crate::textgrid::TITLE_H as i32
                 && lx < tw as i32
                 && ly < th as i32
@@ -1595,7 +1634,7 @@ mod tests {
     use super::{
         alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
         is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_target,
-        workspace_shortcut,
+        taskbar_workspace_target, workspace_shortcut,
     };
 
     #[test]
@@ -1657,6 +1696,20 @@ mod tests {
         assert_eq!(taskbar_target(super::TASKBAR_MON_X), Some(super::MONITOR));
         assert_eq!(taskbar_target(super::TASKBAR_HELP_X), Some(super::HELP));
         assert_eq!(taskbar_target(super::TASKBAR_HELP_X + super::TASKBAR_BUTTON_W), None);
+    }
+
+    #[test]
+    fn taskbar_workspace_strip_has_four_disjoint_targets() {
+        for workspace in 1..=super::MAX_WORKSPACES {
+            let start = super::TASKBAR_WS_X + (workspace as u32 - 1) * super::TASKBAR_WS_W;
+            assert_eq!(taskbar_workspace_target(start), Some(workspace));
+            assert_eq!(taskbar_workspace_target(start + super::TASKBAR_WS_W - 1), Some(workspace));
+        }
+        assert_eq!(taskbar_workspace_target(super::TASKBAR_WS_X - 1), None);
+        assert_eq!(
+            taskbar_workspace_target(super::TASKBAR_WS_X + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32),
+            None
+        );
     }
 
     #[test]
