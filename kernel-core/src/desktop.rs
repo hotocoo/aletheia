@@ -34,7 +34,7 @@ use crate::textgrid::TextGrid;
 use crate::vinput::{self, Button, ConfigWrite, KeyDecoder, PointerDecoder, VirtioInput};
 use crate::virtioblk::{Transport, VirtioHal};
 use crate::virtiogpu::{self, Rect as GpuRect, VirtioGpu};
-use crate::wm::{Press, SnapDirection, WindowManager};
+use crate::wm::{NudgeDirection, Press, SnapDirection, WindowManager};
 
 /// Linux keycode constants used by the desktop-level keyboard shortcuts. Plain Tab remains a
 /// terminal/editor byte; Ctrl+Tab is consumed here before it can reach the focused application.
@@ -575,6 +575,22 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && (ev.value == 1 || ev.value == 2)
                         && ctrl;
                     let (_, _, alt) = self.kb_dec.modifiers();
+                    let keyboard_nudge = if ev.ty == vinput::EV_KEY
+                        && ev.value == 1
+                        && ctrl
+                        && alt
+                        && shift
+                    {
+                        match ev.code {
+                            KEY_LEFT => Some(NudgeDirection::Left),
+                            KEY_RIGHT => Some(NudgeDirection::Right),
+                            KEY_UP => Some(NudgeDirection::Up),
+                            KEY_DOWN => Some(NudgeDirection::Down),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     let maximize = ev.ty == vinput::EV_KEY
                         && ev.code == KEY_ENTER
                         && ev.value == 1
@@ -602,7 +618,10 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else {
                         None
                     };
-                    if maximize {
+                    if let Some(direction) = keyboard_nudge {
+                        let _ = self.wm.nudge_focused(&mut self.comp, direction);
+                        let _ = self.kb_dec.feed(ev);
+                    } else if maximize {
                         if let Some(id) = self.comp.focus() {
                             if self.wm.is_maximized(id).is_some() {
                                 let _ = self.wm.toggle_maximize(&mut self.comp, self.sess, id);

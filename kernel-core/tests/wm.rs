@@ -7,7 +7,8 @@
 use kernel_core::compositor::{CompFault, Compositor, EventKind};
 use kernel_core::textgrid::{CLOSE_W, TITLE_H};
 use kernel_core::wm::{
-    hit_at, wm_suite, Hit, Press, SnapDirection, WindowManager, WmFault, MAX_WINDOWS,
+    hit_at, wm_suite, Hit, NudgeDirection, Press, SnapDirection, WindowManager, WmFault,
+    MAX_WINDOWS,
 };
 
 fn desk() -> (Compositor, WindowManager, u64) {
@@ -28,7 +29,7 @@ fn the_boot_suite_passes_on_the_host() {
         assert!(ok, "{name}");
     })
     .unwrap();
-    assert_eq!(n, 12);
+    assert_eq!(n, 13);
 }
 
 #[test]
@@ -503,4 +504,41 @@ fn keyboard_snap_uses_only_the_visible_focused_window_and_leaves_minimized_windo
     assert_eq!(comp.placement(1), Some((0, 0)));
     assert_eq!(comp.placement(2), Some((40, 20)));
     assert_eq!(comp.is_visible(2), Some(false));
+}
+
+#[test]
+fn keyboard_nudge_moves_focused_window_in_fixed_steps_and_clamps_to_scanout() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 2).unwrap();
+
+    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Right), Ok(Some(2)));
+    assert_eq!(comp.placement(2), Some((56, 20)));
+    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Down), Ok(Some(2)));
+    assert_eq!(comp.placement(2), Some((56, 36)));
+    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Left), Ok(Some(2)));
+    assert_eq!(comp.placement(2), Some((40, 36)));
+    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Up), Ok(Some(2)));
+    assert_eq!(comp.placement(2), Some((40, 20)));
+
+    for _ in 0..32 {
+        let _ = wm.nudge_focused(&mut comp, NudgeDirection::Right);
+        let _ = wm.nudge_focused(&mut comp, NudgeDirection::Down);
+    }
+    assert_eq!(comp.placement(2), Some((120, 60)));
+}
+
+#[test]
+fn keyboard_nudge_refuses_hidden_or_snapped_windows_without_destroying_restore_state() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 2).unwrap();
+    wm.toggle_minimize(&mut comp, sess, 2).unwrap();
+    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Right), Ok(Some(1)));
+    assert_eq!(comp.placement(2), Some((40, 20)));
+
+    wm.toggle_minimize(&mut comp, sess, 2).unwrap();
+    wm.snap_focused(&mut comp, sess, SnapDirection::Left).unwrap();
+    let snapped = comp.placement(2);
+    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Right), Ok(None));
+    assert_eq!(comp.placement(2), snapped);
+    assert_eq!(wm.is_maximized(2), Some(true));
 }

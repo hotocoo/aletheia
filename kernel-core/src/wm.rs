@@ -168,6 +168,19 @@ pub enum SnapDirection {
     Down,
 }
 
+/// Keyboard-directed movement of the focused window. Kept separate from snapping so a held
+/// Shift modifier can request a precise nudge without changing the existing four-way snap
+/// contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NudgeDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+const KEYBOARD_NUDGE_PX: i32 = 16;
+
 impl WindowManager {
     pub fn new() -> Self {
         WindowManager {
@@ -525,6 +538,47 @@ impl WindowManager {
         entry.height = nh;
         comp.raise(id, w.token)?;
         comp.set_focus(session, id)?;
+        Ok(Some(id))
+    }
+
+    /// Move the focused visible managed window by one fixed keyboard step. Maximized/snapped
+    /// windows are deliberately not moved: their restore geometry is user state, and silently
+    /// discarding it would make a keyboard nudge destructive. The operation stays allocation-free
+    /// and uses the manager-held owner token.
+    pub fn nudge_focused(
+        &mut self,
+        comp: &mut Compositor,
+        direction: NudgeDirection,
+    ) -> Result<Option<u32>, WmFault> {
+        let Some(id) = comp.focus() else {
+            return Ok(None);
+        };
+        let Some(w) = self.wins.iter().find(|w| w.id == id).copied() else {
+            self.refusals += 1;
+            return Err(WmFault::UnknownWindow(id));
+        };
+        if comp.is_visible(id) != Some(true) || w.restore.is_some() {
+            return Ok(None);
+        }
+        let Some((x, y)) = comp.placement(id) else {
+            self.refusals += 1;
+            return Err(WmFault::Compositor(CompFault::UnknownSurface(id)));
+        };
+        let (sw, sh) = comp.scanout_size();
+        let max_x = sw.saturating_sub(w.width) as i32;
+        let max_y = sh.saturating_sub(w.height) as i32;
+        let (dx, dy) = match direction {
+            NudgeDirection::Left => (-KEYBOARD_NUDGE_PX, 0),
+            NudgeDirection::Right => (KEYBOARD_NUDGE_PX, 0),
+            NudgeDirection::Up => (0, -KEYBOARD_NUDGE_PX),
+            NudgeDirection::Down => (0, KEYBOARD_NUDGE_PX),
+        };
+        let nx = (x + dx).clamp(0, max_x);
+        let ny = (y + dy).clamp(0, max_y);
+        if (nx, ny) == (x, y) {
+            return Ok(Some(id));
+        }
+        comp.move_surface(id, w.token, nx, ny)?;
         Ok(Some(id))
     }
 
@@ -1060,6 +1114,28 @@ pub fn wm_suite(
                 && w1.counters() == w2.counters()
                 && w1.wins.capacity() == cap,
             "wm: the same pointer story lands bit-identically and the event path allocates nothing"
+        );
+    }
+    // 13 — keyboard nudge is a fixed, allocation-free move of the focused window and never
+    // silently converts a snapped/maximized layout into a new restore geometry.
+    {
+        let (mut comp, mut wm, sess, _a, b) = desk();
+        let _ = comp.set_focus(sess, b);
+        let before = comp.placement(b);
+        let moved = wm.nudge_focused(&mut comp, NudgeDirection::Right);
+        let after = comp.placement(b);
+        let snapped = wm.snap_focused(&mut comp, sess, SnapDirection::Left);
+        let snap_place = comp.placement(b);
+        let refused = wm.nudge_focused(&mut comp, NudgeDirection::Right);
+        check!(
+            moved == Ok(Some(b))
+                && before == Some((40, 20))
+                && after == Some((56, 20))
+                && snapped == Ok(Some(b))
+                && snap_place == Some((0, 0))
+                && refused == Ok(None)
+                && wm.is_maximized(b) == Some(true),
+            "wm: keyboard nudge moves by one fixed step and preserves snap restore state"
         );
     }
     Ok(n)
