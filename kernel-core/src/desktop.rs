@@ -395,6 +395,13 @@ fn taskbar_keyboard_jump(home: bool) -> u8 {
     if home { 1 } else { 9 + MAX_WORKSPACES }
 }
 
+/// Return the taskbar affordance immediately after `current` in the forward direction, treating
+/// the launcher as the first stop. Keeping this separate from the wrapping helper lets callers
+/// implement a one-way traversal without duplicating the taskbar order.
+fn taskbar_keyboard_next(current: u8) -> u8 {
+    next_taskbar_keyboard_target(current, true)
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -1518,7 +1525,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     };
                     if taskbar_enter {
                         if self.taskbar_keyboard_target.is_some() {
-                            self.taskbar_keyboard_target = None;
+                            let current = self.taskbar_keyboard_target.unwrap_or(1);
+                            self.taskbar_keyboard_target = Some(taskbar_keyboard_next(current));
                         } else {
                             self.enter_taskbar_keyboard_mode();
                         }
@@ -1817,7 +1825,7 @@ mod tests {
         alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
         is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
-        taskbar_keyboard_jump,
+        taskbar_keyboard_jump, taskbar_keyboard_next,
     };
 
     #[test]
@@ -1927,6 +1935,15 @@ mod tests {
     fn taskbar_keyboard_home_and_end_jump_to_valid_affordances() {
         assert_eq!(taskbar_keyboard_jump(true), 1);
         assert_eq!(taskbar_keyboard_jump(false), 9 + super::MAX_WORKSPACES);
+    }
+
+    #[test]
+    fn taskbar_f6_forward_traversal_wraps_to_the_launcher() {
+        let max = 9 + super::MAX_WORKSPACES;
+        assert_eq!(taskbar_keyboard_next(1), 2);
+        assert_eq!(taskbar_keyboard_next(max - 1), max);
+        assert_eq!(taskbar_keyboard_next(max), 1);
+        assert_eq!(taskbar_keyboard_next(0), 2);
     }
 
     #[test]
