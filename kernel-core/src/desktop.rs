@@ -142,7 +142,9 @@ const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
 /// the hit map independent from the taskbar's status text.
 const TASKBAR_WS_X: u32 = TASKBAR_HELP_X + TASKBAR_BUTTON_W;
 const TASKBAR_WS_W: u32 = 7 * crate::textgrid::CELL;
-const MENU_COLS: u32 = 18;
+// The widest numbered command is `9 minimize focused` (18 cells); one extra cell leaves the
+// selection marker visible without truncating the accelerator label.
+const MENU_COLS: u32 = 20;
 const MENU_ROWS: u32 = 9;
 const MENU_MARGIN: i32 = 4;
 const MENU_TITLE: &[u8] = b"menu";
@@ -324,6 +326,10 @@ fn render_menu(menu: &TextGrid, selected: usize, out: &mut Vec<u8>) {
     grid.clear();
     for (index, item) in MENU_ITEMS.iter().enumerate() {
         if index == selected { grid.write(b">"); } else { grid.write(b" "); }
+        // Keep the accelerator visible in the menu itself. This makes the existing 1-9 keyboard
+        // contract discoverable instead of requiring users to infer it from the shortcut help.
+        grid.put(b'1' + index as u8);
+        grid.put(b' ');
         grid.write(item);
         if index + 1 < MENU_ITEMS.len() { grid.write(b"\n"); }
     }
