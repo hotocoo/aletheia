@@ -78,6 +78,9 @@ const KEY_END: u16 = 107;
 /// Linux keycode for F1, reserved as the desktop shortcut reference toggle.
 const KEY_F1: u16 = 59;
 const KEY_F6: u16 = 64;
+/// Linux keycode for Space, reserved as the taskbar's accessible activation key while its
+/// keyboard navigation mode is active. Plain Space remains application input everywhere else.
+const KEY_SPACE: u16 = 57;
 
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
@@ -493,7 +496,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.write(b"Ctrl+Alt+Enter/M/Backspace  max/min/close\n");
         help.write(b"Shift+F10  context menu\n");
         help.write(b"Alt+Tab    show window switcher\n");
-        help.write(b"F6/Arrows  keyboard taskbar navigation\n");
+        help.write(b"F6/Arrows/Tab  keyboard taskbar navigation\n");
+        help.write(b"Space/Enter  activate taskbar selection\n");
         let mut help_packed = Vec::new();
         help.render_packed(HELP_TITLE, &mut help_packed);
         comp.fill_packed(HELP, tok_help, &help_packed)
@@ -1442,6 +1446,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     let taskbar_activate = self.taskbar_keyboard_target.is_some()
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_ENTER && ev.value == 1
                         && !ctrl && !alt;
+                    let taskbar_space_activate = self.taskbar_keyboard_target.is_some()
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_SPACE && ev.value == 1
+                        && !ctrl && !alt;
+                    let taskbar_tab = self.taskbar_keyboard_target.is_some()
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_TAB
+                        && (ev.value == 1 || ev.value == 2)
+                        && !ctrl && !alt;
                     let menu_escape = self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY
                         && ev.code == KEY_ESC
@@ -1525,7 +1536,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else if taskbar_left || taskbar_right {
                         self.move_taskbar_keyboard_target(taskbar_right);
                         let _ = self.kb_dec.feed(ev);
-                    } else if taskbar_activate {
+                    } else if taskbar_tab {
+                        self.move_taskbar_keyboard_target(!shift);
+                        let _ = self.kb_dec.feed(ev);
+                    } else if taskbar_activate || taskbar_space_activate {
                         if let Some(target) = self.taskbar_keyboard_target {
                             let _ = self.activate_taskbar_target(target);
                         }
