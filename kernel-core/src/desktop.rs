@@ -388,14 +388,18 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         self.taskbar_sig = sig;
         self.taskbar.clear();
+        let terminal_focus = sig.focus == WINDOW;
+        let monitor_focus = sig.focus == MONITOR;
         let _ = write!(
             self.taskbar,
-            "terminal {}   monitor {}",
+            "{}terminal {}   {}monitor {}",
+            if terminal_focus { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
                 if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
             } else {
                 "[closed]"
             },
+            if monitor_focus { ">" } else { " " },
             if self.wm.is_open(MONITOR) {
                 if self.wm.is_minimized(&self.comp, MONITOR) == Some(true) { "[hidden]" } else { "[open]" }
             } else {
