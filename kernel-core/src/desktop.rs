@@ -58,6 +58,8 @@ const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
 const KEY_RIGHT: u16 = 106;
 const KEY_DOWN: u16 = 108;
+/// Linux keycode for F1, reserved as the desktop shortcut reference toggle.
+const KEY_F1: u16 = 59;
 
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
@@ -75,6 +77,7 @@ const PANEL: u32 = 1;
 pub const WINDOW: u32 = 2;
 pub const MONITOR: u32 = 3;
 const TASKBAR: u32 = 4;
+const HELP: u32 = 5;
 
 /// The terminal grid: 40 columns x 12 rows of the console's alphabet, placed so a gap of empty
 /// scanout remains for an "empty space" click.
@@ -89,6 +92,11 @@ const MON_ROWS: u32 = 6;
 const MON_X: i32 = 20;
 const MON_Y: i32 = 140;
 const MON_TITLE: &[u8] = b"monitor";
+const HELP_COLS: u32 = 50;
+const HELP_ROWS: u32 = 8;
+const HELP_X: i32 = 95;
+const HELP_Y: i32 = 30;
+const HELP_TITLE: &[u8] = b"shortcuts";
 const TASKBAR_COLS: u32 = 100;
 const TASKBAR_ROWS: u32 = 1;
 const TASKBAR_X: i32 = 0;
@@ -144,6 +152,9 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     mon: TextGrid,
     mon_packed: Vec<u8>,
     mon_sig: MonitorFacts,
+    help: TextGrid,
+    help_packed: Vec<u8>,
+    help_token: u64,
     taskbar: TextGrid,
     taskbar_packed: Vec<u8>,
     taskbar_token: u64,
@@ -238,6 +249,22 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         mon.render_packed(MON_TITLE, &mut mon_packed);
         comp.fill_packed(MONITOR, tok_mon, &mon_packed)
             .map_err(|_| "the monitor window's first paint was refused")?;
+        let mut help = TextGrid::new(HELP_COLS, HELP_ROWS);
+        let (hw, hh) = help.pixel_size();
+        let tok_help = wm
+            .open(&mut comp, HELP, hw, hh, HELP_X, HELP_Y)
+            .map_err(|_| "the shortcuts window was refused")?;
+        help.write(b"F1        toggle this help\n");
+        help.write(b"Ctrl+Tab  cycle focus\n");
+        help.write(b"Ctrl+Alt+Arrows  snap focused window\n");
+        help.write(b"Ctrl+Alt+Shift+Arrows  nudge window\n");
+        help.write(b"Ctrl+Alt+T/C  tile/cascade windows\n");
+        help.write(b"Ctrl+Alt+R  keyboard resize mode\n");
+        help.write(b"Ctrl+Alt+Enter/M/Backspace  max/min/close\n");
+        let mut help_packed = Vec::new();
+        help.render_packed(HELP_TITLE, &mut help_packed);
+        comp.fill_packed(HELP, tok_help, &help_packed)
+            .map_err(|_| "the shortcuts window's first paint was refused")?;
         let taskbar = TextGrid::new(TASKBAR_COLS, TASKBAR_ROWS);
         let (tbw, tbh) = taskbar.pixel_size();
         let tok_taskbar = comp
@@ -251,6 +278,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             .map_err(|_| "the taskbar's first paint was refused")?;
         comp.set_focus(sess, WINDOW)
             .map_err(|_| "focusing the terminal window was refused")?;
+        let _ = wm.toggle_minimize(&mut comp, sess, HELP);
         comp.move_cursor(sess, W / 2, H / 2)
             .map_err(|_| "placing the cursor was refused")?;
         comp.set_cursor_shape(sess, CursorShape::Arrow)
@@ -284,6 +312,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             mon,
             mon_packed,
             mon_sig: MonitorFacts::default(),
+            help,
+            help_packed,
+            help_token: tok_help,
             taskbar,
             taskbar_packed,
             taskbar_token: tok_taskbar,
@@ -351,6 +382,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 self.mon.render_packed(MON_TITLE, &mut self.mon_packed);
                 let _ = self.comp.fill_packed(MONITOR, tok, &self.mon_packed);
             }
+        }
+        if self.help.take_dirty() {
+            self.help.render_packed(HELP_TITLE, &mut self.help_packed);
+            let _ = self.comp.fill_packed(HELP, self.help_token, &self.help_packed);
         }
         self.refresh_taskbar();
         if self.comp.has_pending_damage() {
@@ -426,6 +461,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             },
             sig.uptime_s,
         );
+        let _ = write!(self.taskbar, "   F1 help");
         self.taskbar.render_packed(b"desktop", &mut self.taskbar_packed);
         let _ = self.comp.fill_packed(TASKBAR, self.taskbar_token, &self.taskbar_packed);
     }
@@ -460,6 +496,15 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if target == WINDOW { self.sync_terminal_geometry(); }
         true
+    }
+
+    /// Toggle the keyboard reference window through the same manager used by every application
+    /// surface. Showing help therefore changes focus and z-order normally instead of bypassing
+    /// the desktop's ownership boundary.
+    fn toggle_help(&mut self) {
+        if self.wm.is_open(HELP) {
+            let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, HELP);
+        }
     }
 
     /// Select a compositor-owned cursor shape from the same hit geometry the window manager
@@ -663,6 +708,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.ty == vinput::EV_KEY
                         && ev.value == 1
                         && (ev.code == KEY_ESC || ev.code == KEY_ENTER);
+                    let help_toggle =
+                        ev.ty == vinput::EV_KEY && ev.code == KEY_F1 && ev.value == 1;
                     let keyboard_nudge = if ev.ty == vinput::EV_KEY
                         && ev.value == 1
                         && ctrl
@@ -706,7 +753,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else {
                         None
                     };
-                    if resize_toggle {
+                    if help_toggle {
+                        self.toggle_help();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if resize_toggle {
                         self.keyboard_resize = !self.keyboard_resize;
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(direction) = resize_direction {
