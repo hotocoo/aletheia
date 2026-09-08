@@ -57,6 +57,8 @@ const KEY_R: u16 = 19;
 const KEY_ESC: u16 = 1;
 /// Linux keycode for F4, reserved with Alt as the conventional focused-window close shortcut.
 const KEY_F4: u16 = 62;
+/// Linux keycode for F9, reserved with Alt as the conventional focused-window minimize shortcut.
+const KEY_F9: u16 = 67;
 /// Linux keycode for F10, reserved with Alt as the conventional focused-window maximize toggle.
 const KEY_F10: u16 = 68;
 /// Linux keycodes for the number row, reserved with Alt as direct taskbar/window launchers.
@@ -231,6 +233,13 @@ fn is_maximize_shortcut(ty: u16, code: u16, value: u32, alt: bool) -> bool {
     ty == vinput::EV_KEY && code == KEY_F10 && value == 1 && alt
 }
 
+/// Recognize the conventional Alt+F9 minimize gesture without depending on the live keyboard
+/// decoder. Keeping the predicate pure makes the desktop shortcut policy testable and prevents
+/// F9 from leaking into the focused application's input queue.
+fn is_minimize_shortcut(ty: u16, code: u16, value: u32, alt: bool) -> bool {
+    ty == vinput::EV_KEY && code == KEY_F9 && value == 1 && alt
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -321,6 +330,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.write(b"F1        toggle this help\n");
         help.write(b"Alt+Tab   cycle focus\n");
         help.write(b"Alt+F4    close focused window\n");
+        help.write(b"Alt+F9    minimize focused window\n");
         help.write(b"Alt+F10   maximize/restore focused\n");
         help.write(b"Alt+1/2/3 open/focus terminal/monitor/help\n");
         help.write(b"Ctrl+Tab  cycle focus\n");
@@ -860,6 +870,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.code == KEY_F4
                         && ev.value == 1
                         && alt;
+                    let alt_minimize = is_minimize_shortcut(ev.ty, ev.code, ev.value, alt);
                     let alt_maximize = is_maximize_shortcut(ev.ty, ev.code, ev.value, alt);
                     let alt_launcher = if ev.ty == vinput::EV_KEY {
                         alt_window_launcher(ev.code, ev.value, alt)
@@ -970,6 +981,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                             let _ = self.wm.close(&mut self.comp, self.sess, id);
                             if id == WINDOW {
                                 self.term_input.clear();
+                            }
+                        }
+                        let _ = self.kb_dec.feed(ev);
+                    } else if alt_minimize {
+                        if let Some(id) = self.comp.focus() {
+                            let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
+                            if id == WINDOW {
+                                self.sync_terminal_geometry();
                             }
                         }
                         let _ = self.kb_dec.feed(ev);
@@ -1134,7 +1153,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{alt_window_launcher, is_maximize_shortcut, is_title_double_click};
+    use super::{alt_window_launcher, is_maximize_shortcut, is_minimize_shortcut, is_title_double_click};
 
     #[test]
     fn alt_number_launchers_select_the_taskbar_windows() {
@@ -1152,6 +1171,14 @@ mod tests {
         assert!(!is_maximize_shortcut(super::vinput::EV_KEY, 68, 1, false));
         assert!(!is_maximize_shortcut(super::vinput::EV_KEY, 68, 0, true));
         assert!(!is_maximize_shortcut(super::vinput::EV_KEY, 67, 1, true));
+    }
+
+    #[test]
+    fn alt_f9_is_the_conventional_minimize_toggle() {
+        assert!(is_minimize_shortcut(super::vinput::EV_KEY, 67, 1, true));
+        assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 67, 1, false));
+        assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 67, 0, true));
+        assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 68, 1, true));
     }
 
     #[test]
