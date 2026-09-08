@@ -370,6 +370,13 @@ fn menu_number_selection(code: u16) -> Option<usize> {
     }
 }
 
+/// Keyboard navigation accepts the Linux input repeat value as well as an initial press. Action
+/// keys such as Enter remain press-only so holding an activation key cannot repeatedly launch or
+/// mutate a window.
+fn is_key_press_or_repeat(ty: u16, value: u32) -> bool {
+    ty == vinput::EV_KEY && (value == 1 || value == 2)
+}
+
 /// Resolve a taskbar x-coordinate to either the desktop launcher or one managed application.
 /// Keeping the hit map pure makes the launcher boundary testable without a live compositor.
 fn taskbar_target(x: u32) -> Option<u32> {
@@ -1482,16 +1489,16 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     let taskbar_enter = ev.ty == vinput::EV_KEY
                         && ev.code == KEY_F6 && ev.value == 1 && !ctrl && !alt;
                     let taskbar_home = self.taskbar_keyboard_target.is_some()
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_HOME && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_HOME
                         && !shift && !ctrl && !alt;
                     let taskbar_end = self.taskbar_keyboard_target.is_some()
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_END && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_END
                         && !shift && !ctrl && !alt;
                     let taskbar_left = self.taskbar_keyboard_target.is_some()
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_LEFT && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_LEFT
                         && !ctrl && !alt;
                     let taskbar_right = self.taskbar_keyboard_target.is_some()
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_RIGHT && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_RIGHT
                         && !ctrl && !alt;
                     let taskbar_escape = self.taskbar_keyboard_target.is_some()
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_ESC && ev.value == 1;
@@ -1510,10 +1517,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.code == KEY_ESC
                         && ev.value == 1;
                     let menu_up = self.comp.is_visible(MENU) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_UP && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_UP
                         && !ctrl && !alt;
                     let menu_down = self.comp.is_visible(MENU) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_DOWN && ev.value == 1
+                        && is_key_press_or_repeat(ev.ty, ev.value) && ev.code == KEY_DOWN
                         && !ctrl && !alt;
                     let menu_home = self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_HOME && ev.value == 1
@@ -1895,8 +1902,9 @@ fn taskbar_put_hovered_workspace(
 #[cfg(test)]
 mod tests {
     use super::{
-        alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
-        is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_hover_target,
+        alt_window_launcher, is_context_menu_shortcut, is_key_press_or_repeat,
+        is_maximize_shortcut, is_minimize_shortcut, is_title_double_click, next_menu_selection,
+        taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
         taskbar_keyboard_jump, taskbar_keyboard_next, menu_number_selection,
         taskbar_keyboard_previous, menu_keyboard_jump,
@@ -1965,6 +1973,14 @@ mod tests {
             assert_eq!(menu_number_selection(code), Some(expected));
         }
         assert_eq!(menu_number_selection(super::KEY_END), None);
+    }
+
+    #[test]
+    fn navigation_accepts_initial_press_and_repeat_but_not_release() {
+        assert!(is_key_press_or_repeat(super::vinput::EV_KEY, 1));
+        assert!(is_key_press_or_repeat(super::vinput::EV_KEY, 2));
+        assert!(!is_key_press_or_repeat(super::vinput::EV_KEY, 0));
+        assert!(!is_key_press_or_repeat(2, 2));
     }
 
     #[test]
