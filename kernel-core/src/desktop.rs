@@ -119,16 +119,19 @@ const TASKBAR_TERM_X: u32 = 8 * crate::textgrid::CELL;
 const TASKBAR_MON_X: u32 = TASKBAR_TERM_X + TASKBAR_BUTTON_W;
 const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
 const MENU_COLS: u32 = 18;
-const MENU_ROWS: u32 = 6;
+const MENU_ROWS: u32 = 9;
 const MENU_MARGIN: i32 = 4;
 const MENU_TITLE: &[u8] = b"menu";
-const MENU_ITEMS: [&[u8]; 6] = [
+const MENU_ITEMS: [&[u8]; 9] = [
     b"terminal",
     b"monitor",
     b"shortcuts",
     b"tile windows",
     b"cascade windows",
     b"show desktop",
+    b"minimize focused",
+    b"maximize focused",
+    b"close focused",
 ];
 /// Keystrokes the main thread may hold between drains (the console pops one per loop turn).
 const TERM_INPUT_CAP: usize = 64;
@@ -719,6 +722,32 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             5 => {
                 let _ = self.wm.toggle_show_desktop(&mut self.comp, self.sess);
                 self.sync_terminal_geometry();
+            }
+            6 => {
+                if let Some(id) = self.comp.focus() {
+                    let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
+                    if id == WINDOW {
+                        self.sync_terminal_geometry();
+                    }
+                }
+            }
+            7 => {
+                if let Some(id) = self.comp.focus() {
+                    if self.wm.is_maximized(id).is_some() {
+                        let _ = self.wm.toggle_maximize(&mut self.comp, self.sess, id);
+                        if id == WINDOW {
+                            self.sync_terminal_geometry();
+                        }
+                    }
+                }
+            }
+            8 => {
+                if let Some(id) = self.comp.focus() {
+                    let _ = self.wm.close(&mut self.comp, self.sess, id);
+                    if id == WINDOW {
+                        self.term_input.clear();
+                    }
+                }
             }
             _ => return,
         }
@@ -1413,8 +1442,8 @@ mod tests {
 
     #[test]
     fn context_menu_selection_wraps_in_both_directions() {
-        assert_eq!(next_menu_selection(0, false), 5);
-        assert_eq!(next_menu_selection(5, true), 0);
+        assert_eq!(next_menu_selection(0, false), 8);
+        assert_eq!(next_menu_selection(8, true), 0);
         assert_eq!(next_menu_selection(2, false), 1);
         assert_eq!(next_menu_selection(2, true), 3);
     }
