@@ -450,6 +450,63 @@ impl Compositor {
         Ok(())
     }
 
+    /// Resize a placed surface while retaining its owner token and input queue. Existing
+    /// pixels in the old/new intersection survive; newly exposed pixels are blank. This is a
+    /// lifecycle allocation, not a per-event hot path, so its heap cost is explicit.
+    pub fn resize_surface(
+        &mut self,
+        id: u32,
+        token: u64,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CompFault> {
+        self.owner_check(id, token)?;
+        if width == 0 || height == 0 || width as usize * height as usize > MAX_SURFACE_PIXELS {
+            return Err(CompFault::BadGeometry(id));
+        }
+        let placement = self
+            .placed
+            .iter()
+            .find(|p| p.surface == id)
+            .copied()
+            .ok_or(CompFault::UnknownSurface(id))?;
+        let old = self.surface(id).ok_or(CompFault::UnknownSurface(id))?;
+        let old_width = old.width;
+        let old_height = old.height;
+        let right = placement.x as i64 + width as i64;
+        let bottom = placement.y as i64 + height as i64;
+        if placement.x >= self.scanout.0 as i32
+            || placement.y >= self.scanout.1 as i32
+            || right <= 0
+            || bottom <= 0
+        {
+            return Err(CompFault::OffScanout { surface: id });
+        }
+
+        let mut bits = vec![0u64; (width as usize * height as usize).div_ceil(64)];
+        let copy_w = old_width.min(width);
+        let copy_h = old_height.min(height);
+        for y in 0..copy_h {
+            for x in 0..copy_w {
+                let old_idx = y as usize * old_width as usize + x as usize;
+                if old.bits[old_idx / 64] & (1u64 << (old_idx % 64)) != 0 {
+                    let new_idx = y as usize * width as usize + x as usize;
+                    bits[new_idx / 64] |= 1u64 << (new_idx % 64);
+                }
+            }
+        }
+
+        self.damage_scanout_at(id, placement.x, placement.y);
+        let surface = self.surface_mut(id).ok_or(CompFault::UnknownSurface(id))?;
+        surface.width = width;
+        surface.height = height;
+        surface.bits = bits;
+        surface.damage.clear();
+        surface.whole_damage = true;
+        self.damage_scanout_at(id, placement.x, placement.y);
+        Ok(())
+    }
+
     /// Move a placed surface (owner only). Both the vacated and the covered regions are
     /// damaged — a move must be VISIBLE the same frame, without waiting for a redraw.
     pub fn move_surface(&mut self, id: u32, token: u64, x: i32, y: i32) -> Result<(), CompFault> {
@@ -1090,6 +1147,19 @@ impl Compositor {
 
     pub fn surface_count(&self) -> usize {
         self.surfaces.len()
+    }
+
+    /// Geometry of a live surface, for window-manager layout and proof inspection.
+    pub fn surface_size(&self, id: u32) -> Option<(u32, u32)> {
+        self.surface(id).map(|s| (s.width, s.height))
+    }
+
+    /// Read one surface pixel for deterministic host proofs; this does not bypass ownership
+    /// for mutation because it exposes no writable storage or token.
+    pub fn has_pixel(&self, id: u32, x: u32, y: u32) -> bool {
+        self.surface(id)
+            .map(|s| x < s.width && y < s.height && s.pixel(x, y))
+            .unwrap_or(false)
     }
 
     pub fn placed_count(&self) -> usize {

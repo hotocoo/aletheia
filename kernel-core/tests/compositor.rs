@@ -532,6 +532,26 @@ fn identical_sequences_are_bit_identical() {
     assert_eq!(z1, z2);
 }
 
+#[test]
+fn resizing_is_owner_gated_preserves_overlap_and_damages_the_new_extent() {
+    let mut comp = Compositor::new(0x5151, 160, 120);
+    let token = comp.mint_surface(7, 40, 30).unwrap();
+    comp.attach(7, token, 20, 20).unwrap();
+    comp.draw_pixel(7, token, 3, 4, true).unwrap();
+    let before = comp.stats();
+
+    assert_eq!(
+        comp.resize_surface(7, token ^ 1, 60, 40),
+        Err(CompFault::NotOwner { surface: 7 })
+    );
+    assert_eq!(comp.surface_size(7), Some((40, 30)));
+
+    comp.resize_surface(7, token, 60, 40).unwrap();
+    assert_eq!(comp.surface_size(7), Some((60, 40)));
+    assert!(comp.has_pixel(7, 3, 4));
+    assert!(comp.stats().frames >= before.frames);
+}
+
 // ---------------------------------------------------------------------------
 // 8 - the boot suite itself, run on the host with a capturing reporter.
 // ---------------------------------------------------------------------------

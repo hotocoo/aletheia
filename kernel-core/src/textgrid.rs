@@ -32,6 +32,14 @@ pub const TITLE_H: u32 = 10;
 /// here and hit-tested in [`crate::wm`] from this same constant, so a user can never click a
 /// close box that is drawn somewhere else.
 pub const CLOSE_W: u32 = 10;
+/// Size of the bottom-right resize grip, painted and hit-tested from this same constant.
+pub const RESIZE_W: u32 = 10;
+
+/// Small windows do not get a resize grip: the handle must not consume most of a tiny client
+/// area. The manager uses this same predicate for hit-testing.
+pub fn has_resize_grip(width: u32, height: u32) -> bool {
+    width >= RESIZE_W * 2 && height >= TITLE_H + RESIZE_W * 2
+}
 
 /// Does a window this wide carry a close box? A band with no room for a name beside the box
 /// carries none at all — the alternative is a chrome that is nearly all close box, where every
@@ -86,6 +94,28 @@ impl TextGrid {
     /// Pixel size of the surface this grid paints: text rows plus the title band.
     pub fn pixel_size(&self) -> (u32, u32) {
         (self.cols * CELL, self.rows * CELL + TITLE_H)
+    }
+
+    /// Resize while preserving the top-left intersection of the existing cell grid. New cells
+    /// are blank and the cursor is clamped into the new grid.
+    pub fn resize(&mut self, cols: u32, rows: u32) {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let mut cells = alloc::vec![b' '; (cols * rows) as usize];
+        let copy_cols = self.cols.min(cols);
+        let copy_rows = self.rows.min(rows);
+        for row in 0..copy_rows {
+            let old_start = (row * self.cols) as usize;
+            let new_start = (row * cols) as usize;
+            cells[new_start..new_start + copy_cols as usize]
+                .copy_from_slice(&self.cells[old_start..old_start + copy_cols as usize]);
+        }
+        self.cols = cols;
+        self.rows = rows;
+        self.cells = cells;
+        self.col = self.col.min(cols - 1);
+        self.row = self.row.min(rows - 1);
+        self.dirty = true;
     }
     pub fn lines(&self) -> u64 {
         self.lines
@@ -282,6 +312,20 @@ impl TextGrid {
                             set(x0 + 1 + bit, 1 + r as u32, false);
                         }
                     }
+                }
+            }
+        }
+        // Resize grip: stepped diagonal marks in the bottom-right corner.
+        if has_resize_grip(w, h) {
+            let x0 = w - RESIZE_W;
+            let y0 = h - RESIZE_W;
+            for i in 2..RESIZE_W {
+                set(x0 + i, y0 + RESIZE_W - 2, true);
+                if i >= 4 {
+                    set(x0 + i, y0 + RESIZE_W - 4, true);
+                }
+                if i >= 6 {
+                    set(x0 + i, y0 + RESIZE_W - 6, true);
                 }
             }
         }

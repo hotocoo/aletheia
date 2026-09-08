@@ -215,3 +215,30 @@ fn keyboard_focus_cycle_follows_z_order_without_allocating() {
     assert_eq!(wm.cycle_focus(&mut comp, sess, false).unwrap(), Some(2));
     assert_eq!(comp.focus(), Some(2));
 }
+
+#[test]
+fn resize_grip_is_a_distinct_client_control_and_changes_window_size() {
+    let (mut comp, mut wm, sess) = desk();
+    let old = wm.size(2).unwrap();
+    let grip_x = 40 + old.0 - 1;
+    let grip_y = 20 + old.1 - 1;
+    assert_eq!(
+        wm.press(&mut comp, sess, grip_x, grip_y),
+        Press::Resizing(2)
+    );
+    assert_eq!(wm.motion(&mut comp, 140, 100), Some(2));
+    assert_eq!(wm.size(2), Some((101, 81)));
+    assert_eq!(comp.surface_size(2), Some((101, 81)));
+    assert_eq!(wm.release(), Some(2));
+}
+
+#[test]
+fn resize_refuses_a_fully_offscreen_result_without_changing_geometry() {
+    let (mut comp, mut wm, sess) = desk();
+    let before = wm.size(2).unwrap();
+    assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));
+    assert_eq!(wm.motion(&mut comp, 0, 0), Some(2));
+    assert_eq!(wm.size(2), Some(before));
+    assert_eq!(comp.surface_size(2), Some(before));
+    let _ = wm.release();
+}

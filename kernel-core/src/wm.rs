@@ -29,7 +29,7 @@
 use alloc::vec::Vec;
 
 use crate::compositor::{CompFault, Compositor};
-use crate::textgrid::{has_close_box, CLOSE_W, TITLE_H};
+use crate::textgrid::{has_close_box, has_resize_grip, CLOSE_W, RESIZE_W, TITLE_H};
 
 /// Windows one manager tracks. Bounded for the never-freeing boot heap (ADR-063), and under
 /// the compositor's own surface ceiling so the wallpaper and any suite surface still fit.
@@ -63,6 +63,8 @@ pub enum Hit {
     Title,
     /// Everything below the title band: the application's own area.
     Client,
+    /// The bottom-right resize grip.
+    Resize,
 }
 
 /// What a press DID — the routing decision, reported rather than assumed.
@@ -72,6 +74,8 @@ pub enum Press {
     Closed(u32),
     /// The title band was pressed: the window is raised, focused, and now dragging.
     Dragging(u32),
+    /// The bottom-right resize grip was pressed: the window is focused and now resizing.
+    Resizing(u32),
     /// The client area was pressed: the window is raised and focused.
     Focused(u32),
     /// No window covers the point: focus was cleared ("nowhere" is a place a user points).
@@ -86,6 +90,9 @@ pub fn hit_at(width: u32, height: u32, lx: i32, ly: i32) -> Option<Hit> {
     }
     let (x, y) = (lx as u32, ly as u32);
     if y >= TITLE_H {
+        if has_resize_grip(width, height) && x >= width - RESIZE_W && y >= height - RESIZE_W {
+            return Some(Hit::Resize);
+        }
         return Some(Hit::Client);
     }
     if has_close_box(width) && x >= width - CLOSE_W {
@@ -109,11 +116,17 @@ struct Window {
 pub struct WindowManager {
     wins: Vec<Window>,
     /// The window being dragged and the pointer's offset from its top-left at the press.
-    drag: Option<(u32, i32, i32)>,
+    drag: Option<(u32, i32, i32, DragKind)>,
     opens: u64,
     closes: u64,
     drags: u64,
     refusals: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragKind {
+    Move,
+    Resize,
 }
 
 impl WindowManager {
@@ -182,6 +195,14 @@ impl WindowManager {
         self.wins.len()
     }
 
+    /// Current client geometry for a managed window.
+    pub fn size(&self, id: u32) -> Option<(u32, u32)> {
+        self.wins
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| (w.width, w.height))
+    }
+
     /// Open window ids in the manager's own insertion order (not the z-order).
     pub fn ids(&self) -> Vec<u32> {
         self.wins.iter().map(|w| w.id).collect()
@@ -189,7 +210,7 @@ impl WindowManager {
 
     /// The window currently being dragged, if any.
     pub fn dragging(&self) -> Option<u32> {
-        self.drag.map(|(id, _, _)| id)
+        self.drag.map(|(id, _, _, _)| id)
     }
 
     /// (opens, closes, drags completed, refusals) — the manager's ledger.
@@ -247,8 +268,14 @@ impl WindowManager {
             Some(Hit::Title) => {
                 let _ = comp.raise(id, w.token);
                 let _ = comp.set_focus(session, id);
-                self.drag = Some((id, lx, ly));
+                self.drag = Some((id, lx, ly, DragKind::Move));
                 Press::Dragging(id)
+            }
+            Some(Hit::Resize) => {
+                let _ = comp.raise(id, w.token);
+                let _ = comp.set_focus(session, id);
+                self.drag = Some((id, lx, ly, DragKind::Resize));
+                Press::Resizing(id)
             }
             Some(Hit::Client) => {
                 let _ = comp.raise(id, w.token);
@@ -264,17 +291,34 @@ impl WindowManager {
     /// (or the compositor refused a placement fully off the scanout — the window then stays
     /// exactly where it was, which is the refusal being honoured, not ignored).
     pub fn motion(&mut self, comp: &mut Compositor, x: u32, y: u32) -> Option<u32> {
-        let (id, ox, oy) = self.drag?;
+        let (id, ox, oy, kind) = self.drag?;
         let token = self.token(id)?;
-        match comp.move_surface(id, token, x as i32 - ox, y as i32 - oy) {
-            Ok(()) => Some(id),
-            Err(_) => None,
+        match kind {
+            DragKind::Move => match comp.move_surface(id, token, x as i32 - ox, y as i32 - oy) {
+                Ok(()) => Some(id),
+                Err(_) => None,
+            },
+            DragKind::Resize => {
+                let (px, py) = comp.placement(id)?;
+                let width = (x as i32 - px + 1).max((RESIZE_W * 2) as i32) as u32;
+                let height = (y as i32 - py + 1).max((TITLE_H + RESIZE_W * 2) as i32) as u32;
+                match comp.resize_surface(id, token, width, height) {
+                    Ok(()) => {
+                        if let Some(w) = self.wins.iter_mut().find(|w| w.id == id) {
+                            w.width = width;
+                            w.height = height;
+                        }
+                        Some(id)
+                    }
+                    Err(_) => None,
+                }
+            }
         }
     }
 
     /// Pointer RELEASE: ends any drag in flight and counts it. Returns the window released.
     pub fn release(&mut self) -> Option<u32> {
-        let (id, _, _) = self.drag.take()?;
+        let (id, _, _, _) = self.drag.take()?;
         self.drags += 1;
         Some(id)
     }
@@ -292,7 +336,7 @@ impl WindowManager {
             WmFault::from(e)
         })?;
         self.wins.remove(pos);
-        if self.drag.map(|(d, _, _)| d) == Some(id) {
+        if self.drag.map(|(d, _, _, _)| d) == Some(id) {
             self.drag = None; // a window closed mid-drag drags nothing
         }
         self.closes += 1;

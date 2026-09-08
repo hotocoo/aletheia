@@ -344,7 +344,27 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
             }
         }
         if batch.move_to.is_some() {
-            let _ = self.wm.motion(&mut self.comp, px, py);
+            let resized = self.wm.motion(&mut self.comp, px, py);
+            if resized == Some(WINDOW) {
+                self.sync_terminal_geometry();
+            }
+        }
+    }
+
+    /// Keep the terminal text grid aligned with its compositor surface after a resize.
+    fn sync_terminal_geometry(&mut self) {
+        let Some((w, h)) = self.wm.size(WINDOW) else {
+            return;
+        };
+        let cols = (w / crate::textgrid::CELL).max(1);
+        let rows = (h.saturating_sub(crate::textgrid::TITLE_H) / crate::textgrid::CELL).max(1);
+        if self.term.cols() != cols || self.term.rows() != rows {
+            self.term.resize(cols, rows);
+            self.term.render_packed(TITLE, &mut self.packed);
+            let Some(tok) = self.wm.token(WINDOW) else {
+                return;
+            };
+            let _ = self.comp.fill_packed(WINDOW, tok, &self.packed);
         }
     }
 
