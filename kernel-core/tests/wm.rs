@@ -61,6 +61,31 @@ fn a_drag_that_would_leave_the_scanout_is_refused_and_the_window_stays() {
 }
 
 #[test]
+fn dragging_to_an_edge_snaps_move_and_preserves_restore_geometry() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));
+    assert_eq!(wm.motion(&mut comp, 0, 60), Some(2));
+    assert_eq!(wm.release_at(&mut comp, sess, 0, 60), Some(2));
+    assert_eq!(comp.placement(2), Some((0, 0)));
+    assert_eq!(comp.surface_size(2), Some((100, 120)));
+    assert_eq!(wm.is_maximized(2), Some(true));
+
+    assert_eq!(wm.toggle_maximize(&mut comp, sess, 2), Ok(false));
+    assert_eq!(comp.placement(2), Some((40, 20)));
+    assert_eq!(comp.surface_size(2), Some((80, 60)));
+}
+
+#[test]
+fn dragging_to_the_right_edge_snaps_to_the_right_half() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));
+    assert_eq!(wm.motion(&mut comp, 199, 60), Some(2));
+    assert_eq!(wm.release_at(&mut comp, sess, 199, 60), Some(2));
+    assert_eq!(comp.placement(2), Some((100, 0)));
+    assert_eq!(comp.surface_size(2), Some((100, 120)));
+}
+
+#[test]
 fn a_window_closed_mid_drag_drags_nothing_afterwards() {
     let (mut comp, mut wm, sess) = desk();
     assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));

@@ -34,6 +34,8 @@ use crate::textgrid::{has_resize_grip, has_window_controls, CONTROL_W, CLOSE_W, 
 /// Windows one manager tracks. Bounded for the never-freeing boot heap (ADR-063), and under
 /// the compositor's own surface ceiling so the wallpaper and any suite surface still fit.
 pub const MAX_WINDOWS: usize = 8;
+/// Pointer distance from a scanout edge that activates drag-to-snap on release.
+const SNAP_EDGE_PX: u32 = 1;
 
 /// Why the manager refused. Every variant names what was involved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +140,10 @@ pub struct WindowManager {
     wins: Vec<Window>,
     /// The window being dragged and the pointer's offset from its top-left at the press.
     drag: Option<(u32, i32, i32, DragKind)>,
+    /// Geometry at the start of the current move drag, used as the restore target if that drag
+    /// ends in an edge snap. It is separate from `Window::restore` so free-form dragging does
+    /// not make a window appear maximized before a snap actually occurs.
+    drag_restore: Option<(u32, (i32, i32, u32, u32))>,
     opens: u64,
     closes: u64,
     drags: u64,
@@ -155,6 +161,7 @@ impl WindowManager {
         WindowManager {
             wins: Vec::new(),
             drag: None,
+            drag_restore: None,
             opens: 0,
             closes: 0,
             drags: 0,
@@ -470,12 +477,17 @@ impl WindowManager {
                 let _ = comp.raise(id, w.token);
                 let _ = comp.set_focus(session, id);
                 self.drag = Some((id, lx, ly, DragKind::Move));
+                self.drag_restore = comp.placement(id).and_then(|(x, y)| {
+                    self.size(id)
+                        .map(|(width, height)| (id, (x, y, width, height)))
+                });
                 Press::Dragging(id)
             }
             Some(Hit::Resize) => {
                 let _ = comp.raise(id, w.token);
                 let _ = comp.set_focus(session, id);
                 self.drag = Some((id, lx, ly, DragKind::Resize));
+                self.drag_restore = None;
                 Press::Resizing(id)
             }
             Some(Hit::Client) => {
@@ -521,8 +533,80 @@ impl WindowManager {
     /// Pointer RELEASE: ends any drag in flight and counts it. Returns the window released.
     pub fn release(&mut self) -> Option<u32> {
         let (id, _, _, _) = self.drag.take()?;
+        self.drag_restore = None;
         self.drags += 1;
         Some(id)
+    }
+
+    /// Finish a pointer drag and apply the desktop's edge-snap policy. A move ending on the
+    /// top edge maximizes the window; the left and right edges claim the corresponding half of
+    /// the scanout. Resize drags are never snapped.
+    pub fn release_at(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+        x: u32,
+        y: u32,
+    ) -> Option<u32> {
+        let (id, _, _, kind) = self.drag?;
+        if kind == DragKind::Move {
+            let _ = self.snap_edge(comp, session, id, x, y);
+        }
+        self.release()
+    }
+
+    fn snap_edge(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+        id: u32,
+        x: u32,
+        y: u32,
+    ) -> Result<bool, WmFault> {
+        let pos = self.wins.iter().position(|w| w.id == id).ok_or_else(|| {
+            self.refusals += 1;
+            WmFault::UnknownWindow(id)
+        })?;
+        let w = self.wins[pos];
+        let (sw, sh) = comp.scanout_size();
+        if sw < CLOSE_W * 2 || sh < TITLE_H + RESIZE_W * 2 {
+            return Ok(false);
+        }
+
+        let snap = if y <= SNAP_EDGE_PX {
+            Some((0i32, 0i32, sw, sh))
+        } else if x <= SNAP_EDGE_PX {
+            Some((0i32, 0i32, sw / 2, sh))
+        } else if x.saturating_add(SNAP_EDGE_PX) >= sw {
+            let width = sw / 2;
+            Some(((sw - width) as i32, 0i32, width, sh))
+        } else {
+            None
+        };
+        let Some((nx, ny, nw, nh)) = snap else {
+            return Ok(false);
+        };
+
+        if w.restore.is_none() {
+            let restore = self
+                .drag_restore
+                .filter(|(drag_id, _)| *drag_id == id)
+                .map(|(_, geometry)| geometry)
+                .or_else(|| {
+                    comp.placement(id)
+                        .map(|(ox, oy)| (ox, oy, w.width, w.height))
+                })
+                .ok_or(WmFault::Compositor(CompFault::UnknownSurface(id)))?;
+            self.wins[pos].restore = Some(restore);
+        }
+        comp.resize_surface(id, w.token, nw, nh)?;
+        comp.move_surface(id, w.token, nx, ny)?;
+        let entry = &mut self.wins[pos];
+        entry.width = nw;
+        entry.height = nh;
+        comp.raise(id, w.token)?;
+        comp.set_focus(session, id)?;
+        Ok(true)
     }
 
     /// Close a window: detach it (surface, queue and token die together), then give focus to
@@ -540,6 +624,7 @@ impl WindowManager {
         self.wins.remove(pos);
         if self.drag.map(|(d, _, _, _)| d) == Some(id) {
             self.drag = None; // a window closed mid-drag drags nothing
+            self.drag_restore = None;
         }
         self.closes += 1;
         // Focus falls to the topmost survivor this manager owns; nothing left means NOTHING

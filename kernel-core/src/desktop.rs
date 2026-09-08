@@ -494,7 +494,7 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                     self.term_input.clear();
                 }
             } else {
-                let _ = self.wm.release();
+                let _ = self.wm.release_at(&mut self.comp, self.sess, px, py);
             }
         }
         if batch.move_to.is_some() {
