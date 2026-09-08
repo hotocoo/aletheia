@@ -346,6 +346,12 @@ fn next_menu_selection(selected: usize, down: bool) -> usize {
     }
 }
 
+/// Jump the start-menu selection to its first or last command. Home/End mirror the taskbar's
+/// bounded keyboard traversal without adding another navigation authority.
+fn menu_keyboard_jump(home: bool) -> usize {
+    if home { 0 } else { MENU_ITEMS.len() - 1 }
+}
+
 /// Map the number row to a menu item while the menu owns keyboard interaction. This is a
 /// bounded accelerator map: there are exactly nine menu entries, so the key itself directly
 /// selects one without adding another focus authority or a dynamic command registry.
@@ -1509,6 +1515,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     let menu_down = self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_DOWN && ev.value == 1
                         && !ctrl && !alt;
+                    let menu_home = self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_HOME && ev.value == 1
+                        && !shift && !ctrl && !alt;
+                    let menu_end = self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_END && ev.value == 1
+                        && !shift && !ctrl && !alt;
                     let menu_number = if self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY
                         && ev.value == 1
@@ -1627,6 +1639,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.kb_dec.feed(ev);
                     } else if menu_up || menu_down {
                         self.menu_selected = next_menu_selection(self.menu_selected, menu_down);
+                        self.repaint_menu();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if menu_home || menu_end {
+                        self.menu_selected = menu_keyboard_jump(menu_home);
                         self.repaint_menu();
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(selected) = menu_number {
@@ -1883,7 +1899,7 @@ mod tests {
         is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
         taskbar_keyboard_jump, taskbar_keyboard_next, menu_number_selection,
-        taskbar_keyboard_previous,
+        taskbar_keyboard_previous, menu_keyboard_jump,
     };
 
     #[test]
@@ -1935,6 +1951,12 @@ mod tests {
         assert_eq!(next_menu_selection(8, true), 0);
         assert_eq!(next_menu_selection(2, false), 1);
         assert_eq!(next_menu_selection(2, true), 3);
+    }
+
+    #[test]
+    fn start_menu_home_and_end_jump_to_bounded_commands() {
+        assert_eq!(menu_keyboard_jump(true), 0);
+        assert_eq!(menu_keyboard_jump(false), 8);
     }
 
     #[test]
