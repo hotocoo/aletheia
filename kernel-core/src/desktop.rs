@@ -104,6 +104,7 @@ const TASKBAR_BUTTON_W: u32 = 18 * crate::textgrid::CELL;
 const TASKBAR_Y: i32 = H as i32 - (TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H) as i32;
 const TASKBAR_TERM_X: u32 = 8 * crate::textgrid::CELL;
 const TASKBAR_MON_X: u32 = TASKBAR_TERM_X + TASKBAR_BUTTON_W;
+const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
 /// Keystrokes the main thread may hold between drains (the console pops one per loop turn).
 const TERM_INPUT_CAP: usize = 64;
 /// Events drained per device per pump — bounded, so one noisy device cannot own the tick.
@@ -130,6 +131,7 @@ struct MonitorFacts {
 struct TaskbarFacts {
     terminal: u8,
     monitor: u8,
+    help: u8,
     focus: u32,
     uptime_s: u64,
 }
@@ -431,6 +433,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let sig = TaskbarFacts {
             terminal: state(WINDOW),
             monitor: state(MONITOR),
+            help: state(HELP),
             focus: self.comp.focus().unwrap_or(0),
             uptime_s: {
                 let hz = H::timer_freq_hz();
@@ -444,9 +447,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         self.taskbar.clear();
         let terminal_focus = sig.focus == WINDOW;
         let monitor_focus = sig.focus == MONITOR;
+        let help_focus = sig.focus == HELP;
         let _ = write!(
             self.taskbar,
-            "{}terminal {}   {}monitor {}   up {}s",
+            "{}terminal {}   {}monitor {}   {}help {}   up {}s",
             if terminal_focus { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
                 if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
@@ -459,9 +463,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             } else {
                 "[closed]"
             },
+            if help_focus { ">" } else { " " },
+            if self.wm.is_open(HELP) {
+                if self.wm.is_minimized(&self.comp, HELP) == Some(true) { "[hidden]" } else { "[open]" }
+            } else {
+                "[closed]"
+            },
             sig.uptime_s,
         );
-        let _ = write!(self.taskbar, "   F1 help");
         self.taskbar.render_packed(b"desktop", &mut self.taskbar_packed);
         let _ = self.comp.fill_packed(TASKBAR, self.taskbar_token, &self.taskbar_packed);
     }
@@ -479,6 +488,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             WINDOW
         } else if (TASKBAR_MON_X..TASKBAR_MON_X + TASKBAR_BUTTON_W).contains(&lx) {
             MONITOR
+        } else if (TASKBAR_HELP_X..TASKBAR_HELP_X + TASKBAR_BUTTON_W).contains(&lx) {
+            HELP
         } else {
             return false;
         };
@@ -520,7 +531,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             let lx = x as i32 - tx;
             let ly = y as i32 - ty;
             if lx >= TASKBAR_TERM_X as i32
-                && lx < (TASKBAR_MON_X + TASKBAR_BUTTON_W) as i32
+                && lx < (TASKBAR_HELP_X + TASKBAR_BUTTON_W) as i32
                 && ly >= crate::textgrid::TITLE_H as i32
                 && lx < tw as i32
                 && ly < th as i32
