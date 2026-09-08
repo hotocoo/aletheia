@@ -135,6 +135,7 @@ struct TaskbarFacts {
     monitor: u8,
     help: u8,
     focus: u32,
+    keyboard_resize: bool,
     uptime_s: u64,
 }
 
@@ -439,6 +440,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             monitor: state(MONITOR),
             help: state(HELP),
             focus: self.comp.focus().unwrap_or(0),
+            keyboard_resize: self.keyboard_resize,
             uptime_s: {
                 let hz = H::timer_freq_hz();
                 if hz == 0 { 0 } else { H::timer_ticks() / hz }
@@ -454,7 +456,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let help_focus = sig.focus == HELP;
         let _ = write!(
             self.taskbar,
-            "{}terminal {}   {}monitor {}   {}help {}   up {}s",
+            "{}terminal {}   {}monitor {}   {}help {}   {}   up {}s",
             if terminal_focus { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
                 if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
@@ -473,6 +475,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             } else {
                 "[closed]"
             },
+            if sig.keyboard_resize { "[resize-mode]" } else { "[normal]" },
             sig.uptime_s,
         );
         self.taskbar.render_packed(b"desktop", &mut self.taskbar_packed);
@@ -578,6 +581,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// the matching directional glyph; ordinary content keeps the arrow.
     fn refresh_cursor_shape(&mut self) {
         let (x, y) = self.pointer;
+        if self.keyboard_resize && self.comp.focus().is_some() {
+            let _ = self.comp.set_cursor_shape(self.sess, CursorShape::Crosshair);
+            return;
+        }
         let shape = if let Some((tx, ty)) = self.comp.placement(TASKBAR) {
             let Some((tw, th)) = self.comp.surface_size(TASKBAR) else {
                 return;
@@ -839,6 +846,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.kb_dec.feed(ev);
                     } else if resize_toggle {
                         self.keyboard_resize = !self.keyboard_resize;
+                        self.refresh_cursor_shape();
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(direction) = resize_direction {
                         let _ = self.wm.resize_focused(&mut self.comp, direction);
@@ -846,6 +854,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.kb_dec.feed(ev);
                     } else if resize_exit {
                         self.keyboard_resize = false;
+                        self.refresh_cursor_shape();
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(direction) = keyboard_nudge {
                         let _ = self.wm.nudge_focused(&mut self.comp, direction);
