@@ -7,7 +7,7 @@
 use kernel_core::compositor::{CompFault, Compositor, EventKind};
 use kernel_core::textgrid::{CLOSE_W, TITLE_H};
 use kernel_core::wm::{
-    hit_at, wm_suite, Hit, NudgeDirection, Press, SnapDirection, WindowManager, WmFault,
+    hit_at, wm_suite, Hit, NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager, WmFault,
     MAX_WINDOWS,
 };
 
@@ -540,5 +540,41 @@ fn keyboard_nudge_refuses_hidden_or_snapped_windows_without_destroying_restore_s
     let snapped = comp.placement(2);
     assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Right), Ok(None));
     assert_eq!(comp.placement(2), snapped);
+    assert_eq!(wm.is_maximized(2), Some(true));
+}
+
+#[test]
+fn keyboard_resize_changes_focused_window_in_fixed_steps_and_clamps_to_scanout() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 2).unwrap();
+
+    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Right), Ok(Some(2)));
+    assert_eq!(comp.surface_size(2), Some((96, 60)));
+    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Down), Ok(Some(2)));
+    assert_eq!(comp.surface_size(2), Some((96, 76)));
+    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Left), Ok(Some(2)));
+    assert_eq!(comp.surface_size(2), Some((80, 76)));
+    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Up), Ok(Some(2)));
+    assert_eq!(comp.surface_size(2), Some((80, 60)));
+
+    for _ in 0..32 {
+        let _ = wm.resize_focused(&mut comp, ResizeDirection::Right);
+        let _ = wm.resize_focused(&mut comp, ResizeDirection::Down);
+    }
+    assert_eq!(comp.surface_size(2), Some((160, 92)));
+}
+
+#[test]
+fn keyboard_resize_refuses_hidden_or_snapped_windows_without_destroying_restore_state() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 2).unwrap();
+    wm.toggle_minimize(&mut comp, sess, 2).unwrap();
+    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Right), Ok(Some(1)));
+    assert_eq!(comp.surface_size(2), Some((80, 60)));
+
+    wm.toggle_minimize(&mut comp, sess, 2).unwrap();
+    comp.set_focus(sess, 2).unwrap();
+    wm.snap_focused(&mut comp, sess, SnapDirection::Left).unwrap();
+    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Down), Ok(None));
     assert_eq!(wm.is_maximized(2), Some(true));
 }

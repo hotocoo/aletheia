@@ -34,7 +34,7 @@ use crate::textgrid::TextGrid;
 use crate::vinput::{self, Button, ConfigWrite, KeyDecoder, PointerDecoder, VirtioInput};
 use crate::virtioblk::{Transport, VirtioHal};
 use crate::virtiogpu::{self, Rect as GpuRect, VirtioGpu};
-use crate::wm::{NudgeDirection, Press, SnapDirection, WindowManager};
+use crate::wm::{NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager};
 
 /// Linux keycode constants used by the desktop-level keyboard shortcuts. Plain Tab remains a
 /// terminal/editor byte; Ctrl+Tab is consumed here before it can reach the focused application.
@@ -50,6 +50,8 @@ const KEY_M: u16 = 50;
 const KEY_T: u16 = 20;
 /// Linux keycode for `c`, reserved with Ctrl+Alt as the visible-window cascade shortcut.
 const KEY_C: u16 = 46;
+const KEY_R: u16 = 19;
+const KEY_ESC: u16 = 1;
 /// Linux keycodes for the four cursor directions, reserved with Ctrl+Alt for focused-window snap.
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -145,6 +147,7 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     taskbar_token: u64,
     taskbar_sig: TaskbarFacts,
     chrome_focus: u32,
+    keyboard_resize: bool,
     /// Keystrokes drained from the terminal's queue, waiting for the console's `getc`.
     term_input: Vec<u8>,
     /// Where the pointer last was (mirrored from the cursor, so a press knows it).
@@ -282,6 +285,7 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
             taskbar_token: tok_taskbar,
             taskbar_sig: TaskbarFacts::default(),
             chrome_focus: WINDOW,
+            keyboard_resize: false,
             term_input: Vec::with_capacity(TERM_INPUT_CAP),
             pointer: (W / 2, H / 2),
         };
@@ -575,6 +579,29 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && (ev.value == 1 || ev.value == 2)
                         && ctrl;
                     let (_, _, alt) = self.kb_dec.modifiers();
+                    let resize_toggle = ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_R
+                        && ev.value == 1
+                        && ctrl
+                        && alt;
+                    let resize_direction = if self.keyboard_resize
+                        && ev.ty == vinput::EV_KEY
+                        && ev.value == 1
+                    {
+                        match ev.code {
+                            KEY_LEFT => Some(ResizeDirection::Left),
+                            KEY_RIGHT => Some(ResizeDirection::Right),
+                            KEY_UP => Some(ResizeDirection::Up),
+                            KEY_DOWN => Some(ResizeDirection::Down),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let resize_exit = self.keyboard_resize
+                        && ev.ty == vinput::EV_KEY
+                        && ev.value == 1
+                        && (ev.code == KEY_ESC || ev.code == KEY_ENTER);
                     let keyboard_nudge = if ev.ty == vinput::EV_KEY
                         && ev.value == 1
                         && ctrl
@@ -618,7 +645,17 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else {
                         None
                     };
-                    if let Some(direction) = keyboard_nudge {
+                    if resize_toggle {
+                        self.keyboard_resize = !self.keyboard_resize;
+                        let _ = self.kb_dec.feed(ev);
+                    } else if let Some(direction) = resize_direction {
+                        let _ = self.wm.resize_focused(&mut self.comp, direction);
+                        self.sync_terminal_geometry();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if resize_exit {
+                        self.keyboard_resize = false;
+                        let _ = self.kb_dec.feed(ev);
+                    } else if let Some(direction) = keyboard_nudge {
                         let _ = self.wm.nudge_focused(&mut self.comp, direction);
                         let _ = self.kb_dec.feed(ev);
                     } else if maximize {

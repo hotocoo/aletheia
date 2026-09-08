@@ -180,6 +180,16 @@ pub enum NudgeDirection {
 }
 
 const KEYBOARD_NUDGE_PX: i32 = 16;
+const KEYBOARD_RESIZE_PX: i32 = 16;
+
+/// Direction in which keyboard resizing changes the focused window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResizeDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
 
 impl WindowManager {
     pub fn new() -> Self {
@@ -797,6 +807,54 @@ impl WindowManager {
 
     /// Close a window: detach it (surface, queue and token die together), then give focus to
     /// the next topmost window still open, or clear it when none is left.
+    /// Resize the focused visible window by one fixed keyboard step. Maximized/snapped and
+    /// hidden windows are refused so their saved restore geometry remains untouched.
+    pub fn resize_focused(
+        &mut self,
+        comp: &mut Compositor,
+        direction: ResizeDirection,
+    ) -> Result<Option<u32>, WmFault> {
+        let Some(id) = comp.focus() else {
+            self.refusals += 1;
+            return Ok(None);
+        };
+        let Some(pos) = self.wins.iter().position(|w| w.id == id) else {
+            self.refusals += 1;
+            return Ok(None);
+        };
+        let w = &self.wins[pos];
+        if comp.is_visible(id) != Some(true) || w.restore.is_some() {
+            self.refusals += 1;
+            return Ok(None);
+        }
+        let (x, y) = match comp.placement(id) {
+            Some(p) => p,
+            None => {
+                self.refusals += 1;
+                return Ok(None);
+            }
+        };
+        let (sw, sh) = comp.scanout_size();
+        let (mut width, mut height) = (w.width as i32, w.height as i32);
+        match direction {
+            ResizeDirection::Left => width -= KEYBOARD_RESIZE_PX,
+            ResizeDirection::Right => width += KEYBOARD_RESIZE_PX,
+            ResizeDirection::Up => height -= KEYBOARD_RESIZE_PX,
+            ResizeDirection::Down => height += KEYBOARD_RESIZE_PX,
+        }
+        if width <= 0 || height <= 0 || x < 0 || y < 0
+            || x as u32 + width as u32 > sw
+            || y as u32 + height as u32 > sh
+        {
+            self.refusals += 1;
+            return Ok(None);
+        }
+        comp.resize_surface(id, w.token, width as u32, height as u32)?;
+        self.wins[pos].width = width as u32;
+        self.wins[pos].height = height as u32;
+        Ok(Some(id))
+    }
+
     pub fn close(&mut self, comp: &mut Compositor, session: u64, id: u32) -> Result<(), WmFault> {
         let Some(pos) = self.wins.iter().position(|w| w.id == id) else {
             self.refusals += 1;
