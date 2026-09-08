@@ -538,9 +538,10 @@ impl WindowManager {
         Some(id)
     }
 
-    /// Finish a pointer drag and apply the desktop's edge-snap policy. A move ending on the
-    /// top edge maximizes the window; the left and right edges claim the corresponding half of
-    /// the scanout, and the bottom edge claims the lower half. Resize drags are never snapped.
+    /// Finish a pointer drag and apply the desktop's edge-snap policy. A move ending in a
+    /// corner claims that quarter of the scanout; otherwise the top edge maximizes the window,
+    /// while the left and right edges claim the corresponding half and the bottom edge claims
+    /// the lower half. Resize drags are never snapped.
     pub fn release_at(
         &mut self,
         comp: &mut Compositor,
@@ -573,16 +574,26 @@ impl WindowManager {
             return Ok(false);
         }
 
-        let snap = if y <= SNAP_EDGE_PX {
+        let half_w = sw / 2;
+        let half_h = sh / 2;
+        let snap = if x <= SNAP_EDGE_PX && y <= SNAP_EDGE_PX {
+            Some((0i32, 0i32, half_w, half_h))
+        } else if x.saturating_add(SNAP_EDGE_PX) >= sw && y <= SNAP_EDGE_PX {
+            Some(((sw - half_w) as i32, 0i32, half_w, half_h))
+        } else if x <= SNAP_EDGE_PX && y.saturating_add(SNAP_EDGE_PX) >= sh {
+            Some((0i32, (sh - half_h) as i32, half_w, half_h))
+        } else if x.saturating_add(SNAP_EDGE_PX) >= sw
+            && y.saturating_add(SNAP_EDGE_PX) >= sh
+        {
+            Some(((sw - half_w) as i32, (sh - half_h) as i32, half_w, half_h))
+        } else if y <= SNAP_EDGE_PX {
             Some((0i32, 0i32, sw, sh))
         } else if x <= SNAP_EDGE_PX {
-            Some((0i32, 0i32, sw / 2, sh))
+            Some((0i32, 0i32, half_w, sh))
         } else if x.saturating_add(SNAP_EDGE_PX) >= sw {
-            let width = sw / 2;
-            Some(((sw - width) as i32, 0i32, width, sh))
+            Some(((sw - half_w) as i32, 0i32, half_w, sh))
         } else if y.saturating_add(SNAP_EDGE_PX) >= sh {
-            let height = sh / 2;
-            Some((0i32, (sh - height) as i32, sw, height))
+            Some((0i32, (sh - half_h) as i32, sw, half_h))
         } else {
             None
         };

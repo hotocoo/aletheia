@@ -101,6 +101,29 @@ fn dragging_to_the_bottom_edge_snaps_to_the_lower_half() {
 }
 
 #[test]
+fn dragging_to_each_corner_snaps_to_the_matching_quarter() {
+    let cases = [
+        (0, 0, (0, 0)),
+        (199, 0, (100, 0)),
+        (0, 119, (0, 60)),
+        (199, 119, (100, 60)),
+    ];
+    for (x, y, expected) in cases {
+        let (mut comp, mut wm, sess) = desk();
+        assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));
+        assert_eq!(wm.motion(&mut comp, x, y), Some(2));
+        assert_eq!(wm.release_at(&mut comp, sess, x, y), Some(2));
+        assert_eq!(comp.placement(2), Some(expected));
+        assert_eq!(comp.surface_size(2), Some((100, 60)));
+        assert_eq!(wm.is_maximized(2), Some(true));
+
+        assert_eq!(wm.toggle_maximize(&mut comp, sess, 2), Ok(false));
+        assert_eq!(comp.placement(2), Some((40, 20)));
+        assert_eq!(comp.surface_size(2), Some((80, 60)));
+    }
+}
+
+#[test]
 fn a_window_closed_mid_drag_drags_nothing_afterwards() {
     let (mut comp, mut wm, sess) = desk();
     assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));
