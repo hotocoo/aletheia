@@ -12,8 +12,9 @@ window against an edge without manually matching exact coordinates.
 
 When a **move** drag is released at a scanout edge, the window manager applies a deterministic
 edge layout: the top edge maximizes the window, while the left and right edges claim the
-corresponding half of the scanout. Resize drags are not snapped. A snap records the pre-snap
-geometry as the restore geometry, preserving the existing maximize/restore contract.
+corresponding half of the scanout and the bottom edge claims the lower half. Resize drags are not
+snapped. A snap records the pre-snap geometry as the restore geometry, preserving the existing
+maximize/restore contract.
 
 The policy is implemented in the window manager, not the pointer decoder or compositor. The
 owner token, input queue, focus authority, and z-order remain unchanged; geometry still passes
@@ -21,6 +22,6 @@ through the compositor's owner-token checks and damage accounting.
 
 ## Proof
 
-Host window-manager tests cover left-edge maximize/restore and right-edge half snapping. The
-desktop routes pointer release through the same policy, so the live input path uses the tested
-manager decision.
+Host window-manager tests cover left-edge maximize/restore, right-edge half snapping, and
+bottom-edge lower-half snapping. The desktop routes pointer release through the same policy, so
+the live input path uses the tested manager decision.

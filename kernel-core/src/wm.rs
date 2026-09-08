@@ -540,7 +540,7 @@ impl WindowManager {
 
     /// Finish a pointer drag and apply the desktop's edge-snap policy. A move ending on the
     /// top edge maximizes the window; the left and right edges claim the corresponding half of
-    /// the scanout. Resize drags are never snapped.
+    /// the scanout, and the bottom edge claims the lower half. Resize drags are never snapped.
     pub fn release_at(
         &mut self,
         comp: &mut Compositor,
@@ -580,6 +580,9 @@ impl WindowManager {
         } else if x.saturating_add(SNAP_EDGE_PX) >= sw {
             let width = sw / 2;
             Some(((sw - width) as i32, 0i32, width, sh))
+        } else if y.saturating_add(SNAP_EDGE_PX) >= sh {
+            let height = sh / 2;
+            Some((0i32, (sh - height) as i32, sw, height))
         } else {
             None
         };
