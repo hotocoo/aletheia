@@ -29,7 +29,9 @@
 use alloc::vec::Vec;
 
 use crate::compositor::{CompFault, Compositor};
-use crate::textgrid::{has_resize_grip, has_window_controls, CONTROL_W, CLOSE_W, RESIZE_W, TITLE_H};
+use crate::textgrid::{
+    has_resize_grip, has_window_controls, CLOSE_W, CONTROL_W, RESIZE_W, TITLE_H,
+};
 
 /// Windows one manager tracks. Bounded for the never-freeing boot heap (ADR-063), and under
 /// the compositor's own surface ceiling so the wallpaper and any suite surface still fit.
@@ -71,8 +73,21 @@ pub enum Hit {
     Title,
     /// Everything below the title band: the application's own area.
     Client,
-    /// The bottom-right resize grip.
-    Resize,
+    /// A resize edge/corner. The value identifies which opposing edge stays fixed.
+    Resize(ResizeEdge),
+}
+
+/// Which edge(s) a pointer resize owns. Corners resize both axes at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResizeEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 /// What a press DID — the routing decision, reported rather than assumed.
@@ -102,8 +117,22 @@ pub fn hit_at(width: u32, height: u32, lx: i32, ly: i32) -> Option<Hit> {
     }
     let (x, y) = (lx as u32, ly as u32);
     if y >= TITLE_H {
-        if has_resize_grip(width, height) && x >= width - RESIZE_W && y >= height - RESIZE_W {
-            return Some(Hit::Resize);
+        if has_resize_grip(width, height) {
+            let near_left = x < RESIZE_W;
+            let near_right = x >= width - RESIZE_W;
+            let near_top = y - TITLE_H < RESIZE_W;
+            let near_bottom = y >= height - RESIZE_W;
+            return match (near_left, near_right, near_top, near_bottom) {
+                (true, false, true, false) => Some(Hit::Resize(ResizeEdge::TopLeft)),
+                (false, true, true, false) => Some(Hit::Resize(ResizeEdge::TopRight)),
+                (true, false, false, true) => Some(Hit::Resize(ResizeEdge::BottomLeft)),
+                (false, true, false, true) => Some(Hit::Resize(ResizeEdge::BottomRight)),
+                (true, false, false, false) => Some(Hit::Resize(ResizeEdge::Left)),
+                (false, true, false, false) => Some(Hit::Resize(ResizeEdge::Right)),
+                (false, false, true, false) => Some(Hit::Resize(ResizeEdge::Top)),
+                (false, false, false, true) => Some(Hit::Resize(ResizeEdge::Bottom)),
+                _ => return Some(Hit::Client),
+            };
         }
         return Some(Hit::Client);
     }
@@ -155,7 +184,7 @@ pub struct WindowManager {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DragKind {
     Move,
-    Resize,
+    Resize(ResizeEdge),
 }
 
 /// Keyboard-directed desktop snap target. This is deliberately the same four-way geometry
@@ -665,10 +694,10 @@ impl WindowManager {
                 });
                 Press::Dragging(id)
             }
-            Some(Hit::Resize) => {
+            Some(Hit::Resize(edge)) => {
                 let _ = comp.raise(id, w.token);
                 let _ = comp.set_focus(session, id);
-                self.drag = Some((id, lx, ly, DragKind::Resize));
+                self.drag = Some((id, lx, ly, DragKind::Resize(edge)));
                 self.drag_restore = None;
                 Press::Resizing(id)
             }
@@ -693,16 +722,57 @@ impl WindowManager {
                 Ok(()) => Some(id),
                 Err(_) => None,
             },
-            DragKind::Resize => {
+            DragKind::Resize(edge) => {
                 let (px, py) = comp.placement(id)?;
-                let width = (x as i32 - px + 1).max((RESIZE_W * 2) as i32) as u32;
-                let height = (y as i32 - py + 1).max((TITLE_H + RESIZE_W * 2) as i32) as u32;
+                let (old_w, old_h) = self.size(id)?;
+                let right = px.saturating_add(old_w as i32).saturating_sub(1);
+                let bottom = py.saturating_add(old_h as i32).saturating_sub(1);
+                let min_w = (RESIZE_W * 2) as i32;
+                let min_h = (TITLE_H + RESIZE_W * 2) as i32;
+                let mut nx = px;
+                let mut ny = py;
+                let mut width = old_w as i32;
+                let mut height = old_h as i32;
+                match edge {
+                    ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft => {
+                        nx = (x as i32).min(right - min_w + 1);
+                        width = right - nx + 1;
+                    }
+                    ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight => {
+                        width = (x as i32 - px + 1).max(min_w);
+                    }
+                    _ => {}
+                }
+                match edge {
+                    ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight => {
+                        ny = (y as i32).min(bottom - min_h + 1);
+                        height = bottom - ny + 1;
+                    }
+                    ResizeEdge::Bottom | ResizeEdge::BottomLeft | ResizeEdge::BottomRight => {
+                        height = (y as i32 - py + 1).max(min_h);
+                    }
+                    _ => {}
+                }
+                if nx < 0 || ny < 0 {
+                    return None;
+                }
+                let (sw, sh) = comp.scanout_size();
+                if nx as u32 + width as u32 > sw || ny as u32 + height as u32 > sh {
+                    return None;
+                }
+                let width = width as u32;
+                let height = height as u32;
                 match comp.resize_surface(id, token, width, height) {
                     Ok(()) => {
                         if let Some(w) = self.wins.iter_mut().find(|w| w.id == id) {
                             w.width = width;
                             w.height = height;
                             w.restore = None;
+                        }
+                        if (nx, ny) != (px, py) {
+                            if comp.move_surface(id, token, nx, ny).is_err() {
+                                return None;
+                            }
                         }
                         Some(id)
                     }
@@ -764,9 +834,7 @@ impl WindowManager {
             Some(((sw - half_w) as i32, 0i32, half_w, half_h))
         } else if x <= SNAP_EDGE_PX && y.saturating_add(SNAP_EDGE_PX) >= sh {
             Some((0i32, (sh - half_h) as i32, half_w, half_h))
-        } else if x.saturating_add(SNAP_EDGE_PX) >= sw
-            && y.saturating_add(SNAP_EDGE_PX) >= sh
-        {
+        } else if x.saturating_add(SNAP_EDGE_PX) >= sw && y.saturating_add(SNAP_EDGE_PX) >= sh {
             Some(((sw - half_w) as i32, (sh - half_h) as i32, half_w, half_h))
         } else if y <= SNAP_EDGE_PX {
             Some((0i32, 0i32, sw, sh))
@@ -842,7 +910,10 @@ impl WindowManager {
             ResizeDirection::Up => height -= KEYBOARD_RESIZE_PX,
             ResizeDirection::Down => height += KEYBOARD_RESIZE_PX,
         }
-        if width <= 0 || height <= 0 || x < 0 || y < 0
+        if width <= 0
+            || height <= 0
+            || x < 0
+            || y < 0
             || x as u32 + width as u32 > sw
             || y as u32 + height as u32 > sh
         {
@@ -972,9 +1043,11 @@ pub fn wm_suite(
                 && hit_at(w, h, (w - CONTROL_W * 3) as i32, 0) == Some(Hit::Minimize)
                 && hit_at(w, h, (w - CONTROL_W * 2) as i32, 0) == Some(Hit::Maximize)
                 && hit_at(w, h, (w - CONTROL_W) as i32, 0) == Some(Hit::Close)
-                && hit_at(w, h, (w - CONTROL_W * 3 - 1) as i32, (TITLE_H - 1) as i32) == Some(Hit::Title)
+                && hit_at(w, h, (w - CONTROL_W * 3 - 1) as i32, (TITLE_H - 1) as i32)
+                    == Some(Hit::Title)
                 && hit_at(w, h, (w - 1) as i32, (TITLE_H - 1) as i32) == Some(Hit::Close)
-                && hit_at(w, h, (w - 1) as i32, TITLE_H as i32) == Some(Hit::Client)
+                && hit_at(w, h, (w - 1) as i32, (TITLE_H + RESIZE_W + 1) as i32)
+                    == Some(Hit::Resize(ResizeEdge::Right))
                 && hit_at(w, h, -1, 0).is_none()
                 && hit_at(w, h, w as i32, 0).is_none()
                 && hit_at(w, h, 0, h as i32).is_none(),
@@ -999,7 +1072,7 @@ pub fn wm_suite(
     //     z-order the next press consults is the one the user just made.
     {
         let (mut comp, mut wm, sess, a, b) = desk();
-        let p = wm.press(&mut comp, sess, 10, 50); // A only (B starts at x=40,y=20)
+        let p = wm.press(&mut comp, sess, 10, 40); // A only (B starts at x=40,y=20)
         check!(
             p == Press::Focused(a)
                 && comp.focus() == Some(a)

@@ -34,7 +34,7 @@ pub const TITLE_H: u32 = 10;
 pub const CLOSE_W: u32 = 10;
 /// Width of each title-bar lifecycle control (minimize, maximize, close).
 pub const CONTROL_W: u32 = 10;
-/// Size of the bottom-right resize grip, painted and hit-tested from this same constant.
+/// Size of the resize grips, painted and hit-tested from this same constant.
 pub const RESIZE_W: u32 = 10;
 
 /// Small windows do not get a resize grip: the handle must not consume most of a tiny client
@@ -330,7 +330,8 @@ impl TextGrid {
                 }
             }
         }
-        // Resize grip: stepped diagonal marks in the bottom-right corner.
+        // Resize grips: small stepped marks on every edge/corner. The manager hit-tests the
+        // same 10-pixel bands, so every resize affordance is painted where it is clickable.
         if has_resize_grip(w, h) {
             let x0 = w - RESIZE_W;
             let y0 = h - RESIZE_W;
@@ -342,6 +343,17 @@ impl TextGrid {
                 if i >= 6 {
                     set(x0 + i, y0 + RESIZE_W - 6, true);
                 }
+            }
+            for i in 2..RESIZE_W {
+                set(x0 + i, TITLE_H + 1, true);
+                set(x0 + i, TITLE_H + 3, true);
+                set(x0 + i, TITLE_H + 5, true);
+                set(i, TITLE_H + 1, true);
+                set(i, TITLE_H + 3, true);
+                set(i, TITLE_H + 5, true);
+                set(1, y0 + i, true);
+                set(3, y0 + i, true);
+                set(5, y0 + i, true);
             }
         }
         // Cells: glyphs in ink on the blank text area.

@@ -352,6 +352,39 @@ fn resize_grip_is_a_distinct_client_control_and_changes_window_size() {
 }
 
 #[test]
+fn resize_edges_and_corners_change_only_the_owned_axes() {
+    use kernel_core::wm::ResizeEdge;
+    let (mut comp, mut wm, sess) = desk();
+
+    // Left edge keeps the right edge fixed while moving the left edge inward.
+    assert_eq!(wm.press(&mut comp, sess, 40, 50), Press::Resizing(2));
+    assert_eq!(wm.motion(&mut comp, 56, 50), Some(2));
+    assert_eq!(comp.placement(2), Some((56, 20)));
+    assert_eq!(wm.size(2), Some((64, 60)));
+    let _ = wm.release();
+
+    // Top edge keeps the bottom edge fixed.
+    assert_eq!(wm.press(&mut comp, sess, 80, 30), Press::Resizing(2));
+    assert_eq!(wm.motion(&mut comp, 80, 36), Some(2));
+    assert_eq!(comp.placement(2), Some((56, 36)));
+    assert_eq!(wm.size(2), Some((64, 44)));
+    let _ = wm.release();
+
+    // Bottom-right remains the familiar two-axis resize.
+    let (w, h) = wm.size(2).unwrap();
+    assert_eq!(
+        wm.press(&mut comp, sess, 56 + w - 1, 36 + h - 1),
+        Press::Resizing(2)
+    );
+    assert_eq!(wm.motion(&mut comp, 140, 100), Some(2));
+    assert_eq!(wm.size(2), Some((85, 65)));
+    assert_eq!(comp.placement(2), Some((56, 36)));
+    let _ = wm.release();
+
+    assert_eq!(ResizeEdge::BottomRight, ResizeEdge::BottomRight);
+}
+
+#[test]
 fn resize_refuses_a_fully_offscreen_result_without_changing_geometry() {
     let (mut comp, mut wm, sess) = desk();
     let before = wm.size(2).unwrap();
