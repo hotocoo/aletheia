@@ -18,6 +18,7 @@
 //! scratch disk and requires the invariant marker.
 use kernel_core::virtioblk::{self, InitReport, VirtioHal};
 use kernel_core::virtiogpu::{self, VirtioGpu};
+use kernel_core::Hal;
 use kernel_core::virtionet::{self, VirtioNet};
 
 use crate::frames;
@@ -29,6 +30,32 @@ const GATE_IMAGE_BLOCKS: usize = 256;
 
 /// The x86-64 seam: this target's frame allocator and fence.
 pub struct X86Virtio;
+
+impl Hal for X86Virtio {
+    fn arch_name() -> &'static str {
+        <crate::hal::Amd64Hal as Hal>::arch_name()
+    }
+
+    fn timer_ticks() -> u64 {
+        <crate::hal::Amd64Hal as Hal>::timer_ticks()
+    }
+
+    fn timer_freq_hz() -> u64 {
+        <crate::hal::Amd64Hal as Hal>::timer_freq_hz()
+    }
+
+    fn ticks_to_ns(ticks: u64) -> u64 {
+        <crate::hal::Amd64Hal as Hal>::ticks_to_ns(ticks)
+    }
+
+    fn current_privilege() -> u64 {
+        <crate::hal::Amd64Hal as Hal>::current_privilege()
+    }
+
+    fn exit(code: i32) -> ! {
+        <crate::hal::Amd64Hal as Hal>::exit(code)
+    }
+}
 
 impl VirtioHal for X86Virtio {
     fn alloc_frame() -> Option<usize> {

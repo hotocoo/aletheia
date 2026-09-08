@@ -7,11 +7,14 @@
 //! the primitives with `rdtsc` (monotonic ticks), the CS RPL (privilege), and the QEMU/firmware exit.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// The active backend implements the shared `kernel_core::Hal` contract (defined once, not per crate).
 pub use kernel_core::Hal;
 
 pub struct Amd64Hal;
+
+static TSC_HZ: AtomicU64 = AtomicU64::new(0);
 
 impl Hal for Amd64Hal {
     fn arch_name() -> &'static str {
@@ -27,11 +30,16 @@ impl Hal for Amd64Hal {
     }
 
     fn timer_freq_hz() -> u64 {
-        0 // TSC is uncalibrated in M1; the periodic tick source is `pit::FREQ_HZ` (100 Hz).
+        TSC_HZ.load(Ordering::Relaxed)
     }
 
     fn ticks_to_ns(ticks: u64) -> u64 {
-        ticks // Uncalibrated passthrough in M1 (TSC-frequency calibration is a P5 concern).
+        let hz = Self::timer_freq_hz();
+        if hz == 0 {
+            ticks
+        } else {
+            ticks.saturating_mul(1_000_000_000).saturating_div(hz)
+        }
     }
 
     fn current_privilege() -> u64 {
@@ -48,3 +56,25 @@ impl Hal for Amd64Hal {
 
 /// The backend selected for this build target; the kernel refers to `ActiveHal`, never a CPU.
 pub type ActiveHal = Amd64Hal;
+
+/// Calibrate TSC against the already-live PIT interrupt source. QEMU and real x86 hardware both
+/// expose a TSC but do not guarantee its frequency through this kernel's existing contract; using
+/// the PIT gives the benchmark an observed frequency instead of inventing one. Called once after
+/// IRQ0 has been proved live. A short multi-tick window keeps interrupt jitter below the resolution
+/// of the resulting frequency estimate while adding negligible boot cost.
+pub fn calibrate_tsc() -> Option<u64> {
+    let start_tick = crate::pit::ticks();
+    let start = ActiveHal::timer_ticks();
+    let target = start_tick.saturating_add(10);
+    while crate::pit::ticks() < target {
+        x86_64::instructions::hlt();
+    }
+    let end = ActiveHal::timer_ticks();
+    let delta = end.wrapping_sub(start);
+    let hz = delta.saturating_mul(crate::pit::FREQ_HZ as u64) / 10;
+    if hz == 0 {
+        return None;
+    }
+    TSC_HZ.store(hz, Ordering::Relaxed);
+    Some(hz)
+}

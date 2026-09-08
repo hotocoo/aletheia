@@ -237,6 +237,10 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         pit::ticks()
     );
     kprintln!("[hal] rdtsc monotonic sample: {}", ActiveHal::timer_ticks());
+    match hal::calibrate_tsc() {
+        Some(hz) => kprintln!("[hal] TSC calibrated against PIT: {} Hz", hz),
+        None => kprintln!("[hal] WARNING: TSC calibration failed; latency reports remain uncalibrated"),
+    }
 
     // --- physical memory management (P5): take ownership of the RAM the firmware handed us ---
     // W^X needs EFER.NXE before any page is mapped (REQ-MM-006, ADR-034); firmware does not
