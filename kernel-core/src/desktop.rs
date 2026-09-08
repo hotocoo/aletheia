@@ -246,6 +246,12 @@ fn is_minimize_shortcut(ty: u16, code: u16, value: u32, alt: bool) -> bool {
     ty == vinput::EV_KEY && code == KEY_F9 && value == 1 && alt
 }
 
+/// Recognize the standard keyboard context-menu gesture. Shift+F10 is useful when a pointer is
+/// unavailable and opens the same compositor-owned menu at the desktop's last pointer position.
+fn is_context_menu_shortcut(ty: u16, code: u16, value: u32, shift: bool) -> bool {
+    ty == vinput::EV_KEY && code == KEY_F10 && value == 1 && shift
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -345,6 +351,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.write(b"Ctrl+Alt+T/C  tile/cascade windows\n");
         help.write(b"Ctrl+Alt+R  keyboard resize mode\n");
         help.write(b"Ctrl+Alt+Enter/M/Backspace  max/min/close\n");
+        help.write(b"Shift+F10  context menu\n");
         let mut help_packed = Vec::new();
         help.render_packed(HELP_TITLE, &mut help_packed);
         comp.fill_packed(HELP, tok_help, &help_packed)
@@ -995,6 +1002,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && alt;
                     let alt_minimize = is_minimize_shortcut(ev.ty, ev.code, ev.value, alt);
                     let alt_maximize = is_maximize_shortcut(ev.ty, ev.code, ev.value, alt);
+                    let context_menu = is_context_menu_shortcut(ev.ty, ev.code, ev.value, shift);
                     let alt_launcher = if ev.ty == vinput::EV_KEY {
                         alt_window_launcher(ev.code, ev.value, alt)
                     } else {
@@ -1029,6 +1037,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && self.wm.dragging().is_some();
                     let help_toggle =
                         ev.ty == vinput::EV_KEY && ev.code == KEY_F1 && ev.value == 1;
+                    let menu_escape = self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_ESC
+                        && ev.value == 1;
                     let keyboard_nudge = if ev.ty == vinput::EV_KEY
                         && ev.value == 1
                         && ctrl
@@ -1077,6 +1089,16 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     if help_toggle {
                         self.close_menu();
                         self.toggle_help();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if context_menu {
+                        if self.comp.is_visible(MENU) == Some(true) {
+                            self.close_menu();
+                        } else {
+                            self.open_menu(self.pointer.0, self.pointer.1);
+                        }
+                        let _ = self.kb_dec.feed(ev);
+                    } else if menu_escape {
+                        self.close_menu();
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(id) = alt_launcher {
                         if !self.wm.is_open(id) {
@@ -1277,7 +1299,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{alt_window_launcher, is_maximize_shortcut, is_minimize_shortcut, is_title_double_click};
+    use super::{
+        alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
+        is_minimize_shortcut, is_title_double_click,
+    };
 
     #[test]
     fn alt_number_launchers_select_the_taskbar_windows() {
@@ -1303,6 +1328,14 @@ mod tests {
         assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 67, 1, false));
         assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 67, 0, true));
         assert!(!is_minimize_shortcut(super::vinput::EV_KEY, 68, 1, true));
+    }
+
+    #[test]
+    fn shift_f10_is_the_keyboard_context_menu_gesture() {
+        assert!(is_context_menu_shortcut(super::vinput::EV_KEY, 68, 1, true));
+        assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 68, 1, false));
+        assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 68, 0, true));
+        assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 67, 1, true));
     }
 
     #[test]
