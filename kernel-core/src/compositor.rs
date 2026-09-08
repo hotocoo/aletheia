@@ -115,9 +115,40 @@ pub enum CompFault {
 pub const MAX_INPUT_EVENTS: usize = 32;
 /// The cursor glyph is 8x8.
 pub const CURSOR_SIZE: u32 = 8;
-/// The cursor glyph, 1-bit rows (bit 7 = leftmost column): a crosshair, transparent where
-/// 0. The compositor owns it outright — it is not a surface, has no token, no z-order slot.
-const CURSOR_GLYPH: [u8; 8] = [0x10, 0x10, 0x10, 0xFE, 0x10, 0x10, 0x10, 0x00];
+
+/// Cursor shape is compositor-owned state, not a surface. The desktop may select a shape from
+/// its routing decision, but only the input session may change it, just like cursor position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorShape {
+    Arrow,
+    Crosshair,
+    ResizeHorizontal,
+    ResizeVertical,
+    ResizeDiagonal,
+    ResizeAntiDiagonal,
+    Hand,
+}
+
+/// 1-bit rows (bit 7 = leftmost column). Every shape is 8x8 and transparent where 0.
+const CURSOR_ARROW: [u8; 8] = [0x80, 0xC0, 0xE0, 0xF0, 0xF8, 0xCC, 0x0C, 0x06];
+const CURSOR_CROSSHAIR: [u8; 8] = [0x10, 0x10, 0x10, 0xFE, 0x10, 0x10, 0x10, 0x00];
+const CURSOR_HRESIZE: [u8; 8] = [0x10, 0x10, 0x10, 0xFE, 0x10, 0x10, 0x10, 0x00];
+const CURSOR_VRESIZE: [u8; 8] = [0x10, 0x10, 0x10, 0x10, 0xFE, 0x10, 0x10, 0x10];
+const CURSOR_DIAGONAL: [u8; 8] = [0x01, 0x03, 0x07, 0x0E, 0x1C, 0x38, 0x70, 0xE0];
+const CURSOR_ANTIDIAGONAL: [u8; 8] = [0x80, 0xC0, 0xE0, 0x70, 0x38, 0x1C, 0x0E, 0x07];
+const CURSOR_HAND: [u8; 8] = [0x18, 0x3C, 0x3C, 0x3C, 0x7E, 0x7E, 0x3C, 0x18];
+
+fn cursor_glyph(shape: CursorShape) -> &'static [u8; 8] {
+    match shape {
+        CursorShape::Arrow => &CURSOR_ARROW,
+        CursorShape::Crosshair => &CURSOR_CROSSHAIR,
+        CursorShape::ResizeHorizontal => &CURSOR_HRESIZE,
+        CursorShape::ResizeVertical => &CURSOR_VRESIZE,
+        CursorShape::ResizeDiagonal => &CURSOR_DIAGONAL,
+        CursorShape::ResizeAntiDiagonal => &CURSOR_ANTIDIAGONAL,
+        CursorShape::Hand => &CURSOR_HAND,
+    }
+}
 
 /// Wrap one input op: run its body, then COUNT a refusal. The closure borrow ends before
 /// the counter moves, so a refusal both changes nothing and is never silent.
@@ -373,8 +404,9 @@ pub struct Compositor {
     events_dropped: u64,
     input_refusals: u64,
     /// The compositor's own cursor plane: the glyph's top-left on the scanout, `None` =
-    /// hidden. No token names it; only the input session moves it.
+    /// hidden. No token names it; only the input session moves or changes its shape.
     cursor: Option<(u32, u32)>,
+    cursor_shape: CursorShape,
 }
 
 impl Compositor {
@@ -396,6 +428,9 @@ impl Compositor {
             events_dropped: 0,
             input_refusals: 0,
             cursor: None,
+            // Preserve the original compositor cursor contract for callers that do not opt
+            // into hover-aware shapes; the live desktop selects Arrow on install.
+            cursor_shape: CursorShape::Crosshair,
         }
     }
 
@@ -889,6 +924,26 @@ impl Compositor {
         )
     }
 
+    /// Change the cursor glyph (input session only). The current glyph region is damaged before
+    /// and after the change so a shape transition is visible in the same composed frame. An
+    /// idempotent shape selection produces no damage and therefore no frame traffic.
+    pub fn set_cursor_shape(&mut self, session: u64, shape: CursorShape) -> Result<(), CompFault> {
+        count_refusal!(
+            self,
+            (),
+            (|| {
+                self.session_check(session)?;
+                if self.cursor_shape == shape {
+                    return Ok(());
+                }
+                self.damage_cursor();
+                self.cursor_shape = shape;
+                self.damage_cursor();
+                Ok(())
+            })()
+        )
+    }
+
     /// Hide the cursor (input session only). The vacated glyph region is damaged: what
     /// was underneath must reappear — the same clear-then-repaint rule a detached surface
     /// obeys, and the reason hide is visible the same frame.
@@ -913,6 +968,11 @@ impl Compositor {
     /// The cursor's glyph top-left, if shown.
     pub fn cursor(&self) -> Option<(u32, u32)> {
         self.cursor
+    }
+
+    /// The cursor's current glyph shape.
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.cursor_shape
     }
 
     /// (events dropped, input refusals) — the input ledger's two counters.
@@ -993,9 +1053,9 @@ impl Compositor {
         self.scanout_damage.push(r);
     }
 
-    /// The cursor's glyph bit at glyph-local (gx, gy): true where the crosshair has ink.
-    fn cursor_ink(gx: u32, gy: u32) -> bool {
-        CURSOR_GLYPH[gy as usize] & (0x80u8 >> gx) != 0
+    /// The cursor's glyph bit at glyph-local (gx, gy): true where the selected shape has ink.
+    fn cursor_ink(shape: CursorShape, gx: u32, gy: u32) -> bool {
+        cursor_glyph(shape)[gy as usize] & (0x80u8 >> gx) != 0
     }
 
     // -- composition ----------------------------------------------------------
@@ -1067,6 +1127,7 @@ impl Compositor {
         }
         let regions: Vec<Rect> = if whole { vec![scanout] } else { regions };
         let cursor = self.cursor;
+        let cursor_shape = self.cursor_shape;
 
         for r in &regions {
             let Some(r) = Rect::intersect(*r, scanout) else {
@@ -1100,7 +1161,7 @@ impl Compositor {
                 ) {
                     for yy in cr.y..cr.y + cr.h {
                         for xx in cr.x..cr.x + cr.w {
-                            if Self::cursor_ink(xx - cx, yy - cy) {
+                            if Self::cursor_ink(cursor_shape, xx - cx, yy - cy) {
                                 sink.put(xx, yy, true);
                                 stats.pixels_blitted += 1;
                                 stats.cursor_pixels += 1;

@@ -27,7 +27,7 @@
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use crate::compositor::{Compositor, EventKind, Rect};
+use crate::compositor::{Compositor, CursorShape, EventKind, Rect};
 use crate::fbcon::{ComposeSink, Surface};
 use crate::shell::InputFacts;
 use crate::textgrid::TextGrid;
@@ -251,6 +251,8 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
             .map_err(|_| "focusing the terminal window was refused")?;
         comp.move_cursor(sess, W / 2, H / 2)
             .map_err(|_| "placing the cursor was refused")?;
+        comp.set_cursor_shape(sess, CursorShape::Arrow)
+            .map_err(|_| "setting the desktop cursor shape was refused")?;
 
         // The pointer's declared range, qualified exactly as `vinput_suite` qualifies it: a
         // device that will not say what its axes are cannot steer a cursor.
@@ -453,6 +455,57 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         true
     }
 
+    /// Select a compositor-owned cursor shape from the same hit geometry the window manager
+    /// uses for clicks. Hover is presentation state only: it never changes focus, z-order, or
+    /// ownership. The taskbar's actionable regions use the hand cursor; window resize grips use
+    /// the matching directional glyph; ordinary content keeps the arrow.
+    fn refresh_cursor_shape(&mut self) {
+        let (x, y) = self.pointer;
+        let shape = if let Some((tx, ty)) = self.comp.placement(TASKBAR) {
+            let Some((tw, th)) = self.comp.surface_size(TASKBAR) else {
+                return;
+            };
+            let lx = x as i32 - tx;
+            let ly = y as i32 - ty;
+            if lx >= TASKBAR_TERM_X as i32
+                && lx < (TASKBAR_MON_X + TASKBAR_BUTTON_W) as i32
+                && ly >= crate::textgrid::TITLE_H as i32
+                && lx < tw as i32
+                && ly < th as i32
+            {
+                CursorShape::Hand
+            } else {
+                self.window_cursor_shape(x, y)
+            }
+        } else {
+            self.window_cursor_shape(x, y)
+        };
+        let _ = self.comp.set_cursor_shape(self.sess, shape);
+    }
+
+    fn window_cursor_shape(&self, x: u32, y: u32) -> CursorShape {
+        let Some((id, lx, ly)) = self.wm.window_at(&self.comp, x, y) else {
+            return CursorShape::Arrow;
+        };
+        let Some((w, h)) = self.wm.size(id) else {
+            return CursorShape::Arrow;
+        };
+        match crate::wm::hit_at(w, h, lx, ly) {
+            Some(crate::wm::Hit::Resize(crate::wm::ResizeEdge::Left
+                | crate::wm::ResizeEdge::Right)) => CursorShape::ResizeHorizontal,
+            Some(crate::wm::Hit::Resize(crate::wm::ResizeEdge::Top
+                | crate::wm::ResizeEdge::Bottom)) => CursorShape::ResizeVertical,
+            Some(crate::wm::Hit::Resize(crate::wm::ResizeEdge::TopLeft
+                | crate::wm::ResizeEdge::BottomRight)) => CursorShape::ResizeDiagonal,
+            Some(crate::wm::Hit::Resize(crate::wm::ResizeEdge::TopRight
+                | crate::wm::ResizeEdge::BottomLeft)) => CursorShape::ResizeAntiDiagonal,
+            Some(crate::wm::Hit::Minimize
+                | crate::wm::Hit::Maximize
+                | crate::wm::Hit::Close) => CursorShape::Hand,
+            _ => CursorShape::Arrow,
+        }
+    }
+
     /// Repaint the monitor from what the machine knows about itself — but ONLY when one of
     /// those facts CHANGED (ADR-084). A panel on a timer would end the quiet desktop.
     fn refresh_monitor(&mut self, frames_free: usize, frames_total: usize) {
@@ -492,6 +545,7 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
     fn pointer_batch(&mut self, batch: vinput::PointerBatch) {
         if let Some(p) = batch.move_to {
             self.pointer = p;
+            self.refresh_cursor_shape();
         }
         let (px, py) = self.pointer;
         if let Some((Button::Left, down)) = batch.button {

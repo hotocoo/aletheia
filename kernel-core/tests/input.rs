@@ -9,8 +9,8 @@
 //! target boots.
 
 use kernel_core::compositor::{
-    input_suite, CompFault, Compositor, EventKind, Raster, Rect, CURSOR_SIZE, MAX_INPUT_EVENTS,
-    MAX_SURFACES,
+    input_suite, CompFault, Compositor, CursorShape, EventKind, Raster, Rect, CURSOR_SIZE,
+    MAX_INPUT_EVENTS, MAX_SURFACES,
 };
 
 /// The canary-guarded raster from the composition proofs, extended with a put counter:
@@ -425,6 +425,30 @@ fn the_cursor_paints_above_every_surface() {
     c.compose_frame(&mut g);
     assert!(g.get(23, 20));
     assert_eq!(g.oob, 0);
+}
+
+#[test]
+fn cursor_shape_is_session_owned_and_idempotent() {
+    let mut c = Compositor::new(0xCAFE, 64, 32);
+    let s = c.open_input_session().unwrap();
+    c.move_cursor(s, 20, 12).unwrap();
+    assert_eq!(c.cursor_shape(), CursorShape::Crosshair);
+
+    assert_eq!(
+        c.set_cursor_shape(s ^ 1, CursorShape::Hand),
+        Err(CompFault::NotInputSession)
+    );
+    assert_eq!(c.cursor_shape(), CursorShape::Crosshair);
+
+    let mut shadow = Guard::new(64, 32);
+    c.compose_frame(&mut shadow);
+    c.set_cursor_shape(s, CursorShape::ResizeDiagonal).unwrap();
+    assert_eq!(c.cursor_shape(), CursorShape::ResizeDiagonal);
+    assert!(c.has_pending_damage());
+
+    c.compose_frame(&mut shadow);
+    c.set_cursor_shape(s, CursorShape::ResizeDiagonal).unwrap();
+    assert!(!c.has_pending_damage());
 }
 
 /// Determinism over the WHOLE input contract: two engines fed an identical mixed
