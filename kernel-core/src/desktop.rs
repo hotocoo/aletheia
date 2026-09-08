@@ -122,6 +122,14 @@ const MENU_COLS: u32 = 18;
 const MENU_ROWS: u32 = 6;
 const MENU_MARGIN: i32 = 4;
 const MENU_TITLE: &[u8] = b"menu";
+const MENU_ITEMS: [&[u8]; 6] = [
+    b"terminal",
+    b"monitor",
+    b"shortcuts",
+    b"tile windows",
+    b"cascade windows",
+    b"show desktop",
+];
 /// Keystrokes the main thread may hold between drains (the console pops one per loop turn).
 const TERM_INPUT_CAP: usize = 64;
 /// Events drained per device per pump — bounded, so one noisy device cannot own the tick.
@@ -198,7 +206,10 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     taskbar_packed: Vec<u8>,
     taskbar_token: u64,
     taskbar_sig: TaskbarFacts,
+    menu: TextGrid,
+    menu_packed: Vec<u8>,
     menu_token: u64,
+    menu_selected: usize,
     chrome_focus: u32,
     keyboard_resize: bool,
     /// Keystrokes drained from the terminal's queue, waiting for the console's `getc`.
@@ -250,6 +261,27 @@ fn is_minimize_shortcut(ty: u16, code: u16, value: u32, alt: bool) -> bool {
 /// unavailable and opens the same compositor-owned menu at the desktop's last pointer position.
 fn is_context_menu_shortcut(ty: u16, code: u16, value: u32, shift: bool) -> bool {
     ty == vinput::EV_KEY && code == KEY_F10 && value == 1 && shift
+}
+
+fn render_menu(menu: &TextGrid, selected: usize, out: &mut Vec<u8>) {
+    let mut grid = menu.clone();
+    grid.clear();
+    for (index, item) in MENU_ITEMS.iter().enumerate() {
+        if index == selected { grid.write(b">"); } else { grid.write(b" "); }
+        grid.write(item);
+        if index + 1 < MENU_ITEMS.len() { grid.write(b"\n"); }
+    }
+    grid.render_packed(MENU_TITLE, out);
+}
+
+fn next_menu_selection(selected: usize, down: bool) -> usize {
+    if down {
+        (selected + 1) % MENU_ITEMS.len()
+    } else if selected == 0 {
+        MENU_ITEMS.len() - 1
+    } else {
+        selected - 1
+    }
 }
 
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
@@ -367,21 +399,15 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         taskbar.render_packed(b"desktop", &mut taskbar_packed);
         comp.fill_packed(TASKBAR, tok_taskbar, &taskbar_packed)
             .map_err(|_| "the taskbar's first paint was refused")?;
-        let mut menu = TextGrid::new(MENU_COLS, MENU_ROWS);
+        let menu = TextGrid::new(MENU_COLS, MENU_ROWS);
         let (menu_w, menu_h) = menu.pixel_size();
         let tok_menu = comp
             .mint_surface(MENU, menu_w, menu_h)
             .map_err(|_| "the desktop menu surface was refused")?;
         comp.attach(MENU, tok_menu, MENU_MARGIN, MENU_MARGIN)
             .map_err(|_| "the desktop menu placement was refused")?;
-        menu.write(b"terminal\n");
-        menu.write(b"monitor\n");
-        menu.write(b"shortcuts\n");
-        menu.write(b"tile windows\n");
-        menu.write(b"cascade windows\n");
-        menu.write(b"show desktop\n");
         let mut menu_packed = Vec::new();
-        menu.render_packed(MENU_TITLE, &mut menu_packed);
+        render_menu(&menu, 0, &mut menu_packed);
         comp.fill_packed(MENU, tok_menu, &menu_packed)
             .map_err(|_| "the desktop menu's first paint was refused")?;
         comp.set_visible(MENU, tok_menu, false)
@@ -429,7 +455,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             taskbar_packed,
             taskbar_token: tok_taskbar,
             taskbar_sig: TaskbarFacts::default(),
+            menu,
+            menu_packed,
             menu_token: tok_menu,
+            menu_selected: 0,
             chrome_focus: WINDOW,
             keyboard_resize: false,
             term_input: Vec::with_capacity(TERM_INPUT_CAP),
@@ -640,6 +669,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let max_y = H.saturating_sub(mh) as i32;
         let px = (x as i32 - MENU_MARGIN).clamp(0, max_x);
         let py = (y as i32 - MENU_MARGIN).clamp(0, max_y);
+        self.menu_selected = 0;
+        self.repaint_menu();
         let _ = self.comp.move_surface(MENU, self.menu_token, px, py);
         let _ = self.comp.raise(MENU, self.menu_token);
         let _ = self.comp.set_visible(MENU, self.menu_token, true);
@@ -647,6 +678,34 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
     fn close_menu(&mut self) {
         let _ = self.comp.set_visible(MENU, self.menu_token, false);
+    }
+
+    fn repaint_menu(&mut self) {
+        render_menu(&self.menu, self.menu_selected, &mut self.menu_packed);
+        let _ = self.comp.fill_packed(MENU, self.menu_token, &self.menu_packed);
+    }
+
+    fn activate_menu_selection(&mut self) {
+        match self.menu_selected {
+            0 => self.focus_or_restore_window(WINDOW),
+            1 => self.focus_or_restore_window(MONITOR),
+            2 => self.focus_or_restore_window(HELP),
+            3 => {
+                let _ = self.wm.tile_visible(&mut self.comp, self.sess);
+                self.sync_terminal_geometry();
+            }
+            4 => {
+                let _ = self.wm.cascade_visible(&mut self.comp, self.sess);
+                self.sync_terminal_geometry();
+            }
+            5 => {
+                let _ = self.wm.toggle_show_desktop(&mut self.comp, self.sess);
+                self.sync_terminal_geometry();
+            }
+            _ => return,
+        }
+        self.close_menu();
+        self.refresh_cursor_shape();
     }
 
     /// Handle a menu click using fixed text-row geometry. The menu never focuses an application
@@ -665,34 +724,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             return true;
         }
         let row = ((ly as u32 - crate::textgrid::TITLE_H) / crate::textgrid::CELL) as usize;
-        let target = match row {
-            0 => Some(WINDOW),
-            1 => Some(MONITOR),
-            2 => Some(HELP),
-            _ => None,
-        };
-        match row {
-            0..=2 => {
-                if let Some(id) = target {
-                    self.focus_or_restore_window(id);
-                }
-            }
-            3 => {
-                let _ = self.wm.tile_visible(&mut self.comp, self.sess);
-                self.sync_terminal_geometry();
-            }
-            4 => {
-                let _ = self.wm.cascade_visible(&mut self.comp, self.sess);
-                self.sync_terminal_geometry();
-            }
-            5 => {
-                let _ = self.wm.toggle_show_desktop(&mut self.comp, self.sess);
-                self.sync_terminal_geometry();
-            }
-            _ => return true,
+        if row >= MENU_ITEMS.len() {
+            return true;
         }
-        self.close_menu();
-        self.refresh_cursor_shape();
+        self.menu_selected = row;
+        self.activate_menu_selection();
         true
     }
 
@@ -1041,6 +1077,15 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.ty == vinput::EV_KEY
                         && ev.code == KEY_ESC
                         && ev.value == 1;
+                    let menu_up = self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_UP && ev.value == 1
+                        && !ctrl && !alt;
+                    let menu_down = self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_DOWN && ev.value == 1
+                        && !ctrl && !alt;
+                    let menu_activate = self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_ENTER && ev.value == 1
+                        && !ctrl && !alt;
                     let keyboard_nudge = if ev.ty == vinput::EV_KEY
                         && ev.value == 1
                         && ctrl
@@ -1099,6 +1144,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.kb_dec.feed(ev);
                     } else if menu_escape {
                         self.close_menu();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if menu_up || menu_down {
+                        self.menu_selected = next_menu_selection(self.menu_selected, menu_down);
+                        self.repaint_menu();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if menu_activate {
+                        self.activate_menu_selection();
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(id) = alt_launcher {
                         if !self.wm.is_open(id) {
@@ -1301,7 +1353,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 mod tests {
     use super::{
         alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
-        is_minimize_shortcut, is_title_double_click,
+        is_minimize_shortcut, is_title_double_click, next_menu_selection,
     };
 
     #[test]
@@ -1336,6 +1388,14 @@ mod tests {
         assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 68, 1, false));
         assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 68, 0, true));
         assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 67, 1, true));
+    }
+
+    #[test]
+    fn context_menu_selection_wraps_in_both_directions() {
+        assert_eq!(next_menu_selection(0, false), 5);
+        assert_eq!(next_menu_selection(5, true), 0);
+        assert_eq!(next_menu_selection(2, false), 1);
+        assert_eq!(next_menu_selection(2, true), 3);
     }
 
     #[test]
