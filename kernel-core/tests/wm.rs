@@ -109,6 +109,25 @@ fn the_chrome_of_a_window_narrower_than_the_close_box_is_all_title() {
 }
 
 #[test]
+fn title_bar_controls_are_distinct_and_drive_window_lifecycle() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 2).unwrap();
+    // Window 2 starts at x=40 and is 80px wide; controls occupy local x=50..80.
+    assert_eq!(wm.press(&mut comp, sess, 40 + 51, 20), Press::Minimized(2));
+    assert_eq!(wm.is_minimized(&comp, 2), Some(true));
+    assert_eq!(comp.focus(), Some(1));
+
+    wm.toggle_minimize(&mut comp, sess, 2).unwrap();
+    assert_eq!(wm.press(&mut comp, sess, 40 + 61, 20), Press::Maximized(2));
+    assert_eq!(wm.is_maximized(2), Some(true));
+    assert_eq!(comp.placement(2), Some((0, 0)));
+
+    // Maximize changes the window width to the 200px scanout, so its close control moves with it.
+    assert_eq!(wm.press(&mut comp, sess, 191, 1), Press::Closed(2));
+    assert!(!wm.is_open(2));
+}
+
+#[test]
 fn the_manager_refuses_what_it_does_not_own_and_counts_every_refusal() {
     let (mut comp, mut wm, sess) = desk();
     assert_eq!(wm.close(&mut comp, sess, 7), Err(WmFault::UnknownWindow(7)));

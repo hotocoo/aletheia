@@ -29,7 +29,7 @@
 use alloc::vec::Vec;
 
 use crate::compositor::{CompFault, Compositor};
-use crate::textgrid::{has_close_box, has_resize_grip, CLOSE_W, RESIZE_W, TITLE_H};
+use crate::textgrid::{has_resize_grip, has_window_controls, CONTROL_W, CLOSE_W, RESIZE_W, TITLE_H};
 
 /// Windows one manager tracks. Bounded for the never-freeing boot heap (ADR-063), and under
 /// the compositor's own surface ceiling so the wallpaper and any suite surface still fit.
@@ -57,6 +57,10 @@ impl From<CompFault> for WmFault {
 /// Where inside a window's own pixels a point landed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
+    /// The left title-bar control: minimize without destroying the window.
+    Minimize,
+    /// The middle title-bar control: maximize or restore the window.
+    Maximize,
     /// The close box: the rightmost [`CLOSE_W`] pixels of the title band.
     Close,
     /// The rest of the title band — the strip a window is dragged by.
@@ -70,6 +74,10 @@ pub enum Hit {
 /// What a press DID — the routing decision, reported rather than assumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Press {
+    /// The minimize control was pressed and the window is now hidden.
+    Minimized(u32),
+    /// The maximize/restore control was pressed and the window changed geometry.
+    Maximized(u32),
     /// The close box was pressed and the window is gone; the id is the one that closed.
     Closed(u32),
     /// The title band was pressed: the window is raised, focused, and now dragging.
@@ -95,8 +103,19 @@ pub fn hit_at(width: u32, height: u32, lx: i32, ly: i32) -> Option<Hit> {
         }
         return Some(Hit::Client);
     }
-    if has_close_box(width) && x >= width - CLOSE_W {
-        Some(Hit::Close)
+    if has_window_controls(width) {
+        let controls = width - CONTROL_W * 3;
+        if x >= controls {
+            Some(if x < controls + CONTROL_W {
+                Hit::Minimize
+            } else if x < controls + CONTROL_W * 2 {
+                Hit::Maximize
+            } else {
+                Hit::Close
+            })
+        } else {
+            Some(Hit::Title)
+        }
     } else {
         Some(Hit::Title)
     }
@@ -435,6 +454,14 @@ impl WindowManager {
             return Press::Empty;
         };
         match hit_at(w.width, w.height, lx, ly) {
+            Some(Hit::Minimize) => match self.toggle_minimize(comp, session, id) {
+                Ok(_) => Press::Minimized(id),
+                Err(_) => Press::Empty,
+            },
+            Some(Hit::Maximize) => match self.toggle_maximize(comp, session, id) {
+                Ok(_) => Press::Maximized(id),
+                Err(_) => Press::Empty,
+            },
             Some(Hit::Close) => match self.close(comp, session, id) {
                 Ok(()) => Press::Closed(id),
                 Err(_) => Press::Empty,
@@ -606,15 +633,17 @@ pub fn wm_suite(
         (comp, wm, sess, 1, 2)
     }
 
-    // 1 — chrome geometry is the painter's: the close box is the rightmost CLOSE_W pixels of
-    //     the title band, the rest of the band is the drag strip, below it is the client, and
-    //     a point outside the window's pixels is no hit at all.
+    // 1 — chrome geometry is the painter's: the three title controls occupy the rightmost
+    //     CONTROL_W-sized slots, the rest of the band is the drag strip, below it is the client,
+    //     and a point outside the window's pixels is no hit at all.
     {
         let (w, h) = (80u32, 60u32);
         check!(
             hit_at(w, h, 0, 0) == Some(Hit::Title)
-                && hit_at(w, h, (w - CLOSE_W) as i32, 0) == Some(Hit::Close)
-                && hit_at(w, h, (w - CLOSE_W - 1) as i32, (TITLE_H - 1) as i32) == Some(Hit::Title)
+                && hit_at(w, h, (w - CONTROL_W * 3) as i32, 0) == Some(Hit::Minimize)
+                && hit_at(w, h, (w - CONTROL_W * 2) as i32, 0) == Some(Hit::Maximize)
+                && hit_at(w, h, (w - CONTROL_W) as i32, 0) == Some(Hit::Close)
+                && hit_at(w, h, (w - CONTROL_W * 3 - 1) as i32, (TITLE_H - 1) as i32) == Some(Hit::Title)
                 && hit_at(w, h, (w - 1) as i32, (TITLE_H - 1) as i32) == Some(Hit::Close)
                 && hit_at(w, h, (w - 1) as i32, TITLE_H as i32) == Some(Hit::Client)
                 && hit_at(w, h, -1, 0).is_none()

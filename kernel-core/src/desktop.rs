@@ -503,6 +503,10 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                 self.sync_terminal_geometry();
             }
         }
+        if batch.button == Some((Button::Left, true)) {
+            // Title-bar maximize/restore can change terminal geometry without a drag.
+            self.sync_terminal_geometry();
+        }
     }
 
     /// Keep the terminal text grid aligned with its compositor surface after a resize.

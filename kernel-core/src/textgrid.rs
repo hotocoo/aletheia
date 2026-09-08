@@ -32,6 +32,8 @@ pub const TITLE_H: u32 = 10;
 /// here and hit-tested in [`crate::wm`] from this same constant, so a user can never click a
 /// close box that is drawn somewhere else.
 pub const CLOSE_W: u32 = 10;
+/// Width of each title-bar lifecycle control (minimize, maximize, close).
+pub const CONTROL_W: u32 = 10;
 /// Size of the bottom-right resize grip, painted and hit-tested from this same constant.
 pub const RESIZE_W: u32 = 10;
 
@@ -47,6 +49,11 @@ pub fn has_resize_grip(width: u32, height: u32) -> bool {
 /// hit test in [`crate::wm`], so painted and clickable can never disagree.
 pub fn has_close_box(width: u32) -> bool {
     width >= CLOSE_W * 2
+}
+
+/// Does the title bar have room for the full minimize/maximize/close control set?
+pub fn has_window_controls(width: u32) -> bool {
+    width >= CONTROL_W * 3
 }
 
 /// The grid: `cols` x `rows` cells of the console's alphabet, a write cursor, and counters.
@@ -279,7 +286,13 @@ impl TextGrid {
         let mut all_served = true;
         for (k, &ch) in title.iter().enumerate() {
             let x0 = 4 + k as u32 * CELL;
-            let title_limit = if has_close_box(w) { w - CLOSE_W } else { w };
+            let title_limit = if has_window_controls(w) {
+                w - CONTROL_W * 3
+            } else if has_close_box(w) {
+                w - CLOSE_W
+            } else {
+                w
+            };
             if x0 + CELL > title_limit {
                 break;
             }
@@ -298,18 +311,20 @@ impl TextGrid {
                 }
             }
         }
-        // The close box: an 'x' knocked out of the right end of the band, over a knocked-out
-        // gap that separates it from the name. The manager hit-tests exactly these pixels.
-        if has_close_box(w) {
-            let x0 = w - CLOSE_W;
-            for y in 0..TITLE_H - 1 {
-                set(x0, y, false);
-            }
-            if let Some(g) = font8x8::glyph(b'x') {
-                for (r, bits) in g.iter().enumerate() {
-                    for bit in 0..8u32 {
-                        if bits & (1 << bit) != 0 {
-                            set(x0 + 1 + bit, 1 + r as u32, false);
+        // Window controls: '-', '+', and 'x' knocked out of the right end of the band. The
+        // manager hit-tests these same fixed-width regions.
+        if has_window_controls(w) {
+            for (slot, ch) in [b'-', b'+', b'x'].iter().enumerate() {
+                let x0 = w - CONTROL_W * (3 - slot as u32);
+                for y in 0..TITLE_H - 1 {
+                    set(x0, y, false);
+                }
+                if let Some(g) = font8x8::glyph(*ch) {
+                    for (r, bits) in g.iter().enumerate() {
+                        for bit in 0..8u32 {
+                            if bits & (1 << bit) != 0 {
+                                set(x0 + 1 + bit, 1 + r as u32, false);
+                            }
                         }
                     }
                 }
@@ -471,30 +486,31 @@ pub fn textgrid_suite(
             "textgrid: the render buffer is reused and dirty is a one-shot"
         );
     }
-    // 7 — the close box is PAINTED where the window manager hit-tests it (ADR-084): the
-    //     rightmost CLOSE_W pixels of the band carry the knocked-out 'x' glyph, the column
-    //     that separates it from the name is clear, and the title text stops before it.
+    // 7 — the title-bar lifecycle controls are PAINTED where the window manager hit-tests them:
+    //     three fixed slots carry '-', '+', and 'x', and the title stops before them.
     {
         let g = TextGrid::new(8, 1);
         let mut out = Vec::new();
         g.render_packed(b"abcdefgh", &mut out);
         let (w, _) = g.pixel_size();
         let px = |x: u32, y: u32| out[((y * w + x) / 8) as usize] & (1 << ((y * w + x) % 8)) != 0;
-        let glyph = font8x8::glyph(b'x').unwrap();
-        let x0 = w - CLOSE_W;
-        let mut box_ok = true;
-        for (r, bits) in glyph.iter().enumerate() {
-            for bit in 0..8u32 {
-                if bits & (1 << bit) != 0 {
-                    box_ok &= !px(x0 + 1 + bit, 1 + r as u32);
+        let mut controls_ok = true;
+        for (slot, ch) in [b'-', b'+', b'x'].iter().enumerate() {
+            let x0 = w - CONTROL_W * (3 - slot as u32);
+            let glyph = font8x8::glyph(*ch).unwrap();
+            for (r, bits) in glyph.iter().enumerate() {
+                for bit in 0..8u32 {
+                    if bits & (1 << bit) != 0 {
+                        controls_ok &= !px(x0 + 1 + bit, 1 + r as u32);
+                    }
                 }
             }
         }
-        // The title's last glyph cell must end before the close box begins.
-        let title_clear = (0..TITLE_H - 1).all(|y| !px(x0, y));
+        let control_start = w - CONTROL_W * 3;
+        let title_clear = (0..TITLE_H - 1).all(|y| !px(control_start, y));
         check!(
-            box_ok && title_clear && (0..TITLE_H - 1).all(|y| px(x0 - 1, y)),
-            "textgrid: the close box is painted exactly where the window manager hit-tests it"
+            controls_ok && title_clear,
+            "textgrid: title-bar lifecycle controls are painted in exact manager hit-test slots"
         );
     }
     Ok(n)
