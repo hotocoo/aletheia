@@ -135,6 +135,7 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     taskbar_packed: Vec<u8>,
     taskbar_token: u64,
     taskbar_sig: TaskbarFacts,
+    chrome_focus: u32,
     /// Keystrokes drained from the terminal's queue, waiting for the console's `getc`.
     term_input: Vec<u8>,
     /// Where the pointer last was (mirrored from the cursor, so a press knows it).
@@ -266,6 +267,7 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
             taskbar_packed,
             taskbar_token: tok_taskbar,
             taskbar_sig: TaskbarFacts::default(),
+            chrome_focus: WINDOW,
             term_input: Vec::with_capacity(TERM_INPUT_CAP),
             pointer: (W / 2, H / 2),
         };
@@ -315,6 +317,7 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
 
     /// Repaint any window whose grid changed, then show a frame if anything owes a repaint.
     pub fn repaint(&mut self) {
+        self.refresh_window_chrome();
         if self.term.take_dirty() {
             if let Some(tok) = self.wm.token(WINDOW) {
                 self.term.render_packed(TITLE, &mut self.packed);
@@ -330,6 +333,32 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         self.refresh_taskbar();
         if self.comp.has_pending_damage() {
             let _ = self.show_frame();
+        }
+    }
+
+    /// The title band is the desktop's focus indicator. Repaint both managed titles only when
+    /// focus actually changes; the focused title gets a leading `>` while the other title keeps
+    /// its plain name. This makes keyboard focus visible without adding a second authority or a
+    /// timer-driven repaint path.
+    fn refresh_window_chrome(&mut self) {
+        let focus = self.comp.focus().unwrap_or(0);
+        if focus == self.chrome_focus {
+            return;
+        }
+        self.chrome_focus = focus;
+        if let Some(tok) = self.wm.token(WINDOW) {
+            self.term.render_packed(
+                if focus == WINDOW { b">aletheia" } else { TITLE },
+                &mut self.packed,
+            );
+            let _ = self.comp.fill_packed(WINDOW, tok, &self.packed);
+        }
+        if let Some(tok) = self.wm.token(MONITOR) {
+            self.mon.render_packed(
+                if focus == MONITOR { b">monitor" } else { MON_TITLE },
+                &mut self.mon_packed,
+            );
+            let _ = self.comp.fill_packed(MONITOR, tok, &self.mon_packed);
         }
     }
 
