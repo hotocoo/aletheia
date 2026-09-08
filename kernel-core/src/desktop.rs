@@ -44,6 +44,8 @@ use crate::vinput::KEY_TAB;
 const KEY_ENTER: u16 = 28;
 /// Linux keycode for Backspace, reserved with Ctrl+Alt as the focused-window close shortcut.
 const KEY_BACKSPACE: u16 = 14;
+/// Linux keycode for `m`, reserved with Ctrl+Alt as the focused-window minimize/restore shortcut.
+const KEY_M: u16 = 50;
 
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
@@ -425,6 +427,8 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.value == 1
                         && ctrl
                         && alt;
+                    let minimize =
+                        ev.ty == vinput::EV_KEY && ev.code == KEY_M && ev.value == 1 && ctrl && alt;
                     if maximize {
                         if let Some(id) = self.comp.focus() {
                             if self.wm.is_maximized(id).is_some() {
@@ -444,6 +448,15 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                                 self.term_input.clear();
                             }
                         }
+                        let _ = self.kb_dec.feed(ev);
+                    } else if minimize {
+                        if let Some(id) = self.comp.focus() {
+                            let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
+                            if id == WINDOW {
+                                self.sync_terminal_geometry();
+                            }
+                        }
+                        // Keep modifier state faithful but consume the desktop shortcut.
                         let _ = self.kb_dec.feed(ev);
                     } else if focus_cycle {
                         let _ = self.wm.cycle_focus(&mut self.comp, self.sess, !shift);

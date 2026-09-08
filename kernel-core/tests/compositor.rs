@@ -221,6 +221,29 @@ fn ownership_gates_every_op() {
     assert_eq!(comp.placed_count(), 1);
 }
 
+#[test]
+fn visibility_is_owner_gated_and_does_not_destroy_surface_state() {
+    let mut comp = Compositor::new(7, 64, 64);
+    let token = comp.mint_surface(1, 16, 16).unwrap();
+    comp.attach(1, token, 4, 4).unwrap();
+    assert_eq!(comp.is_visible(1), Some(true));
+
+    assert_eq!(
+        comp.set_visible(1, token ^ 1, false),
+        Err(CompFault::NotOwner { surface: 1 })
+    );
+    assert_eq!(comp.is_visible(1), Some(true));
+
+    comp.set_visible(1, token, false).unwrap();
+    assert_eq!(comp.is_visible(1), Some(false));
+    assert_eq!(comp.surface_size(1), Some((16, 16)));
+    assert_eq!(comp.placement(1), Some((4, 4)));
+
+    comp.set_visible(1, token, true).unwrap();
+    assert_eq!(comp.is_visible(1), Some(true));
+    assert_eq!(comp.surface_size(1), Some((16, 16)));
+}
+
 // ---------------------------------------------------------------------------
 // 3 - buffer honesty: every wrong-size fill is refused with the surface
 // untouched; the exact size is accepted and lands pixel-exact.

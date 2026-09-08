@@ -224,6 +224,60 @@ impl WindowManager {
             .map(|w| w.restore.is_some())
     }
 
+    /// Whether a managed window is currently presented. A minimized window keeps its token,
+    /// surface, queue and geometry alive; only presentation and pointer eligibility change.
+    pub fn is_minimized(&self, comp: &Compositor, id: u32) -> Option<bool> {
+        self.wins.iter().find(|w| w.id == id)?;
+        comp.is_visible(id).map(|visible| !visible)
+    }
+
+    /// Minimize or restore a managed window without destroying its lifecycle state.
+    pub fn toggle_minimize(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+        id: u32,
+    ) -> Result<bool, WmFault> {
+        let w = self
+            .wins
+            .iter()
+            .find(|w| w.id == id)
+            .copied()
+            .ok_or_else(|| {
+                self.refusals += 1;
+                WmFault::UnknownWindow(id)
+            })?;
+        let was_minimized = comp
+            .is_visible(id)
+            .ok_or(WmFault::UnknownWindow(id))
+            .map(|v| !v)?;
+        comp.set_visible(id, w.token, was_minimized)?;
+        if was_minimized {
+            comp.raise(id, w.token)?;
+            comp.set_focus(session, id)?;
+            Ok(false)
+        } else {
+            if comp.focus() == Some(id) {
+                let _ = comp.clear_focus(session);
+                self.focus_topmost_visible(comp, session)?;
+            }
+            Ok(true)
+        }
+    }
+
+    fn focus_topmost_visible(&self, comp: &mut Compositor, session: u64) -> Result<(), WmFault> {
+        for i in (0..comp.placed_len()).rev() {
+            let Some((id, _, _)) = comp.placed_at(i) else {
+                continue;
+            };
+            if self.wins.iter().any(|w| w.id == id) && comp.is_visible(id) == Some(true) {
+                comp.set_focus(session, id)?;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// Toggle a window between its saved geometry and the full scanout. The manager owns the
     /// geometry transition and token, so callers cannot maximize a window they do not own.
     /// Existing pixels survive the resize through the compositor's resize contract.
@@ -293,6 +347,9 @@ impl WindowManager {
             let Some(w) = self.wins.iter().find(|w| w.id == id) else {
                 continue; // a surface this manager does not own (the wallpaper, a suite's)
             };
+            if comp.is_visible(id) != Some(true) {
+                continue;
+            }
             let vis_w = w.width.saturating_sub(px.min(0).unsigned_abs());
             let vis_h = w.height.saturating_sub(py.min(0).unsigned_abs());
             let (cx, cy) = (px.max(0) as u32, py.max(0) as u32);
@@ -448,6 +505,9 @@ impl WindowManager {
             let Some((id, _, _)) = comp.placed_at(i) else {
                 continue;
             };
+            if comp.is_visible(id) != Some(true) {
+                continue;
+            }
             let Some(w) = self.wins.iter().find(|w| w.id == id).copied() else {
                 continue;
             };

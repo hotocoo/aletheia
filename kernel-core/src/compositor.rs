@@ -340,6 +340,7 @@ struct Placed {
     surface: u32,
     x: i32,
     y: i32,
+    visible: bool,
 }
 
 /// The software compositor: mint surfaces, place them under their owner tokens, compose
@@ -445,9 +446,39 @@ impl Compositor {
         if self.placed.len() >= MAX_SURFACES {
             return Err(CompFault::NoSpace);
         }
-        self.placed.push(Placed { surface: id, x, y });
+        self.placed.push(Placed {
+            surface: id,
+            x,
+            y,
+            visible: true,
+        });
         self.damage_scanout_at(id, x, y);
         Ok(())
+    }
+
+    /// Toggle presentation without destroying the surface, token, input queue, or z-order.
+    /// Hiding/showing damages the old rectangle so the next frame exposes the correct stack.
+    pub fn set_visible(&mut self, id: u32, token: u64, visible: bool) -> Result<(), CompFault> {
+        self.owner_check(id, token)?;
+        let pos = self
+            .placed
+            .iter()
+            .position(|p| p.surface == id)
+            .ok_or(CompFault::UnknownSurface(id))?;
+        if self.placed[pos].visible == visible {
+            return Ok(());
+        }
+        let (x, y) = (self.placed[pos].x, self.placed[pos].y);
+        self.placed[pos].visible = visible;
+        self.damage_scanout_at(id, x, y);
+        Ok(())
+    }
+
+    pub fn is_visible(&self, id: u32) -> Option<bool> {
+        self.placed
+            .iter()
+            .find(|p| p.surface == id)
+            .map(|p| p.visible)
     }
 
     /// Resize a placed surface while retaining its owner token and input queue. Existing
@@ -1002,6 +1033,9 @@ impl Compositor {
         }
         if !whole {
             'outer: for p in &order {
+                if !p.visible {
+                    continue;
+                }
                 let Some(s) = self.surface(p.surface) else {
                     continue;
                 };
@@ -1046,6 +1080,9 @@ impl Compositor {
                 }
             }
             for p in &order {
+                if !p.visible {
+                    continue;
+                }
                 self.blit_region(p, r, sink, &mut stats);
             }
             // The cursor is the compositor's own plane: painted LAST, above every surface,

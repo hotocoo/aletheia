@@ -276,3 +276,34 @@ fn resize_refuses_a_fully_offscreen_result_without_changing_geometry() {
     assert_eq!(comp.surface_size(2), Some(before));
     let _ = wm.release();
 }
+
+#[test]
+fn minimize_hides_without_destroying_the_window_and_restore_reclaims_focus() {
+    let (mut comp, mut wm, sess) = desk();
+    let tok2 = wm.token(2).unwrap();
+    comp.set_focus(sess, 2).unwrap();
+
+    assert_eq!(wm.is_minimized(&comp, 2), Some(false));
+    assert_eq!(wm.toggle_minimize(&mut comp, sess, 2), Ok(true));
+    assert_eq!(wm.is_minimized(&comp, 2), Some(true));
+    assert!(wm.is_open(2));
+    assert_eq!(wm.token(2), Some(tok2));
+    assert_eq!(comp.is_visible(2), Some(false));
+    assert_eq!(comp.focus(), Some(1));
+    assert_eq!(wm.window_at(&comp, 60, 40), Some((1, 60, 40)));
+
+    assert_eq!(wm.toggle_minimize(&mut comp, sess, 2), Ok(false));
+    assert_eq!(wm.is_minimized(&comp, 2), Some(false));
+    assert_eq!(comp.is_visible(2), Some(true));
+    assert_eq!(comp.focus(), Some(2));
+    assert_eq!(wm.window_at(&comp, 60, 40), Some((2, 20, 20)));
+}
+
+#[test]
+fn minimized_windows_are_skipped_by_focus_cycle() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 1).unwrap();
+    assert_eq!(wm.toggle_minimize(&mut comp, sess, 2), Ok(true));
+    assert_eq!(wm.cycle_focus(&mut comp, sess, true).unwrap(), Some(1));
+    assert_eq!(comp.focus(), Some(1));
+}
