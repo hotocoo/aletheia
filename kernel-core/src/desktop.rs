@@ -934,9 +934,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         let lx = lx as u32;
         if let Some(workspace) = taskbar_workspace_target(lx) {
-            if workspace != self.wm.current_workspace() {
-                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
-            }
+            self.switch_workspace(workspace);
             return true;
         }
         let Some(target) = taskbar_target(lx) else { return false };
@@ -950,7 +948,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if let Some(workspace) = self.wm.workspace_of(target) {
             if workspace != self.wm.current_workspace() {
-                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+                self.switch_workspace(workspace);
             }
         }
         match self.wm.is_minimized(&self.comp, target) {
@@ -986,7 +984,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if target >= 10 && target < 10 + MAX_WORKSPACES {
             let workspace = target - 9;
-            let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+            self.switch_workspace(workspace);
             self.sync_terminal_geometry();
             self.refresh_cursor_shape();
             return true;
@@ -1051,6 +1049,48 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     fn close_switcher(&mut self) {
         self.switcher_until = 0;
         let _ = self.comp.set_visible(SWITCHER, self.switcher_token, false);
+    }
+
+    /// Show transient feedback for a workspace switch. Workspace changes are otherwise easy to
+    /// miss when the selected workspace has no visible windows: the taskbar marker changes, but
+    /// the rest of the scanout can look almost identical. Reusing the presentation-only switcher
+    /// surface keeps the desktop's surface budget fixed and gives workspace navigation the same
+    /// bounded 900ms feedback lifetime as the existing Alt+Tab overview.
+    fn show_workspace_notice(&mut self, workspace: u8) {
+        self.switcher.clear();
+        let _ = write!(self.switcher, "workspace {}", workspace);
+        self.switcher
+            .write(b"\n\nAlt+Tab window switcher  |  F6 taskbar");
+        self.switcher
+            .render_packed(b"workspace", &mut self.switcher_packed);
+        let _ = self.comp.fill_packed(
+            SWITCHER,
+            self.switcher_token,
+            &self.switcher_packed,
+        );
+        let hz = H::timer_freq_hz();
+        let duration = hz.saturating_mul(SWITCHER_MS) / 1000;
+        self.switcher_until = H::timer_ticks().wrapping_add(duration.max(1));
+        let _ = self.comp.raise(SWITCHER, self.switcher_token);
+        let _ = self.comp.set_visible(SWITCHER, self.switcher_token, true);
+    }
+
+    /// Switch workspace through one desktop-owned path so every pointer/keyboard route gets the
+    /// same transient feedback. Invalid requests remain fail-closed in the window manager.
+    fn switch_workspace(&mut self, workspace: u8) -> bool {
+        if workspace == self.wm.current_workspace() {
+            return false;
+        }
+        if self
+            .wm
+            .switch_workspace(&mut self.comp, self.sess, workspace)
+            .is_ok()
+        {
+            self.show_workspace_notice(workspace);
+            true
+        } else {
+            false
+        }
     }
 
     /// Paint a transient Alt+Tab overview above the managed windows. Focus still belongs to the
@@ -1193,7 +1233,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             self.reopen_taskbar_window(id);
         } else if let Some(workspace) = self.wm.workspace_of(id) {
             if workspace != self.wm.current_workspace() {
-                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+                self.switch_workspace(workspace);
             }
             if self.wm.is_minimized(&self.comp, id) == Some(true) {
                 let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
@@ -1743,11 +1783,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                                 workspace,
                             );
                         } else {
-                            let _ = self.wm.switch_workspace(
-                                &mut self.comp,
-                                self.sess,
-                                workspace,
-                            );
+                            self.switch_workspace(workspace);
                         }
                         self.sync_terminal_geometry();
                         self.refresh_cursor_shape();
@@ -1759,11 +1795,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         } else {
                             if let Some(workspace) = self.wm.workspace_of(id) {
                                 if workspace != self.wm.current_workspace() {
-                                    let _ = self.wm.switch_workspace(
-                                        &mut self.comp,
-                                        self.sess,
-                                        workspace,
-                                    );
+                                    self.switch_workspace(workspace);
                                 }
                             }
                             match self.wm.is_minimized(&self.comp, id) {
