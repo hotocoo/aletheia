@@ -66,6 +66,11 @@ const KEY_1: u16 = 2;
 const KEY_2: u16 = 3;
 const KEY_3: u16 = 4;
 const KEY_4: u16 = 5;
+const KEY_5: u16 = 6;
+const KEY_6: u16 = 7;
+const KEY_7: u16 = 8;
+const KEY_8: u16 = 9;
+const KEY_9: u16 = 10;
 /// Linux keycodes for the four cursor directions, reserved with Ctrl+Alt for focused-window snap.
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -335,6 +340,24 @@ fn next_menu_selection(selected: usize, down: bool) -> usize {
     }
 }
 
+/// Map the number row to a menu item while the menu owns keyboard interaction. This is a
+/// bounded accelerator map: there are exactly nine menu entries, so the key itself directly
+/// selects one without adding another focus authority or a dynamic command registry.
+fn menu_number_selection(code: u16) -> Option<usize> {
+    match code {
+        KEY_1 => Some(0),
+        KEY_2 => Some(1),
+        KEY_3 => Some(2),
+        KEY_4 => Some(3),
+        KEY_5 => Some(4),
+        KEY_6 => Some(5),
+        KEY_7 => Some(6),
+        KEY_8 => Some(7),
+        KEY_9 => Some(8),
+        _ => None,
+    }
+}
+
 /// Resolve a taskbar x-coordinate to either the desktop launcher or one managed application.
 /// Keeping the hit map pure makes the launcher boundary testable without a live compositor.
 fn taskbar_target(x: u32) -> Option<u32> {
@@ -512,6 +535,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.write(b"Alt+Tab    show window switcher\n");
         help.write(b"F6/Arrows/Tab  keyboard taskbar navigation\n");
         help.write(b"Space/Enter  activate taskbar selection\n");
+        help.write(b"1-9  select a start-menu command\n");
         let mut help_packed = Vec::new();
         help.render_packed(HELP_TITLE, &mut help_packed);
         comp.fill_packed(HELP, tok_help, &help_packed)
@@ -1168,7 +1192,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             };
             let lx = x as i32 - tx;
             let ly = y as i32 - ty;
-            if (lx >= TASKBAR_TERM_X as i32
+            if (lx >= 0
+                && lx < TASKBAR_MENU_W as i32
+                || lx >= TASKBAR_TERM_X as i32
                 && lx < (TASKBAR_HELP_X + TASKBAR_BUTTON_W) as i32
                 || lx >= TASKBAR_WS_X as i32
                     && lx < (TASKBAR_WS_X + TASKBAR_WS_W * MAX_WORKSPACES as u32) as i32)
@@ -1477,6 +1503,16 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     let menu_down = self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_DOWN && ev.value == 1
                         && !ctrl && !alt;
+                    let menu_number = if self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY
+                        && ev.value == 1
+                        && !ctrl
+                        && !alt
+                    {
+                        menu_number_selection(ev.code)
+                    } else {
+                        None
+                    };
                     let menu_activate = self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_ENTER && ev.value == 1
                         && !ctrl && !alt;
@@ -1585,6 +1621,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.kb_dec.feed(ev);
                     } else if menu_up || menu_down {
                         self.menu_selected = next_menu_selection(self.menu_selected, menu_down);
+                        self.repaint_menu();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if let Some(selected) = menu_number {
+                        self.menu_selected = selected;
                         self.repaint_menu();
                         let _ = self.kb_dec.feed(ev);
                     } else if menu_activate {
@@ -1836,7 +1876,7 @@ mod tests {
         alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
         is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
-        taskbar_keyboard_jump, taskbar_keyboard_next,
+        taskbar_keyboard_jump, taskbar_keyboard_next, menu_number_selection,
         taskbar_keyboard_previous,
     };
 
@@ -1889,6 +1929,14 @@ mod tests {
         assert_eq!(next_menu_selection(8, true), 0);
         assert_eq!(next_menu_selection(2, false), 1);
         assert_eq!(next_menu_selection(2, true), 3);
+    }
+
+    #[test]
+    fn menu_number_accelerators_select_each_bounded_command() {
+        for (code, expected) in (super::KEY_1..=super::KEY_9).zip(0..9) {
+            assert_eq!(menu_number_selection(code), Some(expected));
+        }
+        assert_eq!(menu_number_selection(super::KEY_END), None);
     }
 
     #[test]
