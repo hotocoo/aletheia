@@ -53,6 +53,8 @@ const KEY_T: u16 = 20;
 const KEY_C: u16 = 46;
 const KEY_R: u16 = 19;
 const KEY_ESC: u16 = 1;
+/// Linux keycode for F4, reserved with Alt as the conventional focused-window close shortcut.
+const KEY_F4: u16 = 62;
 /// Linux keycodes for the four cursor directions, reserved with Ctrl+Alt for focused-window snap.
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -257,6 +259,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             .open(&mut comp, HELP, hw, hh, HELP_X, HELP_Y)
             .map_err(|_| "the shortcuts window was refused")?;
         help.write(b"F1        toggle this help\n");
+        help.write(b"Alt+Tab   cycle focus\n");
+        help.write(b"Alt+F4    close focused window\n");
         help.write(b"Ctrl+Tab  cycle focus\n");
         help.write(b"Ctrl+Alt+Arrows  snap focused window\n");
         help.write(b"Ctrl+Alt+Shift+Arrows  nudge window\n");
@@ -746,6 +750,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && (ev.value == 1 || ev.value == 2)
                         && ctrl;
                     let (_, _, alt) = self.kb_dec.modifiers();
+                    let alt_focus_cycle = ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_TAB
+                        && (ev.value == 1 || ev.value == 2)
+                        && alt;
+                    let alt_close = ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_F4
+                        && ev.value == 1
+                        && alt;
                     let resize_toggle = ev.ty == vinput::EV_KEY
                         && ev.code == KEY_R
                         && ev.value == 1
@@ -817,6 +829,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     if help_toggle {
                         self.toggle_help();
                         let _ = self.kb_dec.feed(ev);
+                    } else if alt_close {
+                        if let Some(id) = self.comp.focus() {
+                            let _ = self.wm.close(&mut self.comp, self.sess, id);
+                            if id == WINDOW {
+                                self.term_input.clear();
+                            }
+                        }
+                        let _ = self.kb_dec.feed(ev);
                     } else if resize_toggle {
                         self.keyboard_resize = !self.keyboard_resize;
                         let _ = self.kb_dec.feed(ev);
@@ -875,6 +895,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.wm.cycle_focus(&mut self.comp, self.sess, !shift);
                         // Feed the event to the decoder too so its held modifier state remains
                         // faithful. The Tab itself is deliberately not routed to the shell.
+                        let _ = self.kb_dec.feed(ev);
+                    } else if alt_focus_cycle {
+                        let _ = self.wm.cycle_focus(&mut self.comp, self.sess, !shift);
+                        // Alt+Tab is a desktop-level focus gesture; never leak the Tab byte into
+                        // the focused application's input queue.
                         let _ = self.kb_dec.feed(ev);
                     } else if let Ok(nb) =
                         vinput::route_key(&mut self.kb_dec, &mut self.comp, self.sess, ev)
