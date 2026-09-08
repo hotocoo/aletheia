@@ -307,3 +307,29 @@ fn minimized_windows_are_skipped_by_focus_cycle() {
     assert_eq!(wm.cycle_focus(&mut comp, sess, true).unwrap(), Some(1));
     assert_eq!(comp.focus(), Some(1));
 }
+
+#[test]
+fn tile_visible_lays_out_only_presented_windows_and_preserves_focus() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 2).unwrap();
+    assert_eq!(wm.tile_visible(&mut comp, sess), Ok(2));
+    assert_eq!(comp.placement(1), Some((0, 0)));
+    assert_eq!(comp.placement(2), Some((100, 0)));
+    assert_eq!(comp.surface_size(1), Some((100, 120)));
+    assert_eq!(comp.surface_size(2), Some((100, 120)));
+    assert_eq!(comp.focus(), Some(2));
+    assert_eq!(wm.is_maximized(1), Some(false));
+    assert_eq!(wm.is_maximized(2), Some(false));
+}
+
+#[test]
+fn tile_visible_excludes_minimized_windows() {
+    let (mut comp, mut wm, sess) = desk();
+    wm.toggle_minimize(&mut comp, sess, 2).unwrap();
+    let hidden_placement = comp.placement(2);
+    assert_eq!(wm.tile_visible(&mut comp, sess), Ok(1));
+    assert_eq!(comp.placement(1), Some((0, 0)));
+    assert_eq!(comp.surface_size(1), Some((200, 120)));
+    assert_eq!(comp.placement(2), hidden_placement);
+    assert_eq!(comp.is_visible(2), Some(false));
+}

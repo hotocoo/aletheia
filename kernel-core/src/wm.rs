@@ -327,6 +327,63 @@ impl WindowManager {
         }
     }
 
+    /// Tile every visible managed window into equal-width columns across the scanout. Hidden
+    /// windows keep their presentation and geometry. Tiling is a manager-owned layout operation:
+    /// owner tokens, input queues, focus authority and z-order remain unchanged.
+    pub fn tile_visible(&mut self, comp: &mut Compositor, session: u64) -> Result<usize, WmFault> {
+        let (sw, sh) = comp.scanout_size();
+        if sw < CLOSE_W * 2 || sh < TITLE_H + RESIZE_W * 2 {
+            self.refusals += 1;
+            return Err(WmFault::Compositor(CompFault::BadGeometry(0)));
+        }
+        let mut visible = 0usize;
+        for w in &self.wins {
+            if comp.is_visible(w.id) == Some(true) {
+                visible += 1;
+            }
+        }
+        if visible == 0 {
+            let _ = comp.clear_focus(session);
+            return Ok(0);
+        }
+        let column_w = sw / visible as u32;
+        if column_w < CLOSE_W * 2 {
+            self.refusals += 1;
+            return Err(WmFault::Compositor(CompFault::BadGeometry(0)));
+        }
+
+        let mut column = 0usize;
+        for i in 0..self.wins.len() {
+            let w = self.wins[i];
+            if comp.is_visible(w.id) != Some(true) {
+                continue;
+            }
+            let x = (column as u32 * column_w) as i32;
+            let width = if column + 1 == visible {
+                sw.saturating_sub(column_w.saturating_mul((visible - 1) as u32))
+            } else {
+                column_w
+            };
+            comp.resize_surface(w.id, w.token, width, sh)?;
+            comp.move_surface(w.id, w.token, x, 0)?;
+            let entry = &mut self.wins[i];
+            entry.width = width;
+            entry.height = sh;
+            entry.restore = None;
+            column += 1;
+        }
+        if let Some(id) = comp.focus() {
+            if self
+                .wins
+                .iter()
+                .any(|w| w.id == id && comp.is_visible(id) == Some(true))
+            {
+                comp.set_focus(session, id)?;
+            }
+        }
+        Ok(visible)
+    }
+
     /// (opens, closes, drags completed, refusals) — the manager's ledger.
     pub fn counters(&self) -> (u64, u64, u64, u64) {
         (self.opens, self.closes, self.drags, self.refusals)
