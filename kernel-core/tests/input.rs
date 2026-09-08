@@ -451,6 +451,26 @@ fn cursor_shape_is_session_owned_and_idempotent() {
     assert!(!c.has_pending_damage());
 }
 
+#[test]
+fn resize_cursor_shapes_are_visually_distinct() {
+    let mut c = Compositor::new(0xCAFE_0001, 32, 32);
+    let s = c.open_input_session().unwrap();
+    let mut horizontal = Guard::new(32, 32);
+    let mut vertical = Guard::new(32, 32);
+    c.move_cursor(s, 8, 8).unwrap();
+
+    c.set_cursor_shape(s, CursorShape::ResizeHorizontal).unwrap();
+    c.compose_frame(&mut horizontal);
+    c.set_cursor_shape(s, CursorShape::ResizeVertical).unwrap();
+    c.compose_frame(&mut vertical);
+
+    assert_ne!(horizontal.bits, vertical.bits);
+    assert!(horizontal.get(8, 11) && horizontal.get(15, 11));
+    assert!(vertical.get(11, 8) && vertical.get(11, 15));
+    assert_eq!(horizontal.oob, 0);
+    assert_eq!(vertical.oob, 0);
+}
+
 /// Determinism over the WHOLE input contract: two engines fed an identical mixed
 /// sequence (session, mints, placements, focus changes, keystrokes, backlog, cursor
 /// moves, hides, drains, refusals) land bit-identical rasters with identical counters.
