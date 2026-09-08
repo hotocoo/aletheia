@@ -48,6 +48,8 @@ const KEY_BACKSPACE: u16 = 14;
 const KEY_M: u16 = 50;
 /// Linux keycode for `t`, reserved with Ctrl+Alt as the visible-window tiling shortcut.
 const KEY_T: u16 = 20;
+/// Linux keycode for `c`, reserved with Ctrl+Alt as the visible-window cascade shortcut.
+const KEY_C: u16 = 46;
 
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
@@ -582,6 +584,8 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         ev.ty == vinput::EV_KEY && ev.code == KEY_M && ev.value == 1 && ctrl && alt;
                     let tile =
                         ev.ty == vinput::EV_KEY && ev.code == KEY_T && ev.value == 1 && ctrl && alt;
+                    let cascade =
+                        ev.ty == vinput::EV_KEY && ev.code == KEY_C && ev.value == 1 && ctrl && alt;
                     if maximize {
                         if let Some(id) = self.comp.focus() {
                             if self.wm.is_maximized(id).is_some() {
@@ -613,6 +617,10 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.kb_dec.feed(ev);
                     } else if tile {
                         let _ = self.wm.tile_visible(&mut self.comp, self.sess);
+                        self.sync_terminal_geometry();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if cascade {
+                        let _ = self.wm.cascade_visible(&mut self.comp, self.sess);
                         self.sync_terminal_geometry();
                         let _ = self.kb_dec.feed(ev);
                     } else if focus_cycle {

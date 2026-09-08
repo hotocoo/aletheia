@@ -36,6 +36,8 @@ use crate::textgrid::{has_resize_grip, has_window_controls, CONTROL_W, CLOSE_W, 
 pub const MAX_WINDOWS: usize = 8;
 /// Pointer distance from a scanout edge that activates drag-to-snap on release.
 const SNAP_EDGE_PX: u32 = 1;
+/// Distance between successive windows in the deterministic cascade layout.
+const CASCADE_OFFSET_PX: u32 = 32;
 
 /// Why the manager refused. Every variant names what was involved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -397,6 +399,60 @@ impl WindowManager {
             entry.height = sh;
             entry.restore = None;
             column += 1;
+        }
+        if let Some(id) = comp.focus() {
+            if self
+                .wins
+                .iter()
+                .any(|w| w.id == id && comp.is_visible(id) == Some(true))
+            {
+                comp.set_focus(session, id)?;
+            }
+        }
+        Ok(visible)
+    }
+
+    /// Cascade every visible managed window while preserving each window's size. Windows are
+    /// offset diagonally by a bounded amount and clamped so their top-left remains on-screen.
+    /// Hidden windows retain their placement; changing a visible window's geometry clears its
+    /// maximize restore state because the cascade becomes the current layout.
+    pub fn cascade_visible(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+    ) -> Result<usize, WmFault> {
+        let (sw, sh) = comp.scanout_size();
+        if sw == 0 || sh == 0 {
+            self.refusals += 1;
+            return Err(WmFault::Compositor(CompFault::BadGeometry(0)));
+        }
+
+        let mut visible = 0usize;
+        for w in &self.wins {
+            if comp.is_visible(w.id) == Some(true) {
+                visible += 1;
+            }
+        }
+        if visible == 0 {
+            let _ = comp.clear_focus(session);
+            return Ok(0);
+        }
+
+        let mut slot = 0u32;
+        for i in 0..self.wins.len() {
+            let w = self.wins[i];
+            if comp.is_visible(w.id) != Some(true) {
+                continue;
+            }
+            let offset = slot.saturating_mul(CASCADE_OFFSET_PX);
+            let max_x = sw.saturating_sub(w.width) as i32;
+            let max_y = sh.saturating_sub(w.height) as i32;
+            let x = offset.min(max_x.max(0) as u32) as i32;
+            let y = offset.min(max_y.max(0) as u32) as i32;
+            comp.move_surface(w.id, w.token, x, y)?;
+            let entry = &mut self.wins[i];
+            entry.restore = None;
+            slot += 1;
         }
         if let Some(id) = comp.focus() {
             if self

@@ -415,3 +415,33 @@ fn tile_visible_excludes_minimized_windows() {
     assert_eq!(comp.placement(2), hidden_placement);
     assert_eq!(comp.is_visible(2), Some(false));
 }
+
+#[test]
+fn cascade_visible_stacks_presented_windows_without_resizing_or_reordering() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(wm.toggle_maximize(&mut comp, sess, 1), Ok(true));
+    comp.set_focus(sess, 2).unwrap();
+    let z_before = comp.z_order();
+    assert_eq!(wm.is_maximized(1), Some(true));
+    assert_eq!(wm.cascade_visible(&mut comp, sess), Ok(2));
+
+    assert_eq!(comp.placement(1), Some((0, 0)));
+    assert_eq!(comp.placement(2), Some((32, 32)));
+    assert_eq!(comp.surface_size(1), Some((200, 120)));
+    assert_eq!(comp.surface_size(2), Some((80, 60)));
+    assert_eq!(comp.z_order(), z_before);
+    assert_eq!(comp.focus(), Some(2));
+    assert_eq!(wm.is_maximized(1), Some(false));
+    assert_eq!(wm.is_maximized(2), Some(false));
+}
+
+#[test]
+fn cascade_visible_skips_minimized_windows_and_keeps_them_untouched() {
+    let (mut comp, mut wm, sess) = desk();
+    let hidden = comp.placement(2);
+    wm.toggle_minimize(&mut comp, sess, 2).unwrap();
+    assert_eq!(wm.cascade_visible(&mut comp, sess), Ok(1));
+    assert_eq!(comp.placement(1), Some((0, 0)));
+    assert_eq!(comp.placement(2), hidden);
+    assert_eq!(comp.is_visible(2), Some(false));
+}
