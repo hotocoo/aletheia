@@ -90,6 +90,7 @@ pub const WINDOW: u32 = 2;
 pub const MONITOR: u32 = 3;
 const TASKBAR: u32 = 4;
 const HELP: u32 = 5;
+const MENU: u32 = 6;
 
 /// The terminal grid: 40 columns x 12 rows of the console's alphabet, placed so a gap of empty
 /// scanout remains for an "empty space" click.
@@ -117,6 +118,10 @@ const TASKBAR_Y: i32 = H as i32 - (TASKBAR_ROWS * crate::textgrid::CELL + crate:
 const TASKBAR_TERM_X: u32 = 8 * crate::textgrid::CELL;
 const TASKBAR_MON_X: u32 = TASKBAR_TERM_X + TASKBAR_BUTTON_W;
 const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
+const MENU_COLS: u32 = 18;
+const MENU_ROWS: u32 = 6;
+const MENU_MARGIN: i32 = 4;
+const MENU_TITLE: &[u8] = b"menu";
 /// Keystrokes the main thread may hold between drains (the console pops one per loop turn).
 const TERM_INPUT_CAP: usize = 64;
 /// Events drained per device per pump — bounded, so one noisy device cannot own the tick.
@@ -193,6 +198,7 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     taskbar_packed: Vec<u8>,
     taskbar_token: u64,
     taskbar_sig: TaskbarFacts,
+    menu_token: u64,
     chrome_focus: u32,
     keyboard_resize: bool,
     /// Keystrokes drained from the terminal's queue, waiting for the console's `getc`.
@@ -354,6 +360,25 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         taskbar.render_packed(b"desktop", &mut taskbar_packed);
         comp.fill_packed(TASKBAR, tok_taskbar, &taskbar_packed)
             .map_err(|_| "the taskbar's first paint was refused")?;
+        let mut menu = TextGrid::new(MENU_COLS, MENU_ROWS);
+        let (menu_w, menu_h) = menu.pixel_size();
+        let tok_menu = comp
+            .mint_surface(MENU, menu_w, menu_h)
+            .map_err(|_| "the desktop menu surface was refused")?;
+        comp.attach(MENU, tok_menu, MENU_MARGIN, MENU_MARGIN)
+            .map_err(|_| "the desktop menu placement was refused")?;
+        menu.write(b"terminal\n");
+        menu.write(b"monitor\n");
+        menu.write(b"shortcuts\n");
+        menu.write(b"tile windows\n");
+        menu.write(b"cascade windows\n");
+        menu.write(b"show desktop\n");
+        let mut menu_packed = Vec::new();
+        menu.render_packed(MENU_TITLE, &mut menu_packed);
+        comp.fill_packed(MENU, tok_menu, &menu_packed)
+            .map_err(|_| "the desktop menu's first paint was refused")?;
+        comp.set_visible(MENU, tok_menu, false)
+            .map_err(|_| "hiding the desktop menu was refused")?;
         comp.set_focus(sess, WINDOW)
             .map_err(|_| "focusing the terminal window was refused")?;
         let _ = wm.toggle_minimize(&mut comp, sess, HELP);
@@ -397,6 +422,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             taskbar_packed,
             taskbar_token: tok_taskbar,
             taskbar_sig: TaskbarFacts::default(),
+            menu_token: tok_menu,
             chrome_focus: WINDOW,
             keyboard_resize: false,
             term_input: Vec::with_capacity(TERM_INPUT_CAP),
@@ -598,6 +624,85 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         true
     }
 
+    /// Open the desktop context menu at the pointer. It is compositor chrome rather than a
+    /// managed application window: selecting an item still delegates the actual window change
+    /// to the window manager, so the menu cannot become a second focus authority.
+    fn open_menu(&mut self, x: u32, y: u32) {
+        let Some((mw, mh)) = self.comp.surface_size(MENU) else { return };
+        let max_x = W.saturating_sub(mw) as i32;
+        let max_y = H.saturating_sub(mh) as i32;
+        let px = (x as i32 - MENU_MARGIN).clamp(0, max_x);
+        let py = (y as i32 - MENU_MARGIN).clamp(0, max_y);
+        let _ = self.comp.move_surface(MENU, self.menu_token, px, py);
+        let _ = self.comp.raise(MENU, self.menu_token);
+        let _ = self.comp.set_visible(MENU, self.menu_token, true);
+    }
+
+    fn close_menu(&mut self) {
+        let _ = self.comp.set_visible(MENU, self.menu_token, false);
+    }
+
+    /// Handle a menu click using fixed text-row geometry. The menu never focuses an application
+    /// itself; actions are translated into the same launch/layout operations as keyboard and
+    /// taskbar controls.
+    fn menu_press(&mut self, x: u32, y: u32) -> bool {
+        let Some((mx, my)) = self.comp.placement(MENU) else { return false };
+        let Some((mw, mh)) = self.comp.surface_size(MENU) else { return false };
+        let lx = x as i32 - mx;
+        let ly = y as i32 - my;
+        if lx < 0 || ly < 0 || lx as u32 >= mw || ly as u32 >= mh {
+            self.close_menu();
+            return true;
+        }
+        if ly < crate::textgrid::TITLE_H as i32 {
+            return true;
+        }
+        let row = ((ly as u32 - crate::textgrid::TITLE_H) / crate::textgrid::CELL) as usize;
+        let target = match row {
+            0 => Some(WINDOW),
+            1 => Some(MONITOR),
+            2 => Some(HELP),
+            _ => None,
+        };
+        match row {
+            0..=2 => {
+                if let Some(id) = target {
+                    self.focus_or_restore_window(id);
+                }
+            }
+            3 => {
+                let _ = self.wm.tile_visible(&mut self.comp, self.sess);
+                self.sync_terminal_geometry();
+            }
+            4 => {
+                let _ = self.wm.cascade_visible(&mut self.comp, self.sess);
+                self.sync_terminal_geometry();
+            }
+            5 => {
+                let _ = self.wm.toggle_show_desktop(&mut self.comp, self.sess);
+                self.sync_terminal_geometry();
+            }
+            _ => return true,
+        }
+        self.close_menu();
+        self.refresh_cursor_shape();
+        true
+    }
+
+    fn focus_or_restore_window(&mut self, id: u32) {
+        if !self.wm.is_open(id) {
+            self.reopen_taskbar_window(id);
+        } else if self.wm.is_minimized(&self.comp, id) == Some(true) {
+            let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
+        } else if let Some(tok) = self.wm.token(id) {
+            let _ = self.comp.raise(id, tok);
+            let _ = self.comp.set_focus(self.sess, id);
+        }
+        if id == WINDOW {
+            self.sync_terminal_geometry();
+        }
+    }
+
     /// Taskbar buttons are launchers as well as window switches. Closing a managed window must
     /// not strand its taskbar entry: a later click creates a fresh compositor surface and manager
     /// token, repaints the retained grid, and gives the new window normal focus/z-order authority.
@@ -756,6 +861,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let (px, py) = self.pointer;
         if let Some((Button::Left, down)) = batch.button {
             if down {
+                if self.comp.is_visible(MENU) == Some(true) && self.menu_press(px, py) {
+                    self.last_title_click = None;
+                    return;
+                }
                 if self.taskbar_press(px, py) {
                     self.last_title_click = None;
                     return;
@@ -800,6 +909,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             } else {
                 let _ = self.wm.release_at(&mut self.comp, self.sess, px, py);
             }
+        }
+        if batch.button == Some((Button::Right, true)) {
+            self.open_menu(px, py);
+            self.last_title_click = None;
         }
         if batch.move_to.is_some() {
             let resized = self.wm.motion(&mut self.comp, px, py);
@@ -962,6 +1075,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         None
                     };
                     if help_toggle {
+                        self.close_menu();
                         self.toggle_help();
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(id) = alt_launcher {
