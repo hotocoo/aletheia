@@ -7,8 +7,8 @@
 use kernel_core::compositor::{CompFault, Compositor, EventKind};
 use kernel_core::textgrid::{CLOSE_W, TITLE_H};
 use kernel_core::wm::{
-    hit_at, wm_suite, Hit, NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager, WmFault,
-    MAX_WINDOWS, MAX_WORKSPACES,
+    hit_at, wm_suite, Hit, NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager,
+    WmFault, MAX_WINDOWS, MAX_WORKSPACES,
 };
 
 fn desk() -> (Compositor, WindowManager, u64) {
@@ -91,10 +91,11 @@ fn workspaces_isolate_visibility_and_preserve_window_lifecycle() {
     assert_eq!(wm.is_minimized(&comp, 2), Some(false));
     assert_eq!(comp.is_visible(2), Some(true));
     let events = comp.drain_input(2, token).unwrap();
-    assert!(events.iter().all(|event| event.kind == EventKind::FocusLost));
+    assert!(events
+        .iter()
+        .all(|event| event.kind == EventKind::FocusLost));
 }
 
-#[test]
 #[test]
 fn workspace_counts_follow_managed_window_ownership() {
     let (mut comp, mut wm, sess) = desk();
@@ -114,8 +115,14 @@ fn workspace_counts_follow_managed_window_ownership() {
 #[test]
 fn workspace_switch_rejects_invalid_numbers_without_changing_state() {
     let (mut comp, mut wm, sess) = desk();
-    assert_eq!(wm.switch_workspace(&mut comp, sess, 0), Err(WmFault::UnknownWindow(0)));
-    assert_eq!(wm.switch_workspace(&mut comp, sess, MAX_WORKSPACES + 1), Err(WmFault::UnknownWindow((MAX_WORKSPACES + 1) as u32)));
+    assert_eq!(
+        wm.switch_workspace(&mut comp, sess, 0),
+        Err(WmFault::UnknownWindow(0))
+    );
+    assert_eq!(
+        wm.switch_workspace(&mut comp, sess, MAX_WORKSPACES + 1),
+        Err(WmFault::UnknownWindow((MAX_WORKSPACES + 1) as u32))
+    );
     assert_eq!(wm.current_workspace(), 1);
     assert_eq!(comp.is_visible(1), Some(true));
     assert_eq!(comp.is_visible(2), Some(true));
@@ -697,11 +704,20 @@ fn keyboard_nudge_moves_focused_window_in_fixed_steps_and_clamps_to_scanout() {
     let (mut comp, mut wm, sess) = desk();
     comp.set_focus(sess, 2).unwrap();
 
-    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Right), Ok(Some(2)));
+    assert_eq!(
+        wm.nudge_focused(&mut comp, NudgeDirection::Right),
+        Ok(Some(2))
+    );
     assert_eq!(comp.placement(2), Some((56, 20)));
-    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Down), Ok(Some(2)));
+    assert_eq!(
+        wm.nudge_focused(&mut comp, NudgeDirection::Down),
+        Ok(Some(2))
+    );
     assert_eq!(comp.placement(2), Some((56, 36)));
-    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Left), Ok(Some(2)));
+    assert_eq!(
+        wm.nudge_focused(&mut comp, NudgeDirection::Left),
+        Ok(Some(2))
+    );
     assert_eq!(comp.placement(2), Some((40, 36)));
     assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Up), Ok(Some(2)));
     assert_eq!(comp.placement(2), Some((40, 20)));
@@ -718,11 +734,15 @@ fn keyboard_nudge_refuses_hidden_or_snapped_windows_without_destroying_restore_s
     let (mut comp, mut wm, sess) = desk();
     comp.set_focus(sess, 2).unwrap();
     wm.toggle_minimize(&mut comp, sess, 2).unwrap();
-    assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Right), Ok(Some(1)));
+    assert_eq!(
+        wm.nudge_focused(&mut comp, NudgeDirection::Right),
+        Ok(Some(1))
+    );
     assert_eq!(comp.placement(2), Some((40, 20)));
 
     wm.toggle_minimize(&mut comp, sess, 2).unwrap();
-    wm.snap_focused(&mut comp, sess, SnapDirection::Left).unwrap();
+    wm.snap_focused(&mut comp, sess, SnapDirection::Left)
+        .unwrap();
     let snapped = comp.placement(2);
     assert_eq!(wm.nudge_focused(&mut comp, NudgeDirection::Right), Ok(None));
     assert_eq!(comp.placement(2), snapped);
@@ -734,13 +754,25 @@ fn keyboard_resize_changes_focused_window_in_fixed_steps_and_clamps_to_scanout()
     let (mut comp, mut wm, sess) = desk();
     comp.set_focus(sess, 2).unwrap();
 
-    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Right), Ok(Some(2)));
+    assert_eq!(
+        wm.resize_focused(&mut comp, ResizeDirection::Right),
+        Ok(Some(2))
+    );
     assert_eq!(comp.surface_size(2), Some((96, 60)));
-    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Down), Ok(Some(2)));
+    assert_eq!(
+        wm.resize_focused(&mut comp, ResizeDirection::Down),
+        Ok(Some(2))
+    );
     assert_eq!(comp.surface_size(2), Some((96, 76)));
-    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Left), Ok(Some(2)));
+    assert_eq!(
+        wm.resize_focused(&mut comp, ResizeDirection::Left),
+        Ok(Some(2))
+    );
     assert_eq!(comp.surface_size(2), Some((80, 76)));
-    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Up), Ok(Some(2)));
+    assert_eq!(
+        wm.resize_focused(&mut comp, ResizeDirection::Up),
+        Ok(Some(2))
+    );
     assert_eq!(comp.surface_size(2), Some((80, 60)));
 
     for _ in 0..32 {
@@ -755,12 +787,19 @@ fn keyboard_resize_refuses_hidden_or_snapped_windows_without_destroying_restore_
     let (mut comp, mut wm, sess) = desk();
     comp.set_focus(sess, 2).unwrap();
     wm.toggle_minimize(&mut comp, sess, 2).unwrap();
-    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Right), Ok(Some(1)));
+    assert_eq!(
+        wm.resize_focused(&mut comp, ResizeDirection::Right),
+        Ok(Some(1))
+    );
     assert_eq!(comp.surface_size(2), Some((80, 60)));
 
     wm.toggle_minimize(&mut comp, sess, 2).unwrap();
     comp.set_focus(sess, 2).unwrap();
-    wm.snap_focused(&mut comp, sess, SnapDirection::Left).unwrap();
-    assert_eq!(wm.resize_focused(&mut comp, ResizeDirection::Down), Ok(None));
+    wm.snap_focused(&mut comp, sess, SnapDirection::Left)
+        .unwrap();
+    assert_eq!(
+        wm.resize_focused(&mut comp, ResizeDirection::Down),
+        Ok(None)
+    );
     assert_eq!(wm.is_maximized(2), Some(true));
 }
