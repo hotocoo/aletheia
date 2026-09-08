@@ -178,8 +178,13 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         let sess = comp
             .open_input_session()
             .map_err(|_| "the desktop's input session was refused")?;
+        // The desktop surface is the full scanout, not a small decorative panel.  Keeping the
+        // background as a real compositor surface gives the GUI an actual desktop plane behind
+        // managed windows: every uncovered pixel is owned by the desktop rather than relying on
+        // whatever the previous framebuffer contents happened to be.  The geometry stays within
+        // the compositor's per-surface ceiling (the scanout is 640x240 = 153,600 pixels).
         let tok_panel = comp
-            .mint_surface(PANEL, 400, 200)
+            .mint_surface(PANEL, W, H)
             .map_err(|_| "the desktop's panel surface was refused")?;
         let _ = comp.fill_rect(
             PANEL,
@@ -187,8 +192,8 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
             Rect {
                 x: 0,
                 y: 0,
-                w: 400,
-                h: 200,
+                w: W,
+                h: H,
             },
             true,
         );
@@ -198,8 +203,8 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
             Rect {
                 x: 8,
                 y: 8,
-                w: 384,
-                h: 184,
+                w: W.saturating_sub(16),
+                h: H.saturating_sub(16),
             },
             false,
         );
