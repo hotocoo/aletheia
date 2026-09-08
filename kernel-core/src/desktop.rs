@@ -91,6 +91,7 @@ pub const MONITOR: u32 = 3;
 const TASKBAR: u32 = 4;
 const HELP: u32 = 5;
 const MENU: u32 = 6;
+const SWITCHER: u32 = 7;
 
 /// The terminal grid: 40 columns x 12 rows of the console's alphabet, placed so a gap of empty
 /// scanout remains for an "empty space" click.
@@ -133,6 +134,10 @@ const MENU_ITEMS: [&[u8]; 9] = [
     b"maximize focused",
     b"close focused",
 ];
+const SWITCHER_COLS: u32 = 56;
+const SWITCHER_ROWS: u32 = 3;
+const SWITCHER_TITLE: &[u8] = b"window switcher";
+const SWITCHER_MS: u64 = 900;
 /// Keystrokes the main thread may hold between drains (the console pops one per loop turn).
 const TERM_INPUT_CAP: usize = 64;
 /// Events drained per device per pump — bounded, so one noisy device cannot own the tick.
@@ -213,6 +218,10 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     menu_packed: Vec<u8>,
     menu_token: u64,
     menu_selected: usize,
+    switcher: TextGrid,
+    switcher_packed: Vec<u8>,
+    switcher_token: u64,
+    switcher_until: u64,
     chrome_focus: u32,
     keyboard_resize: bool,
     /// Keystrokes drained from the terminal's queue, waiting for the console's `getc`.
@@ -387,6 +396,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.write(b"Ctrl+Alt+R  keyboard resize mode\n");
         help.write(b"Ctrl+Alt+Enter/M/Backspace  max/min/close\n");
         help.write(b"Shift+F10  context menu\n");
+        help.write(b"Alt+Tab    show window switcher\n");
         let mut help_packed = Vec::new();
         help.render_packed(HELP_TITLE, &mut help_packed);
         comp.fill_packed(HELP, tok_help, &help_packed)
@@ -415,6 +425,21 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             .map_err(|_| "the desktop menu's first paint was refused")?;
         comp.set_visible(MENU, tok_menu, false)
             .map_err(|_| "hiding the desktop menu was refused")?;
+        let switcher = TextGrid::new(SWITCHER_COLS, SWITCHER_ROWS);
+        let (switcher_w, switcher_h) = switcher.pixel_size();
+        let tok_switcher = comp
+            .mint_surface(SWITCHER, switcher_w, switcher_h)
+            .map_err(|_| "the window switcher surface was refused")?;
+        let switcher_x = ((W.saturating_sub(switcher_w)) / 2) as i32;
+        let switcher_y = ((H.saturating_sub(switcher_h)) / 2) as i32;
+        comp.attach(SWITCHER, tok_switcher, switcher_x, switcher_y)
+            .map_err(|_| "the window switcher placement was refused")?;
+        let mut switcher_packed = Vec::new();
+        switcher.render_packed(SWITCHER_TITLE, &mut switcher_packed);
+        comp.fill_packed(SWITCHER, tok_switcher, &switcher_packed)
+            .map_err(|_| "the window switcher's first paint was refused")?;
+        comp.set_visible(SWITCHER, tok_switcher, false)
+            .map_err(|_| "hiding the window switcher was refused")?;
         comp.set_focus(sess, WINDOW)
             .map_err(|_| "focusing the terminal window was refused")?;
         let _ = wm.toggle_minimize(&mut comp, sess, HELP);
@@ -462,6 +487,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             menu_packed,
             menu_token: tok_menu,
             menu_selected: 0,
+            switcher,
+            switcher_packed,
+            switcher_token: tok_switcher,
+            switcher_until: 0,
             chrome_focus: WINDOW,
             keyboard_resize: false,
             term_input: Vec::with_capacity(TERM_INPUT_CAP),
@@ -681,6 +710,42 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
     fn close_menu(&mut self) {
         let _ = self.comp.set_visible(MENU, self.menu_token, false);
+    }
+
+    fn close_switcher(&mut self) {
+        self.switcher_until = 0;
+        let _ = self.comp.set_visible(SWITCHER, self.switcher_token, false);
+    }
+
+    /// Paint a transient Alt+Tab overview above the managed windows. Focus still belongs to the
+    /// window manager; this surface is presentation-only and automatically disappears after the
+    /// key gesture settles, so it cannot become a second focus authority.
+    fn show_switcher(&mut self) {
+        let focus = self.comp.focus().unwrap_or(0);
+        self.switcher.clear();
+        let _ = write!(
+            self.switcher,
+            "{}aletheia    {}monitor    {}shortcuts\n\nAlt+Tab next  Shift+Alt+Tab previous",
+            if focus == WINDOW { ">" } else { " " },
+            if focus == MONITOR { ">" } else { " " },
+            if focus == HELP { ">" } else { " " },
+        );
+        self.switcher
+            .render_packed(SWITCHER_TITLE, &mut self.switcher_packed);
+        let _ = self.comp.fill_packed(
+            SWITCHER,
+            self.switcher_token,
+            &self.switcher_packed,
+        );
+        let hz = H::timer_freq_hz();
+        let duration = hz.saturating_mul(SWITCHER_MS) / 1000;
+        self.switcher_until = H::timer_ticks().wrapping_add(duration.max(1));
+        let _ = self
+            .comp
+            .raise(SWITCHER, self.switcher_token);
+        let _ = self
+            .comp
+            .set_visible(SWITCHER, self.switcher_token, true);
     }
 
     fn repaint_menu(&mut self) {
@@ -954,6 +1019,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let (px, py) = self.pointer;
         if let Some((Button::Left, down)) = batch.button {
             if down {
+                if self.comp.is_visible(SWITCHER) == Some(true) {
+                    self.close_switcher();
+                }
                 if self.comp.is_visible(MENU) == Some(true) && self.menu_press(px, py) {
                     self.last_title_click = None;
                     return;
@@ -1069,6 +1137,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// The devices must still be live (they were at `install`), and the caller must guarantee
     /// no other reference to this desktop exists for the duration (its own interrupt posture).
     pub unsafe fn pump(&mut self, frames_free: usize, frames_total: usize) {
+        if self.comp.is_visible(SWITCHER) == Some(true)
+            && self.switcher_until != 0
+            && H::timer_ticks() >= self.switcher_until
+        {
+            self.close_switcher();
+        }
         for _ in 0..EVENTS_PER_TICK {
             match self.kb.next_event() {
                 Some(ev) => {
@@ -1136,6 +1210,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     let menu_activate = self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_ENTER && ev.value == 1
                         && !ctrl && !alt;
+                    let switcher_escape = self.comp.is_visible(SWITCHER) == Some(true)
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_ESC && ev.value == 1;
+                    let switcher_accept = self.comp.is_visible(SWITCHER) == Some(true)
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_ENTER && ev.value == 1
+                        && !ctrl && !alt;
                     let keyboard_nudge = if ev.ty == vinput::EV_KEY
                         && ev.value == 1
                         && ctrl
@@ -1183,14 +1262,19 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     };
                     if help_toggle {
                         self.close_menu();
+                        self.close_switcher();
                         self.toggle_help();
                         let _ = self.kb_dec.feed(ev);
                     } else if context_menu {
+                        self.close_switcher();
                         if self.comp.is_visible(MENU) == Some(true) {
                             self.close_menu();
                         } else {
                             self.open_menu(self.pointer.0, self.pointer.1);
                         }
+                        let _ = self.kb_dec.feed(ev);
+                    } else if switcher_escape || switcher_accept {
+                        self.close_switcher();
                         let _ = self.kb_dec.feed(ev);
                     } else if menu_escape {
                         self.close_menu();
@@ -1314,7 +1398,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         // faithful. The Tab itself is deliberately not routed to the shell.
                         let _ = self.kb_dec.feed(ev);
                     } else if alt_focus_cycle {
+                        self.close_menu();
                         let _ = self.wm.cycle_focus(&mut self.comp, self.sess, !shift);
+                        self.show_switcher();
                         // Alt+Tab is a desktop-level focus gesture; never leak the Tab byte into
                         // the focused application's input queue.
                         let _ = self.kb_dec.feed(ev);
