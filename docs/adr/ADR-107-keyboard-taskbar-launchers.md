@@ -19,9 +19,15 @@ taskbar: a closed target is reopened, a minimized target is restored, and an alr
 target is raised and focused. The shortcut is consumed by the desktop after modifier state is
 fed to the decoder, so the focused application never receives the number-row byte.
 
+`F6` enters taskbar keyboard navigation. Left/Right moves through the launcher, three application
+targets and the workspace strip; Enter activates the selected target and Escape leaves the mode.
+The selection is presentation state only and activation delegates to the same taskbar/window-
+manager operations used by pointer input.
+
 ## Consequences
 
 - Keyboard and pointer access reach the same taskbar targets.
+- A keyboard-only user can reach every taskbar affordance without requiring pointer input.
 - Reopening uses the existing manager-owned token and lifecycle path; no second launcher authority
   is introduced.
 - The hot path remains bounded and allocation-free for an already-open window.

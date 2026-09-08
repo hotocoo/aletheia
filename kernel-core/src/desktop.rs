@@ -73,6 +73,7 @@ const KEY_RIGHT: u16 = 106;
 const KEY_DOWN: u16 = 108;
 /// Linux keycode for F1, reserved as the desktop shortcut reference toggle.
 const KEY_F1: u16 = 59;
+const KEY_F6: u16 = 64;
 
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
@@ -216,6 +217,7 @@ struct TaskbarFacts {
     uptime_s: u64,
     workspace: u8,
     workspace_counts: [u8; MAX_WORKSPACES as usize],
+    keyboard_target: u8,
 }
 
 /// The machine's live desktop: its devices, its decoders, its compositor and input session, its
@@ -243,6 +245,7 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     taskbar_packed: Vec<u8>,
     taskbar_token: u64,
     taskbar_sig: TaskbarFacts,
+    taskbar_keyboard_target: Option<u8>,
     menu: TextGrid,
     menu_packed: Vec<u8>,
     menu_token: u64,
@@ -369,6 +372,18 @@ fn taskbar_hover_target(x: u32) -> u8 {
     }
 }
 
+fn next_taskbar_keyboard_target(current: u8, right: bool) -> u8 {
+    let current = if current == 0 { 1 } else { current };
+    let max = 9 + MAX_WORKSPACES;
+    if right {
+        if current >= max { 1 } else { current + 1 }
+    } else if current <= 1 {
+        max
+    } else {
+        current - 1
+    }
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -470,6 +485,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.write(b"Ctrl+Alt+Enter/M/Backspace  max/min/close\n");
         help.write(b"Shift+F10  context menu\n");
         help.write(b"Alt+Tab    show window switcher\n");
+        help.write(b"F6/Arrows  keyboard taskbar navigation\n");
         let mut help_packed = Vec::new();
         help.render_packed(HELP_TITLE, &mut help_packed);
         comp.fill_packed(HELP, tok_help, &help_packed)
@@ -556,6 +572,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             taskbar_packed,
             taskbar_token: tok_taskbar,
             taskbar_sig: TaskbarFacts::default(),
+            taskbar_keyboard_target: None,
             menu,
             menu_packed,
             menu_token: tok_menu,
@@ -707,6 +724,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             },
             workspace: self.wm.current_workspace(),
             workspace_counts: core::array::from_fn(|i| self.wm.workspace_count(i as u8 + 1).min(9) as u8),
+            keyboard_target: self.taskbar_keyboard_target.unwrap_or(0),
         };
         if sig == self.taskbar_sig {
             return;
@@ -719,20 +737,20 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let _ = write!(
             self.taskbar,
             "{}[menu] {}terminal {}   {}monitor {}   {}help {}   ",
-            if sig.hover == 1 { ">" } else { " " },
-            if terminal_focus || sig.hover == 2 { ">" } else { " " },
+            if sig.hover == 1 || sig.keyboard_target == 1 { ">" } else { " " },
+            if terminal_focus || sig.hover == 2 || sig.keyboard_target == 2 { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
                 if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
             } else {
                 "[closed]"
             },
-            if monitor_focus || sig.hover == 3 { ">" } else { " " },
+            if monitor_focus || sig.hover == 3 || sig.keyboard_target == 3 { ">" } else { " " },
             if self.wm.is_open(MONITOR) {
                 if self.wm.is_minimized(&self.comp, MONITOR) == Some(true) { "[hidden]" } else { "[open]" }
             } else {
                 "[closed]"
             },
-            if help_focus || sig.hover == 4 { ">" } else { " " },
+            if help_focus || sig.hover == 4 || sig.keyboard_target == 4 { ">" } else { " " },
             if self.wm.is_open(HELP) {
                 if self.wm.is_minimized(&self.comp, HELP) == Some(true) { "[hidden]" } else { "[open]" }
             } else {
@@ -740,7 +758,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             },
         );
         for workspace in 1..=MAX_WORKSPACES {
-            if sig.hover == 9 + workspace {
+            if sig.hover == 9 + workspace || sig.keyboard_target == 9 + workspace {
                 taskbar_put_hovered_workspace(
                     &mut self.taskbar,
                     workspace,
@@ -811,6 +829,45 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if target == WINDOW { self.sync_terminal_geometry(); }
         true
+    }
+
+    fn activate_taskbar_target(&mut self, target: u8) -> bool {
+        if target == 1 {
+            self.open_start_menu();
+            return true;
+        }
+        if (2..=4).contains(&target) {
+            let id = match target {
+                2 => WINDOW,
+                3 => MONITOR,
+                4 => HELP,
+                _ => unreachable!(),
+            };
+            self.focus_or_restore_window(id);
+            self.refresh_cursor_shape();
+            return true;
+        }
+        if target >= 10 && target < 10 + MAX_WORKSPACES {
+            let workspace = target - 9;
+            let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+            self.sync_terminal_geometry();
+            self.refresh_cursor_shape();
+            return true;
+        }
+        false
+    }
+
+    fn enter_taskbar_keyboard_mode(&mut self) {
+        if self.taskbar_keyboard_target.is_none() {
+            self.taskbar_keyboard_target = Some(1);
+            self.close_menu();
+            self.close_switcher();
+        }
+    }
+
+    fn move_taskbar_keyboard_target(&mut self, right: bool) {
+        let current = self.taskbar_keyboard_target.unwrap_or(1);
+        self.taskbar_keyboard_target = Some(next_taskbar_keyboard_target(current, right));
     }
 
     /// Open the desktop menu from the taskbar launcher above the taskbar rather than under the
@@ -1178,10 +1235,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 }
                 if self.comp.is_visible(MENU) == Some(true) && self.menu_press(px, py) {
                     self.last_title_click = None;
+                    self.taskbar_keyboard_target = None;
                     return;
                 }
                 if self.taskbar_press(px, py) {
                     self.last_title_click = None;
+                    self.taskbar_keyboard_target = None;
                     return;
                 }
                 let title_hit = self
@@ -1356,6 +1415,19 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && self.wm.dragging().is_some();
                     let help_toggle =
                         ev.ty == vinput::EV_KEY && ev.code == KEY_F1 && ev.value == 1;
+                    let taskbar_enter = ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_F6 && ev.value == 1 && !shift && !ctrl && !alt;
+                    let taskbar_left = self.taskbar_keyboard_target.is_some()
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_LEFT && ev.value == 1
+                        && !ctrl && !alt;
+                    let taskbar_right = self.taskbar_keyboard_target.is_some()
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_RIGHT && ev.value == 1
+                        && !ctrl && !alt;
+                    let taskbar_escape = self.taskbar_keyboard_target.is_some()
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_ESC && ev.value == 1;
+                    let taskbar_activate = self.taskbar_keyboard_target.is_some()
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_ENTER && ev.value == 1
+                        && !ctrl && !alt;
                     let menu_escape = self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY
                         && ev.code == KEY_ESC
@@ -1419,7 +1491,23 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else {
                         None
                     };
-                    if help_toggle {
+                    if taskbar_enter {
+                        self.enter_taskbar_keyboard_mode();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if taskbar_escape {
+                        self.taskbar_keyboard_target = None;
+                        self.refresh_cursor_shape();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if taskbar_left || taskbar_right {
+                        self.move_taskbar_keyboard_target(taskbar_right);
+                        let _ = self.kb_dec.feed(ev);
+                    } else if taskbar_activate {
+                        if let Some(target) = self.taskbar_keyboard_target {
+                            let _ = self.activate_taskbar_target(target);
+                        }
+                        self.taskbar_keyboard_target = None;
+                        let _ = self.kb_dec.feed(ev);
+                    } else if help_toggle {
                         self.close_menu();
                         self.close_switcher();
                         self.toggle_help();
@@ -1690,7 +1778,7 @@ mod tests {
     use super::{
         alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
         is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_hover_target,
-        taskbar_target, taskbar_workspace_target, workspace_shortcut,
+        taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
     };
 
     #[test]
@@ -1784,6 +1872,16 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn taskbar_keyboard_navigation_wraps_across_all_targets() {
+        let max = 9 + super::MAX_WORKSPACES;
+        assert_eq!(next_taskbar_keyboard_target(1, true), 2);
+        assert_eq!(next_taskbar_keyboard_target(1, false), max);
+        assert_eq!(next_taskbar_keyboard_target(max, true), 1);
+        assert_eq!(next_taskbar_keyboard_target(max, false), max - 1);
+        assert_eq!(next_taskbar_keyboard_target(0, true), 2);
     }
 
     #[test]
