@@ -116,6 +116,10 @@ const TASKBAR_ROWS: u32 = 1;
 const TASKBAR_X: i32 = 0;
 const TASKBAR_BUTTON_W: u32 = 18 * crate::textgrid::CELL;
 const TASKBAR_Y: i32 = H as i32 - (TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H) as i32;
+/// The first taskbar button is the desktop launcher. It deliberately occupies the same fixed
+/// cell band used by the keyboard launcher layout, so pointer and keyboard navigation describe
+/// one stable affordance instead of two subtly different hit maps.
+const TASKBAR_MENU_W: u32 = 8 * crate::textgrid::CELL;
 const TASKBAR_TERM_X: u32 = 8 * crate::textgrid::CELL;
 const TASKBAR_MON_X: u32 = TASKBAR_TERM_X + TASKBAR_BUTTON_W;
 const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
@@ -293,6 +297,22 @@ fn next_menu_selection(selected: usize, down: bool) -> usize {
         MENU_ITEMS.len() - 1
     } else {
         selected - 1
+    }
+}
+
+/// Resolve a taskbar x-coordinate to either the desktop launcher or one managed application.
+/// Keeping the hit map pure makes the launcher boundary testable without a live compositor.
+fn taskbar_target(x: u32) -> Option<u32> {
+    if x < TASKBAR_MENU_W {
+        Some(MENU)
+    } else if (TASKBAR_TERM_X..TASKBAR_MON_X).contains(&x) {
+        Some(WINDOW)
+    } else if (TASKBAR_MON_X..TASKBAR_MON_X + TASKBAR_BUTTON_W).contains(&x) {
+        Some(MONITOR)
+    } else if (TASKBAR_HELP_X..TASKBAR_HELP_X + TASKBAR_BUTTON_W).contains(&x) {
+        Some(HELP)
+    } else {
+        None
     }
 }
 
@@ -629,7 +649,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let help_focus = sig.focus == HELP;
         let _ = write!(
             self.taskbar,
-            "{}terminal {}   {}monitor {}   {}help {}   {}   up {}s",
+            "[menu] {}terminal {}   {}monitor {}   {}help {}   {}   up {}s",
             if terminal_focus { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
                 if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
@@ -664,15 +684,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             return false;
         }
         let lx = lx as u32;
-        let target = if (TASKBAR_TERM_X..TASKBAR_MON_X).contains(&lx) {
-            WINDOW
-        } else if (TASKBAR_MON_X..TASKBAR_MON_X + TASKBAR_BUTTON_W).contains(&lx) {
-            MONITOR
-        } else if (TASKBAR_HELP_X..TASKBAR_HELP_X + TASKBAR_BUTTON_W).contains(&lx) {
-            HELP
-        } else {
-            return false;
-        };
+        let Some(target) = taskbar_target(lx) else { return false };
+        if target == MENU {
+            self.open_start_menu();
+            return true;
+        }
         if !self.wm.is_open(target) {
             self.reopen_taskbar_window(target);
             return true;
@@ -690,6 +706,27 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if target == WINDOW { self.sync_terminal_geometry(); }
         true
+    }
+
+    /// Open the desktop menu from the taskbar launcher above the taskbar rather than under the
+    /// pointer. This gives the launcher conventional desktop behavior while retaining the same
+    /// compositor-owned menu used by right-click and Shift+F10.
+    fn open_start_menu(&mut self) {
+        let Some((mw, mh)) = self.comp.surface_size(MENU) else { return };
+        let x = TASKBAR_X.saturating_add(TASKBAR_MENU_W as i32 / 2) - mw as i32 / 2;
+        let y = TASKBAR_Y - mh as i32 - MENU_MARGIN;
+        let max_x = W.saturating_sub(mw) as i32;
+        let max_y = H.saturating_sub(mh) as i32;
+        self.menu_selected = 0;
+        self.repaint_menu();
+        let _ = self.comp.move_surface(
+            MENU,
+            self.menu_token,
+            x.clamp(0, max_x),
+            y.clamp(0, max_y),
+        );
+        let _ = self.comp.raise(MENU, self.menu_token);
+        let _ = self.comp.set_visible(MENU, self.menu_token, true);
     }
 
     /// Open the desktop context menu at the pointer. It is compositor chrome rather than a
@@ -1489,7 +1526,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 mod tests {
     use super::{
         alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
-        is_minimize_shortcut, is_title_double_click, next_menu_selection,
+        is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_target,
     };
 
     #[test]
@@ -1532,6 +1569,16 @@ mod tests {
         assert_eq!(next_menu_selection(8, true), 0);
         assert_eq!(next_menu_selection(2, false), 1);
         assert_eq!(next_menu_selection(2, true), 3);
+    }
+
+    #[test]
+    fn taskbar_launcher_has_a_dedicated_start_region() {
+        assert_eq!(taskbar_target(0), Some(super::MENU));
+        assert_eq!(taskbar_target(super::TASKBAR_MENU_W - 1), Some(super::MENU));
+        assert_eq!(taskbar_target(super::TASKBAR_TERM_X), Some(super::WINDOW));
+        assert_eq!(taskbar_target(super::TASKBAR_MON_X), Some(super::MONITOR));
+        assert_eq!(taskbar_target(super::TASKBAR_HELP_X), Some(super::HELP));
+        assert_eq!(taskbar_target(super::TASKBAR_HELP_X + super::TASKBAR_BUTTON_W), None);
     }
 
     #[test]
