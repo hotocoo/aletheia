@@ -71,6 +71,10 @@ const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
 const KEY_RIGHT: u16 = 106;
 const KEY_DOWN: u16 = 108;
+/// Linux keycodes for Home/End, reserved by taskbar keyboard navigation to jump directly to
+/// the first/last taskbar affordance without making the user traverse the whole strip.
+const KEY_HOME: u16 = 102;
+const KEY_END: u16 = 107;
 /// Linux keycode for F1, reserved as the desktop shortcut reference toggle.
 const KEY_F1: u16 = 59;
 const KEY_F6: u16 = 64;
@@ -382,6 +386,10 @@ fn next_taskbar_keyboard_target(current: u8, right: bool) -> u8 {
     } else {
         current - 1
     }
+}
+
+fn taskbar_keyboard_jump(home: bool) -> u8 {
+    if home { 1 } else { 9 + MAX_WORKSPACES }
 }
 
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
@@ -1417,6 +1425,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         ev.ty == vinput::EV_KEY && ev.code == KEY_F1 && ev.value == 1;
                     let taskbar_enter = ev.ty == vinput::EV_KEY
                         && ev.code == KEY_F6 && ev.value == 1 && !shift && !ctrl && !alt;
+                    let taskbar_home = self.taskbar_keyboard_target.is_some()
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_HOME && ev.value == 1
+                        && !shift && !ctrl && !alt;
+                    let taskbar_end = self.taskbar_keyboard_target.is_some()
+                        && ev.ty == vinput::EV_KEY && ev.code == KEY_END && ev.value == 1
+                        && !shift && !ctrl && !alt;
                     let taskbar_left = self.taskbar_keyboard_target.is_some()
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_LEFT && ev.value == 1
                         && !ctrl && !alt;
@@ -1492,7 +1506,17 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         None
                     };
                     if taskbar_enter {
-                        self.enter_taskbar_keyboard_mode();
+                        if self.taskbar_keyboard_target.is_some() {
+                            self.taskbar_keyboard_target = None;
+                        } else {
+                            self.enter_taskbar_keyboard_mode();
+                        }
+                        self.refresh_cursor_shape();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if taskbar_home || taskbar_end {
+                        self.taskbar_keyboard_target = Some(taskbar_keyboard_jump(
+                            taskbar_home,
+                        ));
                         let _ = self.kb_dec.feed(ev);
                     } else if taskbar_escape {
                         self.taskbar_keyboard_target = None;
@@ -1779,6 +1803,7 @@ mod tests {
         alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
         is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
+        taskbar_keyboard_jump,
     };
 
     #[test]
@@ -1882,6 +1907,12 @@ mod tests {
         assert_eq!(next_taskbar_keyboard_target(max, true), 1);
         assert_eq!(next_taskbar_keyboard_target(max, false), max - 1);
         assert_eq!(next_taskbar_keyboard_target(0, true), 2);
+    }
+
+    #[test]
+    fn taskbar_keyboard_home_and_end_jump_to_valid_affordances() {
+        assert_eq!(taskbar_keyboard_jump(true), 1);
+        assert_eq!(taskbar_keyboard_jump(false), 9 + super::MAX_WORKSPACES);
     }
 
     #[test]
