@@ -402,6 +402,13 @@ fn taskbar_keyboard_next(current: u8) -> u8 {
     next_taskbar_keyboard_target(current, true)
 }
 
+/// Return the taskbar affordance immediately before `current` in the reverse direction. Keeping
+/// reverse F6 traversal on the same canonical order makes Shift+F6 symmetric with F6 without
+/// introducing a second taskbar layout.
+fn taskbar_keyboard_previous(current: u8) -> u8 {
+    next_taskbar_keyboard_target(current, false)
+}
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -1435,7 +1442,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     let help_toggle =
                         ev.ty == vinput::EV_KEY && ev.code == KEY_F1 && ev.value == 1;
                     let taskbar_enter = ev.ty == vinput::EV_KEY
-                        && ev.code == KEY_F6 && ev.value == 1 && !shift && !ctrl && !alt;
+                        && ev.code == KEY_F6 && ev.value == 1 && !ctrl && !alt;
                     let taskbar_home = self.taskbar_keyboard_target.is_some()
                         && ev.ty == vinput::EV_KEY && ev.code == KEY_HOME && ev.value == 1
                         && !shift && !ctrl && !alt;
@@ -1526,7 +1533,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     if taskbar_enter {
                         if self.taskbar_keyboard_target.is_some() {
                             let current = self.taskbar_keyboard_target.unwrap_or(1);
-                            self.taskbar_keyboard_target = Some(taskbar_keyboard_next(current));
+                            self.taskbar_keyboard_target = Some(if shift {
+                                taskbar_keyboard_previous(current)
+                            } else {
+                                taskbar_keyboard_next(current)
+                            });
                         } else {
                             self.enter_taskbar_keyboard_mode();
                         }
@@ -1826,6 +1837,7 @@ mod tests {
         is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_hover_target,
         taskbar_target, taskbar_workspace_target, workspace_shortcut, next_taskbar_keyboard_target,
         taskbar_keyboard_jump, taskbar_keyboard_next,
+        taskbar_keyboard_previous,
     };
 
     #[test]
@@ -1944,6 +1956,15 @@ mod tests {
         assert_eq!(taskbar_keyboard_next(max - 1), max);
         assert_eq!(taskbar_keyboard_next(max), 1);
         assert_eq!(taskbar_keyboard_next(0), 2);
+    }
+
+    #[test]
+    fn shift_f6_reverse_traversal_wraps_to_the_last_affordance() {
+        let max = 9 + super::MAX_WORKSPACES;
+        assert_eq!(taskbar_keyboard_previous(1), max);
+        assert_eq!(taskbar_keyboard_previous(2), 1);
+        assert_eq!(taskbar_keyboard_previous(max), max - 1);
+        assert_eq!(taskbar_keyboard_previous(0), max);
     }
 
     #[test]
