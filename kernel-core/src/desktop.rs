@@ -685,6 +685,24 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let _ = self.comp.fill_packed(MENU, self.menu_token, &self.menu_packed);
     }
 
+    /// Move the retained menu selection with the pointer without activating anything. Keeping
+    /// hover selection in the same state as keyboard selection gives mouse users the same visible
+    /// affordance and leaves activation exclusively to a press/Enter gesture.
+    fn menu_hover(&mut self, x: u32, y: u32) {
+        let Some((mx, my)) = self.comp.placement(MENU) else { return };
+        let Some((mw, mh)) = self.comp.surface_size(MENU) else { return };
+        let lx = x as i32 - mx;
+        let ly = y as i32 - my;
+        if lx < 0 || ly < crate::textgrid::TITLE_H as i32 || lx as u32 >= mw || ly as u32 >= mh {
+            return;
+        }
+        let row = ((ly as u32 - crate::textgrid::TITLE_H) / crate::textgrid::CELL) as usize;
+        if row < MENU_ITEMS.len() && row != self.menu_selected {
+            self.menu_selected = row;
+            self.repaint_menu();
+        }
+    }
+
     fn activate_menu_selection(&mut self) {
         match self.menu_selected {
             0 => self.focus_or_restore_window(WINDOW),
@@ -900,6 +918,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         if let Some(p) = batch.move_to {
             self.pointer = p;
             self.refresh_cursor_shape();
+            if self.comp.is_visible(MENU) == Some(true) {
+                self.menu_hover(p.0, p.1);
+            }
         }
         let (px, py) = self.pointer;
         if let Some((Button::Left, down)) = batch.button {
