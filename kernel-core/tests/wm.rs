@@ -172,6 +172,25 @@ fn dragging_to_each_corner_snaps_to_the_matching_quarter() {
 }
 
 #[test]
+fn edge_snap_accepts_a_forgiving_release_band_but_not_a_distant_release() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 2).unwrap();
+
+    wm.press(&mut comp, sess, 60, 29);
+    wm.motion(&mut comp, 14, 40);
+    wm.release_at(&mut comp, sess, 16, 40);
+    assert_eq!(comp.placement(2), Some((0, 0)));
+    assert_eq!(wm.size(2), Some((100, 120)));
+
+    // Start a fresh drag and release clearly outside the snap band. The free-form position
+    // must survive unchanged rather than being pulled to the edge.
+    wm.press(&mut comp, sess, 10, 9);
+    wm.motion(&mut comp, 40, 40);
+    wm.release_at(&mut comp, sess, 17, 40);
+    assert_eq!(comp.placement(2), Some((30, 31)));
+}
+
+#[test]
 fn a_window_closed_mid_drag_drags_nothing_afterwards() {
     let (mut comp, mut wm, sess) = desk();
     assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));

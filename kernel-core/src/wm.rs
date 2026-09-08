@@ -37,7 +37,9 @@ use crate::textgrid::{
 /// the compositor's own surface ceiling so the wallpaper and any suite surface still fit.
 pub const MAX_WINDOWS: usize = 8;
 /// Pointer distance from a scanout edge that activates drag-to-snap on release.
-const SNAP_EDGE_PX: u32 = 1;
+/// A forgiving band makes snapping practical at normal pointer speed without requiring a
+/// pixel-perfect release. The value is intentionally fixed so the gesture stays deterministic.
+const SNAP_EDGE_PX: u32 = 16;
 /// Distance between successive windows in the deterministic cascade layout.
 const CASCADE_OFFSET_PX: u32 = 32;
 
