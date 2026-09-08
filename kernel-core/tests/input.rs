@@ -459,7 +459,8 @@ fn resize_cursor_shapes_are_visually_distinct() {
     let mut vertical = Guard::new(32, 32);
     c.move_cursor(s, 8, 8).unwrap();
 
-    c.set_cursor_shape(s, CursorShape::ResizeHorizontal).unwrap();
+    c.set_cursor_shape(s, CursorShape::ResizeHorizontal)
+        .unwrap();
     c.compose_frame(&mut horizontal);
     c.set_cursor_shape(s, CursorShape::ResizeVertical).unwrap();
     c.compose_frame(&mut vertical);

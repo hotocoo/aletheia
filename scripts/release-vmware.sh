@@ -19,7 +19,8 @@
 #   --no-verify skips the QEMU boot of the packaged disks (CI never passes this; a host without
 #               QEMU/OVMF gets a loud SKIP of the verify step, never a silent one).
 #
-# Portable: python3 (mkesp.py is stdlib-only), qemu-img, zip, the Rust nightly via the rustup shim.
+# Portable: python3 (mkesp.py + deterministic ZIP/VMDK helpers are stdlib-only), qemu-img, the Rust
+# nightly via the rustup shim.
 # No hdiutil, no mtools, no root. Exit 0 = the package exists AND (unless skipped) booted.
 set -euo pipefail
 
@@ -56,7 +57,6 @@ fail() { echo "FAIL: $*"; echo "RELEASE-VMWARE: FAIL"; exit 1; }
 PY="$(command -v python3 || command -v python || true)"
 [ -n "$PY" ] || fail "python3 is required (mkesp.py)"
 command -v qemu-img >/dev/null 2>&1 || fail "qemu-img is required (raw -> VMDK)"
-command -v zip >/dev/null 2>&1 || fail "zip is required"
 SHA() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 
 NAME="aletheia-$VERSION-x86_64-vmware"
@@ -77,11 +77,15 @@ hr; echo "==> [2/6] write the GPT/ESP disk images (deterministic, mkesp.py)"; hr
 "$PY" "$X86/scripts/mkesp.py" --efi "$BUILD/release-interactive.efi" --out "$BUILD/release-interactive.img" >/dev/null \
   || fail "interactive image"
 
-hr; echo "==> [3/6] convert raw -> VMware VMDK"; hr
+hr; echo "==> [3/6] convert raw -> VMware VMDK (then normalize generated identity)"; hr
 qemu-img convert -f raw -O vmdk "$BUILD/release-selftest.img" "$STAGE/aletheia-x86_64-selftest.vmdk" \
   || fail "selftest vmdk"
 qemu-img convert -f raw -O vmdk "$BUILD/release-interactive.img" "$STAGE/aletheia-x86_64.vmdk" \
   || fail "interactive vmdk"
+"$PY" "$ROOT/scripts/normalize-vmdk.py" --vmdk "$STAGE/aletheia-x86_64-selftest.vmdk" \
+  --seed "$BUILD/release-selftest.img" || fail "normalize selftest vmdk"
+"$PY" "$ROOT/scripts/normalize-vmdk.py" --vmdk "$STAGE/aletheia-x86_64.vmdk" \
+  --seed "$BUILD/release-interactive.img" || fail "normalize interactive vmdk"
 
 hr; echo "==> [4/6] VMware configs, README, checksums"; hr
 vmx() { # $1 = vmdk file name, $2 = display name, $3 = serial log name, $4 = out file
@@ -190,7 +194,7 @@ fi
 
 hr; echo "==> [6/6] checksums (over EVERY shipped file, the boot log included), zip, digest, release notes"; hr
 ( cd "$STAGE" && rm -f SHA256SUMS && SHA $(ls | grep -v '^SHA256SUMS$' | sort) > SHA256SUMS )
-( cd "$OUT" && zip -q -r -X "$NAME.zip" "$NAME" )
+( cd "$OUT" && "$PY" "$ROOT/scripts/zip-reproducible.py" "$NAME" "$NAME.zip" )
 ( cd "$OUT" && SHA "$NAME.zip" > "$NAME.zip.sha256" )
 {
   echo "# Aletheia $VERSION — x86-64 VMware package"

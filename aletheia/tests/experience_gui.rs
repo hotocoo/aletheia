@@ -10,7 +10,7 @@ fn dir() -> String {
 
 #[test]
 fn gui_queries_are_capability_gated_and_never_expose_tokens() {
-    let mut svc = CoreService::open(dir()).unwrap();
+    let mut svc = CoreService::open_deterministic(dir()).unwrap();
     let root = svc
         .handle(Request::BootstrapOwner {
             subject: "human:operator".into(),
@@ -41,7 +41,7 @@ fn gui_queries_are_capability_gated_and_never_expose_tokens() {
 
 #[test]
 fn gui_world_query_fails_closed_to_empty_without_read_authority() {
-    let mut svc = CoreService::open(dir()).unwrap();
+    let mut svc = CoreService::open_deterministic(dir()).unwrap();
     let world = svc.handle(Request::QueryWorld { caps: vec![] });
     assert!(world.ok);
     assert_eq!(world.data["entities"].as_array().unwrap().len(), 0);

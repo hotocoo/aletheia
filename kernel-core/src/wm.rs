@@ -369,11 +369,7 @@ impl WindowManager {
         }
         self.current_workspace = workspace;
         for w in self.wins.iter().copied() {
-            comp.set_visible(
-                w.id,
-                w.token,
-                w.workspace == workspace && !w.minimized,
-            )?;
+            comp.set_visible(w.id, w.token, w.workspace == workspace && !w.minimized)?;
         }
         let _ = comp.clear_focus(session);
         self.focus_topmost_visible(comp, session)?;
@@ -395,7 +391,9 @@ impl WindowManager {
             self.refusals += 1;
             return Err(WmFault::UnknownWindow(workspace as u32));
         }
-        let Some(id) = comp.focus() else { return Ok(None) };
+        let Some(id) = comp.focus() else {
+            return Ok(None);
+        };
         let pos = self.wins.iter().position(|w| w.id == id).ok_or_else(|| {
             self.refusals += 1;
             WmFault::UnknownWindow(id)
@@ -794,9 +792,9 @@ impl WindowManager {
                 let _ = comp.raise(id, w.token);
                 let _ = comp.set_focus(session, id);
                 self.drag = Some((id, lx, ly, DragKind::Resize(edge)));
-                self.drag_restore = comp.placement(id).map(|(x, y)| {
-                    (id, (x, y, w.width, w.height))
-                });
+                self.drag_restore = comp
+                    .placement(id)
+                    .map(|(x, y)| (id, (x, y, w.width, w.height)));
                 Press::Resizing(id)
             }
             Some(Hit::Client) => {
@@ -1089,9 +1087,10 @@ impl WindowManager {
         comp: &mut Compositor,
         session: u64,
     ) -> Result<bool, WmFault> {
-        let any_visible = self.wins.iter().any(|w| {
-            w.workspace == self.current_workspace && comp.is_visible(w.id) == Some(true)
-        });
+        let any_visible = self
+            .wins
+            .iter()
+            .any(|w| w.workspace == self.current_workspace && comp.is_visible(w.id) == Some(true));
         for i in 0..self.wins.len() {
             let (id, token) = (self.wins[i].id, self.wins[i].token);
             if self.wins[i].workspace == self.current_workspace {

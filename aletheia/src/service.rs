@@ -71,6 +71,12 @@ pub enum Request {
     },
     /// audit (query): the tail of the immutable event log. Capability-gated (`audit.read`).
     QueryAudit { caps: Vec<String>, limit: usize },
+    /// experience (query): inspect the semantic world model. Capability-gated per entity.
+    QueryWorld { caps: Vec<String> },
+    /// experience (query): semantic keyword search over authorized entities.
+    Search { caps: Vec<String>, query: String, limit: usize },
+    /// experience (query): inspect capability metadata without exposing bearer tokens.
+    QueryCapabilities { caps: Vec<String> },
     /// components (command): install untrusted WASM (hex-encoded bytes) as an Application entity.
     InstallComponent {
         caps: Vec<String>,
@@ -120,9 +126,25 @@ pub struct CoreService {
 
 impl CoreService {
     pub fn open(dir: impl AsRef<std::path::Path>) -> crate::domain::Result<Self> {
+        Self::open_with_model(
+            dir,
+            crate::ai::select_provider(&crate::ai::config::AiConfig::from_env()),
+        )
+    }
+
+    pub fn open_with_model(
+        dir: impl AsRef<std::path::Path>,
+        model: Box<dyn crate::intelligence::ModelRuntime>,
+    ) -> crate::domain::Result<Self> {
         Ok(CoreService {
-            core: SysCore::open_default(dir)?,
+            core: SysCore::open(dir, model)?,
         })
+    }
+
+    /// Deterministic service constructor for boundary/conformance tests that must not depend on
+    /// whether a real inference server happens to be listening on localhost.
+    pub fn open_deterministic(dir: impl AsRef<std::path::Path>) -> crate::domain::Result<Self> {
+        Self::open_with_model(dir, Box::new(crate::intelligence::DeterministicRuntime))
     }
 
     /// Dispatch one request. Authorization happens inside the Core operations, not here.
@@ -210,6 +232,50 @@ impl CoreService {
                 Ok(tail) => Response::ok(serde_json::to_value(&tail).unwrap_or(Value::Null)),
                 Err(e) => Response::err(e.to_string()),
             },
+            Request::QueryWorld { caps } => {
+                let entities: Vec<_> = self
+                    .core
+                    .store()
+                    .entities()
+                    .filter(|e| {
+                        matches!(
+                            self.core.caps().evaluate(
+                                "entity.read",
+                                &crate::capabilities::Target {
+                                    id: Some(e.id.clone()),
+                                    etype: Some(e.etype),
+                                },
+                                &caps,
+                            ),
+                            crate::capabilities::Decision::Allow
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                let visible: std::collections::HashSet<_> =
+                    entities.iter().map(|e| e.id.clone()).collect();
+                let relationships: Vec<_> = self
+                    .core
+                    .store()
+                    .relationships()
+                    .filter(|r| visible.contains(&r.from) && visible.contains(&r.to))
+                    .cloned()
+                    .collect();
+                Response::ok(json!({ "entities": entities, "relationships": relationships }))
+            }
+            Request::Search { caps, query, limit } => Response::ok(
+                serde_json::to_value(self.core.search(&caps, &query, limit)).unwrap_or(Value::Null),
+            ),
+            Request::QueryCapabilities { caps } => {
+                if matches!(
+                    self.core.caps().evaluate("audit.read", &crate::capabilities::Target::default(), &caps),
+                    crate::capabilities::Decision::Deny(_)
+                ) {
+                    Response::err("not permitted to inspect capabilities")
+                } else {
+                    Response::ok(Value::Array(self.core.caps().inspect()))
+                }
+            }
             Request::InstallComponent {
                 caps,
                 subject,

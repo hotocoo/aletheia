@@ -27,7 +27,7 @@ fn owner_token(svc: &mut CoreService) -> String {
 
 #[test]
 fn uc_create_derive_traverse_through_the_api() {
-    let mut svc = CoreService::open(dir()).unwrap();
+    let mut svc = CoreService::open_deterministic(dir()).unwrap();
     let owner = owner_token(&mut svc);
 
     // UC: create a recording (world command).
@@ -104,7 +104,7 @@ fn uc_create_derive_traverse_through_the_api() {
 
 #[test]
 fn no_ambient_authority_at_the_boundary() {
-    let mut svc = CoreService::open(dir()).unwrap();
+    let mut svc = CoreService::open_deterministic(dir()).unwrap();
     let owner = owner_token(&mut svc);
     let created = svc.handle(Request::CreateEntity {
         caps: vec![owner],
@@ -132,7 +132,7 @@ fn no_ambient_authority_at_the_boundary() {
 
 #[test]
 fn destructive_requires_approval_lifecycle_over_the_api() {
-    let mut svc = CoreService::open(dir()).unwrap();
+    let mut svc = CoreService::open_deterministic(dir()).unwrap();
     let owner = owner_token(&mut svc);
     let created = svc.handle(Request::CreateEntity {
         caps: vec![owner.clone()],
@@ -190,7 +190,7 @@ fn destructive_requires_approval_lifecycle_over_the_api() {
 
 #[test]
 fn capability_scope_confined_over_the_api() {
-    let mut svc = CoreService::open(dir()).unwrap();
+    let mut svc = CoreService::open_deterministic(dir()).unwrap();
     let owner = owner_token(&mut svc);
     let e1 = svc.handle(Request::CreateEntity {
         caps: vec![owner.clone()],
@@ -268,7 +268,7 @@ fn same_contract_holds_over_the_endpoint_transport() {
     let sock_srv = sock.clone();
     // Server constructs its own CoreService inside the thread (nothing non-Send crosses the boundary).
     let server = std::thread::spawn(move || {
-        let svc = CoreService::open(data).unwrap();
+        let svc = CoreService::open_deterministic(data).unwrap();
         let _ = serve(svc, &sock_srv);
     });
 

@@ -30,8 +30,222 @@ use crate::intent_action::{Intent, Verb};
 use crate::storage::Store;
 use serde::Serialize;
 
+/// Lifecycle policy for retained AI context. Context is a resource, not an ambient process-global
+/// history: ownership, capacity and lifetime are explicit and enforced before retention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextLifecyclePolicy {
+    pub budget: ContextBudget,
+    /// Maximum number of retained context snapshots for one lifecycle store.
+    pub max_retained: usize,
+    /// Maximum age in the same monotonic units returned by `domain::now()`.
+    pub ttl: u64,
+}
+
+impl Default for ContextLifecyclePolicy {
+    fn default() -> Self {
+        Self {
+            budget: ContextBudget::small(),
+            max_retained: 8,
+            ttl: 300,
+        }
+    }
+}
+
+/// An owned, expiring context snapshot. The owner is part of the resource itself, so a caller cannot
+/// retrieve another subject's retained context merely by knowing its id.
+#[derive(Debug, Clone, Serialize)]
+pub struct RetainedContext {
+    pub id: u64,
+    pub owner: String,
+    pub context: AiContext,
+    pub created_at: u64,
+    pub expires_at: u64,
+    /// True after deterministic compression has replaced the full snapshot with its bounded form.
+    pub compressed: bool,
+    /// A small deterministic summary retained alongside the bounded snapshot; no model inference or
+    /// unbounded transcript is required to recover lifecycle metadata.
+    pub summary: String,
+}
+
+/// Small in-memory context resource manager. It deliberately has no persistence: context containing
+/// private world state expires with the lifecycle and is never written to the durable store.
+#[derive(Debug, Clone)]
+pub struct ContextLifecycle {
+    policy: ContextLifecyclePolicy,
+    next_id: u64,
+    retained: Vec<RetainedContext>,
+}
+
+impl ContextLifecycle {
+    pub fn new(policy: ContextLifecyclePolicy) -> Self {
+        Self {
+            policy,
+            next_id: 1,
+            retained: Vec::new(),
+        }
+    }
+
+    pub fn policy(&self) -> ContextLifecyclePolicy {
+        self.policy
+    }
+
+    /// Retain a context only for its owner and only within the configured resource bounds.
+    /// Expired resources are collected before capacity is evaluated; if still full, the oldest
+    /// resource is evicted. This makes retention bounded rather than an unbounded append log.
+    pub fn retain(&mut self, owner: &str, context: AiContext, now: u64) -> Option<u64> {
+        self.expire(now);
+        if owner.is_empty() || self.policy.max_retained == 0 || self.policy.ttl == 0 {
+            return None;
+        }
+
+        let mut context = context;
+        compress_context(&mut context, self.policy.budget);
+        let summary = summarize_context(&context);
+        if self.retained.len() >= self.policy.max_retained {
+            let mut evicted = self.retained.remove(0);
+            clear_context(&mut evicted.context);
+            evicted.owner.clear();
+            evicted.summary.clear();
+        }
+
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.retained.push(RetainedContext {
+            id,
+            owner: owner.to_string(),
+            context,
+            created_at: now,
+            expires_at: now.saturating_add(self.policy.ttl),
+            compressed: true,
+            summary,
+        });
+        Some(id)
+    }
+
+    /// Owner-only access. Expiration is checked at the same boundary as authorization.
+    pub fn get(&mut self, owner: &str, id: u64, now: u64) -> Option<&AiContext> {
+        self.expire(now);
+        self.retained
+            .iter()
+            .find(|r| r.id == id && r.owner == owner)
+            .map(|r| &r.context)
+    }
+
+    /// Explicit owner-only release. The retained vectors are cleared before the resource disappears,
+    /// ensuring no later lifecycle lookup can observe its contents.
+    pub fn release(&mut self, owner: &str, id: u64) -> bool {
+        if let Some(pos) = self
+            .retained
+            .iter()
+            .position(|r| r.id == id && r.owner == owner)
+        {
+            let mut removed = self.retained.remove(pos);
+            clear_context(&mut removed.context);
+            removed.owner.clear();
+            removed.summary.clear();
+            return true;
+        }
+        false
+    }
+
+    /// Expire every snapshot whose deadline has passed and clear its private payload before removal.
+    pub fn expire(&mut self, now: u64) {
+        let mut kept = Vec::with_capacity(self.retained.len());
+        for mut resource in self.retained.drain(..) {
+            if resource.expires_at <= now {
+                clear_context(&mut resource.context);
+                resource.owner.clear();
+                resource.summary.clear();
+            } else {
+                kept.push(resource);
+            }
+        }
+        self.retained = kept;
+    }
+
+    pub fn len(&self) -> usize {
+        self.retained.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.retained.is_empty()
+    }
+}
+
+/// Deterministically compress a context in retrieval-priority order. High-value direct/focus data
+/// survives first; memory is discarded before relationships, and relationships before world entries.
+/// The final rendered form is therefore bounded by the same character budget that reaches the model.
+fn compress_context(context: &mut AiContext, budget: ContextBudget) {
+    context.direct.authority.sort();
+    context.direct.authority.dedup();
+    // Preserve retrieval priority (focus first, then neighbours) while removing duplicates. Sorting
+    // here would make compression deterministic but could evict the focus entity, which is the seed
+    // that made the context relevant in the first place.
+    let mut seen_world: Vec<Id> = Vec::new();
+    context.world.retain(|e| {
+        if seen_world.contains(&e.id) {
+            false
+        } else {
+            seen_world.push(e.id.clone());
+            true
+        }
+    });
+    let mut seen_edges: Vec<(Id, String, Id)> = Vec::new();
+    context.relationships.retain(|r| {
+        let key = (r.from.clone(), r.rtype.clone(), r.to.clone());
+        if seen_edges.contains(&key) {
+            false
+        } else {
+            seen_edges.push(key);
+            true
+        }
+    });
+
+    context.world.truncate(budget.max_entities);
+    context.relationships.truncate(budget.max_relationships);
+    context.memory.truncate(budget.max_memory);
+
+    while context.render(budget.max_chars).len() > budget.max_chars {
+        if !context.memory.is_empty() {
+            context.memory.pop();
+        } else if !context.relationships.is_empty() {
+            context.relationships.pop();
+        } else if !context.world.is_empty() {
+            context.world.pop();
+        } else {
+            break;
+        }
+    }
+}
+
+fn summarize_context(context: &AiContext) -> String {
+    let focus = context
+        .direct
+        .focus
+        .as_ref()
+        .map(|id| id.as_str())
+        .unwrap_or("none");
+    format!(
+        "subject={} focus={} world={} relationships={} memory={}",
+        context.direct.subject,
+        focus,
+        context.world.len(),
+        context.relationships.len(),
+        context.memory.len()
+    )
+}
+
+fn clear_context(context: &mut AiContext) {
+    context.direct.subject.clear();
+    context.direct.authority.clear();
+    context.direct.focus = None;
+    context.world.clear();
+    context.relationships.clear();
+    context.memory.clear();
+}
+
 /// Explicit context budget. Tuned small for the 1B model; the engine never exceeds it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
     pub max_entities: usize,
     pub max_relationships: usize,
@@ -487,5 +701,93 @@ mod tests {
     fn budget_profile_is_tight_for_small_model() {
         let b = ContextBudget::small();
         assert!(b.max_entities <= 8 && b.max_chars <= 4000);
+    }
+
+    fn sample_context(subject: &str) -> AiContext {
+        AiContext {
+            direct: DirectContext {
+                subject: subject.into(),
+                focus: Some("focus".into()),
+                authority: vec!["entity.read".into(), "entity.read".into()],
+            },
+            world: (0..12)
+                .map(|i| EntityRef {
+                    id: format!("e{i}"),
+                    etype: EntityType::Document,
+                    version: 1,
+                })
+                .collect(),
+            relationships: (0..12)
+                .map(|i| EdgeRef {
+                    from: "focus".into(),
+                    rtype: format!("rel{i}"),
+                    to: format!("e{i}"),
+                })
+                .collect(),
+            memory: (0..12)
+                .map(|i| MemoryRef {
+                    etype: format!("event{i}"),
+                    actor: subject.into(),
+                    at: i,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_is_bounded_compressed_owned_and_expiring() {
+        let policy = ContextLifecyclePolicy {
+            budget: ContextBudget {
+                max_entities: 2,
+                max_relationships: 2,
+                max_memory: 1,
+                max_chars: 256,
+            },
+            max_retained: 2,
+            ttl: 10,
+        };
+        let mut lifecycle = ContextLifecycle::new(policy);
+        let id = lifecycle
+            .retain("alice", sample_context("alice"), 100)
+            .unwrap();
+
+        let ctx = lifecycle.get("alice", id, 101).unwrap();
+        assert!(ctx.world.len() <= 2);
+        assert_eq!(ctx.world.first().map(|e| e.id.as_str()), Some("e0"));
+        assert!(ctx.relationships.len() <= 2);
+        assert!(ctx.memory.len() <= 1);
+        assert!(ctx.render(256).len() <= 256);
+        assert!(
+            lifecycle.get("bob", id, 101).is_none(),
+            "owner boundary must hold"
+        );
+
+        assert!(
+            lifecycle.get("alice", id, 110).is_none(),
+            "TTL must expire at deadline"
+        );
+        assert!(lifecycle.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_eviction_and_explicit_release_clear_retained_resources() {
+        let policy = ContextLifecyclePolicy {
+            budget: ContextBudget::small(),
+            max_retained: 1,
+            ttl: 100,
+        };
+        let mut lifecycle = ContextLifecycle::new(policy);
+        let first = lifecycle
+            .retain("alice", sample_context("private-a"), 1)
+            .unwrap();
+        let second = lifecycle
+            .retain("alice", sample_context("private-b"), 2)
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(lifecycle.get("alice", first, 2).is_none());
+        assert!(lifecycle.get("alice", second, 2).is_some());
+        assert!(lifecycle.release("alice", second));
+        assert!(lifecycle.is_empty());
+        assert!(!lifecycle.release("alice", second));
     }
 }

@@ -59,6 +59,8 @@ pub struct SysCore {
     approvals: ApprovalStore,
     tasks: HashMap<Id, TaskState>,
     cancelled: HashSet<Id>,
+    /// Bounded, owner-scoped, expiring AI context resources (ALET-P2-025 / ADR-087).
+    context_lifecycle: crate::ai::context::ContextLifecycle,
     root_minted: bool,
     /// Trust anchor for component signatures (ADR-025 Phase 1). Empty by default.
     trust: crate::provenance::TrustStore,
@@ -95,6 +97,9 @@ impl SysCore {
             approvals: ApprovalStore::new(),
             tasks: HashMap::new(),
             cancelled: HashSet::new(),
+            context_lifecycle: crate::ai::context::ContextLifecycle::new(
+                crate::ai::context::ContextLifecyclePolicy::default(),
+            ),
             root_minted,
             trust: crate::provenance::TrustStore::new(),
             asym_trust: crate::provenance::AsymTrustStore::new(),
@@ -1427,9 +1432,21 @@ impl SysCore {
             &intent,
             crate::ai::context::ContextBudget::small(),
         );
-        trace.context_provenance = aictx.provenance();
+        // Context is a real lifecycle resource: retain it only under the subject's ownership,
+        // compress to the policy budget, and let the lifecycle enforce retention/expiration rather
+        // than allowing an implicit transcript to grow with the number of requests.
+        let context_id =
+            self.context_lifecycle
+                .retain(&intent.subject, aictx, crate::domain::now());
+        let ctx = context_id
+            .and_then(|id| {
+                self.context_lifecycle
+                    .get(&intent.subject, id, crate::domain::now())
+            })
+            .expect("context lifecycle must return a just-retained resource");
+        trace.context_provenance = ctx.provenance();
         // Compact, budgeted rendering handed to the model (never a raw store dump).
-        let ctx_brief = aictx.render(crate::ai::context::ContextBudget::small().max_chars);
+        let ctx_brief = ctx.render(crate::ai::context::ContextBudget::small().max_chars);
 
         // Interpretation — the ONLY probabilistic stage. Model-unhealthy → deterministic fallback.
         // Model-healthy-but-errored → this request fails (no silent fallback); state stays intact.
@@ -1731,7 +1748,31 @@ impl SysCore {
             "world.traverse" => {
                 let from = arg_str(a, "from")?;
                 let edge = arg_str(a, "edge")?;
-                let ids = worldmodel::traverse(&self.store, &from, &edge, Dir::Incoming, 8);
+                let ids = worldmodel::traverse_filtered(
+                    &self.store,
+                    &from,
+                    &edge,
+                    Dir::Incoming,
+                    8,
+                    |id| {
+                        self.store
+                            .get_entity(id)
+                            .map(|e| {
+                                matches!(
+                                    self.caps.evaluate(
+                                        "entity.read",
+                                        &Target {
+                                            id: Some(id.clone()),
+                                            etype: Some(e.etype),
+                                        },
+                                        offered,
+                                    ),
+                                    Decision::Allow
+                                )
+                            })
+                            .unwrap_or(false)
+                    },
+                );
                 for id in &ids {
                     self.store
                         .get_entity(id)

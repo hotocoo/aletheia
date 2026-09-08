@@ -518,6 +518,8 @@ The System Core runs on the dev host behind the same Service API / IPC boundary 
 cd aletheia
 cargo run                        # aletheiad demo: runs UC-001..004 as a CLIENT over the service boundary
 cargo run -- serve               # long-running Core Alpha behind the Unix-socket IPC boundary
+cargo run -- gui                 # hosted Experience GUI at http://127.0.0.1:8787
+cargo run -- gui --bind 127.0.0.1:9000  # choose another loopback port
 
 cargo run -- model list          # what this machine actually has; * marks the running selection
 cargo run -- model use lfm2.5    # switch (unique prefix is enough); persisted under $HOME/.aletheia
@@ -525,6 +527,11 @@ cargo run -- model status        # confirms the backend is serving the model you
 cargo run -- model bench         # every registered operation through the real model; non-zero on any failure
 MODEL_ENDPOINT=http://127.0.0.1:8099 cargo run   # provider healthy → the model interprets intents
 ```
+
+The hosted GUI is the M1 Experience Surface: system overview, semantic world-model search,
+capability inspection, approvals, immutable audit events, and full action-trace explainability.
+Every API operation remains inside `CoreService`; world/capability reads are capability-gated and
+bearer tokens are never rendered in the capability view. The GUI binds to loopback only.
 
 With no model available at all the **deterministic interpreter** takes over and the OS stays fully
 functional — nothing above requires a resident model.

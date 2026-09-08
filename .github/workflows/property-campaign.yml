@@ -1,0 +1,26 @@
+name: aletheia-property-nightly
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  property-nightly:
+    name: Nightly large deterministic property campaign (512 cases)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run 512-case campaign with captured seed and minimized failures
+        env:
+          ALETHEIA_PROPERTY_CASES: '512'
+          ALETHEIA_PROPERTY_SEED: 'a1e702105eed'
+        run: ./scripts/property-campaign.sh
+      - name: Retain campaign evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: property-campaign-nightly
+          path: build/property-campaign/
+          retention-days: 14

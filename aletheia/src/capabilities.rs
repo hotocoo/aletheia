@@ -94,6 +94,27 @@ impl CapEngine {
         self.registry.insert(cap.token.clone(), cap);
     }
 
+    /// Snapshot active capabilities for the human control surface. Tokens are intentionally
+    /// omitted: the GUI may inspect authority metadata, but it must never expose bearer secrets.
+    pub fn inspect(&self) -> Vec<serde_json::Value> {
+        let mut out = Vec::with_capacity(self.registry.len());
+        for cap in self.registry.values() {
+            out.push(serde_json::json!({
+                "subject": cap.subject,
+                "action": cap.action,
+                "scope": cap.scope,
+                "constraints": cap.constraints,
+                "parent": cap.parent,
+                "revoked": self.revoked.contains(&cap.token),
+            }));
+        }
+        out.sort_by(|a, b| {
+            a["subject"].as_str().unwrap_or("").cmp(b["subject"].as_str().unwrap_or(""))
+                .then_with(|| a["action"].as_str().unwrap_or("").cmp(b["action"].as_str().unwrap_or("")))
+        });
+        out
+    }
+
     pub fn mark_revoked(&mut self, token: &str) {
         self.revoke(token);
     }

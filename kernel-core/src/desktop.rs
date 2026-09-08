@@ -122,8 +122,8 @@ const MON_ROWS: u32 = 6;
 const MON_X: i32 = 20;
 const MON_Y: i32 = 140;
 const MON_TITLE: &[u8] = b"monitor";
-const HELP_COLS: u32 = 50;
-const HELP_ROWS: u32 = 8;
+const HELP_COLS: u32 = 54;
+const HELP_ROWS: u32 = 18;
 const HELP_X: i32 = 95;
 const HELP_Y: i32 = 30;
 const HELP_TITLE: &[u8] = b"shortcuts";
@@ -591,23 +591,33 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let tok_help = wm
             .open(&mut comp, HELP, hw, hh, HELP_X, HELP_Y)
             .map_err(|_| "the shortcuts window was refused")?;
-        help.write(b"F1        toggle this help\n");
-        help.write(b"Alt+Tab   cycle focus\n");
-        help.write(b"Alt+F4    close focused window\n");
-        help.write(b"Alt+F9    minimize focused window\n");
-        help.write(b"Alt+F10   maximize/restore focused\n");
-        help.write(b"Alt+1/2/3 open/focus terminal/monitor/help\n");
-        help.write(b"Ctrl+Tab  cycle focus\n");
-        help.write(b"Ctrl+Alt+Arrows  snap focused window\n");
-        help.write(b"Ctrl+Alt+Shift+Arrows  nudge window\n");
-        help.write(b"Ctrl+Alt+T/C  tile/cascade windows\n");
-        help.write(b"Ctrl+Alt+R  keyboard resize mode\n");
-        help.write(b"Ctrl+Alt+Enter/M/Backspace  max/min/close\n");
-        help.write(b"Shift+F10  context menu\n");
-        help.write(b"Alt+Tab    show window switcher\n");
-        help.write(b"F6/Arrows/Tab  keyboard taskbar navigation\n");
-        help.write(b"Space/Enter  activate taskbar selection\n");
-        help.write(b"1-9  select a start-menu command\n");
+        // Keep the reference as explicit rows so the help surface cannot silently clip newly
+        // added shortcuts. The grid is sized to fit this complete reference on the 640x240
+        // desktop while leaving the taskbar unobstructed.
+        const HELP_LINES: [&[u8]; HELP_ROWS as usize] = [
+            b"F1        toggle this help",
+            b"Alt+Tab   cycle focus",
+            b"Alt+F4    close focused window",
+            b"Alt+F9    minimize focused window",
+            b"Alt+F10   maximize/restore focused",
+            b"Alt+1/2/3 open/focus terminal/monitor/help",
+            b"Ctrl+Tab  cycle focus",
+            b"Ctrl+Alt+Arrows  snap focused window",
+            b"Ctrl+Alt+Shift+Arrows  nudge window",
+            b"Ctrl+Alt+T/C  tile/cascade windows",
+            b"Ctrl+Alt+R  keyboard resize mode",
+            b"Ctrl+Alt+Enter/M/Backspace  max/min/close",
+            b"Shift+F10  context menu",
+            b"Alt+Tab    show window switcher",
+            b"F6/Arrows/Tab  keyboard taskbar navigation",
+            b"Space/Enter  activate taskbar selection",
+            b"1-9  select a start-menu command",
+            b"",
+        ];
+        for line in HELP_LINES {
+            help.write(line);
+            help.put(b'\n');
+        }
         let mut help_packed = Vec::new();
         help.render_packed(HELP_TITLE, &mut help_packed);
         comp.fill_packed(HELP, tok_help, &help_packed)
@@ -2021,6 +2031,34 @@ mod tests {
     };
 
     #[test]
+    fn help_reference_has_one_row_per_documented_shortcut_and_fits_surface() {
+        const HELP_LINES: [&[u8]; super::HELP_ROWS as usize] = [
+            b"F1        toggle this help",
+            b"Alt+Tab   cycle focus",
+            b"Alt+F4    close focused window",
+            b"Alt+F9    minimize focused window",
+            b"Alt+F10   maximize/restore focused",
+            b"Alt+1/2/3 open/focus terminal/monitor/help",
+            b"Ctrl+Tab  cycle focus",
+            b"Ctrl+Alt+Arrows  snap focused window",
+            b"Ctrl+Alt+Shift+Arrows  nudge window",
+            b"Ctrl+Alt+T/C  tile/cascade windows",
+            b"Ctrl+Alt+R  keyboard resize mode",
+            b"Ctrl+Alt+Enter/M/Backspace  max/min/close",
+            b"Shift+F10  context menu",
+            b"Alt+Tab    show window switcher",
+            b"F6/Arrows/Tab  keyboard taskbar navigation",
+            b"Space/Enter  activate taskbar selection",
+            b"1-9  select a start-menu command",
+            b"",
+        ];
+        assert_eq!(HELP_LINES.len(), super::HELP_ROWS as usize);
+        assert!(HELP_LINES.iter().all(|line| line.len() <= super::HELP_COLS as usize));
+        let (w, h) = crate::textgrid::TextGrid::new(super::HELP_COLS, super::HELP_ROWS).pixel_size();
+        assert!(super::HELP_X + w as i32 <= super::W as i32);
+        assert!(super::HELP_Y + (h as i32) < super::H as i32);
+    }
+
     fn alt_number_launchers_select_the_taskbar_windows() {
         assert_eq!(alt_window_launcher(2, 1, true), Some(super::WINDOW));
         assert_eq!(alt_window_launcher(3, 1, true), Some(super::MONITOR));

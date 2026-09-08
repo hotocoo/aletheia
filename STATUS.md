@@ -1,6 +1,14 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-03, latest (THE CONSOLE SESSION THAT NEVER GROWS — the fourth hot path measured and
+**As of:** 2026-09-08, latest (REPRODUCIBLE RELEASE ARTIFACTS — qemu-img's random VMDK `CID` is now
+normalized from the exact raw image payload, ZIP entries use fixed metadata and sorted paths, and
+`scripts/reproducible-release.sh` builds the release twice and requires byte-identical ZIP bytes plus
+matching digest metadata; CI runs the gate on every push while the normal release path still boots
+its packaged VMDKs before publication, ADR-090; PROPERTY CAMPAIGNS — `scripts/property-campaign.sh`
+runs 64 deterministic generated load shapes on every push/PR, captures the seed and failure log,
+shrinks failing shapes, and a scheduled workflow runs 512 nightly with retained artifacts; before that:
+THE CONSOLE SESSION THAT NEVER GROWS — the
+fourth hot path measured and
 the only one a human drives: ~453 bytes per command, closed to ZERO by a fixed stack `LineBuf` behind
 `outf!` at all fifty formatting sites, a reused history buffer, streamed `ls`/`find`, an
 allocation-free `CapEngine::allows`, and in-place wildcard matching in `action_covers` — that last one
@@ -814,3 +822,9 @@ packaged and BOOTED from their own VMDKs on every push; on every `vX.Y.Z` tag
 docs/RELEASING.md), and the four VM gates — scripts/vm-e2e.sh (aarch64),
 scripts/vm-e2e-riscv.sh (RISC-V), scripts/vm-e2e-x86.sh (x86-64 under OVMF) and
 scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung).
+
+
+### 2026-09-08 — Security threat-model maintenance
+
+- ALET-P2-029/030/031 resolved by ADR-091: `docs/THREAT-MODEL.md` inventories 13 security boundaries and explicitly separates unauthorized effects from denial of service.
+- `scripts/check-threat-model.sh` is CI-enforced and validates the inventory sections, unique boundary IDs, and referenced evidence paths.

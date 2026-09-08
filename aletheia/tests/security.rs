@@ -119,6 +119,65 @@ fn scope_confinement() {
 }
 
 #[test]
+fn relationship_traversal_cannot_reveal_an_unauthorized_neighbor() {
+    let mut core = SysCore::open(dir(), det()).unwrap();
+    let owner_caps = owner(&mut core);
+    let source = core
+        .create_entity(
+            &owner_caps,
+            "human:owner",
+            EntityType::Document,
+            b"source",
+            serde_json::json!({}),
+        )
+        .unwrap();
+
+    let derived = core.handle_intent(
+        &owner_caps,
+        Intent {
+            subject: "human:owner".into(),
+            verb: Verb::Derive {
+                source: source.id.clone(),
+                into_type: EntityType::Document,
+                content: "derived".into(),
+            },
+        },
+        false,
+    );
+    assert!(derived.ok, "owner can establish the graph edge");
+
+    // Give the attacker read authority over the source only. The derived neighbour is deliberately
+    // outside its scope, so traversal must not expose it or cross through it as a hidden bridge.
+    let read_source = core
+        .grant_to(
+            &owner_caps,
+            "agent:attacker",
+            "entity.read",
+            Scope::Entities(vec![source.id.clone()]),
+            Constraints::none(),
+        )
+        .unwrap();
+    let tr = core.handle_intent(
+        &[read_source.token],
+        Intent {
+            subject: "agent:attacker".into(),
+            verb: Verb::Traverse {
+                from: source.id,
+                edge: "derived_from".into(),
+            },
+        },
+        false,
+    );
+    assert!(tr.ok, "authorized origin may traverse");
+    let results = tr.result[0]["results"].as_array().unwrap();
+    let derived_id = derived.result[0]["derived_id"].as_str().unwrap();
+    assert!(
+        !results.iter().any(|v| v.as_str() == Some(derived_id)),
+        "traversal must not reveal an unauthorized neighbor"
+    );
+}
+
+#[test]
 fn agent_cannot_self_escalate() {
     let mut core = SysCore::open(dir(), det()).unwrap();
     let t = owner(&mut core);

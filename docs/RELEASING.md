@@ -37,6 +37,12 @@ with the disk, name and serial-log fields set for the package.
    `--version dev` on every push, so the packaging path is gated like every other gate script
    (`scripts/check-ci-parity.sh` refuses a script CI does not run).
 
+4. The `reproducible-release` CI job runs `scripts/reproducible-release.sh`, which builds the same
+   package twice from the same checkout and requires byte-identical ZIPs. The packager first
+   normalizes qemu-img's generated VMDK `CID` from the raw image payload and creates the ZIP with
+   fixed timestamps, normalized permissions and sorted entries. This proves reproducibility of the
+   complete VMware artifact rather than inferring it from the raw image builder alone.
+
 ## Cutting a stable version
 
 ```bash

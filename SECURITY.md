@@ -37,6 +37,12 @@ Report privately (see below) if you find any of these:
 We aim to acknowledge a report within a few days and to fix confirmed issues on `main` before public
 disclosure. Please give us reasonable time to remediate before disclosing.
 
+## Threat model and boundaries
+
+The maintained adversary assumptions and security-boundary inventory live in `docs/THREAT-MODEL.md`
+and are checked by `scripts/check-threat-model.sh` in CI. The inventory distinguishes unauthorized
+effects from denial of service; neither class is treated as evidence for the other.
+
 ## Scope notes
 
 - Findings must be reproducible against `main` (a hosted `cargo test` case or a VM boot gate is ideal).

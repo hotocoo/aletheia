@@ -254,7 +254,9 @@ rule of kernel CI, not a local convention.
 SBOM derived from `cargo metadata` (timestamp-free, so an unchanged lockfile yields a byte-identical
 file), `cargo audit` that *runs* rather than silently skips, and a permissive-license allow-list are
 the minimum. Aletheia has all five (ALET-P2-002/004/005). Reproducible builds as a *release* property
-(ALET-P2-006) remain open, and are harder than they look on a nightly toolchain.
+(ALET-P2-006) were subsequently closed by the reproducible-release gate (ADR-090); the larger
+property campaign (ALET-P2-010) is likewise now gated in CI and nightly, with deterministic seed
+capture and minimized failure artifacts.
 
 ---
 
