@@ -35,7 +35,7 @@ use crate::textgrid::TextGrid;
 use crate::vinput::{self, Button, ConfigWrite, KeyDecoder, PointerDecoder, VirtioInput};
 use crate::virtioblk::{Transport, VirtioHal};
 use crate::virtiogpu::{self, Rect as GpuRect, VirtioGpu};
-use crate::wm::{NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager};
+use crate::wm::{NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager, MAX_WORKSPACES};
 
 /// Linux keycode constants used by the desktop-level keyboard shortcuts. Plain Tab remains a
 /// terminal/editor byte; Ctrl+Tab is consumed here before it can reach the focused application.
@@ -65,6 +65,7 @@ const KEY_F10: u16 = 68;
 const KEY_1: u16 = 2;
 const KEY_2: u16 = 3;
 const KEY_3: u16 = 4;
+const KEY_4: u16 = 5;
 /// Linux keycodes for the four cursor directions, reserved with Ctrl+Alt for focused-window snap.
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -166,6 +167,22 @@ fn alt_window_launcher(code: u16, value: u32, alt: bool) -> Option<u32> {
     }
 }
 
+/// Ctrl+Alt+number selects a workspace; adding Shift moves the focused window there. Plain
+/// Alt+number remains the taskbar launcher, preserving the existing desktop shortcut contract.
+fn workspace_shortcut(code: u16, value: u32, ctrl: bool, alt: bool, shift: bool) -> Option<(u8, bool)> {
+    if !ctrl || !alt || value != 1 {
+        return None;
+    }
+    let workspace = match code {
+        KEY_1 => 1,
+        KEY_2 => 2,
+        KEY_3 => 3,
+        KEY_4 => 4,
+        _ => return None,
+    };
+    Some((workspace, shift))
+}
+
 /// Every number the monitor window prints. Compared whole, so "nothing changed" is a fact about
 /// the panel's contents rather than about a hash of them (ADR-084).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -191,6 +208,7 @@ struct TaskbarFacts {
     focus: u32,
     keyboard_resize: bool,
     uptime_s: u64,
+    workspace: u8,
 }
 
 /// The machine's live desktop: its devices, its decoders, its compositor and input session, its
@@ -638,6 +656,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 let hz = H::timer_freq_hz();
                 if hz == 0 { 0 } else { H::timer_ticks() / hz }
             },
+            workspace: self.wm.current_workspace(),
         };
         if sig == self.taskbar_sig {
             return;
@@ -649,7 +668,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let help_focus = sig.focus == HELP;
         let _ = write!(
             self.taskbar,
-            "[menu] {}terminal {}   {}monitor {}   {}help {}   {}   up {}s",
+            "[menu] {}terminal {}   {}monitor {}   {}help {}   ws {}/{}   {}   up {}s",
             if terminal_focus { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
                 if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
@@ -668,6 +687,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             } else {
                 "[closed]"
             },
+            sig.workspace,
+            MAX_WORKSPACES,
             if sig.keyboard_resize { "[resize-mode]" } else { "[normal]" },
             sig.uptime_s,
         );
@@ -692,6 +713,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         if !self.wm.is_open(target) {
             self.reopen_taskbar_window(target);
             return true;
+        }
+        if let Some(workspace) = self.wm.workspace_of(target) {
+            if workspace != self.wm.current_workspace() {
+                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+            }
         }
         match self.wm.is_minimized(&self.comp, target) {
             Some(true) => { let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target); }
@@ -884,6 +910,16 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     fn focus_or_restore_window(&mut self, id: u32) {
         if !self.wm.is_open(id) {
             self.reopen_taskbar_window(id);
+        } else if let Some(workspace) = self.wm.workspace_of(id) {
+            if workspace != self.wm.current_workspace() {
+                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+            }
+            if self.wm.is_minimized(&self.comp, id) == Some(true) {
+                let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
+            } else if let Some(tok) = self.wm.token(id) {
+                let _ = self.comp.raise(id, tok);
+                let _ = self.comp.set_focus(self.sess, id);
+            }
         } else if self.wm.is_minimized(&self.comp, id) == Some(true) {
             let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
         } else if let Some(tok) = self.wm.token(id) {
@@ -1205,6 +1241,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else {
                         None
                     };
+                    let workspace_key = if ev.ty == vinput::EV_KEY {
+                        workspace_shortcut(ev.code, ev.value, ctrl, alt, shift)
+                    } else {
+                        None
+                    };
                     let resize_toggle = ev.ty == vinput::EV_KEY
                         && ev.code == KEY_R
                         && ev.value == 1
@@ -1323,10 +1364,37 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else if menu_activate {
                         self.activate_menu_selection();
                         let _ = self.kb_dec.feed(ev);
+                    } else if let Some((workspace, move_focused)) = workspace_key {
+                        if move_focused {
+                            let _ = self.wm.move_focused_to_workspace(
+                                &mut self.comp,
+                                self.sess,
+                                workspace,
+                            );
+                        } else {
+                            let _ = self.wm.switch_workspace(
+                                &mut self.comp,
+                                self.sess,
+                                workspace,
+                            );
+                        }
+                        self.sync_terminal_geometry();
+                        self.refresh_cursor_shape();
+                        // Workspace shortcuts are desktop commands, never application input.
+                        let _ = self.kb_dec.feed(ev);
                     } else if let Some(id) = alt_launcher {
                         if !self.wm.is_open(id) {
                             self.reopen_taskbar_window(id);
                         } else {
+                            if let Some(workspace) = self.wm.workspace_of(id) {
+                                if workspace != self.wm.current_workspace() {
+                                    let _ = self.wm.switch_workspace(
+                                        &mut self.comp,
+                                        self.sess,
+                                        workspace,
+                                    );
+                                }
+                            }
                             match self.wm.is_minimized(&self.comp, id) {
                                 Some(true) => {
                                     let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
@@ -1527,6 +1595,7 @@ mod tests {
     use super::{
         alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
         is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_target,
+        workspace_shortcut,
     };
 
     #[test]
@@ -1537,6 +1606,15 @@ mod tests {
         assert_eq!(alt_window_launcher(2, 0, true), None);
         assert_eq!(alt_window_launcher(2, 1, false), None);
         assert_eq!(alt_window_launcher(5, 1, true), None);
+    }
+
+    #[test]
+    fn ctrl_alt_numbers_select_workspaces_and_shift_moves_the_focused_window() {
+        assert_eq!(workspace_shortcut(3, 1, true, true, false), Some((2, false)));
+        assert_eq!(workspace_shortcut(5, 1, true, true, false), Some((4, false)));
+        assert_eq!(workspace_shortcut(4, 1, true, true, true), Some((3, true)));
+        assert_eq!(workspace_shortcut(3, 1, false, true, false), None);
+        assert_eq!(workspace_shortcut(3, 0, true, true, false), None);
     }
 
     #[test]

@@ -36,6 +36,9 @@ use crate::textgrid::{
 /// Windows one manager tracks. Bounded for the never-freeing boot heap (ADR-063), and under
 /// the compositor's own surface ceiling so the wallpaper and any suite surface still fit.
 pub const MAX_WINDOWS: usize = 8;
+/// Independent desktop workspaces. The window manager owns the mapping; a hidden workspace is
+/// presentation state, not a second focus authority.
+pub const MAX_WORKSPACES: u8 = 4;
 /// Pointer distance from a scanout edge that activates drag-to-snap on release.
 /// A forgiving band makes snapping practical at normal pointer speed without requiring a
 /// pixel-perfect release. The value is intentionally fixed so the gesture stays deterministic.
@@ -165,12 +168,15 @@ struct Window {
     height: u32,
     /// Geometry saved by the maximize toggle. `None` means the window is not maximized.
     restore: Option<(i32, i32, u32, u32)>,
+    workspace: u8,
+    minimized: bool,
 }
 
 /// The window manager: the set of open windows, the drag in flight, and the ledger.
 #[derive(Debug, Default)]
 pub struct WindowManager {
     wins: Vec<Window>,
+    current_workspace: u8,
     /// The window being dragged and the pointer's offset from its top-left at the press.
     drag: Option<(u32, i32, i32, DragKind)>,
     /// Geometry at the start of the current move drag, used as the restore target if that drag
@@ -226,6 +232,7 @@ impl WindowManager {
     pub fn new() -> Self {
         WindowManager {
             wins: Vec::new(),
+            current_workspace: 1,
             drag: None,
             drag_restore: None,
             opens: 0,
@@ -272,6 +279,8 @@ impl WindowManager {
             width,
             height,
             restore: None,
+            workspace: self.current_workspace,
+            minimized: false,
         });
         self.opens += 1;
         Ok(token)
@@ -319,8 +328,82 @@ impl WindowManager {
     /// Whether a managed window is currently presented. A minimized window keeps its token,
     /// surface, queue and geometry alive; only presentation and pointer eligibility change.
     pub fn is_minimized(&self, comp: &Compositor, id: u32) -> Option<bool> {
-        self.wins.iter().find(|w| w.id == id)?;
+        let w = self.wins.iter().find(|w| w.id == id)?;
+        if w.workspace != self.current_workspace {
+            return Some(false);
+        }
         comp.is_visible(id).map(|visible| !visible)
+    }
+
+    /// The active desktop workspace, numbered from one for the user-facing shortcuts.
+    pub fn current_workspace(&self) -> u8 {
+        self.current_workspace
+    }
+
+    /// Return the workspace assigned to a managed window.
+    pub fn workspace_of(&self, id: u32) -> Option<u8> {
+        self.wins.iter().find(|w| w.id == id).map(|w| w.workspace)
+    }
+
+    /// Switch the presentation to another workspace. Windows keep their tokens, queues and
+    /// geometry; only visibility changes. Minimized windows remain hidden when their workspace
+    /// becomes active, so workspace switching cannot accidentally restore them.
+    pub fn switch_workspace(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+        workspace: u8,
+    ) -> Result<bool, WmFault> {
+        if !(1..=MAX_WORKSPACES).contains(&workspace) {
+            self.refusals += 1;
+            return Err(WmFault::UnknownWindow(workspace as u32));
+        }
+        if workspace == self.current_workspace {
+            return Ok(false);
+        }
+        self.current_workspace = workspace;
+        for w in self.wins.iter().copied() {
+            comp.set_visible(
+                w.id,
+                w.token,
+                w.workspace == workspace && !w.minimized,
+            )?;
+        }
+        let _ = comp.clear_focus(session);
+        self.focus_topmost_visible(comp, session)?;
+        self.drag = None;
+        self.drag_restore = None;
+        Ok(true)
+    }
+
+    /// Move the focused window to another workspace and reveal that workspace's next target if
+    /// necessary. The operation is manager-owned and allocation-free after the initial window
+    /// open, so moving windows cannot create an unbounded presentation path.
+    pub fn move_focused_to_workspace(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+        workspace: u8,
+    ) -> Result<Option<u32>, WmFault> {
+        if !(1..=MAX_WORKSPACES).contains(&workspace) {
+            self.refusals += 1;
+            return Err(WmFault::UnknownWindow(workspace as u32));
+        }
+        let Some(id) = comp.focus() else { return Ok(None) };
+        let pos = self.wins.iter().position(|w| w.id == id).ok_or_else(|| {
+            self.refusals += 1;
+            WmFault::UnknownWindow(id)
+        })?;
+        if self.wins[pos].workspace == workspace {
+            return Ok(Some(id));
+        }
+        self.wins[pos].workspace = workspace;
+        self.wins[pos].minimized = false;
+        let token = self.wins[pos].token;
+        comp.set_visible(id, token, false)?;
+        let _ = comp.clear_focus(session);
+        self.focus_topmost_visible(comp, session)?;
+        Ok(Some(id))
     }
 
     /// Minimize or restore a managed window without destroying its lifecycle state.
@@ -339,11 +422,16 @@ impl WindowManager {
                 self.refusals += 1;
                 WmFault::UnknownWindow(id)
             })?;
-        let was_minimized = comp
-            .is_visible(id)
-            .ok_or(WmFault::UnknownWindow(id))
-            .map(|v| !v)?;
+        if w.workspace != self.current_workspace {
+            return Ok(false);
+        }
+        let was_minimized = w.minimized;
         comp.set_visible(id, w.token, was_minimized)?;
+        self.wins
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .expect("window position checked above")
+            .minimized = !was_minimized;
         if was_minimized {
             comp.raise(id, w.token)?;
             comp.set_focus(session, id)?;
@@ -995,14 +1083,19 @@ impl WindowManager {
         comp: &mut Compositor,
         session: u64,
     ) -> Result<bool, WmFault> {
-        let any_visible = self
-            .wins
-            .iter()
-            .any(|w| comp.is_visible(w.id) == Some(true));
+        let any_visible = self.wins.iter().any(|w| {
+            w.workspace == self.current_workspace && comp.is_visible(w.id) == Some(true)
+        });
         for i in 0..self.wins.len() {
             let (id, token) = (self.wins[i].id, self.wins[i].token);
-            if comp.is_visible(id) == Some(any_visible) {
-                comp.set_visible(id, token, !any_visible)?;
+            if self.wins[i].workspace == self.current_workspace {
+                if any_visible {
+                    if !self.wins[i].minimized {
+                        comp.set_visible(id, token, false)?;
+                    }
+                } else if !self.wins[i].minimized {
+                    comp.set_visible(id, token, true)?;
+                }
             }
         }
         if any_visible {

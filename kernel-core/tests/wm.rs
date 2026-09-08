@@ -8,7 +8,7 @@ use kernel_core::compositor::{CompFault, Compositor, EventKind};
 use kernel_core::textgrid::{CLOSE_W, TITLE_H};
 use kernel_core::wm::{
     hit_at, wm_suite, Hit, NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager, WmFault,
-    MAX_WINDOWS,
+    MAX_WINDOWS, MAX_WORKSPACES,
 };
 
 fn desk() -> (Compositor, WindowManager, u64) {
@@ -57,6 +57,51 @@ fn show_desktop_hides_and_restores_the_managed_set() {
         .unwrap()
         .iter()
         .any(|e| e.kind == EventKind::Key(b'x')));
+}
+
+#[test]
+fn workspaces_isolate_visibility_and_preserve_window_lifecycle() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(wm.current_workspace(), 1);
+    assert_eq!(wm.workspace_of(1), Some(1));
+    assert_eq!(wm.workspace_of(2), Some(1));
+
+    comp.set_focus(sess, 2).unwrap();
+    wm.move_focused_to_workspace(&mut comp, sess, 2).unwrap();
+    assert_eq!(wm.workspace_of(2), Some(2));
+    assert_eq!(comp.is_visible(2), Some(false));
+    assert_eq!(comp.focus(), Some(1));
+
+    assert_eq!(wm.switch_workspace(&mut comp, sess, 2), Ok(true));
+    assert_eq!(wm.current_workspace(), 2);
+    assert_eq!(comp.is_visible(1), Some(false));
+    assert_eq!(comp.is_visible(2), Some(true));
+    assert_eq!(comp.focus(), Some(2));
+
+    let token = wm.token(2).unwrap();
+    assert_eq!(wm.toggle_minimize(&mut comp, sess, 2), Ok(true));
+    assert_eq!(wm.is_minimized(&comp, 2), Some(true));
+    assert_eq!(comp.is_visible(2), Some(false));
+    assert_eq!(wm.switch_workspace(&mut comp, sess, 1), Ok(true));
+    assert_eq!(comp.is_visible(1), Some(true));
+    assert_eq!(comp.is_visible(2), Some(false));
+    assert_eq!(wm.switch_workspace(&mut comp, sess, 2), Ok(true));
+    assert_eq!(comp.is_visible(2), Some(false));
+    assert_eq!(wm.toggle_minimize(&mut comp, sess, 2), Ok(false));
+    assert_eq!(wm.is_minimized(&comp, 2), Some(false));
+    assert_eq!(comp.is_visible(2), Some(true));
+    let events = comp.drain_input(2, token).unwrap();
+    assert!(events.iter().all(|event| event.kind == EventKind::FocusLost));
+}
+
+#[test]
+fn workspace_switch_rejects_invalid_numbers_without_changing_state() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(wm.switch_workspace(&mut comp, sess, 0), Err(WmFault::UnknownWindow(0)));
+    assert_eq!(wm.switch_workspace(&mut comp, sess, MAX_WORKSPACES + 1), Err(WmFault::UnknownWindow((MAX_WORKSPACES + 1) as u32)));
+    assert_eq!(wm.current_workspace(), 1);
+    assert_eq!(comp.is_visible(1), Some(true));
+    assert_eq!(comp.is_visible(2), Some(true));
 }
 
 #[test]
