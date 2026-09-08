@@ -29,6 +29,7 @@ use core::fmt::Write as _;
 
 use crate::compositor::{Compositor, CursorShape, EventKind, Rect};
 use crate::fbcon::{ComposeSink, Surface};
+use crate::Hal;
 use crate::shell::InputFacts;
 use crate::textgrid::TextGrid;
 use crate::vinput::{self, Button, ConfigWrite, KeyDecoder, PointerDecoder, VirtioInput};
@@ -122,6 +123,7 @@ struct TaskbarFacts {
     terminal: u8,
     monitor: u8,
     focus: u32,
+    uptime_s: u64,
 }
 
 /// The machine's live desktop: its devices, its decoders, its compositor and input session, its
@@ -154,7 +156,7 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     pointer: (u32, u32),
 }
 
-impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
+impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
     /// managed windows, focus the terminal, place the cursor, and hand the first frame to the
@@ -395,6 +397,10 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
             terminal: state(WINDOW),
             monitor: state(MONITOR),
             focus: self.comp.focus().unwrap_or(0),
+            uptime_s: {
+                let hz = H::timer_freq_hz();
+                if hz == 0 { 0 } else { H::timer_ticks() / hz }
+            },
         };
         if sig == self.taskbar_sig {
             return;
@@ -405,7 +411,7 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         let monitor_focus = sig.focus == MONITOR;
         let _ = write!(
             self.taskbar,
-            "{}terminal {}   {}monitor {}",
+            "{}terminal {}   {}monitor {}   up {}s",
             if terminal_focus { ">" } else { " " },
             if self.wm.is_open(WINDOW) {
                 if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
@@ -417,7 +423,8 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                 if self.wm.is_minimized(&self.comp, MONITOR) == Some(true) { "[hidden]" } else { "[open]" }
             } else {
                 "[closed]"
-            }
+            },
+            sig.uptime_s,
         );
         self.taskbar.render_packed(b"desktop", &mut self.taskbar_packed);
         let _ = self.comp.fill_packed(TASKBAR, self.taskbar_token, &self.taskbar_packed);
