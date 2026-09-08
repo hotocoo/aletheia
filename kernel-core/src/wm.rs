@@ -698,7 +698,9 @@ impl WindowManager {
                 let _ = comp.raise(id, w.token);
                 let _ = comp.set_focus(session, id);
                 self.drag = Some((id, lx, ly, DragKind::Resize(edge)));
-                self.drag_restore = None;
+                self.drag_restore = comp.placement(id).map(|(x, y)| {
+                    (id, (x, y, w.width, w.height))
+                });
                 Press::Resizing(id)
             }
             Some(Hit::Client) => {
@@ -787,6 +789,30 @@ impl WindowManager {
         let (id, _, _, _) = self.drag.take()?;
         self.drag_restore = None;
         self.drags += 1;
+        Some(id)
+    }
+
+    /// Cancel the active pointer move/resize and restore the exact geometry captured at press.
+    /// Escape is a presentation/input gesture, so cancellation never changes focus or z-order
+    /// and never destroys the window. A drag that has already ended is a no-op.
+    pub fn cancel_drag(&mut self, comp: &mut Compositor) -> Option<u32> {
+        let (id, _, _, kind) = self.drag.take()?;
+        let restore = self.drag_restore.take();
+        if let Some((restore_id, (x, y, width, height))) = restore.filter(|(rid, _)| *rid == id) {
+            if let Some(w) = self.wins.iter_mut().find(|w| w.id == restore_id) {
+                if comp.resize_surface(id, w.token, width, height).is_ok() {
+                    let _ = comp.move_surface(id, w.token, x, y);
+                    w.width = width;
+                    w.height = height;
+                    // A cancelled MOVE must preserve an existing maximize/snap restore point;
+                    // a cancelled RESIZE returns to the pre-resize geometry and therefore is
+                    // again an ordinary window.
+                    if matches!(kind, DragKind::Resize(_)) {
+                        w.restore = None;
+                    }
+                }
+            }
+        }
         Some(id)
     }
 

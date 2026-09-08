@@ -887,6 +887,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.ty == vinput::EV_KEY
                         && ev.value == 1
                         && (ev.code == KEY_ESC || ev.code == KEY_ENTER);
+                    let cancel_pointer_drag = ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_ESC
+                        && ev.value == 1
+                        && self.wm.dragging().is_some();
                     let help_toggle =
                         ev.ty == vinput::EV_KEY && ev.code == KEY_F1 && ev.value == 1;
                     let keyboard_nudge = if ev.ty == vinput::EV_KEY
@@ -967,6 +971,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.kb_dec.feed(ev);
                     } else if resize_toggle {
                         self.keyboard_resize = !self.keyboard_resize;
+                        self.refresh_cursor_shape();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if cancel_pointer_drag {
+                        let cancelled = self.wm.cancel_drag(&mut self.comp);
+                        if cancelled == Some(WINDOW) {
+                            self.sync_terminal_geometry();
+                        }
                         self.refresh_cursor_shape();
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(direction) = resize_direction {

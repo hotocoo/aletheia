@@ -64,6 +64,51 @@ fn a_drag_that_would_leave_the_scanout_is_refused_and_the_window_stays() {
 }
 
 #[test]
+fn escape_cancels_move_and_restores_the_press_geometry() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));
+    assert_eq!(wm.motion(&mut comp, 140, 90), Some(2));
+    assert_ne!(comp.placement(2), Some((40, 20)));
+    assert_eq!(wm.cancel_drag(&mut comp), Some(2));
+    assert_eq!(wm.dragging(), None);
+    assert_eq!(comp.placement(2), Some((40, 20)));
+    assert_eq!(comp.surface_size(2), Some((80, 60)));
+}
+
+#[test]
+fn escape_cancels_resize_and_restores_the_press_geometry() {
+    let (mut comp, mut wm, sess) = desk();
+    // Bottom-right resize grip of window 2.
+    assert_eq!(wm.press(&mut comp, sess, 119, 79), Press::Resizing(2));
+    assert_eq!(wm.motion(&mut comp, 170, 110), Some(2));
+    assert_ne!(comp.surface_size(2), Some((80, 60)));
+    assert_eq!(wm.cancel_drag(&mut comp), Some(2));
+    assert_eq!(wm.dragging(), None);
+    assert_eq!(comp.placement(2), Some((40, 20)));
+    assert_eq!(comp.surface_size(2), Some((80, 60)));
+}
+
+#[test]
+fn escape_cancel_of_a_maximized_move_preserves_maximize_state() {
+    let (mut comp, mut wm, sess) = desk();
+    wm.toggle_maximize(&mut comp, sess, 2).unwrap();
+    assert_eq!(wm.is_maximized(2), Some(true));
+    assert_eq!(wm.press(&mut comp, sess, 20, 2), Press::Dragging(2));
+    assert_eq!(wm.motion(&mut comp, 80, 30), Some(2));
+    assert_eq!(wm.cancel_drag(&mut comp), Some(2));
+    assert_eq!(comp.placement(2), Some((0, 0)));
+    assert_eq!(comp.surface_size(2), Some((200, 120)));
+    assert_eq!(wm.is_maximized(2), Some(true));
+}
+
+#[test]
+fn escape_without_a_drag_is_a_no_op() {
+    let (mut comp, mut wm, _sess) = desk();
+    assert_eq!(wm.cancel_drag(&mut comp), None);
+    assert_eq!(comp.placement(2), Some((40, 20)));
+}
+
+#[test]
 fn dragging_to_an_edge_snaps_move_and_preserves_restore_geometry() {
     let (mut comp, mut wm, sess) = desk();
     assert_eq!(wm.press(&mut comp, sess, 44, 22), Press::Dragging(2));
