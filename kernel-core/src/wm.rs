@@ -987,6 +987,33 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Toggle the desktop view: hide every managed window when any is visible, otherwise restore
+    /// every managed window. Lifecycle state, tokens, queues and geometry remain intact.
+    /// Restoring deterministically focuses the topmost visible managed window.
+    pub fn toggle_show_desktop(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+    ) -> Result<bool, WmFault> {
+        let any_visible = self
+            .wins
+            .iter()
+            .any(|w| comp.is_visible(w.id) == Some(true));
+        for i in 0..self.wins.len() {
+            let (id, token) = (self.wins[i].id, self.wins[i].token);
+            if comp.is_visible(id) == Some(any_visible) {
+                comp.set_visible(id, token, !any_visible)?;
+            }
+        }
+        if any_visible {
+            let _ = comp.clear_focus(session);
+            Ok(true)
+        } else {
+            self.focus_topmost_visible(comp, session)?;
+            Ok(false)
+        }
+    }
+
     /// Cycle keyboard focus through this manager's windows without allocating. The cycle follows
     /// the compositor's current z-order, so the next target is the next visible window rather
     /// than an insertion-order surprise. Non-window surfaces (the desktop panel, for example)
@@ -1295,6 +1322,31 @@ pub fn wm_suite(
                 && refused == Ok(None)
                 && wm.is_maximized(b) == Some(true),
             "wm: keyboard nudge moves by one fixed step and preserves snap restore state"
+        );
+    }
+    // 14 — Show Desktop hides every managed window without destroying lifecycle state, clears
+    //      focus, and a second invocation restores the set and focuses its topmost window.
+    {
+        let (mut comp, mut wm, sess, a, b) = desk();
+        let tok_a = wm.token(a).unwrap();
+        let tok_b = wm.token(b).unwrap();
+        let _ = comp.set_focus(sess, b);
+        comp.post_key(sess, b'x').unwrap();
+        let hidden = wm.toggle_show_desktop(&mut comp, sess);
+        let hidden_state = (comp.is_visible(a), comp.is_visible(b), comp.focus());
+        let restored = wm.toggle_show_desktop(&mut comp, sess);
+        let restored_state = (comp.is_visible(a), comp.is_visible(b), comp.focus());
+        let ev_a = comp.drain_input(a, tok_a).unwrap();
+        let ev_b = comp.drain_input(b, tok_b).unwrap();
+        check!(
+            hidden == Ok(true)
+                && hidden_state == (Some(false), Some(false), None)
+                && restored == Ok(false)
+                && restored_state == (Some(true), Some(true), Some(b))
+                && !ev_a.iter().any(|e| e.kind == EventKind::Key(b'x'))
+                && ev_b.iter().any(|e| e.kind == EventKind::Key(b'x'))
+                && wm.count() == 2,
+            "wm: Show Desktop hides and restores the managed set without destroying state"
         );
     }
     Ok(n)

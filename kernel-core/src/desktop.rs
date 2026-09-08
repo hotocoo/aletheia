@@ -51,6 +51,8 @@ const KEY_M: u16 = 50;
 const KEY_T: u16 = 20;
 /// Linux keycode for `c`, reserved with Ctrl+Alt as the visible-window cascade shortcut.
 const KEY_C: u16 = 46;
+/// Linux keycode for `d`, reserved with Ctrl+Alt as the Show Desktop toggle.
+const KEY_D: u16 = 32;
 const KEY_R: u16 = 19;
 const KEY_ESC: u16 = 1;
 /// Linux keycode for F4, reserved with Alt as the conventional focused-window close shortcut.
@@ -925,6 +927,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         ev.ty == vinput::EV_KEY && ev.code == KEY_T && ev.value == 1 && ctrl && alt;
                     let cascade =
                         ev.ty == vinput::EV_KEY && ev.code == KEY_C && ev.value == 1 && ctrl && alt;
+                    let show_desktop =
+                        ev.ty == vinput::EV_KEY && ev.code == KEY_D && ev.value == 1 && ctrl && alt;
                     let snap = if ev.ty == vinput::EV_KEY && ev.value == 1 && ctrl && alt {
                         match ev.code {
                             KEY_LEFT => Some(SnapDirection::Left),
@@ -1027,6 +1031,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else if cascade {
                         let _ = self.wm.cascade_visible(&mut self.comp, self.sess);
                         self.sync_terminal_geometry();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if show_desktop {
+                        let _ = self.wm.toggle_show_desktop(&mut self.comp, self.sess);
+                        self.sync_terminal_geometry();
+                        self.refresh_cursor_shape();
                         let _ = self.kb_dec.feed(ev);
                     } else if let Some(direction) = snap {
                         let _ = self.wm.snap_focused(&mut self.comp, self.sess, direction);

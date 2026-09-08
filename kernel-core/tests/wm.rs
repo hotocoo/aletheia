@@ -29,7 +29,34 @@ fn the_boot_suite_passes_on_the_host() {
         assert!(ok, "{name}");
     })
     .unwrap();
-    assert_eq!(n, 13);
+    assert_eq!(n, 14);
+}
+
+#[test]
+fn show_desktop_hides_and_restores_the_managed_set() {
+    let (mut comp, mut wm, sess) = desk();
+    let a = 1;
+    let b = 2;
+    let tok_a = wm.token(a).unwrap();
+    let tok_b = wm.token(b).unwrap();
+
+    comp.set_focus(sess, b).unwrap();
+    comp.post_key(sess, b'x').unwrap();
+    assert_eq!(wm.toggle_show_desktop(&mut comp, sess), Ok(true));
+    assert_eq!(comp.is_visible(a), Some(false));
+    assert_eq!(comp.is_visible(b), Some(false));
+    assert_eq!(comp.focus(), None);
+
+    assert_eq!(wm.toggle_show_desktop(&mut comp, sess), Ok(false));
+    assert_eq!(comp.is_visible(a), Some(true));
+    assert_eq!(comp.is_visible(b), Some(true));
+    assert_eq!(comp.focus(), Some(b));
+    assert!(comp.drain_input(a, tok_a).unwrap().is_empty());
+    assert!(comp
+        .drain_input(b, tok_b)
+        .unwrap()
+        .iter()
+        .any(|e| e.kind == EventKind::Key(b'x')));
 }
 
 #[test]
