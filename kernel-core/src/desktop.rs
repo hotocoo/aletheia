@@ -57,6 +57,10 @@ const KEY_ESC: u16 = 1;
 const KEY_F4: u16 = 62;
 /// Linux keycode for F10, reserved with Alt as the conventional focused-window maximize toggle.
 const KEY_F10: u16 = 68;
+/// Linux keycodes for the number row, reserved with Alt as direct taskbar/window launchers.
+const KEY_1: u16 = 2;
+const KEY_2: u16 = 3;
+const KEY_3: u16 = 4;
 /// Linux keycodes for the four cursor directions, reserved with Ctrl+Alt for focused-window snap.
 const KEY_UP: u16 = 103;
 const KEY_LEFT: u16 = 105;
@@ -118,6 +122,20 @@ const DOUBLE_CLICK_MS: u64 = 500;
 /// Pointer movement tolerance for a title-bar double click. A second click that moved farther
 /// than this is a new click, not an implicit maximize gesture.
 const DOUBLE_CLICK_SLOP_PX: u32 = 8;
+
+/// Map the desktop's Alt+number launchers to the same managed windows exposed by the taskbar.
+/// Keeping this predicate pure makes the keyboard accessibility policy independently testable.
+fn alt_window_launcher(code: u16, value: u32, alt: bool) -> Option<u32> {
+    if !alt || value != 1 {
+        return None;
+    }
+    match code {
+        KEY_1 => Some(WINDOW),
+        KEY_2 => Some(MONITOR),
+        KEY_3 => Some(HELP),
+        _ => None,
+    }
+}
 
 /// Every number the monitor window prints. Compared whole, so "nothing changed" is a fact about
 /// the panel's contents rather than about a hash of them (ADR-084).
@@ -302,6 +320,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.write(b"Alt+Tab   cycle focus\n");
         help.write(b"Alt+F4    close focused window\n");
         help.write(b"Alt+F10   maximize/restore focused\n");
+        help.write(b"Alt+1/2/3 open/focus terminal/monitor/help\n");
         help.write(b"Ctrl+Tab  cycle focus\n");
         help.write(b"Ctrl+Alt+Arrows  snap focused window\n");
         help.write(b"Ctrl+Alt+Shift+Arrows  nudge window\n");
@@ -840,6 +859,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.value == 1
                         && alt;
                     let alt_maximize = is_maximize_shortcut(ev.ty, ev.code, ev.value, alt);
+                    let alt_launcher = if ev.ty == vinput::EV_KEY {
+                        alt_window_launcher(ev.code, ev.value, alt)
+                    } else {
+                        None
+                    };
                     let resize_toggle = ev.ty == vinput::EV_KEY
                         && ev.code == KEY_R
                         && ev.value == 1
@@ -910,6 +934,28 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     };
                     if help_toggle {
                         self.toggle_help();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if let Some(id) = alt_launcher {
+                        if !self.wm.is_open(id) {
+                            self.reopen_taskbar_window(id);
+                        } else {
+                            match self.wm.is_minimized(&self.comp, id) {
+                                Some(true) => {
+                                    let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
+                                }
+                                Some(false) => {
+                                    if let Some(tok) = self.wm.token(id) {
+                                        let _ = self.comp.raise(id, tok);
+                                        let _ = self.comp.set_focus(self.sess, id);
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        if id == WINDOW {
+                            self.sync_terminal_geometry();
+                        }
+                        // Preserve modifier state, but the launcher must never become application input.
                         let _ = self.kb_dec.feed(ev);
                     } else if alt_close {
                         if let Some(id) = self.comp.focus() {
@@ -1068,7 +1114,17 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_maximize_shortcut, is_title_double_click};
+    use super::{alt_window_launcher, is_maximize_shortcut, is_title_double_click};
+
+    #[test]
+    fn alt_number_launchers_select_the_taskbar_windows() {
+        assert_eq!(alt_window_launcher(2, 1, true), Some(super::WINDOW));
+        assert_eq!(alt_window_launcher(3, 1, true), Some(super::MONITOR));
+        assert_eq!(alt_window_launcher(4, 1, true), Some(super::HELP));
+        assert_eq!(alt_window_launcher(2, 0, true), None);
+        assert_eq!(alt_window_launcher(2, 1, false), None);
+        assert_eq!(alt_window_launcher(5, 1, true), None);
+    }
 
     #[test]
     fn alt_f10_is_the_conventional_maximize_toggle() {
