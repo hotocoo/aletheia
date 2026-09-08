@@ -42,6 +42,8 @@ use crate::vinput::KEY_TAB;
 
 /// Linux keycode for Enter, reserved with Ctrl+Alt as the desktop maximize toggle.
 const KEY_ENTER: u16 = 28;
+/// Linux keycode for Backspace, reserved with Ctrl+Alt as the focused-window close shortcut.
+const KEY_BACKSPACE: u16 = 14;
 
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
@@ -418,6 +420,11 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.value == 1
                         && ctrl
                         && alt;
+                    let close = ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_BACKSPACE
+                        && ev.value == 1
+                        && ctrl
+                        && alt;
                     if maximize {
                         if let Some(id) = self.comp.focus() {
                             if self.wm.is_maximized(id).is_some() {
@@ -429,6 +436,14 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         }
                         // Feed the event so Ctrl/Alt state remains faithful, but never route
                         // the desktop shortcut into the focused application's queue.
+                        let _ = self.kb_dec.feed(ev);
+                    } else if close {
+                        if let Some(id) = self.comp.focus() {
+                            let _ = self.wm.close(&mut self.comp, self.sess, id);
+                            if id == WINDOW {
+                                self.term_input.clear();
+                            }
+                        }
                         let _ = self.kb_dec.feed(ev);
                     } else if focus_cycle {
                         let _ = self.wm.cycle_focus(&mut self.comp, self.sess, !shift);
