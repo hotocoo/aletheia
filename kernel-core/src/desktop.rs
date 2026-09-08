@@ -36,6 +36,10 @@ use crate::virtioblk::{Transport, VirtioHal};
 use crate::virtiogpu::{self, Rect as GpuRect, VirtioGpu};
 use crate::wm::{Press, WindowManager};
 
+/// Linux keycode constants used by the desktop-level keyboard shortcuts. Plain Tab remains a
+/// terminal/editor byte; Ctrl+Tab is consumed here before it can reach the focused application.
+use crate::vinput::KEY_TAB;
+
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
 pub const DESKTOP_RID: u32 = 11;
@@ -380,7 +384,17 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
         for _ in 0..EVENTS_PER_TICK {
             match self.kb.next_event() {
                 Some(ev) => {
-                    if let Ok(nb) =
+                    let (shift, ctrl, _) = self.kb_dec.modifiers();
+                    let focus_cycle = ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_TAB
+                        && (ev.value == 1 || ev.value == 2)
+                        && ctrl;
+                    if focus_cycle {
+                        let _ = self.wm.cycle_focus(&mut self.comp, self.sess, !shift);
+                        // Feed the event to the decoder too so its held modifier state remains
+                        // faithful. The Tab itself is deliberately not routed to the shell.
+                        let _ = self.kb_dec.feed(ev);
+                    } else if let Ok(nb) =
                         vinput::route_key(&mut self.kb_dec, &mut self.comp, self.sess, ev)
                     {
                         self.posted += nb as u64;

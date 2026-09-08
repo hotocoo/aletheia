@@ -198,3 +198,20 @@ fn the_motion_route_moves_the_cursor_and_leaves_the_click_to_the_manager() {
     ));
     assert_eq!(wm.dragging().is_some(), matches!(press, Press::Dragging(_)));
 }
+
+#[test]
+fn keyboard_focus_cycle_follows_z_order_without_allocating() {
+    let (mut comp, mut wm, sess) = desk();
+    comp.set_focus(sess, 1).unwrap();
+    assert_eq!(comp.z_order(), vec![1, 2]);
+
+    assert_eq!(wm.cycle_focus(&mut comp, sess, true).unwrap(), Some(2));
+    assert_eq!(comp.focus(), Some(2));
+    assert_eq!(comp.z_order(), vec![1, 2]);
+
+    assert_eq!(wm.cycle_focus(&mut comp, sess, true).unwrap(), Some(1));
+    assert_eq!(comp.focus(), Some(1));
+    // Backwards from 1 selects 2 and keeps the compositor's stacking/focus contract aligned.
+    assert_eq!(wm.cycle_focus(&mut comp, sess, false).unwrap(), Some(2));
+    assert_eq!(comp.focus(), Some(2));
+}

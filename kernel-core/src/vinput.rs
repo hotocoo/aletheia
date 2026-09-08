@@ -105,10 +105,12 @@ pub const BTN_RIGHT: u16 = 0x111;
 // Linux keycodes the decoder maps BY NAME (everything else goes through the tables).
 const KEY_ESC: u16 = 1;
 const KEY_BACKSPACE: u16 = 14;
-const KEY_TAB: u16 = 15;
+/// Linux keycode for Tab; the desktop reserves Ctrl+Tab (and Ctrl+Shift+Tab) for window focus
+/// traversal, while plain Tab remains the console's completion key.
+pub const KEY_TAB: u16 = 15;
 const KEY_ENTER: u16 = 28;
-const KEY_LEFTCTRL: u16 = 29;
-const KEY_LEFTSHIFT: u16 = 42;
+pub const KEY_LEFTCTRL: u16 = 29;
+pub const KEY_LEFTSHIFT: u16 = 42;
 const KEY_RIGHTSHIFT: u16 = 54;
 const KEY_LEFTALT: u16 = 56;
 const KEY_CAPSLOCK: u16 = 58;
@@ -543,6 +545,12 @@ impl KeyDecoder {
     /// Events refused by name — counted, never silent.
     pub fn unknown_refusals(&self) -> u64 {
         self.unknown
+    }
+
+    /// Modifier state after the last decoded event. The desktop uses this to reserve a
+    /// compositor-level shortcut without widening the console's byte alphabet.
+    pub fn modifiers(&self) -> (bool, bool, bool) {
+        (self.st.shift, self.st.ctrl, self.st.alt)
     }
 
     /// Decode one event. Releases, modifiers and unmapped keys produce [`Keys::EMPTY`] — the

@@ -312,6 +312,46 @@ impl WindowManager {
         }
         Ok(())
     }
+
+    /// Cycle keyboard focus through this manager's windows without allocating. The cycle follows
+    /// the compositor's current z-order, so the next target is the next visible window rather
+    /// than an insertion-order surprise. Non-window surfaces (the desktop panel, for example)
+    /// are skipped. `forward=false` walks the same order backwards. The selected window is raised
+    /// before focus changes, keeping keyboard focus and visual stacking aligned.
+    pub fn cycle_focus(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+        forward: bool,
+    ) -> Result<Option<u32>, WmFault> {
+        let len = comp.placed_len();
+        if len == 0 || self.wins.is_empty() {
+            return Ok(None);
+        }
+
+        let current = comp.focus().and_then(|focused| {
+            (0..len).find(|&i| comp.placed_at(i).map(|(id, _, _)| id) == Some(focused))
+        });
+
+        let first = current.unwrap_or_else(|| if forward { len - 1 } else { 0 });
+        for step in 1..=len {
+            let i = if forward {
+                (first + step) % len
+            } else {
+                (first + len - (step % len)) % len
+            };
+            let Some((id, _, _)) = comp.placed_at(i) else {
+                continue;
+            };
+            let Some(w) = self.wins.iter().find(|w| w.id == id).copied() else {
+                continue;
+            };
+            comp.raise(id, w.token)?;
+            comp.set_focus(session, id)?;
+            return Ok(Some(id));
+        }
+        Ok(None)
+    }
 }
 
 /// The boot suite for the window manager (ADR-084): arch-neutral, allocation-bounded, and
