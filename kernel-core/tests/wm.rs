@@ -6,7 +6,9 @@
 
 use kernel_core::compositor::{CompFault, Compositor, EventKind};
 use kernel_core::textgrid::{CLOSE_W, TITLE_H};
-use kernel_core::wm::{hit_at, wm_suite, Hit, Press, WindowManager, WmFault, MAX_WINDOWS};
+use kernel_core::wm::{
+    hit_at, wm_suite, Hit, Press, SnapDirection, WindowManager, WmFault, MAX_WINDOWS,
+};
 
 fn desk() -> (Compositor, WindowManager, u64) {
     let mut comp = Compositor::new(0xC0FF_EE84, 200, 120);
@@ -443,5 +445,62 @@ fn cascade_visible_skips_minimized_windows_and_keeps_them_untouched() {
     assert_eq!(wm.cascade_visible(&mut comp, sess), Ok(1));
     assert_eq!(comp.placement(1), Some((0, 0)));
     assert_eq!(comp.placement(2), hidden);
+    assert_eq!(comp.is_visible(2), Some(false));
+}
+
+#[test]
+fn keyboard_snap_moves_the_focused_window_to_each_half_and_preserves_restore_geometry() {
+    let cases = [
+        (SnapDirection::Left, (0, 0)),
+        (SnapDirection::Right, (100, 0)),
+        (SnapDirection::Up, (0, 0)),
+        (SnapDirection::Down, (0, 60)),
+    ];
+    for (direction, expected) in cases {
+        let (mut comp, mut wm, sess) = desk();
+        comp.set_focus(sess, 2).unwrap();
+        assert_eq!(wm.snap_focused(&mut comp, sess, direction), Ok(Some(2)));
+        assert_eq!(comp.placement(2), Some(expected));
+        assert_eq!(comp.focus(), Some(2));
+        assert_eq!(
+            comp.surface_size(2),
+            Some(
+                if matches!(direction, SnapDirection::Up | SnapDirection::Down) {
+                    (200, 60)
+                } else {
+                    (100, 120)
+                }
+            )
+        );
+        assert_eq!(wm.is_maximized(2), Some(true));
+        assert_eq!(
+            wm.snap_focused(&mut comp, sess, SnapDirection::Right),
+            Ok(Some(2))
+        );
+        assert_eq!(comp.placement(2), Some((100, 0)));
+        assert_eq!(wm.toggle_maximize(&mut comp, sess, 2), Ok(false));
+        assert_eq!(comp.placement(2), Some((40, 20)));
+        assert_eq!(comp.surface_size(2), Some((80, 60)));
+    }
+}
+
+#[test]
+fn keyboard_snap_uses_only_the_visible_focused_window_and_leaves_minimized_windows_untouched() {
+    let (mut comp, mut wm, sess) = desk();
+    assert_eq!(
+        wm.snap_focused(&mut comp, sess, SnapDirection::Left),
+        Ok(None)
+    );
+    assert_eq!(comp.placement(1), Some((0, 0)));
+    assert_eq!(comp.placement(2), Some((40, 20)));
+
+    comp.set_focus(sess, 2).unwrap();
+    wm.toggle_minimize(&mut comp, sess, 2).unwrap();
+    assert_eq!(
+        wm.snap_focused(&mut comp, sess, SnapDirection::Left),
+        Ok(Some(1))
+    );
+    assert_eq!(comp.placement(1), Some((0, 0)));
+    assert_eq!(comp.placement(2), Some((40, 20)));
     assert_eq!(comp.is_visible(2), Some(false));
 }

@@ -158,6 +158,16 @@ enum DragKind {
     Resize,
 }
 
+/// Keyboard-directed desktop snap target. This is deliberately the same four-way geometry
+/// family as pointer edge snapping, but does not require a pointer event to be in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 impl WindowManager {
     pub fn new() -> Self {
         WindowManager {
@@ -464,6 +474,58 @@ impl WindowManager {
             }
         }
         Ok(visible)
+    }
+
+    /// Snap the focused managed window to a scanout half without requiring a pointer drag.
+    /// Existing maximize/snap restore geometry is preserved, so repeated directional moves can
+    /// move between halves and the existing maximize toggle can still return to the user's
+    /// pre-snap geometry. The operation is allocation-free and uses the manager-held token.
+    pub fn snap_focused(
+        &mut self,
+        comp: &mut Compositor,
+        session: u64,
+        direction: SnapDirection,
+    ) -> Result<Option<u32>, WmFault> {
+        let Some(id) = comp.focus() else {
+            return Ok(None);
+        };
+        let pos = self.wins.iter().position(|w| w.id == id).ok_or_else(|| {
+            self.refusals += 1;
+            WmFault::UnknownWindow(id)
+        })?;
+        if comp.is_visible(id) != Some(true) {
+            return Ok(None);
+        }
+
+        let (sw, sh) = comp.scanout_size();
+        let half_w = sw / 2;
+        let half_h = sh / 2;
+        if sw < CLOSE_W * 2 || sh < TITLE_H + RESIZE_W * 2 || half_w == 0 || half_h == 0 {
+            self.refusals += 1;
+            return Err(WmFault::Compositor(CompFault::BadGeometry(id)));
+        }
+
+        let (nx, ny, nw, nh) = match direction {
+            SnapDirection::Left => (0, 0, half_w, sh),
+            SnapDirection::Right => ((sw - half_w) as i32, 0, half_w, sh),
+            SnapDirection::Up => (0, 0, sw, half_h),
+            SnapDirection::Down => (0, (sh - half_h) as i32, sw, half_h),
+        };
+        let w = self.wins[pos];
+        if w.restore.is_none() {
+            let (x, y) = comp
+                .placement(id)
+                .ok_or(WmFault::Compositor(CompFault::UnknownSurface(id)))?;
+            self.wins[pos].restore = Some((x, y, w.width, w.height));
+        }
+        comp.resize_surface(id, w.token, nw, nh)?;
+        comp.move_surface(id, w.token, nx, ny)?;
+        let entry = &mut self.wins[pos];
+        entry.width = nw;
+        entry.height = nh;
+        comp.raise(id, w.token)?;
+        comp.set_focus(session, id)?;
+        Ok(Some(id))
     }
 
     /// (opens, closes, drags completed, refusals) — the manager's ledger.

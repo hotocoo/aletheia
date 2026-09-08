@@ -34,7 +34,7 @@ use crate::textgrid::TextGrid;
 use crate::vinput::{self, Button, ConfigWrite, KeyDecoder, PointerDecoder, VirtioInput};
 use crate::virtioblk::{Transport, VirtioHal};
 use crate::virtiogpu::{self, Rect as GpuRect, VirtioGpu};
-use crate::wm::{Press, WindowManager};
+use crate::wm::{Press, SnapDirection, WindowManager};
 
 /// Linux keycode constants used by the desktop-level keyboard shortcuts. Plain Tab remains a
 /// terminal/editor byte; Ctrl+Tab is consumed here before it can reach the focused application.
@@ -50,6 +50,11 @@ const KEY_M: u16 = 50;
 const KEY_T: u16 = 20;
 /// Linux keycode for `c`, reserved with Ctrl+Alt as the visible-window cascade shortcut.
 const KEY_C: u16 = 46;
+/// Linux keycodes for the four cursor directions, reserved with Ctrl+Alt for focused-window snap.
+const KEY_UP: u16 = 103;
+const KEY_LEFT: u16 = 105;
+const KEY_RIGHT: u16 = 106;
+const KEY_DOWN: u16 = 108;
 
 /// The desktop's resource id on the GPU device — distinct from the suites' ids, because the
 /// suites' resources are torn down and this one lives as long as the machine does.
@@ -586,6 +591,17 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         ev.ty == vinput::EV_KEY && ev.code == KEY_T && ev.value == 1 && ctrl && alt;
                     let cascade =
                         ev.ty == vinput::EV_KEY && ev.code == KEY_C && ev.value == 1 && ctrl && alt;
+                    let snap = if ev.ty == vinput::EV_KEY && ev.value == 1 && ctrl && alt {
+                        match ev.code {
+                            KEY_LEFT => Some(SnapDirection::Left),
+                            KEY_RIGHT => Some(SnapDirection::Right),
+                            KEY_UP => Some(SnapDirection::Up),
+                            KEY_DOWN => Some(SnapDirection::Down),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     if maximize {
                         if let Some(id) = self.comp.focus() {
                             if self.wm.is_maximized(id).is_some() {
@@ -621,6 +637,10 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> Desktop<H, T> {
                         let _ = self.kb_dec.feed(ev);
                     } else if cascade {
                         let _ = self.wm.cascade_visible(&mut self.comp, self.sess);
+                        self.sync_terminal_geometry();
+                        let _ = self.kb_dec.feed(ev);
+                    } else if let Some(direction) = snap {
+                        let _ = self.wm.snap_focused(&mut self.comp, self.sess, direction);
                         self.sync_terminal_geometry();
                         let _ = self.kb_dec.feed(ev);
                     } else if focus_cycle {
