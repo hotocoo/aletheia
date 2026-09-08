@@ -29,13 +29,15 @@ use core::fmt::Write as _;
 
 use crate::compositor::{Compositor, CursorShape, EventKind, Rect};
 use crate::fbcon::{ComposeSink, Surface};
-use crate::Hal;
 use crate::shell::InputFacts;
 use crate::textgrid::TextGrid;
 use crate::vinput::{self, Button, ConfigWrite, KeyDecoder, PointerDecoder, VirtioInput};
 use crate::virtioblk::{Transport, VirtioHal};
 use crate::virtiogpu::{self, Rect as GpuRect, VirtioGpu};
-use crate::wm::{NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager, MAX_WORKSPACES};
+use crate::wm::{
+    NudgeDirection, Press, ResizeDirection, SnapDirection, WindowManager, MAX_WORKSPACES,
+};
+use crate::Hal;
 
 /// Linux keycode constants used by the desktop-level keyboard shortcuts. Plain Tab remains a
 /// terminal/editor byte; Ctrl+Tab is consumed here before it can reach the focused application.
@@ -116,7 +118,8 @@ const TASKBAR_COLS: u32 = 100;
 const TASKBAR_ROWS: u32 = 1;
 const TASKBAR_X: i32 = 0;
 const TASKBAR_BUTTON_W: u32 = 18 * crate::textgrid::CELL;
-const TASKBAR_Y: i32 = H as i32 - (TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H) as i32;
+const TASKBAR_Y: i32 =
+    H as i32 - (TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H) as i32;
 /// The first taskbar button is the desktop launcher. It deliberately occupies the same fixed
 /// cell band used by the keyboard launcher layout, so pointer and keyboard navigation describe
 /// one stable affordance instead of two subtly different hit maps.
@@ -174,7 +177,13 @@ fn alt_window_launcher(code: u16, value: u32, alt: bool) -> Option<u32> {
 
 /// Ctrl+Alt+number selects a workspace; adding Shift moves the focused window there. Plain
 /// Alt+number remains the taskbar launcher, preserving the existing desktop shortcut contract.
-fn workspace_shortcut(code: u16, value: u32, ctrl: bool, alt: bool, shift: bool) -> Option<(u8, bool)> {
+fn workspace_shortcut(
+    code: u16,
+    value: u32,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+) -> Option<(u8, bool)> {
     if !ctrl || !alt || value != 1 {
         return None;
     }
@@ -211,6 +220,7 @@ struct TaskbarFacts {
     monitor: u8,
     help: u8,
     focus: u32,
+    hover: u8,
     keyboard_resize: bool,
     uptime_s: u64,
     workspace: u8,
@@ -306,9 +316,15 @@ fn render_menu(menu: &TextGrid, selected: usize, out: &mut Vec<u8>) {
     let mut grid = menu.clone();
     grid.clear();
     for (index, item) in MENU_ITEMS.iter().enumerate() {
-        if index == selected { grid.write(b">"); } else { grid.write(b" "); }
+        if index == selected {
+            grid.write(b">");
+        } else {
+            grid.write(b" ");
+        }
         grid.write(item);
-        if index + 1 < MENU_ITEMS.len() { grid.write(b"\n"); }
+        if index + 1 < MENU_ITEMS.len() {
+            grid.write(b"\n");
+        }
     }
     grid.render_packed(MENU_TITLE, out);
 }
@@ -348,17 +364,22 @@ fn taskbar_workspace_target(x: u32) -> Option<u8> {
     Some(((x - TASKBAR_WS_X) / TASKBAR_WS_W + 1) as u8)
 }
 
-/// Paint the four workspace buttons at the same fixed cell positions used by the pointer hit
-/// map. The current workspace is marked with `*`; all four buttons retain identical hit widths.
-fn write_workspace_buttons(taskbar: &mut TextGrid, current: u8) {
-    for workspace in 1..=MAX_WORKSPACES {
-        let marker = if workspace == current { b'*' } else { b'0' + workspace };
-        taskbar.put(b'[');
-        taskbar.put(marker);
-        taskbar.put(b']');
-        if workspace != MAX_WORKSPACES {
-            taskbar.write(b"   ");
-        }
+/// Return a stable presentation id for the taskbar affordance under the pointer. Zero means
+/// ordinary taskbar chrome; 1 is the launcher, 2..=4 are the managed application buttons and
+/// 10..=13 are workspaces 1..=4. The id is presentation-only and never becomes WM authority.
+fn taskbar_hover_target(x: u32) -> u8 {
+    if x < TASKBAR_MENU_W {
+        1
+    } else if (TASKBAR_TERM_X..TASKBAR_MON_X).contains(&x) {
+        2
+    } else if (TASKBAR_MON_X..TASKBAR_MON_X + TASKBAR_BUTTON_W).contains(&x) {
+        3
+    } else if (TASKBAR_HELP_X..TASKBAR_HELP_X + TASKBAR_BUTTON_W).contains(&x) {
+        4
+    } else if let Some(workspace) = taskbar_workspace_target(x) {
+        9 + workspace
+    } else {
+        0
     }
 }
 
@@ -624,7 +645,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if self.help.take_dirty() {
             self.help.render_packed(HELP_TITLE, &mut self.help_packed);
-            let _ = self.comp.fill_packed(HELP, self.help_token, &self.help_packed);
+            let _ = self
+                .comp
+                .fill_packed(HELP, self.help_token, &self.help_packed);
         }
         self.refresh_taskbar();
         if self.comp.has_pending_damage() {
@@ -651,14 +674,22 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if let Some(tok) = self.wm.token(MONITOR) {
             self.mon.render_packed(
-                if focus == MONITOR { b">monitor" } else { MON_TITLE },
+                if focus == MONITOR {
+                    b">monitor"
+                } else {
+                    MON_TITLE
+                },
                 &mut self.mon_packed,
             );
             let _ = self.comp.fill_packed(MONITOR, tok, &self.mon_packed);
         }
         if let Some(tok) = self.wm.token(HELP) {
             self.help.render_packed(
-                if focus == HELP { b">shortcuts" } else { HELP_TITLE },
+                if focus == HELP {
+                    b">shortcuts"
+                } else {
+                    HELP_TITLE
+                },
                 &mut self.help_packed,
             );
             let _ = self.comp.fill_packed(HELP, tok, &self.help_packed);
@@ -679,10 +710,35 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             monitor: state(MONITOR),
             help: state(HELP),
             focus: self.comp.focus().unwrap_or(0),
+            hover: {
+                match (
+                    self.comp.placement(TASKBAR),
+                    self.comp.surface_size(TASKBAR),
+                ) {
+                    (Some((tx, ty)), Some((tw, th))) => {
+                        let lx = self.pointer.0 as i32 - tx;
+                        let ly = self.pointer.1 as i32 - ty;
+                        if lx >= 0
+                            && ly >= crate::textgrid::TITLE_H as i32
+                            && (lx as u32) < tw
+                            && (ly as u32) < th
+                        {
+                            taskbar_hover_target(lx as u32)
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                }
+            },
             keyboard_resize: self.keyboard_resize,
             uptime_s: {
                 let hz = H::timer_freq_hz();
-                if hz == 0 { 0 } else { H::timer_ticks() / hz }
+                if hz == 0 {
+                    0
+                } else {
+                    H::timer_ticks() / hz
+                }
             },
             workspace: self.wm.current_workspace(),
         };
@@ -696,53 +752,110 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let help_focus = sig.focus == HELP;
         let _ = write!(
             self.taskbar,
-            "[menu] {}terminal {}   {}monitor {}   {}help {}   ",
-            if terminal_focus { ">" } else { " " },
+            "{}[menu] {}terminal {}   {}monitor {}   {}help {}   ",
+            if sig.hover == 1 { ">" } else { " " },
+            if terminal_focus || sig.hover == 2 {
+                ">"
+            } else {
+                " "
+            },
             if self.wm.is_open(WINDOW) {
-                if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) { "[hidden]" } else { "[open]" }
+                if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) {
+                    "[hidden]"
+                } else {
+                    "[open]"
+                }
             } else {
                 "[closed]"
             },
-            if monitor_focus { ">" } else { " " },
+            if monitor_focus || sig.hover == 3 {
+                ">"
+            } else {
+                " "
+            },
             if self.wm.is_open(MONITOR) {
-                if self.wm.is_minimized(&self.comp, MONITOR) == Some(true) { "[hidden]" } else { "[open]" }
+                if self.wm.is_minimized(&self.comp, MONITOR) == Some(true) {
+                    "[hidden]"
+                } else {
+                    "[open]"
+                }
             } else {
                 "[closed]"
             },
-            if help_focus { ">" } else { " " },
+            if help_focus || sig.hover == 4 {
+                ">"
+            } else {
+                " "
+            },
             if self.wm.is_open(HELP) {
-                if self.wm.is_minimized(&self.comp, HELP) == Some(true) { "[hidden]" } else { "[open]" }
+                if self.wm.is_minimized(&self.comp, HELP) == Some(true) {
+                    "[hidden]"
+                } else {
+                    "[open]"
+                }
             } else {
                 "[closed]"
             },
         );
-        write_workspace_buttons(&mut self.taskbar, sig.workspace);
+        for workspace in 1..=MAX_WORKSPACES {
+            if sig.hover == 9 + workspace {
+                taskbar_put_hovered_workspace(&mut self.taskbar, workspace, sig.workspace);
+            } else {
+                let marker = if workspace == sig.workspace {
+                    b'*'
+                } else {
+                    b'0' + workspace
+                };
+                self.taskbar.put(b'[');
+                self.taskbar.put(marker);
+                self.taskbar.put(b']');
+            }
+            if workspace != MAX_WORKSPACES {
+                self.taskbar.write(b"   ");
+            }
+        }
         let _ = write!(
             self.taskbar,
             "   [{}] {}s",
             if sig.keyboard_resize { "R" } else { "N" },
             sig.uptime_s.min(999_999_999),
         );
-        self.taskbar.render_packed(b"desktop", &mut self.taskbar_packed);
-        let _ = self.comp.fill_packed(TASKBAR, self.taskbar_token, &self.taskbar_packed);
+        self.taskbar
+            .render_packed(b"desktop", &mut self.taskbar_packed);
+        let _ = self
+            .comp
+            .fill_packed(TASKBAR, self.taskbar_token, &self.taskbar_packed);
     }
 
     fn taskbar_press(&mut self, x: u32, y: u32) -> bool {
-        let Some((tx, ty)) = self.comp.placement(TASKBAR) else { return false };
-        let Some((tw, th)) = self.comp.surface_size(TASKBAR) else { return false };
+        let Some((tx, ty)) = self.comp.placement(TASKBAR) else {
+            return false;
+        };
+        let Some((tw, th)) = self.comp.surface_size(TASKBAR) else {
+            return false;
+        };
         let lx = x as i32 - tx;
         let ly = y as i32 - ty;
-        if lx < 0 || ly < 0 || lx as u32 >= tw || ly as u32 >= th || (ly as u32) < crate::textgrid::TITLE_H {
+        if lx < 0
+            || ly < 0
+            || lx as u32 >= tw
+            || ly as u32 >= th
+            || (ly as u32) < crate::textgrid::TITLE_H
+        {
             return false;
         }
         let lx = lx as u32;
         if let Some(workspace) = taskbar_workspace_target(lx) {
             if workspace != self.wm.current_workspace() {
-                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+                let _ = self
+                    .wm
+                    .switch_workspace(&mut self.comp, self.sess, workspace);
             }
             return true;
         }
-        let Some(target) = taskbar_target(lx) else { return false };
+        let Some(target) = taskbar_target(lx) else {
+            return false;
+        };
         if target == MENU {
             self.open_start_menu();
             return true;
@@ -753,12 +866,18 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         if let Some(workspace) = self.wm.workspace_of(target) {
             if workspace != self.wm.current_workspace() {
-                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+                let _ = self
+                    .wm
+                    .switch_workspace(&mut self.comp, self.sess, workspace);
             }
         }
         match self.wm.is_minimized(&self.comp, target) {
-            Some(true) => { let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target); }
-            Some(false) if self.comp.focus() == Some(target) => { let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target); }
+            Some(true) => {
+                let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target);
+            }
+            Some(false) if self.comp.focus() == Some(target) => {
+                let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, target);
+            }
             Some(false) => {
                 if let Some(tok) = self.wm.token(target) {
                     let _ = self.comp.raise(target, tok);
@@ -767,7 +886,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             }
             None => {}
         }
-        if target == WINDOW { self.sync_terminal_geometry(); }
+        if target == WINDOW {
+            self.sync_terminal_geometry();
+        }
         true
     }
 
@@ -775,19 +896,18 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// pointer. This gives the launcher conventional desktop behavior while retaining the same
     /// compositor-owned menu used by right-click and Shift+F10.
     fn open_start_menu(&mut self) {
-        let Some((mw, mh)) = self.comp.surface_size(MENU) else { return };
+        let Some((mw, mh)) = self.comp.surface_size(MENU) else {
+            return;
+        };
         let x = TASKBAR_X.saturating_add(TASKBAR_MENU_W as i32 / 2) - mw as i32 / 2;
         let y = TASKBAR_Y - mh as i32 - MENU_MARGIN;
         let max_x = W.saturating_sub(mw) as i32;
         let max_y = H.saturating_sub(mh) as i32;
         self.menu_selected = 0;
         self.repaint_menu();
-        let _ = self.comp.move_surface(
-            MENU,
-            self.menu_token,
-            x.clamp(0, max_x),
-            y.clamp(0, max_y),
-        );
+        let _ = self
+            .comp
+            .move_surface(MENU, self.menu_token, x.clamp(0, max_x), y.clamp(0, max_y));
         let _ = self.comp.raise(MENU, self.menu_token);
         let _ = self.comp.set_visible(MENU, self.menu_token, true);
     }
@@ -796,7 +916,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// managed application window: selecting an item still delegates the actual window change
     /// to the window manager, so the menu cannot become a second focus authority.
     fn open_menu(&mut self, x: u32, y: u32) {
-        let Some((mw, mh)) = self.comp.surface_size(MENU) else { return };
+        let Some((mw, mh)) = self.comp.surface_size(MENU) else {
+            return;
+        };
         let max_x = W.saturating_sub(mw) as i32;
         let max_y = H.saturating_sub(mh) as i32;
         let px = (x as i32 - MENU_MARGIN).clamp(0, max_x);
@@ -832,33 +954,33 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         );
         self.switcher
             .render_packed(SWITCHER_TITLE, &mut self.switcher_packed);
-        let _ = self.comp.fill_packed(
-            SWITCHER,
-            self.switcher_token,
-            &self.switcher_packed,
-        );
+        let _ = self
+            .comp
+            .fill_packed(SWITCHER, self.switcher_token, &self.switcher_packed);
         let hz = H::timer_freq_hz();
         let duration = hz.saturating_mul(SWITCHER_MS) / 1000;
         self.switcher_until = H::timer_ticks().wrapping_add(duration.max(1));
-        let _ = self
-            .comp
-            .raise(SWITCHER, self.switcher_token);
-        let _ = self
-            .comp
-            .set_visible(SWITCHER, self.switcher_token, true);
+        let _ = self.comp.raise(SWITCHER, self.switcher_token);
+        let _ = self.comp.set_visible(SWITCHER, self.switcher_token, true);
     }
 
     fn repaint_menu(&mut self) {
         render_menu(&self.menu, self.menu_selected, &mut self.menu_packed);
-        let _ = self.comp.fill_packed(MENU, self.menu_token, &self.menu_packed);
+        let _ = self
+            .comp
+            .fill_packed(MENU, self.menu_token, &self.menu_packed);
     }
 
     /// Move the retained menu selection with the pointer without activating anything. Keeping
     /// hover selection in the same state as keyboard selection gives mouse users the same visible
     /// affordance and leaves activation exclusively to a press/Enter gesture.
     fn menu_hover(&mut self, x: u32, y: u32) {
-        let Some((mx, my)) = self.comp.placement(MENU) else { return };
-        let Some((mw, mh)) = self.comp.surface_size(MENU) else { return };
+        let Some((mx, my)) = self.comp.placement(MENU) else {
+            return;
+        };
+        let Some((mw, mh)) = self.comp.surface_size(MENU) else {
+            return;
+        };
         let lx = x as i32 - mx;
         let ly = y as i32 - my;
         if lx < 0 || ly < crate::textgrid::TITLE_H as i32 || lx as u32 >= mw || ly as u32 >= mh {
@@ -924,8 +1046,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// itself; actions are translated into the same launch/layout operations as keyboard and
     /// taskbar controls.
     fn menu_press(&mut self, x: u32, y: u32) -> bool {
-        let Some((mx, my)) = self.comp.placement(MENU) else { return false };
-        let Some((mw, mh)) = self.comp.surface_size(MENU) else { return false };
+        let Some((mx, my)) = self.comp.placement(MENU) else {
+            return false;
+        };
+        let Some((mw, mh)) = self.comp.surface_size(MENU) else {
+            return false;
+        };
         let lx = x as i32 - mx;
         let ly = y as i32 - my;
         if lx < 0 || ly < 0 || lx as u32 >= mw || ly as u32 >= mh {
@@ -949,7 +1075,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             self.reopen_taskbar_window(id);
         } else if let Some(workspace) = self.wm.workspace_of(id) {
             if workspace != self.wm.current_workspace() {
-                let _ = self.wm.switch_workspace(&mut self.comp, self.sess, workspace);
+                let _ = self
+                    .wm
+                    .switch_workspace(&mut self.comp, self.sess, workspace);
             }
             if self.wm.is_minimized(&self.comp, id) == Some(true) {
                 let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
@@ -1004,7 +1132,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             HELP => {
                 self.help_token = token;
                 self.help.render_packed(
-                    if self.comp.focus() == Some(HELP) { b">shortcuts" } else { HELP_TITLE },
+                    if self.comp.focus() == Some(HELP) {
+                        b">shortcuts"
+                    } else {
+                        HELP_TITLE
+                    },
                     &mut self.help_packed,
                 );
                 let _ = self.comp.fill_packed(HELP, token, &self.help_packed);
@@ -1034,7 +1166,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     fn refresh_cursor_shape(&mut self) {
         let (x, y) = self.pointer;
         if self.keyboard_resize && self.comp.focus().is_some() {
-            let _ = self.comp.set_cursor_shape(self.sess, CursorShape::Crosshair);
+            let _ = self
+                .comp
+                .set_cursor_shape(self.sess, CursorShape::Crosshair);
             return;
         }
         let shape = if let Some((tx, ty)) = self.comp.placement(TASKBAR) {
@@ -1043,8 +1177,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             };
             let lx = x as i32 - tx;
             let ly = y as i32 - ty;
-            if (lx >= TASKBAR_TERM_X as i32
-                && lx < (TASKBAR_HELP_X + TASKBAR_BUTTON_W) as i32
+            if (lx >= TASKBAR_TERM_X as i32 && lx < (TASKBAR_HELP_X + TASKBAR_BUTTON_W) as i32
                 || lx >= TASKBAR_WS_X as i32
                     && lx < (TASKBAR_WS_X + TASKBAR_WS_W * MAX_WORKSPACES as u32) as i32)
                 && ly >= crate::textgrid::TITLE_H as i32
@@ -1069,17 +1202,21 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             return CursorShape::Arrow;
         };
         match crate::wm::hit_at(w, h, lx, ly) {
-            Some(crate::wm::Hit::Resize(crate::wm::ResizeEdge::Left
-                | crate::wm::ResizeEdge::Right)) => CursorShape::ResizeHorizontal,
-            Some(crate::wm::Hit::Resize(crate::wm::ResizeEdge::Top
-                | crate::wm::ResizeEdge::Bottom)) => CursorShape::ResizeVertical,
-            Some(crate::wm::Hit::Resize(crate::wm::ResizeEdge::TopLeft
-                | crate::wm::ResizeEdge::BottomRight)) => CursorShape::ResizeDiagonal,
-            Some(crate::wm::Hit::Resize(crate::wm::ResizeEdge::TopRight
-                | crate::wm::ResizeEdge::BottomLeft)) => CursorShape::ResizeAntiDiagonal,
-            Some(crate::wm::Hit::Minimize
-                | crate::wm::Hit::Maximize
-                | crate::wm::Hit::Close) => CursorShape::Hand,
+            Some(crate::wm::Hit::Resize(
+                crate::wm::ResizeEdge::Left | crate::wm::ResizeEdge::Right,
+            )) => CursorShape::ResizeHorizontal,
+            Some(crate::wm::Hit::Resize(
+                crate::wm::ResizeEdge::Top | crate::wm::ResizeEdge::Bottom,
+            )) => CursorShape::ResizeVertical,
+            Some(crate::wm::Hit::Resize(
+                crate::wm::ResizeEdge::TopLeft | crate::wm::ResizeEdge::BottomRight,
+            )) => CursorShape::ResizeDiagonal,
+            Some(crate::wm::Hit::Resize(
+                crate::wm::ResizeEdge::TopRight | crate::wm::ResizeEdge::BottomLeft,
+            )) => CursorShape::ResizeAntiDiagonal,
+            Some(crate::wm::Hit::Minimize | crate::wm::Hit::Maximize | crate::wm::Hit::Close) => {
+                CursorShape::Hand
+            }
             _ => CursorShape::Arrow,
         }
     }
@@ -1268,10 +1405,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.code == KEY_TAB
                         && (ev.value == 1 || ev.value == 2)
                         && alt;
-                    let alt_close = ev.ty == vinput::EV_KEY
-                        && ev.code == KEY_F4
-                        && ev.value == 1
-                        && alt;
+                    let alt_close =
+                        ev.ty == vinput::EV_KEY && ev.code == KEY_F4 && ev.value == 1 && alt;
                     let alt_minimize = is_minimize_shortcut(ev.ty, ev.code, ev.value, alt);
                     let alt_maximize = is_maximize_shortcut(ev.ty, ev.code, ev.value, alt);
                     let context_menu = is_context_menu_shortcut(ev.ty, ev.code, ev.value, shift);
@@ -1285,25 +1420,20 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else {
                         None
                     };
-                    let resize_toggle = ev.ty == vinput::EV_KEY
-                        && ev.code == KEY_R
-                        && ev.value == 1
-                        && ctrl
-                        && alt;
-                    let resize_direction = if self.keyboard_resize
-                        && ev.ty == vinput::EV_KEY
-                        && ev.value == 1
-                    {
-                        match ev.code {
-                            KEY_LEFT => Some(ResizeDirection::Left),
-                            KEY_RIGHT => Some(ResizeDirection::Right),
-                            KEY_UP => Some(ResizeDirection::Up),
-                            KEY_DOWN => Some(ResizeDirection::Down),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
+                    let resize_toggle =
+                        ev.ty == vinput::EV_KEY && ev.code == KEY_R && ev.value == 1 && ctrl && alt;
+                    let resize_direction =
+                        if self.keyboard_resize && ev.ty == vinput::EV_KEY && ev.value == 1 {
+                            match ev.code {
+                                KEY_LEFT => Some(ResizeDirection::Left),
+                                KEY_RIGHT => Some(ResizeDirection::Right),
+                                KEY_UP => Some(ResizeDirection::Up),
+                                KEY_DOWN => Some(ResizeDirection::Down),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                     let resize_exit = self.keyboard_resize
                         && ev.ty == vinput::EV_KEY
                         && ev.value == 1
@@ -1312,42 +1442,51 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && ev.code == KEY_ESC
                         && ev.value == 1
                         && self.wm.dragging().is_some();
-                    let help_toggle =
-                        ev.ty == vinput::EV_KEY && ev.code == KEY_F1 && ev.value == 1;
+                    let help_toggle = ev.ty == vinput::EV_KEY && ev.code == KEY_F1 && ev.value == 1;
                     let menu_escape = self.comp.is_visible(MENU) == Some(true)
                         && ev.ty == vinput::EV_KEY
                         && ev.code == KEY_ESC
                         && ev.value == 1;
                     let menu_up = self.comp.is_visible(MENU) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_UP && ev.value == 1
-                        && !ctrl && !alt;
-                    let menu_down = self.comp.is_visible(MENU) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_DOWN && ev.value == 1
-                        && !ctrl && !alt;
-                    let menu_activate = self.comp.is_visible(MENU) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_ENTER && ev.value == 1
-                        && !ctrl && !alt;
-                    let switcher_escape = self.comp.is_visible(SWITCHER) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_ESC && ev.value == 1;
-                    let switcher_accept = self.comp.is_visible(SWITCHER) == Some(true)
-                        && ev.ty == vinput::EV_KEY && ev.code == KEY_ENTER && ev.value == 1
-                        && !ctrl && !alt;
-                    let keyboard_nudge = if ev.ty == vinput::EV_KEY
+                        && ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_UP
                         && ev.value == 1
-                        && ctrl
-                        && alt
-                        && shift
-                    {
-                        match ev.code {
-                            KEY_LEFT => Some(NudgeDirection::Left),
-                            KEY_RIGHT => Some(NudgeDirection::Right),
-                            KEY_UP => Some(NudgeDirection::Up),
-                            KEY_DOWN => Some(NudgeDirection::Down),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
+                        && !ctrl
+                        && !alt;
+                    let menu_down = self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_DOWN
+                        && ev.value == 1
+                        && !ctrl
+                        && !alt;
+                    let menu_activate = self.comp.is_visible(MENU) == Some(true)
+                        && ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_ENTER
+                        && ev.value == 1
+                        && !ctrl
+                        && !alt;
+                    let switcher_escape = self.comp.is_visible(SWITCHER) == Some(true)
+                        && ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_ESC
+                        && ev.value == 1;
+                    let switcher_accept = self.comp.is_visible(SWITCHER) == Some(true)
+                        && ev.ty == vinput::EV_KEY
+                        && ev.code == KEY_ENTER
+                        && ev.value == 1
+                        && !ctrl
+                        && !alt;
+                    let keyboard_nudge =
+                        if ev.ty == vinput::EV_KEY && ev.value == 1 && ctrl && alt && shift {
+                            match ev.code {
+                                KEY_LEFT => Some(NudgeDirection::Left),
+                                KEY_RIGHT => Some(NudgeDirection::Right),
+                                KEY_UP => Some(NudgeDirection::Up),
+                                KEY_DOWN => Some(NudgeDirection::Down),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                     let maximize = ev.ty == vinput::EV_KEY
                         && ev.code == KEY_ENTER
                         && ev.value == 1
@@ -1411,11 +1550,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                                 workspace,
                             );
                         } else {
-                            let _ = self.wm.switch_workspace(
-                                &mut self.comp,
-                                self.sess,
-                                workspace,
-                            );
+                            let _ = self
+                                .wm
+                                .switch_workspace(&mut self.comp, self.sess, workspace);
                         }
                         self.sync_terminal_geometry();
                         self.refresh_cursor_shape();
@@ -1629,11 +1766,22 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     }
 }
 
+fn taskbar_put_hovered_workspace(taskbar: &mut TextGrid, workspace: u8, current: u8) {
+    taskbar.put(b'>');
+    taskbar.put(b'[');
+    taskbar.put(if workspace == current {
+        b'*'
+    } else {
+        b'0' + workspace
+    });
+    taskbar.put(b']');
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut,
-        is_minimize_shortcut, is_title_double_click, next_menu_selection, taskbar_target,
+        alt_window_launcher, is_context_menu_shortcut, is_maximize_shortcut, is_minimize_shortcut,
+        is_title_double_click, next_menu_selection, taskbar_hover_target, taskbar_target,
         taskbar_workspace_target, workspace_shortcut,
     };
 
@@ -1649,8 +1797,14 @@ mod tests {
 
     #[test]
     fn ctrl_alt_numbers_select_workspaces_and_shift_moves_the_focused_window() {
-        assert_eq!(workspace_shortcut(3, 1, true, true, false), Some((2, false)));
-        assert_eq!(workspace_shortcut(5, 1, true, true, false), Some((4, false)));
+        assert_eq!(
+            workspace_shortcut(3, 1, true, true, false),
+            Some((2, false))
+        );
+        assert_eq!(
+            workspace_shortcut(5, 1, true, true, false),
+            Some((4, false))
+        );
         assert_eq!(workspace_shortcut(4, 1, true, true, true), Some((3, true)));
         assert_eq!(workspace_shortcut(3, 1, false, true, false), None);
         assert_eq!(workspace_shortcut(3, 0, true, true, false), None);
@@ -1675,9 +1829,24 @@ mod tests {
     #[test]
     fn shift_f10_is_the_keyboard_context_menu_gesture() {
         assert!(is_context_menu_shortcut(super::vinput::EV_KEY, 68, 1, true));
-        assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 68, 1, false));
-        assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 68, 0, true));
-        assert!(!is_context_menu_shortcut(super::vinput::EV_KEY, 67, 1, true));
+        assert!(!is_context_menu_shortcut(
+            super::vinput::EV_KEY,
+            68,
+            1,
+            false
+        ));
+        assert!(!is_context_menu_shortcut(
+            super::vinput::EV_KEY,
+            68,
+            0,
+            true
+        ));
+        assert!(!is_context_menu_shortcut(
+            super::vinput::EV_KEY,
+            67,
+            1,
+            true
+        ));
     }
 
     #[test]
@@ -1695,7 +1864,10 @@ mod tests {
         assert_eq!(taskbar_target(super::TASKBAR_TERM_X), Some(super::WINDOW));
         assert_eq!(taskbar_target(super::TASKBAR_MON_X), Some(super::MONITOR));
         assert_eq!(taskbar_target(super::TASKBAR_HELP_X), Some(super::HELP));
-        assert_eq!(taskbar_target(super::TASKBAR_HELP_X + super::TASKBAR_BUTTON_W), None);
+        assert_eq!(
+            taskbar_target(super::TASKBAR_HELP_X + super::TASKBAR_BUTTON_W),
+            None
+        );
     }
 
     #[test]
@@ -1703,12 +1875,35 @@ mod tests {
         for workspace in 1..=super::MAX_WORKSPACES {
             let start = super::TASKBAR_WS_X + (workspace as u32 - 1) * super::TASKBAR_WS_W;
             assert_eq!(taskbar_workspace_target(start), Some(workspace));
-            assert_eq!(taskbar_workspace_target(start + super::TASKBAR_WS_W - 1), Some(workspace));
+            assert_eq!(
+                taskbar_workspace_target(start + super::TASKBAR_WS_W - 1),
+                Some(workspace)
+            );
         }
         assert_eq!(taskbar_workspace_target(super::TASKBAR_WS_X - 1), None);
         assert_eq!(
-            taskbar_workspace_target(super::TASKBAR_WS_X + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32),
+            taskbar_workspace_target(
+                super::TASKBAR_WS_X + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn taskbar_hover_map_is_stable_and_keeps_chrome_non_actionable() {
+        assert_eq!(taskbar_hover_target(0), 1);
+        assert_eq!(taskbar_hover_target(super::TASKBAR_TERM_X), 2);
+        assert_eq!(taskbar_hover_target(super::TASKBAR_MON_X), 3);
+        assert_eq!(taskbar_hover_target(super::TASKBAR_HELP_X), 4);
+        for workspace in 1..=super::MAX_WORKSPACES {
+            let start = super::TASKBAR_WS_X + (workspace as u32 - 1) * super::TASKBAR_WS_W;
+            assert_eq!(taskbar_hover_target(start), 9 + workspace);
+        }
+        assert_eq!(
+            taskbar_hover_target(
+                super::TASKBAR_WS_X + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32
+            ),
+            0
         );
     }
 
