@@ -1,5 +1,22 @@
 # Aletheia — Implementation Status
 
+## 2026-09-09 qualification snapshot
+
+The current tree was re-qualified after the event-driven x86 input wave. `bash scripts/e2e-all.sh`
+passed end to end: aarch64 full, RISC-V full, x86-64 UEFI full, and live GUI workflows on both DT
+targets. The x86 smoke gate passed its three-boot persistence/custody sequence; VirtualBox remains
+an explicit SKIP on this arm64 validation host. `bash scripts/vinput-e2e.sh` passed the live QEMU
+keyboard/tablet workflow with **29 MSI-X hits / 29 foreground wake samples**, and the 100 Hz PIT
+watchdog remained active as the recovery path.
+
+Fresh same-host/same-QEMU/TCG comparative measurement with `BOOT_SAMPLES=3 WORKLOAD_OPS=50` recorded
+Aletheia boot median **3067 ms** (3074/3058/3067), idle host CPU **3.9%**, and typed echo **115 ms
+total / 2 ms per op**. Linux 6.12-lts recorded boot median **2056 ms** (2057/2042/2056), idle host
+CPU **2.4%**, and typed echo **1623 ms total / 32 ms per op**. The workload is an end-to-end serial
+interactive comparison under identical QEMU/TCG conditions; it is not a GUI pointer-latency or
+physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
+**13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
+
 **As of:** 2026-09-09, latest (X86 INTERACTIVE INPUT — ADR-135 makes the existing virtio-input MSI-X
 wake path the default for the `interactive` x86-64 build. The interrupt remains wake+EOI only and a
 100 Hz PIT is retained as a lost-interrupt watchdog. `scripts/vinput-e2e.sh` passed with real QEMU
