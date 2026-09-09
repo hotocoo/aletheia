@@ -314,7 +314,7 @@ impl TextGrid {
         // Window controls: '-', '+', and 'x' knocked out of the right end of the band. The
         // manager hit-tests these same fixed-width regions.
         if has_window_controls(w) {
-            for (slot, ch) in [b'-', b'+', b'x'].iter().enumerate() {
+            for (slot, ch) in b"-+x".iter().enumerate() {
                 let x0 = w - CONTROL_W * (3 - slot as u32);
                 for y in 0..TITLE_H - 1 {
                     set(x0, y, false);
@@ -524,7 +524,7 @@ pub fn textgrid_suite(
         let (w, _) = g.pixel_size();
         let px = |x: u32, y: u32| out[((y * w + x) / 8) as usize] & (1 << ((y * w + x) % 8)) != 0;
         let mut controls_ok = true;
-        for (slot, ch) in [b'-', b'+', b'x'].iter().enumerate() {
+        for (slot, ch) in b"-+x".iter().enumerate() {
             let x0 = w - CONTROL_W * (3 - slot as u32);
             let glyph = font8x8::glyph(*ch).unwrap();
             for (r, bits) in glyph.iter().enumerate() {

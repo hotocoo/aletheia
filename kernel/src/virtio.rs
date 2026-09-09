@@ -15,6 +15,7 @@
 use kernel_core::virtioblk::{self, InitReport, MmioLayout, MmioTransport, VirtioHal};
 use kernel_core::virtiogpu::{self, VirtioGpu, VIRTIO_ID_GPU};
 use kernel_core::virtionet::{self, VirtioNet, VIRTIO_ID_NET};
+use kernel_core::Hal;
 
 use crate::frames;
 
@@ -31,6 +32,32 @@ const GATE_IMAGE_BLOCKS: usize = 256;
 
 /// The aarch64 seam: this target's frame allocator and barrier instruction.
 pub struct Aarch64Virtio;
+
+impl Hal for Aarch64Virtio {
+    fn arch_name() -> &'static str {
+        <crate::hal::Aarch64Hal as Hal>::arch_name()
+    }
+
+    fn timer_ticks() -> u64 {
+        <crate::hal::Aarch64Hal as Hal>::timer_ticks()
+    }
+
+    fn timer_freq_hz() -> u64 {
+        <crate::hal::Aarch64Hal as Hal>::timer_freq_hz()
+    }
+
+    fn ticks_to_ns(ticks: u64) -> u64 {
+        <crate::hal::Aarch64Hal as Hal>::ticks_to_ns(ticks)
+    }
+
+    fn current_privilege() -> u64 {
+        <crate::hal::Aarch64Hal as Hal>::current_privilege()
+    }
+
+    fn exit(code: i32) -> ! {
+        <crate::hal::Aarch64Hal as Hal>::exit(code)
+    }
+}
 
 impl VirtioHal for Aarch64Virtio {
     fn alloc_frame() -> Option<usize> {

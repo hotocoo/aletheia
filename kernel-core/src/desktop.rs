@@ -852,7 +852,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             keyboard_resize: self.keyboard_resize,
             uptime_s: {
                 let hz = H::timer_freq_hz();
-                if hz == 0 { 0 } else { H::timer_ticks() / hz }
+                H::timer_ticks().checked_div(hz).unwrap_or(0)
             },
             workspace: self.wm.current_workspace(),
             workspace_counts: core::array::from_fn(|i| self.wm.workspace_count(i as u8 + 1).min(9) as u8),
@@ -992,7 +992,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             self.refresh_cursor_shape();
             return true;
         }
-        if target >= 10 && target < 10 + MAX_WORKSPACES {
+        if (10..10 + MAX_WORKSPACES).contains(&target) {
             let workspace = target - 9;
             self.switch_workspace(workspace);
             self.sync_terminal_geometry();
@@ -2059,6 +2059,7 @@ mod tests {
         assert!(super::HELP_Y + (h as i32) < super::H as i32);
     }
 
+    #[test]
     fn alt_number_launchers_select_the_taskbar_windows() {
         assert_eq!(alt_window_launcher(2, 1, true), Some(super::WINDOW));
         assert_eq!(alt_window_launcher(3, 1, true), Some(super::MONITOR));

@@ -865,10 +865,8 @@ impl WindowManager {
                             w.height = height;
                             w.restore = None;
                         }
-                        if (nx, ny) != (px, py) {
-                            if comp.move_surface(id, token, nx, ny).is_err() {
-                                return None;
-                            }
+                        if (nx, ny) != (px, py) && comp.move_surface(id, token, nx, ny).is_err() {
+                            return None;
                         }
                         Some(id)
                     }

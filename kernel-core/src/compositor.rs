@@ -340,20 +340,6 @@ impl ClientSurface {
         self.bits[idx / 64] & (1u64 << (idx % 64)) != 0
     }
 
-    /// The surface's damaged regions, coalesced to whole-surface when summarized.
-    fn damage_rects(&self) -> Vec<Rect> {
-        if self.whole_damage {
-            vec![Rect {
-                x: 0,
-                y: 0,
-                w: self.width,
-                h: self.height,
-            }]
-        } else {
-            self.damage.clone()
-        }
-    }
-
     fn has_damage(&self) -> bool {
         self.whole_damage || !self.damage.is_empty()
     }
@@ -1058,6 +1044,37 @@ impl Compositor {
         cursor_glyph(shape)[gy as usize] & (0x80u8 >> gx) != 0
     }
 
+    #[inline]
+    fn push_damage_region(
+        regions: &mut [Rect; MAX_DAMAGE_RECTS + 1],
+        region_count: &mut usize,
+        placement: Placed,
+        surface_w: u32,
+        surface_h: u32,
+        damage: Rect,
+    ) -> bool {
+        let surface_bounds = Rect {
+            x: 0,
+            y: 0,
+            w: surface_w,
+            h: surface_h,
+        };
+        let Some(damage) = Rect::intersect(damage, surface_bounds) else {
+            return true;
+        };
+        if *region_count == MAX_DAMAGE_RECTS {
+            return false;
+        }
+        regions[*region_count] = Rect {
+            x: (placement.x + damage.x as i32).max(0) as u32,
+            y: (placement.y + damage.y as i32).max(0) as u32,
+            w: damage.w,
+            h: damage.h,
+        };
+        *region_count += 1;
+        true
+    }
+
     // -- composition ----------------------------------------------------------
 
     /// Compose one frame into `sink`: every damaged SCREEN region is cleared to the
@@ -1077,22 +1094,29 @@ impl Compositor {
             w: sw,
             h: sh,
         };
-        let order: Vec<Placed> = self.placed.clone();
         let mut stats = FrameStats {
             frames: self.stats.frames + 1,
             ..FrameStats::default()
         };
 
-        // Collect the screen regions that owe a repaint, bounded: past MAX_DAMAGE_RECTS
-        // the collection COALESCES to the whole scanout — damage is summarized, never
-        // lost.
-        let mut regions: Vec<Rect> = Vec::new();
+        // Collect screen regions into a fixed stack buffer. This is the compositor hot path:
+        // cloning z-order and growing a Vec per frame made a repaint pay heap traffic even though
+        // the desktop's damage bound is already known. Keep the bound structural and allocation-free.
+        let mut regions = [Rect { x: 0, y: 0, w: 0, h: 0 }; MAX_DAMAGE_RECTS + 1];
+        let mut region_count = 0usize;
         let mut whole = self.whole_scanout_damage;
         if !whole {
-            regions.extend(self.scanout_damage.iter().copied());
+            for r in self.scanout_damage.iter().copied() {
+                if region_count == MAX_DAMAGE_RECTS {
+                    whole = true;
+                    break;
+                }
+                regions[region_count] = r;
+                region_count += 1;
+            }
         }
         if !whole {
-            'outer: for p in &order {
+            'outer: for p in &self.placed {
                 if !p.visible {
                     continue;
                 }
@@ -1102,34 +1126,48 @@ impl Compositor {
                 if !s.has_damage() {
                     continue;
                 }
-                for dmg in s.damage_rects() {
-                    let surface_bounds = Rect {
-                        x: 0,
-                        y: 0,
-                        w: s.width,
-                        h: s.height,
-                    };
-                    let Some(dmg) = Rect::intersect(dmg, surface_bounds) else {
-                        continue;
-                    };
-                    regions.push(Rect {
-                        x: (p.x + dmg.x as i32).max(0) as u32,
-                        y: (p.y + dmg.y as i32).max(0) as u32,
-                        w: dmg.w,
-                        h: dmg.h,
-                    });
-                    if regions.len() >= MAX_DAMAGE_RECTS {
+                if s.whole_damage {
+                    if !Self::push_damage_region(
+                        &mut regions,
+                        &mut region_count,
+                        *p,
+                        s.width,
+                        s.height,
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            w: s.width,
+                            h: s.height,
+                        },
+                    ) {
                         whole = true;
                         break 'outer;
+                    }
+                } else {
+                    for dmg in s.damage.iter().copied() {
+                        if !Self::push_damage_region(
+                            &mut regions,
+                            &mut region_count,
+                            *p,
+                            s.width,
+                            s.height,
+                            dmg,
+                        ) {
+                            whole = true;
+                            break 'outer;
+                        }
                     }
                 }
             }
         }
-        let regions: Vec<Rect> = if whole { vec![scanout] } else { regions };
+        if whole {
+            regions[0] = scanout;
+            region_count = 1;
+        }
         let cursor = self.cursor;
         let cursor_shape = self.cursor_shape;
 
-        for r in &regions {
+        for r in regions[..region_count].iter() {
             let Some(r) = Rect::intersect(*r, scanout) else {
                 continue;
             };
@@ -1140,7 +1178,7 @@ impl Compositor {
                     stats.pixels_blitted += 1;
                 }
             }
-            for p in &order {
+            for p in &self.placed {
                 if !p.visible {
                     continue;
                 }

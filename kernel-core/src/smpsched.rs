@@ -356,6 +356,8 @@ impl SmpSched {
     /// have no counters and report 0.
     #[doc(hidden)]
     pub fn debug_locks_held(&self, cpu: usize) -> u8 {
+        #[cfg(not(debug_assertions))]
+        let _ = cpu;
         #[cfg(debug_assertions)]
         {
             self.held

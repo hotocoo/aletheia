@@ -1,6 +1,13 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-08, latest (REPRODUCIBLE RELEASE ARTIFACTS — qemu-img's random VMDK `CID` is now
+**As of:** 2026-09-09, latest (COMPOSITOR HOT-PATH — `kernel-core/src/compositor.rs` now collects
+bounded repaint regions in fixed stack storage and walks live z-order directly, removing per-frame
+heap allocation while preserving clipping/damage/z-order authority; ADR-125; this wave also restored
+cross-target `Hal` implementations for the target-specific Virtio seams and synchronized stale GUI
+E2E marker expectations to the current three-window desktop. Live verification: aarch64, RISC-V and
+x86-64 VM gates PASS; real virtio-input workflow PASS; same-host QEMU/TCG comparative benchmark PASS
+(Aletheia idle 0.3% vs Linux 0.9%; typed echo 35 ms/op vs 266 ms/op in the measured run). VirtualBox
+remains SKIP on this arm64 host. Before that: REPRODUCIBLE RELEASE ARTIFACTS — qemu-img's random VMDK `CID` is now
 normalized from the exact raw image payload, ZIP entries use fixed metadata and sorted paths, and
 `scripts/reproducible-release.sh` builds the release twice and requires byte-identical ZIP bytes plus
 matching digest metadata; CI runs the gate on every push while the normal release path still boots
