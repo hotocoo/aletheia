@@ -263,15 +263,24 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                 guaranteed,
                 most_efficient
             );
-            match hwpm::request_hardware_max() {
-                Ok(_) => match hwpm::requested_max() {
-                    Some(actual) if actual == highest => kprintln!(
-                        "[hwpm] VERIFIED: hardware performance ceiling requested at {}",
-                        actual
-                    ),
-                    Some(actual) => kprintln!(
-                        "[hwpm] WARNING: hardware clamped request to {} (capability {})",
-                        actual,
+            match hwpm::request_performance_mode() {
+                Ok(_) => match hwpm::performance_request() {
+                    Some((min, max, desired, epp))
+                        if min == guaranteed && max == highest && desired == highest && epp == 0 =>
+                    {
+                        kprintln!(
+                            "[hwpm] VERIFIED: performance mode min={} max={} desired={} EPP={}",
+                            min, max, desired, epp
+                        )
+                    }
+                    Some((min, max, desired, epp)) => kprintln!(
+                        "[hwpm] WARNING: request readback min={} max={} desired={} EPP={} (target {}/{}/{}/0)",
+                        min,
+                        max,
+                        desired,
+                        epp,
+                        guaranteed,
+                        highest,
                         highest
                     ),
                     None => kprintln!("[hwpm] WARNING: HWP readback unavailable"),

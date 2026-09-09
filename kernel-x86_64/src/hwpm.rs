@@ -87,30 +87,43 @@ pub fn enable() -> bool {
     true
 }
 
-/// Request the highest performance point advertised by the CPU's HWP capability MSR.
-///
-/// The write is bounded by hardware-reported capability and preserves every other request field.
-/// It therefore cannot claim an electrical/ratio overclock. A future platform-specific backend
-/// may add true unlocked-ratio control only when firmware authorization and a hard thermal ceiling
-/// can be proved.
-pub fn request_hardware_max() -> Result<HwPmStatus, HwPmStatus> {
+/// Put HWP into an explicit latency/performance posture while remaining entirely inside the
+/// processor's architectural envelope. `guaranteed` is the lowest requested performance point,
+/// `highest` is both the maximum and desired point, and EPP=0 asks the hardware governor to prefer
+/// performance over energy efficiency. This is deliberately different from unlocked-ratio
+/// overclocking: no value outside `IA32_HWP_CAPABILITIES` is ever written.
+pub fn request_performance_mode() -> Result<HwPmStatus, HwPmStatus> {
     let status = probe();
-    let HwPmStatus::Hwp { highest, .. } = status else {
+    let HwPmStatus::Hwp {
+        guaranteed,
+        highest,
+        ..
+    } = status
+    else {
         return Err(status);
     };
     enable();
     unsafe {
         let request = rdmsr(IA32_HWP_REQUEST);
-        let updated = (request & !(0xffu64 << 8)) | ((highest as u64) << 8);
+        let updated = (request & !0xffff_ffffu64)
+            | (guaranteed as u64)
+            | ((highest as u64) << 8)
+            | ((highest as u64) << 16);
         wrmsr(IA32_HWP_REQUEST, updated);
     }
     Ok(status)
 }
 
-/// Read back the HWP maximum-performance request for verification.
-pub fn requested_max() -> Option<u8> {
+/// Read back the four architecturally visible HWP request fields used by the performance mode.
+pub fn performance_request() -> Option<(u8, u8, u8, u8)> {
     if !matches!(probe(), HwPmStatus::Hwp { .. }) {
         return None;
     }
-    Some(unsafe { ((rdmsr(IA32_HWP_REQUEST) >> 8) & 0xff) as u8 })
+    let request = unsafe { rdmsr(IA32_HWP_REQUEST) };
+    Some((
+        (request & 0xff) as u8,
+        ((request >> 8) & 0xff) as u8,
+        ((request >> 16) & 0xff) as u8,
+        ((request >> 24) & 0xff) as u8,
+    ))
 }

@@ -1,6 +1,17 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (INPUT HOT-PATH — `kernel-core/src/vinput.rs` now batches receive-buffer
+**As of:** 2026-09-09, latest (HARDWARE PERFORMANCE RUNG — `kernel-x86_64/src/hwpm.rs` now drives an
+explicit Intel HWP performance posture when architectural HWP is present: min=`guaranteed`,
+max=`highest`, desired=`highest`, EPP=0, with MSR readback verification; this stays strictly inside
+the CPU-advertised envelope and does not pretend to be unlocked-ratio overclocking. Current QEMU
+`qemu64` correctly reports HWP unsupported, so no unsafe MSR probing occurs. Same-host QEMU/TCG
+comparison re-run: Aletheia boot median 3067 ms (3067/3070), idle 1.6%, typed echo 45 ms/10 ops;
+Linux 6.12.81 boot median 2060 ms (2060/2062), idle 2.1%, typed echo 308 ms/10 ops. The measured
+interactive workload remains materially faster on Aletheia, while boot remains slower because the
+comparison intentionally boots Aletheia through UEFI and Linux directly with `-kernel`. Full x86
+smoke gate reached QEMU exit 33 and all required markers including the three-boot persistence/custody
+workflow; physical HWP performance-mode validation remains pending because the current validation host
+is QEMU. Before that: INPUT HOT-PATH — `kernel-core/src/vinput.rs` now batches receive-buffer
 repost notifications in bounded groups of four, flushes a short pending batch at observed quiescence,
 and exposes live keyboard/pointer doorbell counters; `kernel-core/src/desktop.rs` reports them and the
 terminal queue is O(1) FIFO via `VecDeque`; ADR-126. This preserves DMA validation and bounded queue
