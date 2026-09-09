@@ -79,7 +79,14 @@ impl ShellHost for Host {
         crate::desktop::facts()
     }
     fn input_irq_stats(&self) -> Option<((u64, u64, u64, u64), (u64, u64, u64))> {
-        Some((crate::idt::input_msix_stats(), crate::idt::timer_wakeup_stats()))
+        #[cfg(feature = "input-msix")]
+        {
+            Some((crate::idt::input_msix_stats(), crate::idt::timer_wakeup_stats()))
+        }
+        #[cfg(not(feature = "input-msix"))]
+        {
+            None
+        }
     }
     /// `sti; hlt` — safe here because this target's console is interrupt-driven through the 8259A on
     /// IRQ4 (REQ-CON-002), and the UART interrupt is what ends the wait.

@@ -1,6 +1,11 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (POINTER FAST LANE — ADR-133 gives the interactive desktop pump a
+**As of:** 2026-09-09, latest (X86 QUALIFICATION HOT-PATH — ADR-134 compiles MSI-X/timer wake-latency
+telemetry only into the explicit `input-msix` qualification build, removing dead telemetry state and
+sampling calls from the normal interactive desktop hot path while preserving the complete A/B
+measurement surface. `scripts/vm-e2e-x86.sh` passes with the normal interactive build, and the
+`interactive,input-msix` release image also builds successfully. Before that: POINTER FAST LANE —
+ADR-133 gives the interactive desktop pump a
 one-event pointer fast lane before the bounded keyboard burst, preventing a noisy keyboard from
 delaying cursor/focus input behind the full keyboard budget while preserving the existing bounded
 work and authority paths. `cargo test --manifest-path kernel-core/Cargo.toml` passed with **133 unit

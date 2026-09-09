@@ -30,13 +30,21 @@ pub const INPUT_MSIX_VECTOR: u8 = 0x51;
 static INPUT_MSIX_HITS: AtomicU64 = AtomicU64::new(0);
 static INPUT_MSIX_SEQ: AtomicU64 = AtomicU64::new(0);
 static INPUT_MSIX_TSC: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static INPUT_MSIX_SAMPLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static INPUT_MSIX_TOTAL_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static INPUT_MSIX_MAX_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static TIMER_IRQ_SEQ: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static TIMER_IRQ_TSC: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static TIMER_SAMPLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static TIMER_TOTAL_CYCLES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static TIMER_MAX_CYCLES: AtomicU64 = AtomicU64::new(0);
 
 /// The software-interrupt vector the ring-3 syscall door uses (`int 0x80`). Its IDT gate is
@@ -118,6 +126,7 @@ extern "x86-interrupt" fn input_msix(_frame: InterruptStackFrame) {
 /// Record the end-to-end interrupt-wakeup portion of the path: TSC at the MSI-X handler to the
 /// first foreground service that consumes its wake. This intentionally excludes compositor work,
 /// so it measures the scheduling/wakeup floor rather than hiding rendering cost inside "latency".
+#[cfg(feature = "input-msix")]
 pub fn sample_input_msix_wakeup(last_seq: &AtomicU64) {
     let seq = INPUT_MSIX_SEQ.load(Ordering::Acquire);
     let seen = last_seq.load(Ordering::Relaxed);
@@ -149,6 +158,7 @@ pub fn sample_input_msix_wakeup(last_seq: &AtomicU64) {
     }
 }
 
+#[cfg(feature = "input-msix")]
 pub fn input_msix_stats() -> (u64, u64, u64, u64) {
     (
         INPUT_MSIX_HITS.load(Ordering::Relaxed),
@@ -158,6 +168,7 @@ pub fn input_msix_stats() -> (u64, u64, u64, u64) {
     )
 }
 
+#[cfg(feature = "input-msix")]
 pub fn sample_timer_wakeup(last_seq: &AtomicU64) {
     let seq = TIMER_IRQ_SEQ.load(Ordering::Acquire);
     let seen = last_seq.load(Ordering::Relaxed);
@@ -184,6 +195,7 @@ pub fn sample_timer_wakeup(last_seq: &AtomicU64) {
     }
 }
 
+#[cfg(feature = "input-msix")]
 pub fn timer_wakeup_stats() -> (u64, u64, u64) {
     (
         TIMER_SAMPLES.load(Ordering::Relaxed),
@@ -262,9 +274,12 @@ extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, _err: u64) ->
 
 extern "x86-interrupt" fn timer(_frame: InterruptStackFrame) {
     crate::pit::tick();
+    #[cfg(feature = "input-msix")]
+    {
     let tsc = unsafe { core::arch::x86_64::_rdtsc() };
     TIMER_IRQ_TSC.store(tsc, Ordering::Release);
     TIMER_IRQ_SEQ.fetch_add(1, Ordering::AcqRel);
+    }
     // Acknowledge the PIC before the wakeup store so interrupt-controller service is released
     // before any foreground bookkeeping is requested.
     crate::pic::eoi(TIMER_VECTOR);

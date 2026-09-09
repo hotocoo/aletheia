@@ -15,7 +15,9 @@
 //! by the CPU's interrupt flag and no lock is needed — and none is taken, because the main
 //! thread also holds console locks that an IRQ path must never spin on.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "input-msix")]
+use core::sync::atomic::AtomicU64;
 
 use alloc::vec::Vec;
 use kernel_core::desktop::{Desktop as CoreDesktop, PAGES};
@@ -34,7 +36,9 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Set by IRQ0 and consumed by the foreground context. Keeping the desktop pump out of interrupt
 /// context removes compositor, input-device, and framebuffer work from the hard IRQ latency path.
 static PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "input-msix")]
 static LAST_INPUT_MSIX_SEQ: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "input-msix")]
 static LAST_TIMER_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Bring the desktop up and hand back the GPU function's FULL grant list (backing pages
@@ -85,11 +89,14 @@ pub fn service_pending() {
         // singleton. The devices remain live for the machine's lifetime after install().
         let d = unsafe { (*core::ptr::addr_of_mut!(DESKTOP)).as_mut() };
         if let Some(d) = d {
-            // Sample immediately before foreground queue/frame work starts. The hard IRQ itself
-            // stays bounded to an atomic wake + LAPIC EOI; this isolates IRQ-to-foreground handoff
-            // from compositor/rendering cost.
-            crate::idt::sample_input_msix_wakeup(&LAST_INPUT_MSIX_SEQ);
-            crate::idt::sample_timer_wakeup(&LAST_TIMER_SEQ);
+            // Sample immediately before foreground queue/frame work starts when the MSI-X
+            // qualification path is enabled. The normal interactive build keeps this diagnostic
+            // instrumentation out of the hot path entirely.
+            #[cfg(feature = "input-msix")]
+            {
+                crate::idt::sample_input_msix_wakeup(&LAST_INPUT_MSIX_SEQ);
+                crate::idt::sample_timer_wakeup(&LAST_TIMER_SEQ);
+            }
             unsafe { d.pump(crate::frames::free_count(), crate::frames::total_count()) };
         }
     });
