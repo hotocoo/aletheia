@@ -1,6 +1,12 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (HOSTED GUI TRANSPORT HARDENING — ADR-128 makes the Experience HTTP
+**As of:** 2026-09-09, latest (PER-CPU HARDWARE PERFORMANCE POSTURE — ADR-129 applies the architectural
+HWP performance request independently on every x86-64 AP after it enters long mode, closing the
+multi-core gap where only the BSP received the requested performance posture; the SMP gate now
+requires every online AP to accept its own request when HWP is available, while unsupported CPUs
+remain fail-closed. `scripts/vm-e2e-x86.sh` passes with the structured marker map updated to `smp=23`.
+The validation QEMU CPU reports HWP unsupported, so physical HWP behavior remains hardware-qualified
+work rather than an invented benchmark claim. Before that: HOSTED GUI TRANSPORT HARDENING — ADR-128 makes the Experience HTTP
 boundary incrementally framed and bounded at 64 KiB, rejects malformed framing and cross-origin browser
 requests, adds short read/write timeouts, and strengthens browser isolation headers. Targeted GUI tests
 remain green; live `aletheiad gui` returned HTTP 200 with the security headers and an evil Origin was

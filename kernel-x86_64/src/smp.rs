@@ -312,6 +312,11 @@ static ONLINE_MASK: AtomicUsize = AtomicUsize::new(0);
 /// LAPIC ID and IA32_GS_BASE observed by each AP (per-CPU identity proof, the MPIDR/TPIDR twin).
 static SEEN_APIC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
 static SEEN_GS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+/// Number of secondary CPUs that successfully applied the architectural HWP performance request
+/// to their OWN package/thread-local MSRs. HWP control is per logical processor; programming only
+/// the BSP would leave the other CPUs at firmware policy even though the scheduler can dispatch
+/// work to them.
+static HWPM_AP_OK: AtomicUsize = AtomicUsize::new(0);
 /// APs that reached the final parking loop.
 static PARKED: AtomicUsize = AtomicUsize::new(0);
 
@@ -492,6 +497,14 @@ pub extern "C" fn ap_entry() -> ! {
     let gs = unsafe { Msr::new(IA32_GS_BASE).read() };
     SEEN_GS[cpu].store(gs, Ordering::SeqCst);
     SEEN_APIC[cpu].store((lapic_r(LAPIC_ID) >> 24) as u64, Ordering::SeqCst);
+
+    // HWP request MSRs are per logical processor. The BSP requests its performance posture during
+    // normal boot; every AP must independently apply the same architectural request after it has
+    // entered long mode. Unsupported CPUs are harmlessly skipped by the backend, but when the BSP
+    // has HWP the SMP gate below requires every online AP to have accepted its own request.
+    if crate::hwpm::request_performance_mode().is_ok() {
+        HWPM_AP_OK.fetch_add(1, Ordering::SeqCst);
+    }
     lapic_enable_self();
     ONLINE_MASK.fetch_or(1 << cpu, Ordering::SeqCst);
 
@@ -629,6 +642,10 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         return Ok(0);
     }
     let planned = found.min(MAX_CPUS - 1);
+    let hwp_supported = matches!(
+        crate::hwpm::probe(),
+        crate::hwpm::HwPmStatus::Hwp { .. }
+    );
 
     // LAPIC up on the BSP (ICR sends require it); preserve the firmware's LVT/virtual-wire state.
     // SAFETY: rdmsr IA32_APIC_BASE at ring 0; bits 12..36 = the xAPIC MMIO base.
@@ -721,6 +738,10 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     check!(
         ONLINE_MASK.load(Ordering::SeqCst) == all_mask && AP_FAULTS.load(Ordering::SeqCst) == 0,
         "smp: all APs online in long mode (shared CR3, no AP faults)"
+    );
+    check!(
+        !hwp_supported || HWPM_AP_OK.load(Ordering::SeqCst) == secondaries,
+        "smp: architectural HWP performance posture applied on every online AP"
     );
     kprintln!(
         "  [info  ] {} AP(s) online, mask {:#x}",
