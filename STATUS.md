@@ -86,7 +86,7 @@ a heap that never frees — the manager's `z_order()` per event and the pump's `
 desktop a value generic over the same `VirtioHal`+`Transport` seams the drivers cross, so aarch64,
 RISC-V and x86-64 install and pump the SAME compositor, input session, window manager, terminal and
 monitor: each kernel keeps only its own static, its own way of shutting the pump out (IF / `DAIF.I` /
-`sstatus.SIE`), its own 100 Hz timer (PIT / generic timer PPI / SBI `set_timer`) and its own frame
+`sstatus.SIE`), its own timer (x86 PIT 250 Hz / generic timer PPI / SBI `set_timer`) and its own frame
 ledger, handed to `pump(free, total)`; the console's second surface reaches all three; all three
 gates assert `[desktop] LIVE ... 2 managed windows`; ADR-085); before that: (WINDOWS ARE A MANAGED SET, NOT ONE PRIVILEGED SURFACE — `kernel-core/src/wm.rs`
 gives the desktop a window manager that owns every window's owner token (unknown, duplicate and
@@ -156,7 +156,7 @@ and the click as a ROUTING decision — `Compositor::focus_at` focuses the topmo
 point, an empty click clears focus, the loser is told, a forged session is refused — with `route_key` /
 `route_pointer` shared between the boot suite and the live pump; `kernel-x86_64/src/desktop.rs` installs
 the LIVE desktop before the VT-d gate (one compositor, one session, panel + window, the tablet steering the
-cursor) and pumps it from the PIT tick at 100 Hz, bounded, composing only when pixels changed and issuing
+cursor) and pumps it from the PIT tick at 250 Hz on x86-64, bounded, composing only when pixels changed and issuing
 exactly one TRANSFER + one FLUSH per changed frame, its facts published as single machine words the new
 `input` console command reads LIVE — 10 boot invariants against the REAL devices on all three targets
 (`[vinput] ALL 10 INPUT-HARDWARE INVARIANTS HOLD`, init fails 679, suite fails 680+i; `input_suite` grows
