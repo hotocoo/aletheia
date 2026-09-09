@@ -882,3 +882,11 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung).
 
 - ALET-P2-029/030/031 resolved by ADR-091: `docs/THREAT-MODEL.md` inventories 13 security boundaries and explicitly separates unauthorized effects from denial of service.
 - `scripts/check-threat-model.sh` is CI-enforced and validates the inventory sections, unique boundary IDs, and referenced evidence paths.
+
+### 2026-09-09 — Performance/security/GUI verification wave
+
+- Re-ran the complete `kernel-core` host suite: **all tests passed**, including the compositor, input, scheduler, reclaim, power/performance, IOMMU, VT-d/SMMU models, persistent-store, security-behavior, ML-advisor stress, and GUI/window-manager suites. The long virtio-block fuzz surface also completed successfully (14/14, 110.46 s).
+- Re-ran `REQUIRE_X86=1 REQUIRE_DESKTOP=1 bash scripts/e2e-all.sh`: **aarch64 PASS, RISC-V PASS, x86-64 UEFI PASS, live GUI PASS** on both DT targets. x86-64 completed the full live VT-d gate with 14 invariants and the persistent-medium two-reboot proof; the rootless third boot remained fail-closed and continued. VirtualBox is explicitly **SKIP** on this arm64 host because it cannot virtualize the x86-64 target.
+- The x86-64 live boot now has direct evidence for the performance posture: PIT at **250 Hz**, live timer IRQs, TSC calibration, kernel-owned identity map active, and **0 live W^X violations** across 6,645 audited leaves. The architectural HWP actuator correctly reports unsupported on this QEMU CPU rather than probing unsafe MSRs.
+- Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=2`, `WORKLOAD_OPS=10`) recorded Aletheia median boot **9,252 ms** vs Linux **5,167 ms** (not a kernel-speed claim because the boot paths differ), idle host CPU **2.2%** vs **1.4%**, and typed echo **279 ms** vs **468 ms** on the final samples. Aletheia's bootable payload was **1,817,600 B** vs Linux kernel+initramfs **13,895,205 B**. The benchmark remains deliberately non-gating for wall-clock superiority under TCG.
+- No hardware overclock claim is made: the PM policy and HWP actuator remain bounded by the CPU's advertised architectural envelope. Physical unlocked-ratio/voltage control requires a hardware-qualified platform backend and cannot be truthfully validated by this QEMU host.
