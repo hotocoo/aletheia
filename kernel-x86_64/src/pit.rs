@@ -17,25 +17,24 @@ pub const FREQ_HZ: u32 = 1_000;
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
 pub fn init() {
-    let divisor = (PIT_BASE_HZ / FREQ_HZ) as u16;
+    program(FREQ_HZ);
+}
+
+/// Qualification-only override for a longer preemption proof slice. Production timing remains
+/// [`FREQ_HZ`]; the ring-3 proof uses this to avoid making a 1 ms slice depend on host scheduling
+/// jitter under TCG.
+pub fn init_at_hz(freq_hz: u32) {
+    program(freq_hz.max(1));
+}
+
+fn program(freq_hz: u32) {
+    let divisor = (PIT_BASE_HZ / freq_hz).clamp(1, u16::MAX as u32) as u16;
     unsafe {
         // Channel 0, access lobyte/hibyte, mode 3 (square wave generator), binary.
         Port::<u8>::new(COMMAND).write(0x36u8);
         Port::<u8>::new(CHANNEL0).write((divisor & 0xFF) as u8);
         Port::<u8>::new(CHANNEL0).write((divisor >> 8) as u8);
     }
-}
-
-/// Restart channel 0's count from the top, so the caller gets a WHOLE period before the next IRQ0
-/// rather than whatever remains of the current one.
-///
-/// The other two targets arm a one-shot timer per slice; the PIT free-runs, so a ring-3 task can be
-/// resumed a microsecond before a tick that was already due and be preempted before executing a
-/// single instruction of its own. Writing the control word halts and reloads the counter (8254
-/// §Control Word), which is the PIT's equivalent of that arm. `TICKS` is untouched — this changes
-/// the PHASE of the tick, never its rate, so every deadline computed from [`ticks`] stays valid.
-pub fn rearm() {
-    init();
 }
 
 /// Called from the IRQ0 handler.

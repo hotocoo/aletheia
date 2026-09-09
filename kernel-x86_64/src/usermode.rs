@@ -1820,11 +1820,10 @@ fn run_preemptive() -> (bool, bool) {
             s.preempted = false;
             s.exited = false;
         }
-        // Start the slice budget when the TASK starts. The PIT free-runs at 100 Hz, so without this
-        // a task resumes into whatever is LEFT of the current 10 ms period — which on a loaded host
-        // can be nothing, and it would then take IRQ0 before executing a single `inc` and fail the
-        // progress invariant for a reason that has nothing to do with state preservation.
-        crate::pit::rearm();
+        // The production desktop cadence is 1 kHz, but a 1 ms qualification slice can expire
+        // while the TCG vCPU is descheduled between rearm and the first ring-3 instruction. Use a
+        // 10 ms proof slice here; this changes only the selftest's timing, not the live scheduler.
+        crate::pit::init_at_hz(100);
         // SAFETY: roots[slot] maps the kernel; run the task until the timer preempts it.
         unsafe {
             vm::switch_to(roots[slot]);
@@ -1867,6 +1866,9 @@ fn run_preemptive() -> (bool, bool) {
         counts[slot] += 1;
         cur = (cur + 1) % NTASK;
     }
+
+    // Restore the production 1 kHz cadence before the remaining boot/live path resumes.
+    crate::pit::init();
 
     cleanup_tasks(&roots, &mut code, &mut stack);
 

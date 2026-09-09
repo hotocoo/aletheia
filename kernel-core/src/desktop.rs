@@ -19,7 +19,7 @@
 //!   than calling an allocator: the machine's memory ledger is the platform's to report.
 //! * **The wake-up.** A pump that never runs is a dead desktop, but WHEN it runs is a timer
 //!   question every CPU answers differently (PIT, the ARM generic timer PPI, the RISC-V timer),
-//!   all currently configured to the same 250 Hz / 4 ms interactive cadence.
+//!   with the x86 interactive backend currently using a 1 kHz / 1 ms cadence.
 //!
 //! The pump is BOUNDED exactly as ADR-080 left it: at most one queue depth of events per tick
 //! per device, a compose only when something owes a repaint, and a device command only when the

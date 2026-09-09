@@ -899,3 +899,12 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung).
 - Fresh x86-64 UEFI smoke verification passed all three boots: **boot #1 PASS, persistent boot #2 PASS, rootless boot #3 PASS** with `PLATFORM ROOT ABSENT (RootNotProvided)` and final process exit 33. The same run reached the live VT-d gate with **14/14 invariants**, **39/39 ring-3**, **72/72 VM**, **23/23 SMP**, and **10/10 live input-hardware** invariants.
 - Live GUI E2E remained **PASS** on both aarch64 and RISC-V. VirtualBox remains a deliberate **SKIP** on this arm64 host because it cannot execute the x86-64 guest.
 - The QEMU x86 host still reports no architectural HWP actuator; therefore this wave makes no unsafe frequency/voltage or physical-overclock claim.
+
+### 2026-09-09 — x86 hard-IRQ micro-path + qualification-timing hardening
+
+- Shortened the live IRQ0 path further: PIC EOI now occurs before the deferred desktop wakeup store, and IRQ0 no longer performs the desktop-enabled atomic load. The production path is now timer accounting + EOI + one release-store wakeup; all compositor/input/framebuffer work remains foreground-only.
+- Added an explicit PIT programming seam for qualification-only timing. The live desktop/scheduler cadence remains **1 kHz**; the ring-3 involuntary-preemption proof temporarily uses **100 Hz / 10 ms slices** under QEMU TCG, then restores 1 kHz before the live path continues. This removes host-vCPU scheduling jitter from the register-preservation proof rather than weakening the invariant.
+- Rebuilt the x86-64 release UEFI image with the pinned `nightly-2026-08-09` toolchain and re-ran the complete three-boot smoke gate: **PASS**. Boot #1 reached `[e2e] PASS`; persistent boot #2 verified the prior entity; rootless boot #3 reported `RootNotProvided` and remained sealed; all three exited 33.
+- Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
+- Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
+- QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.

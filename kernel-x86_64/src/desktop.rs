@@ -27,9 +27,9 @@ use crate::virtio::{Gpu, InputDev, X86Virtio};
 type Desktop = CoreDesktop<X86Virtio, PciTransport>;
 
 static mut DESKTOP: Option<Desktop> = None;
-/// Pump enable — set once by [`install`], never cleared. Before it is set, [`request_pump`] is one
-/// relaxed load and a return, which is why it is safe to call unconditionally from IRQ0 during
-/// the whole boot.
+/// Pump enable — set once by [`install`], never cleared. The foreground side uses this to decide
+/// whether a desktop exists; IRQ0 deliberately does not read it because the timer path should
+/// only perform its required accounting, acknowledgement, and wakeup store.
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Set by IRQ0 and consumed by the foreground context. Keeping the desktop pump out of interrupt
 /// context removes compositor, input-device, and framebuffer work from the hard IRQ latency path.
@@ -65,9 +65,9 @@ pub fn install(
 
 /// Request desktop service from IRQ0. See the module docs for the deferred-work posture.
 pub fn request_pump() {
-    if !ENABLED.load(Ordering::Relaxed) {
-        return;
-    }
+    // Deliberately unconditional: a pre-install timer tick is harmless and removing the extra
+    // atomic load from IRQ0 shortens the hard-interrupt path. The foreground side discards the
+    // pending bit while ENABLED is false.
     PENDING.store(true, Ordering::Release);
 }
 

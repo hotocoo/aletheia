@@ -159,10 +159,12 @@ extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, _err: u64) ->
 
 extern "x86-interrupt" fn timer(_frame: InterruptStackFrame) {
     crate::pit::tick();
+    // Acknowledge the PIC before the wakeup store so interrupt-controller service is released
+    // before any foreground bookkeeping is requested.
+    crate::pic::eoi(TIMER_VECTOR);
     // Only wake the foreground desktop service here. Device draining, window routing, and
     // framebuffer work must not extend hard-IRQ latency (ADR-080).
     crate::desktop::request_pump();
-    crate::pic::eoi(TIMER_VECTOR);
 }
 
 /// Repoint the three vectors the user-mode suite drives at its own register-exact assembly entries
