@@ -24,6 +24,7 @@
 //! per device, a compose only when something owes a repaint, and a device command only when the
 //! model reports it wrote pixels. An idle tick is two used-ring reads and one damage check.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
@@ -277,7 +278,7 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     chrome_focus: u32,
     keyboard_resize: bool,
     /// Keystrokes drained from the terminal's queue, waiting for the console's `getc`.
-    term_input: Vec<u8>,
+    term_input: VecDeque<u8>,
     /// Where the pointer last was (mirrored from the cursor, so a press knows it).
     pointer: (u32, u32),
     /// Last title-bar click: window id, scanout position and timer tick. Kept as presentation
@@ -715,7 +716,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             switcher_until: 0,
             chrome_focus: WINDOW,
             keyboard_resize: false,
-            term_input: Vec::with_capacity(TERM_INPUT_CAP),
+            term_input: VecDeque::with_capacity(TERM_INPUT_CAP),
             pointer: (W / 2, H / 2),
             last_title_click: None,
         };
@@ -1527,7 +1528,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         while let Ok(Some(e)) = self.comp.pop_input(WINDOW, tok) {
             if let EventKind::Key(b) = e.kind {
                 if self.term_input.len() < TERM_INPUT_CAP {
-                    self.term_input.push(b);
+                    self.term_input.push_back(b);
                 } else {
                     break;
                 }
@@ -1967,7 +1968,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         if self.term_input.is_empty() {
             None
         } else {
-            Some(self.term_input.remove(0))
+            self.term_input.pop_front()
         }
     }
 
@@ -1992,6 +1993,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             focus: self.comp.focus(),
             kb_events: self.kb.events_seen(),
             pt_events: self.tab.events_seen(),
+            kb_doorbells: self.kb.doorbells(),
+            pt_doorbells: self.tab.doorbells(),
             window: self.comp.placement(WINDOW),
             term_lines: self.term.lines(),
             term_last,

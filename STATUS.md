@@ -1,6 +1,12 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (COMPOSITOR HOT-PATH — `kernel-core/src/compositor.rs` now collects
+**As of:** 2026-09-09, latest (INPUT HOT-PATH — `kernel-core/src/vinput.rs` now batches receive-buffer
+repost notifications in bounded groups of four, flushes a short pending batch at observed quiescence,
+and exposes live keyboard/pointer doorbell counters; `kernel-core/src/desktop.rs` reports them and the
+terminal queue is O(1) FIFO via `VecDeque`; ADR-126. This preserves DMA validation and bounded queue
+semantics while reducing MMIO notification work on bursty input. Targeted vinput verification: 10/10
+passed. Full kernel-core verification is still running; no commit/push claim is made until it settles.
+Before that: COMPOSITOR HOT-PATH — `kernel-core/src/compositor.rs` now collects
 bounded repaint regions in fixed stack storage and walks live z-order directly, removing per-frame
 heap allocation while preserving clipping/damage/z-order authority; ADR-125; this wave also restored
 cross-target `Hal` implementations for the target-specific Virtio seams and synchronized stale GUI

@@ -724,6 +724,9 @@ pub struct InputFacts {
     pub kb_events: u64,
     /// Raw events the pointer device has delivered since boot.
     pub pt_events: u64,
+    /// Event-queue device notifications issued by the keyboard and pointer drivers.
+    pub kb_doorbells: u64,
+    pub pt_doorbells: u64,
     /// The terminal window's top-left on the scanout, if placed (ADR-083).
     pub window: Option<(i32, i32)>,
     /// Lines the terminal window has completed since boot.
@@ -1131,6 +1134,12 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                         "devices: keyboard {} events, pointer {} events",
                         f.kb_events,
                         f.pt_events
+                    );
+                    outf!(
+                        out,
+                        "doorbells: keyboard {}, pointer {}",
+                        f.kb_doorbells,
+                        f.pt_doorbells
                     );
                     // The terminal window (ADR-083): where it sits and what its last line says,
                     // read from the same grid the compositor paints - not a second copy.

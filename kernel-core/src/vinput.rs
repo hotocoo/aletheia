@@ -74,6 +74,9 @@ const STATUS_QUEUE: u16 = 1;
 
 /// `struct virtio_input_event`: type (u16), code (u16), value (u32) — 8 bytes, one per buffer.
 pub const EVENT_SIZE: usize = 8;
+/// Re-post several consumed receive buffers per device notification. Four keeps the device
+/// supplied ring ahead of the consumer while cutting MMIO doorbells on bursty input.
+const REPOST_KICK_BATCH: u8 = 4;
 
 // -- config-space selects (VIRTIO 1.2 §5.8.4) ----------------------------------------------
 /// Select 0: `size` 1, the data byte is the unplugged flag (0 = plugged in).
@@ -196,6 +199,12 @@ pub struct VirtioInput<H: VirtioHal, T: Transport + ConfigWrite> {
     qsize: u16,
     version1: bool,
     status_at_ok: u32,
+    /// Receive buffers published since the last device notification. Bounded by
+    /// [`REPOST_KICK_BATCH`], so a quiet device never accumulates an unbounded deferred kick.
+    pending_kicks: Cell<u8>,
+    /// Device notifications issued for the event queue, exposed so performance claims can be
+    /// observed on the live machine instead of inferred from source inspection.
+    doorbells: Cell<u64>,
     /// Events harvested from the device — the live-leg counter.
     events_seen: Cell<u64>,
     local_refusals: Cell<u64>,
@@ -306,6 +315,8 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
             qsize,
             version1: true,
             status_at_ok: status,
+            pending_kicks: Cell::new(0),
+            doorbells: Cell::new(1),
             events_seen: Cell::new(0),
             local_refusals: Cell::new(0),
             _hal: PhantomData,
@@ -406,7 +417,18 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
     /// # Safety
     /// The device must be live (DRIVER_OK reached at init).
     pub unsafe fn next_event(&mut self) -> Option<RawEvent> {
-        let (slot, written) = self.eventq.poll_used::<H>()?;
+        let (slot, written) = match self.eventq.poll_used::<H>() {
+            Some(used) => used,
+            None => {
+                // A short burst must not leave its replacement buffers invisible to the
+                // device forever. The common burst path batches four restores; an observed
+                // empty used ring is the natural quiescence boundary at which to flush a
+                // smaller batch. This preserves the bounded MMIO reduction without adding
+                // refill starvation after one-to-three events.
+                self.flush_pending_kick();
+                return None;
+            }
+        };
         let addr = self.events_frame + slot as usize * EVENT_SIZE;
         if written as usize != EVENT_SIZE {
             // A device that writes the wrong amount into an event buffer is a device whose
@@ -417,8 +439,7 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
             let _ = self
                 .eventq
                 .add::<H>(slot, addr as u64, EVENT_SIZE as u32, true);
-            // SAFETY: live transport.
-            self.eventq.kick::<H, T>(&self.transport);
+            self.repost_kick();
             return None;
         }
         // SAFETY: addr is inside the registered event frame; the used-ring advance observed
@@ -435,10 +456,36 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
         let _ = self
             .eventq
             .add::<H>(slot, addr as u64, EVENT_SIZE as u32, true);
-        // SAFETY: live transport.
-        self.eventq.kick::<H, T>(&self.transport);
+        self.repost_kick();
         self.events_seen.set(self.events_seen.get() + 1);
         Some(raw)
+    }
+
+    /// Re-notify the device only after a small bounded batch of receive buffers was restored.
+    /// The initial ring is already full; after consumption, the device can continue using its
+    /// remaining posted buffers while these replacements accumulate. At most four consumed
+    /// buffers can therefore sit un-notified, bounding refill latency while reducing MMIO work.
+    #[inline]
+    unsafe fn repost_kick(&self) {
+        let pending = self.pending_kicks.get().saturating_add(1);
+        if pending >= REPOST_KICK_BATCH {
+            self.flush_pending_kick();
+        } else {
+            self.pending_kicks.set(pending);
+        }
+    }
+
+    /// Flush a deferred event-queue notification, if any buffers have been restored.
+    #[inline]
+    unsafe fn flush_pending_kick(&self) {
+        if self.pending_kicks.get() == 0 {
+            return;
+        }
+        // SAFETY: caller has a live transport and event queue; this only publishes the
+        // already DMA-validated buffers restored by `next_event`.
+        self.eventq.kick::<H, T>(&self.transport);
+        self.doorbells.set(self.doorbells.get() + 1);
+        self.pending_kicks.set(0);
     }
 
     // -- the facts the suites and the IOMMU layer consume ------------------------------------
@@ -454,6 +501,11 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
     }
     pub fn events_seen(&self) -> u64 {
         self.events_seen.get()
+    }
+
+    /// Number of event-queue device notifications issued since initialization.
+    pub fn doorbells(&self) -> u64 {
+        self.doorbells.get()
     }
     pub fn local_refusals(&self) -> u64 {
         self.local_refusals.get()
