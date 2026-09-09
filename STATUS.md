@@ -1,6 +1,15 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (X86 QUALIFICATION HOT-PATH — ADR-134 compiles MSI-X/timer wake-latency
+**As of:** 2026-09-09, latest (X86 INTERACTIVE INPUT — ADR-135 makes the existing virtio-input MSI-X
+wake path the default for the `interactive` x86-64 build. The interrupt remains wake+EOI only and a
+100 Hz PIT is retained as a lost-interrupt watchdog. `scripts/vinput-e2e.sh` passed with real QEMU
+keyboard/tablet events and reported **29 MSI-X hits / 29 wake samples**; the live workflow also
+verified the watchdog at 100 Hz. The full `kernel-core` suite passed (**133 unit tests, 7 bench tests,
+all integration/doc tests**). Fresh same-host/same-QEMU comparative measurement with 20 typed echo
+round-trips recorded Aletheia **63 ms / 3 ms per op** versus Linux **623 ms / 31 ms per op**; boot
+was **3055 ms** vs **2061 ms** and idle host CPU **4.2%** vs **2.3%**. This console benchmark is
+not a direct measurement of GUI pointer latency, so no GUI latency delta is claimed from it. Before
+that: X86 QUALIFICATION HOT-PATH — ADR-134 compiles MSI-X/timer wake-latency
 telemetry only into the explicit `input-msix` qualification build, removing dead telemetry state and
 sampling calls from the normal interactive desktop hot path while preserving the complete A/B
 measurement surface. `scripts/vm-e2e-x86.sh` passes with the normal interactive build, and the

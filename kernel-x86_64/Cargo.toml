@@ -13,7 +13,10 @@ bench = false
 [features]
 # Hand the machine to the serial line after the gates instead of exiting with a verdict
 # (REQ-CON-001, ADR-044). OFF by default so every gate keeps its exit-code contract.
-interactive = []
+# The interactive desktop uses the device's MSI-X wake path by default. The interrupt handler is
+# wake+EOI only; queue harvesting and composition stay in foreground context. A 100 Hz PIT remains
+# as a watchdog for lost device interrupts. The explicit feature is retained as an A/B escape hatch.
+interactive = ["input-msix"]
 input-msix = []
 
 [dependencies]
