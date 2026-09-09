@@ -1,5 +1,21 @@
 # Aletheia — Implementation Status
 
+## 2026-09-09 — Hosted GUI CSP hardening wave
+
+- The hosted Experience GUI now uses a fresh 128-bit per-response CSP nonce for its trusted inline
+  `<style>` and `<script>` blocks. `unsafe-inline` has been removed from the GUI policy; API/error
+  responses receive a script/style-disabled policy instead.
+- Runtime verification against `127.0.0.1:18787` returned HTTP 200, a matching nonce in the HTML and
+  `Content-Security-Policy`, no `unsafe-inline`, and no unresolved nonce placeholder.
+- `cargo test --manifest-path aletheia/Cargo.toml --tests` passed: **127 unit + 14 acceptance + all
+  integration suites**, including the 3 hosted-GUI security/telemetry tests.
+- `rustfmt --check aletheia/src/experience.rs` and `git diff --check` passed. The repository-wide
+  `cargo fmt --all -- --check` remains blocked by two pre-existing formatting differences in
+  `aletheia/src/capabilities.rs` and `aletheia/src/worldmodel.rs`; those unrelated files were not
+  modified by this wave.
+- `REQUIRE_X86=1 REQUIRE_DESKTOP=1 bash scripts/e2e-all.sh` passed: **aarch64 full, RISC-V full,
+  x86-64 UEFI, and live GUI**; VirtualBox remains an explicit host-architecture SKIP.
+
 ## 2026-09-09 qualification snapshot
 
 The current tree was re-qualified after the event-driven x86 input wave. `bash scripts/e2e-all.sh`

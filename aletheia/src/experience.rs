@@ -7,7 +7,7 @@ use crate::storage::Store;
 const GUI_HTML: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Aletheia Experience</title>
-<style>
+<style nonce="__CSP_NONCE__">
 :root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#e8edf5;background:#0b1018}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;display:grid;grid-template-columns:230px 1fr;min-height:100vh}aside{border-right:1px solid #263244;padding:24px 16px;background:#0e1520;position:sticky;top:0;height:100vh}.brand{display:flex;align-items:center;justify-content:space-between;gap:8px}.shortcut{font-size:11px;color:#8794a8;border:1px solid #263244;border-radius:6px;padding:3px 5px}.session-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#65758a;margin-right:6px}.session-dot.ready{background:#63b37a}.nav{display:grid;gap:6px;margin-top:24px}.nav button,.action{border:1px solid #2a394e;background:#111b29;color:#dfe8f5;border-radius:8px;padding:10px;text-align:left;cursor:pointer}.nav button:hover,.action:hover{border-color:#536b89}.nav button:focus-visible,.action:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid #8fa2bc;outline-offset:2px}.nav button.active{background:#1a2a3f}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:22px 0}.card{border:1px solid #263244;background:#101824;border-radius:12px;padding:16px}.value{font-size:28px;margin-top:8px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}.toolbar input{flex:1;min-width:220px}input,textarea,select{background:#0b121d;color:#e8edf5;border:1px solid #2a394e;border-radius:8px;padding:10px;width:100%}textarea{min-height:110px;resize:vertical}table{width:100%;border-collapse:collapse}.scroll{overflow:auto}.scroll td,.scroll th{padding:10px;border-bottom:1px solid #263244;text-align:left;vertical-align:top}pre{white-space:pre-wrap;overflow:auto;background:#0b121d;padding:14px;border-radius:8px}.danger{border-color:#7d3942}.status{padding:8px 10px;border-radius:8px;background:#152236;margin:10px 0}.status.error{border:1px solid #7d3942}.hidden{display:none}.trace{display:grid;gap:7px}.trace div{display:grid;grid-template-columns:150px 1fr;gap:10px;border-bottom:1px solid #202d3f;padding:8px}.trace b{color:#8fa2bc}.loading{opacity:.65;pointer-events:none}.palette{position:fixed;inset:0;background:rgba(0,0,0,.55);display:grid;place-items:start center;padding-top:14vh}.palette-card{width:min(680px,calc(100vw - 32px));border:1px solid #3b4d65;background:#101824;border-radius:12px;padding:12px;box-shadow:0 18px 50px rgba(0,0,0,.45)}.palette-card input{margin-bottom:8px}.palette-card .selected{border-color:#8fa2bc;background:#1a2a3f}.toast{position:fixed;right:20px;bottom:20px;max-width:420px;border:1px solid #3b4d65;background:#101824;padding:12px 14px;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.35);z-index:20}@media(max-width:760px){body{display:block}aside{position:sticky;top:0;height:auto;z-index:5;border-right:0;border-bottom:1px solid #263244;padding:12px 14px}.brand h2{margin:0}.nav{display:flex;overflow-x:auto;gap:6px;margin-top:12px;padding-bottom:2px}.nav button{flex:0 0 auto;white-space:nowrap}main{padding:0 12px}.main-head{display:block}.toolbar input{min-width:0}.grid{grid-template-columns:1fr 1fr}.trace div{grid-template-columns:1fr;gap:4px}}@media(max-width:480px){.grid{grid-template-columns:1fr}.shortcut{display:none}.palette{padding-top:8vh}.palette-card{width:calc(100vw - 20px)}}@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 </style></head><body><a class="hidden" href="#main-content">Skip to content</a><aside><div class="brand"><h2>Aletheia</h2><span class="shortcut">Ctrl/⌘ K</span></div><div class="muted"><span id="sessionDot" class="session-dot" aria-hidden="true"></span><span id="sessionLabel">No session</span></div><nav class="nav" id="nav" aria-label="Experience surfaces"></nav></aside><main id="main-content">
 <section id="dashboard"><div class="main-head"><div><h1>System overview</h1><div class="muted">Capability-gated semantic desktop</div></div><div class="toolbar"><button class="action" onclick="refreshCurrent()">Refresh</button><button class="action" onclick="openPalette()">Command palette</button></div></div><div class="grid" id="stats"></div><div class="card"><h2>Intent</h2><textarea id="intent" placeholder="Describe what you want Aletheia to do"></textarea><div class="toolbar"><button class="action" onclick="submitIntent(false)">Plan</button><button class="action danger" onclick="submitIntent(true)">Execute / approve</button></div><div id="intentResult"></div></div></section>
@@ -18,7 +18,7 @@ const GUI_HTML: &str = r##"<!doctype html>
 <section id="trace" class="hidden"><h1>Action trace</h1><div id="traceBody" class="card trace"></div></section>
 <section id="performance" class="hidden"><h1>Performance</h1><div class="muted">Live request-dispatch telemetry for the hosted Core. These figures measure Aletheia's service path; they are not CPU-frequency or thermal measurements.</div><div class="grid" id="perfStats"></div><div class="card"><h2>Interpretation</h2><p>Use this surface to catch regressions in the Core boundary. Hardware frequency, package power, thermals, and device-specific utilization require the native hardware backend and are intentionally not fabricated here.</p></div></section>
 <section id="setup"><h1>Session</h1><div class="muted">Bootstrap root capability once, then keep it in this browser session.</div><div class="toolbar"><input id="subject" value="human:operator" placeholder="subject"><button class="action" onclick="bootstrap()">Bootstrap</button><button class="action danger" onclick="logout()">Forget session</button></div><div id="setupStatus" class="status" role="status" aria-live="polite"></div></section>
-</main><div id="toast" class="toast hidden" role="status" aria-live="polite"></div><div id="palette" class="palette hidden" role="dialog" aria-modal="true" aria-label="Command palette"><div class="palette-card"><input id="paletteInput" autocomplete="off" placeholder="Jump to a surface or action…"><div id="paletteList"></div></div></div><script>
+</main><div id="toast" class="toast hidden" role="status" aria-live="polite"></div><div id="palette" class="palette hidden" role="dialog" aria-modal="true" aria-label="Command palette"><div class="palette-card"><input id="paletteInput" autocomplete="off" placeholder="Jump to a surface or action…"><div id="paletteList"></div></div></div><script nonce="__CSP_NONCE__">
 const tabs=['dashboard','world','capabilities','approvals','audit','trace','performance','setup'];let token=sessionStorage.getItem('aletheia.token')||'';let paletteIndex=0;let toastTimer;let activeTab=token?(sessionStorage.getItem('aletheia.surface')||'dashboard'):'setup';
 const nav=document.getElementById('nav');let paletteReturnFocus=null;tabs.forEach((x,i)=>{let b=document.createElement('button');b.type='button';b.textContent=x[0].toUpperCase()+x.slice(1);b.onclick=()=>show(x);b.setAttribute('aria-controls',x);if(i===0)b.classList.add('active');nav.appendChild(b)});
 function updateSessionIndicator(){let ready=Boolean(token);document.getElementById('sessionDot').classList.toggle('ready',ready);document.getElementById('sessionLabel').textContent=ready?'Session ready':'No session'}
@@ -168,7 +168,21 @@ pub fn serve_gui(mut service: crate::service::CoreService, bind: &str) -> std::i
             .unwrap_or(false);
         let (status, content_type, payload) = match (method, path) {
             ("GET", "/") if origin_ok => {
-                ("200 OK", "text/html; charset=utf-8", GUI_HTML.to_string())
+                // A fresh per-response nonce lets the GUI keep its self-contained HTML while
+                // removing `unsafe-inline` from the CSP.  The nonce is only a presentation
+                // capability for these two trusted inline blocks; it is never returned by the
+                // Core API or stored in the browser session.
+                let nonce = {
+                    let bytes: [u8; 16] = rand::random();
+                    let mut out = String::with_capacity(32);
+                    for byte in bytes {
+                        use core::fmt::Write as _;
+                        let _ = write!(&mut out, "{byte:02x}");
+                    }
+                    out
+                };
+                let html = GUI_HTML.replace("__CSP_NONCE__", &nonce);
+                ("200 OK", "text/html; charset=utf-8", html)
             }
             ("POST", "/api/request") if origin_ok && framing_ok => {
                 match serde_json::from_str::<crate::service::Request>(body) {
@@ -211,7 +225,20 @@ pub fn serve_gui(mut service: crate::service::CoreService, bind: &str) -> std::i
                 "not found".into(),
             ),
         };
-        let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nCross-Origin-Opener-Policy: same-origin\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: camera=(), microphone=(), geolocation=(), usb=()\r\n\r\n{payload}", payload.len());
+        let csp = if method == "GET" && path == "/" && status == "200 OK" {
+            // The nonce has already been embedded in the trusted HTML. Extracting it here keeps
+            // the wire contract allocation-free for all API/error responses and avoids a second
+            // random value that would invalidate the document's policy.
+            let nonce = payload
+                .split("nonce=\"")
+                .nth(1)
+                .and_then(|v| v.split('\"').next())
+                .unwrap_or("");
+            format!("default-src 'self'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        } else {
+            "default-src 'self'; script-src 'none'; style-src 'none'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'".to_string()
+        };
+        let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nCross-Origin-Opener-Policy: same-origin\r\nContent-Security-Policy: {csp}\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: camera=(), microphone=(), geolocation=(), usb=()\r\n\r\n{payload}", payload.len());
         let _ = stream.write_all(response.as_bytes());
     }
     Ok(())
