@@ -1522,6 +1522,37 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         (Some(Ok(gpu)), Some((kb, tab))) => match desktop::install(gpu, kb, tab) {
             Ok(grants) => {
                 desktop_gpu_grants = Some(grants);
+                // Prefer the device's own MSI-X completion signal over timer polling. The timer
+                // remains the desktop watchdog/fallback for now; the IRQ handler is deliberately
+                // only a wake+EOI path, so the compositor still executes in the foreground.
+                #[cfg(feature = "input-msix")]
+                if smp::enable_msi_target() {
+                    let kb_bdf = unsafe { pci::find_virtio_input_nth(0) };
+                    let tab_bdf = unsafe { pci::find_virtio_input_nth(1) };
+                    let kb_msix = kb_bdf
+                        .and_then(|b| unsafe { pci::enable_msix(b, idt::INPUT_MSIX_VECTOR).ok() });
+                    let tab_msix = tab_bdf
+                        .and_then(|b| unsafe { pci::enable_msix(b, idt::INPUT_MSIX_VECTOR).ok() });
+                    kprintln!(
+                        "[input-msix] keyboard={:?} tablet={:?} vector={:#x}",
+                        kb_msix, tab_msix, idt::INPUT_MSIX_VECTOR
+                    );
+                    if kb_msix.is_some() && tab_msix.is_some() {
+                        kprintln!("[input-msix] VERIFIED: both live input functions use MSI-X wake delivery");
+                        // MSI-X is now the event-driven wake source. Keep a low-rate PIT watchdog
+                        // rather than paying the old 1 kHz desktop interrupt/compositor cadence on
+                        // every idle millisecond; this watchdog is only a recovery path if an
+                        // interrupt is lost and is not the normal input wake mechanism.
+                        pit::init_at_hz(100);
+                        kprintln!("[input-msix] performance mode: PIT desktop watchdog reduced to 100 Hz");
+                    } else {
+                        kprintln!("[input-msix] fallback: one or more input functions remain timer-polled");
+                    }
+                } else {
+                    kprintln!("[input-msix] unavailable: xAPIC MSI target is not usable on this CPU");
+                }
+                #[cfg(not(feature = "input-msix"))]
+                kprintln!("[input-msix] disabled by build feature: timer wake path selected for A/B qualification");
                 kprintln!(
                     "[desktop] LIVE: one compositor, one input session, real devices, {} managed windows (pumped from the PIT tick)",
                     desktop::window_count()

@@ -305,6 +305,11 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
                 )
                 .map_err(|_| InputError::Queue("an event buffer failed the DMA gate"))?;
         }
+        // Bind the event queue to a transport interrupt vector when the bus supports one. This is
+        // separate from programming the PCI MSI-X table itself: the device must know WHICH queue
+        // raises WHICH message before it can ever deliver the message. A false result is retained
+        // as a timer/polling path, never relabeled as interrupt-driven.
+        let _interrupt_bound = unsafe { transport.configure_queue_interrupt(EVENT_QUEUE, 0) };
         // SAFETY: the transport is live and at least one buffer is published.
         eventq.kick::<H, T>(&transport);
 

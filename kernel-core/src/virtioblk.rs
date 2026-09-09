@@ -157,6 +157,12 @@ pub trait Transport {
     /// The transport's registers must be mapped and the caller must not call these concurrently — the
     /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn set_status(&self, value: u32);
+    /// Bind one queue's device notification to a transport-specific interrupt vector. Legacy or
+    /// MMIO transports return false and retain their existing wake path; PCI transports may map
+    /// the vector through MSI-X. The driver never treats a false result as proof of interrupts.
+    unsafe fn configure_queue_interrupt(&self, _queue: u16, _vector: u16) -> bool {
+        false
+    }
     /// Select the queue subsequent queue calls refer to.
     ///
     /// # Safety

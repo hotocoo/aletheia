@@ -69,8 +69,10 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || [ -z "$OVMF_CODE_PATH" ] \
   exit 0
 fi
 
-hr; echo "==> building the UEFI image WITH the interactive console"; hr
-( cd "$X86" && cargo build --release --features interactive ) \
+FEATURES="${VINPUT_FEATURES:-interactive,input-msix}"
+read -r -a QEMU_ACCEL_ARGS <<< "${VINPUT_QEMU_ACCEL_ARGS:--accel tcg,thread=multi}"
+hr; echo "==> building the UEFI image WITH features: $FEATURES"; hr
+( cd "$X86" && cargo build --release --features "$FEATURES" ) \
   || { echo "FAIL: build"; echo "VINPUT-E2E: FAIL"; exit 1; }
 IMG="$BUILD/aletheia-vinput.img"
 "$PY" "$X86/scripts/mkesp.py" \
@@ -86,7 +88,7 @@ hr; echo "==> booting (paused) with virtio-input keyboard + tablet + GPU; COM1 i
 # `-S`: the CPU starts paused, so the harness can attach to the serial socket and the QMP
 # socket before the first byte is printed; nothing of the boot log is lost to an unconnected
 # chardev. The harness alone writes the log file, from bytes the machine alone produced.
-qemu-system-x86_64 -machine q35 -m 256 -cpu qemu64,+smep -display none -S \
+qemu-system-x86_64 -machine q35 -m 256 -cpu qemu64,+smep -display none -S "${QEMU_ACCEL_ARGS[@]}" \
   -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE_PATH" \
   -drive if=pflash,format=raw,unit=1,file="$VARS" \
   -drive format=raw,file="$IMG" \
@@ -100,7 +102,7 @@ QEMU_PID=$!
 trap 'kill -9 "$QEMU_PID" 2>/dev/null; rm -f "$QMP" "$SER"' EXIT
 
 "$PY" - "$QMP" "$SER" "$LOG" <<'PYEOF'
-import json, re, socket, sys, threading, time
+import json, os, re, socket, sys, threading, time
 
 qmp_path, ser_path, log_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -420,6 +422,20 @@ check(posted6 == posted7 and dropped6 == dropped7 and refused6 == refused7 and q
       (posted6, dropped6, queued6, posted7, dropped7, queued7))
 check(cursor6 == cursor7,
       'quiet: the cursor does not drift (%r)' % (cursor7,))
+
+# Configuration is not evidence of delivery. The MSI-X build must show actual vector entries and
+# wake samples; the timer-only A/B build must show zero MSI-X hits and live timer samples.
+MSIX_RE = re.compile(r'msix: hits (\d+) wake-samples (\d+) avg-cycles (\d+) max-cycles (\d+) \| timer: samples (\d+) avg-cycles (\d+) max-cycles (\d+)')
+msix = MSIX_RE.search(chunk)
+features = os.environ.get('VINPUT_FEATURES', 'interactive,input-msix')
+if 'input-msix' in features:
+    check(msix is not None and int(msix.group(1)) > 0 and int(msix.group(2)) > 0,
+          'interrupt: live MSI-X handler fired and produced wake samples (%r)' % (msix.groups() if msix else None,))
+    check('PIT desktop watchdog reduced to 100 Hz' in log_text(),
+          'interrupt: MSI-X mode reduced the periodic desktop watchdog to 100 Hz')
+else:
+    check(msix is not None and int(msix.group(1)) == 0 and int(msix.group(5)) > 0,
+          'timer A/B: no MSI-X interrupts and timer wake samples are live (%r)' % (msix.groups() if msix else None,))
 
 print()
 if fails:

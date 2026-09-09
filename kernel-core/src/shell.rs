@@ -776,6 +776,12 @@ pub trait ShellHost {
     fn input_facts(&self) -> Option<InputFacts> {
         None
     }
+    /// Optional target-native interrupt telemetry: (MSI-X IRQ hits, sampled wakeups, total TSC
+    /// cycles, maximum TSC cycles). The tuple is deliberately optional because non-x86 targets
+    /// have different interrupt-controller domains and must not fabricate x86 counters.
+    fn input_irq_stats(&self) -> Option<((u64, u64, u64, u64), (u64, u64, u64))> {
+        None
+    }
     /// Processors this kernel brought up. Defaulted to one because a target that has not answered
     /// the question has exactly one core it is sure about, and claiming more would be a claim about
     /// hardware nobody enumerated.
@@ -1141,6 +1147,21 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                         f.kb_doorbells,
                         f.pt_doorbells
                     );
+                    if let Some(((hits, samples, total_cycles, max_cycles), (timer_samples, timer_total, timer_max))) = host.input_irq_stats() {
+                        let avg = if samples == 0 { 0 } else { total_cycles / samples };
+                        let timer_avg = if timer_samples == 0 { 0 } else { timer_total / timer_samples };
+                        outf!(
+                            out,
+                            "msix: hits {} wake-samples {} avg-cycles {} max-cycles {} | timer: samples {} avg-cycles {} max-cycles {}",
+                            hits,
+                            samples,
+                            avg,
+                            max_cycles,
+                            timer_samples,
+                            timer_avg,
+                            timer_max
+                        );
+                    }
                     // The terminal window (ADR-083): where it sits and what its last line says,
                     // read from the same grid the compositor paints - not a second copy.
                     match f.window {

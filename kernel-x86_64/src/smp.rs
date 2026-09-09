@@ -141,6 +141,32 @@ fn lapic_enable_self() {
     lapic_w(LAPIC_SVR, lapic_r(LAPIC_SVR) | 0x100 | 0xFF);
 }
 
+/// Enable the BSP's xAPIC as an MSI/MSI-X interrupt target.  This is deliberately separate from
+/// the SMP bring-up suite: a one-CPU machine still has a LAPIC and must be able to receive PCI
+/// message-signalled interrupts.  x2APIC is refused by this first xAPIC-only interrupt domain
+/// rather than being mistaken for an initialized MMIO LAPIC.
+#[cfg(feature = "input-msix")]
+pub fn enable_msi_target() -> bool {
+    let mut apic_base = unsafe { Msr::new(IA32_APIC_BASE).read() };
+    if apic_base & (1 << 10) != 0 {
+        return false;
+    }
+    if apic_base & (1 << 11) == 0 {
+        apic_base |= 1 << 11;
+        unsafe { Msr::new(IA32_APIC_BASE).write(apic_base) };
+    }
+    LAPIC_BASE.store((apic_base & 0xF_FFFF_F000) as usize, Ordering::SeqCst);
+    lapic_enable_self();
+    true
+}
+
+/// Acknowledge a message-signalled interrupt on the current CPU.
+pub fn msi_eoi() {
+    if LAPIC_BASE.load(Ordering::Relaxed) != 0 {
+        lapic_w(LAPIC_EOI, 0);
+    }
+}
+
 fn lapic_send(dest_apic_id: u32, icr_lo: u32) {
     lapic_w(LAPIC_ICR_HI, dest_apic_id << 24);
     lapic_w(LAPIC_ICR_LO, icr_lo);

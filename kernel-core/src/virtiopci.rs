@@ -80,9 +80,11 @@ const C_DEVICE_FEATURE_SELECT: usize = 0x00;
 const C_DEVICE_FEATURE: usize = 0x04;
 const C_DRIVER_FEATURE_SELECT: usize = 0x08;
 const C_DRIVER_FEATURE: usize = 0x0C;
+const C_CONFIG_MSIX_VECTOR: usize = 0x10;
 const C_DEVICE_STATUS: usize = 0x14;
 const C_QUEUE_SELECT: usize = 0x16;
 const C_QUEUE_SIZE: usize = 0x18;
+const C_QUEUE_MSIX_VECTOR: usize = 0x1A;
 const C_QUEUE_ENABLE: usize = 0x1C;
 const C_QUEUE_NOTIFY_OFF: usize = 0x1E;
 const C_QUEUE_DESC: usize = 0x20;
@@ -450,6 +452,15 @@ impl Transport for PciTransport {
 
     unsafe fn set_status(&self, value: u32) {
         self.w8(C_DEVICE_STATUS, value as u8);
+    }
+
+    unsafe fn configure_queue_interrupt(&self, queue: u16, vector: u16) -> bool {
+        // VIRTIO_PCI_COMMON_CFG: queue_select + queue_msix_vector. A value of 0xffff is the
+        // device's refusal sentinel; never report an IRQ binding that the hardware rejected.
+        self.w16(C_CONFIG_MSIX_VECTOR, vector);
+        self.w16(C_QUEUE_SELECT, queue);
+        self.w16(C_QUEUE_MSIX_VECTOR, vector);
+        self.c16(C_QUEUE_MSIX_VECTOR) == vector
     }
 
     unsafe fn select_queue(&self, queue: u16) {

@@ -14,6 +14,7 @@ bench = false
 # Hand the machine to the serial line after the gates instead of exiting with a verdict
 # (REQ-CON-001, ADR-044). OFF by default so every gate keeps its exit-code contract.
 interactive = []
+input-msix = []
 
 [dependencies]
 # The single shared Hal trait (defined once in kernel-core, not copied per target).

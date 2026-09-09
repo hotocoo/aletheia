@@ -9,6 +9,7 @@
 use crate::cell::Racy;
 use kernel_core::faultclass::{kind_name, x86_verdict, FaultVerdict};
 use kernel_core::reentry::ReentryGuard;
+use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::{PrivilegeLevel, VirtAddr};
 
@@ -22,6 +23,21 @@ pub const KEYBOARD_VECTOR: u8 = 0x21;
 
 /// IRQ4 (COM1, the console's serial line) is remapped to vector 0x24 by the PIC.
 pub const SERIAL_VECTOR: u8 = 0x24;
+/// Shared MSI-X vector for the virtio-input wake path. The hard handler only records a wake and
+/// acknowledges the LAPIC; queue harvesting/composition remains in foreground context.
+pub const INPUT_MSIX_VECTOR: u8 = 0x51;
+
+static INPUT_MSIX_HITS: AtomicU64 = AtomicU64::new(0);
+static INPUT_MSIX_SEQ: AtomicU64 = AtomicU64::new(0);
+static INPUT_MSIX_TSC: AtomicU64 = AtomicU64::new(0);
+static INPUT_MSIX_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static INPUT_MSIX_TOTAL_CYCLES: AtomicU64 = AtomicU64::new(0);
+static INPUT_MSIX_MAX_CYCLES: AtomicU64 = AtomicU64::new(0);
+static TIMER_IRQ_SEQ: AtomicU64 = AtomicU64::new(0);
+static TIMER_IRQ_TSC: AtomicU64 = AtomicU64::new(0);
+static TIMER_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static TIMER_TOTAL_CYCLES: AtomicU64 = AtomicU64::new(0);
+static TIMER_MAX_CYCLES: AtomicU64 = AtomicU64::new(0);
 
 /// The software-interrupt vector the ring-3 syscall door uses (`int 0x80`). Its IDT gate is
 /// installed with DPL=3 so an unprivileged task may invoke it; every other user vector stays DPL=0.
@@ -69,6 +85,7 @@ pub fn init() {
         idt[TIMER_VECTOR].set_handler_fn(timer);
         idt[SERIAL_VECTOR].set_handler_fn(serial);
         idt[KEYBOARD_VECTOR].set_handler_fn(keyboard);
+        idt[INPUT_MSIX_VECTOR].set_handler_fn(input_msix);
         IDT.get().load();
     }
 }
@@ -87,6 +104,92 @@ extern "x86-interrupt" fn serial(_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn keyboard(_frame: InterruptStackFrame) {
     crate::conirq::on_keyboard_irq();
     crate::pic::eoi(KEYBOARD_VECTOR);
+}
+
+extern "x86-interrupt" fn input_msix(_frame: InterruptStackFrame) {
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    INPUT_MSIX_TSC.store(tsc, Ordering::Release);
+    INPUT_MSIX_SEQ.fetch_add(1, Ordering::AcqRel);
+    INPUT_MSIX_HITS.fetch_add(1, Ordering::Relaxed);
+    crate::desktop::request_pump();
+    crate::smp::msi_eoi();
+}
+
+/// Record the end-to-end interrupt-wakeup portion of the path: TSC at the MSI-X handler to the
+/// first foreground service that consumes its wake. This intentionally excludes compositor work,
+/// so it measures the scheduling/wakeup floor rather than hiding rendering cost inside "latency".
+pub fn sample_input_msix_wakeup(last_seq: &AtomicU64) {
+    let seq = INPUT_MSIX_SEQ.load(Ordering::Acquire);
+    let seen = last_seq.load(Ordering::Relaxed);
+    if seq == seen {
+        return;
+    }
+    if last_seq
+        .compare_exchange(seen, seq, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let irq_tsc = INPUT_MSIX_TSC.load(Ordering::Acquire);
+    let now = unsafe { core::arch::x86_64::_rdtsc() };
+    let cycles = now.saturating_sub(irq_tsc);
+    INPUT_MSIX_SAMPLES.fetch_add(1, Ordering::Relaxed);
+    INPUT_MSIX_TOTAL_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    let mut old = INPUT_MSIX_MAX_CYCLES.load(Ordering::Relaxed);
+    while cycles > old {
+        match INPUT_MSIX_MAX_CYCLES.compare_exchange_weak(
+            old,
+            cycles,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => old = observed,
+        }
+    }
+}
+
+pub fn input_msix_stats() -> (u64, u64, u64, u64) {
+    (
+        INPUT_MSIX_HITS.load(Ordering::Relaxed),
+        INPUT_MSIX_SAMPLES.load(Ordering::Relaxed),
+        INPUT_MSIX_TOTAL_CYCLES.load(Ordering::Relaxed),
+        INPUT_MSIX_MAX_CYCLES.load(Ordering::Relaxed),
+    )
+}
+
+pub fn sample_timer_wakeup(last_seq: &AtomicU64) {
+    let seq = TIMER_IRQ_SEQ.load(Ordering::Acquire);
+    let seen = last_seq.load(Ordering::Relaxed);
+    if seq == seen {
+        return;
+    }
+    if last_seq
+        .compare_exchange(seen, seq, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let irq_tsc = TIMER_IRQ_TSC.load(Ordering::Acquire);
+    let now = unsafe { core::arch::x86_64::_rdtsc() };
+    let cycles = now.saturating_sub(irq_tsc);
+    TIMER_SAMPLES.fetch_add(1, Ordering::Relaxed);
+    TIMER_TOTAL_CYCLES.fetch_add(cycles, Ordering::Relaxed);
+    let mut old = TIMER_MAX_CYCLES.load(Ordering::Relaxed);
+    while cycles > old {
+        match TIMER_MAX_CYCLES.compare_exchange_weak(old, cycles, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => old = observed,
+        }
+    }
+}
+
+pub fn timer_wakeup_stats() -> (u64, u64, u64) {
+    (
+        TIMER_SAMPLES.load(Ordering::Relaxed),
+        TIMER_TOTAL_CYCLES.load(Ordering::Relaxed),
+        TIMER_MAX_CYCLES.load(Ordering::Relaxed),
+    )
 }
 
 extern "x86-interrupt" fn breakpoint(frame: InterruptStackFrame) {
@@ -159,6 +262,9 @@ extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, _err: u64) ->
 
 extern "x86-interrupt" fn timer(_frame: InterruptStackFrame) {
     crate::pit::tick();
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    TIMER_IRQ_TSC.store(tsc, Ordering::Release);
+    TIMER_IRQ_SEQ.fetch_add(1, Ordering::AcqRel);
     // Acknowledge the PIC before the wakeup store so interrupt-controller service is released
     // before any foreground bookkeeping is requested.
     crate::pic::eoi(TIMER_VECTOR);

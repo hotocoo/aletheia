@@ -22,6 +22,18 @@ use kernel_core::virtiopci::{self, PciEnv};
 /// Legacy configuration-space access ports.
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
+#[cfg(feature = "input-msix")]
+const CAP_ID_MSIX: u8 = 0x11;
+#[cfg(feature = "input-msix")]
+const MSIX_FLAGS: u8 = 0x02;
+#[cfg(feature = "input-msix")]
+const MSIX_TABLE: u8 = 0x04;
+#[cfg(feature = "input-msix")]
+const MSIX_ENABLE: u16 = 1 << 15;
+#[cfg(feature = "input-msix")]
+const MSIX_FUNCTION_MASK: u16 = 1 << 14;
+#[cfg(feature = "input-msix")]
+const PCI_COMMAND_INTX_DISABLE: u32 = 1 << 10;
 
 #[inline]
 unsafe fn outl(port: u16, value: u32) {
@@ -172,4 +184,105 @@ pub unsafe fn enumerate_bus0() -> alloc::vec::Vec<(Bdf, u16, u16)> {
 pub unsafe fn transport_new(bdf: Bdf) -> Result<PciTransport, &'static str> {
     // SAFETY: regions resolve through [Ports], whose map_region applies ADR-037's admission rule.
     unsafe { PciTransport::new(&Ports, bdf) }
+}
+
+#[cfg(feature = "input-msix")]
+fn cap_ptr(env: &Ports, bdf: Bdf) -> Option<u8> {
+    let mut ptr = unsafe { virtiopci::cfg_read8(env, bdf, virtiopci::CFG_CAP_PTR) } & 0xfc;
+    let mut hops = 0;
+    while ptr != 0 && hops < 48 {
+        hops += 1;
+        let id = unsafe { virtiopci::cfg_read8(env, bdf, ptr) };
+        if id == CAP_ID_MSIX {
+            return Some(ptr);
+        }
+        ptr = unsafe { virtiopci::cfg_read8(env, bdf, ptr + 1) } & 0xfc;
+    }
+    None
+}
+
+#[cfg(feature = "input-msix")]
+unsafe fn bar_base(env: &Ports, bdf: Bdf, index: u8) -> Option<u64> {
+    if index > 5 {
+        return None;
+    }
+    let lo = unsafe { env.read32(bdf, virtiopci::CFG_BAR0 + index * 4) };
+    if lo == 0xffff_ffff || lo & 1 != 0 {
+        return None;
+    }
+    let ty = (lo >> 1) & 0x3;
+    if ty == 0x2 {
+        if index == 5 {
+            return None;
+        }
+        let hi = unsafe { env.read32(bdf, virtiopci::CFG_BAR0 + (index + 1) * 4) };
+        Some(((hi as u64) << 32) | (lo as u64 & 0xffff_fff0))
+    } else {
+        Some((lo as u64) & 0xffff_fff0)
+    }
+}
+
+/// Program one MSI-X table entry to deliver to the BSP LAPIC and return the table/vector pair
+/// that was actually selected.  The device stays masked until the complete message is visible,
+/// then MSI-X is enabled and legacy INTx is disabled.  No guessed BAR or capability offset is
+/// accepted: a missing/cyclic capability list, I/O BAR, short table, or unmappable table refuses.
+///
+/// The vector is allocated by the kernel's fixed interrupt domain (0x51 for the input wake path),
+/// while the MSI-X table index is independently validated against the device-advertised size.
+#[cfg(feature = "input-msix")]
+pub unsafe fn enable_msix(bdf: Bdf, vector: u8) -> Result<usize, &'static str> {
+    let env = Ports;
+    let cap = cap_ptr(&env, bdf).ok_or("PCI function has no MSI-X capability")?;
+    let ctrl = unsafe { virtiopci::cfg_read16(&env, bdf, cap + MSIX_FLAGS) };
+    let count = ((ctrl & 0x07ff) as usize) + 1;
+    if count == 0 {
+        return Err("MSI-X advertises an empty table");
+    }
+    let table = unsafe { env.read32(bdf, cap + MSIX_TABLE) };
+    let bir = (table & 0x7) as u8;
+    let offset = (table & 0xffff_fff8) as u64;
+    let bar = unsafe { bar_base(&env, bdf, bir) }.ok_or("MSI-X table names an invalid BAR")?;
+    let table_bytes = count
+        .checked_mul(16)
+        .ok_or("MSI-X table size overflow")?;
+    if offset > u64::MAX - table_bytes as u64 {
+        return Err("MSI-X table address overflow");
+    }
+    let pa = bar.checked_add(offset).ok_or("MSI-X table base overflow")?;
+    if pa > usize::MAX as u64 {
+        return Err("MSI-X table is outside the target address space");
+    }
+    if !vm::map_device_range(pa as usize, table_bytes) {
+        return Err("MSI-X table could not be admitted as device memory");
+    }
+
+    // Mask the function before touching its table entry. The per-vector mask is then also kept
+    // set until all four DWORDs have been written, avoiding a partially programmed message.
+    let mut flags = ctrl | MSIX_FUNCTION_MASK;
+    let cap_word = unsafe { env.read32(bdf, cap) };
+    let cap_word = (cap_word & 0xffff) | ((flags as u32) << 16);
+    unsafe { env.write32(bdf, cap, cap_word) };
+    let entry = pa as usize;
+    unsafe {
+        core::ptr::write_volatile(entry as *mut u32, 0xfee0_0000);
+        core::ptr::write_volatile((entry + 4) as *mut u32, 0);
+        core::ptr::write_volatile((entry + 8) as *mut u32, vector as u32);
+        core::ptr::write_volatile((entry + 12) as *mut u32, 0);
+    }
+
+    // Message delivery is now authoritative; prevent the legacy pin from generating a second
+    // interrupt path for the same device.
+    let command_status = unsafe { env.read32(bdf, virtiopci::CFG_COMMAND) };
+    let command = (command_status & 0xffff) | PCI_COMMAND_INTX_DISABLE;
+    // Config-space status contains RW1C bits; writing the previously read status value back here
+    // could acknowledge unrelated device faults. Preserve only the command half and write zeroes
+    // into the status half instead.
+    unsafe { env.write32(bdf, virtiopci::CFG_COMMAND, command) };
+
+    flags |= MSIX_ENABLE;
+    flags &= !MSIX_FUNCTION_MASK;
+    let cap_word = unsafe { env.read32(bdf, cap) };
+    let cap_word = (cap_word & 0xffff) | ((flags as u32) << 16);
+    unsafe { env.write32(bdf, cap, cap_word) };
+    Ok(count)
 }
