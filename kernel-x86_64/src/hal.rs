@@ -63,15 +63,34 @@ pub type ActiveHal = Amd64Hal;
 /// IRQ0 has been proved live. A short multi-tick window keeps interrupt jitter below the resolution
 /// of the resulting frequency estimate while adding negligible boot cost.
 pub fn calibrate_tsc() -> Option<u64> {
+    // Prefer architectural CPUID.15 when firmware exposes it: waiting for ten PIT ticks costs
+    // ~100 ms of boot latency solely to measure a counter whose ratio the CPU already reports.
+    // Keep the timed path as a conservative fallback because older firmware/virtual CPUs may
+    // advertise CPUID.15 without a usable crystal frequency.
+    let leaf = core::arch::x86_64::__cpuid_count(0x15, 0);
+    if leaf.eax != 0 && leaf.ebx != 0 && leaf.ecx != 0 {
+        let hz = (leaf.ecx as u64)
+            .saturating_mul(leaf.ebx as u64)
+            .checked_div(leaf.eax as u64)
+            .unwrap_or(0);
+        if hz != 0 {
+            TSC_HZ.store(hz, Ordering::Relaxed);
+            return Some(hz);
+        }
+    }
+
     let start_tick = crate::pit::ticks();
     let start = ActiveHal::timer_ticks();
-    let target = start_tick.saturating_add(10);
+    // Two ticks are enough for the fallback's coarse monotonic conversion while keeping the
+    // boot penalty around 20 ms instead of the previous ~100 ms. The benchmark does not use this
+    // estimate to manufacture hardware performance claims; it only needs a local time base.
+    let target = start_tick.saturating_add(2);
     while crate::pit::ticks() < target {
         x86_64::instructions::hlt();
     }
     let end = ActiveHal::timer_ticks();
     let delta = end.wrapping_sub(start);
-    let hz = delta.saturating_mul(crate::pit::FREQ_HZ as u64) / 10;
+    let hz = delta.saturating_mul(crate::pit::FREQ_HZ as u64) / 2;
     if hz == 0 {
         return None;
     }
