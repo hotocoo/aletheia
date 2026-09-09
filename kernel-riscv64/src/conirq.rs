@@ -120,11 +120,11 @@ pub fn unmask_irqs_pub() {
 #[cfg(feature = "interactive")]
 pub const SCAUSE_S_TIMER: usize = (1 << 63) | 5;
 
-/// Timer slice in `time`-CSR ticks: QEMU virt's timebase is 10 MHz, so four milliseconds is
-/// 40_000 ticks. The desktop pump therefore runs at 250 Hz, matching the x86-64 and aarch64
-/// timer-driven input posture.
+/// Timer slice in `time`-CSR ticks: QEMU virt's timebase is 10 MHz, so one millisecond is
+/// 10_000 ticks. The desktop pump therefore runs at 1 kHz, matching x86-64 and aarch64 and
+/// minimizing timer-driven input latency.
 #[cfg(feature = "interactive")]
-const TIMER_SLICE: u64 = 40_000;
+const TIMER_SLICE: u64 = 10_000;
 
 /// Program the next timer interrupt one slice from now, through SBI.
 #[cfg(feature = "interactive")]

@@ -1,6 +1,17 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (CROSS-TARGET DESKTOP CADENCE — ADR-131 raises the interactive aarch64 and
+**As of:** 2026-09-09, latest (CROSS-TARGET 1 kHz DESKTOP CADENCE — ADR-132 raises the interactive
+aarch64 and RISC-V timer-driven desktop pump from 250 Hz to 1 kHz / 1 ms nominal cadence, matching
+x86-64. The timer remains a wake signal and all compositor/input/framebuffer work stays foreground-only.
+The change is intended to reduce timer-driven input latency; interrupt-driven virtio-input remains open.
+Fresh verification after ADR-132: `bash scripts/desktop-e2e-dt.sh` PASS on both aarch64 and RISC-V, and
+`bash scripts/e2e-all.sh` PASS with aarch64 full, RISC-V full, x86-64 UEFI full, and live GUI all green;
+VirtualBox remains an explicit SKIP on this arm64 validation host. Same-host QEMU/TCG comparative run
+(`BOOT_SAMPLES=2 WORKLOAD_OPS=10`) measured Aletheia boot median **6153 ms**, idle host CPU **3.6%**,
+typed echo **9 ms/op** (92 ms total); Linux measured **5165 ms**, **1.2%**, and **33 ms/op** (333 ms
+total). This benchmark is a fresh baseline for the current tree; the cadence change targets DT GUI input
+latency and is not inferred from the x86 serial workload. No physical overclock claim is made.
+Before that: CROSS-TARGET DESKTOP CADENCE — ADR-131 raised the interactive aarch64 and
 RISC-V timer-driven desktop pump from 100 Hz to 250 Hz / 4 ms nominal cadence, matching x86-64. The
 live DT workflow was re-run after the change: aarch64 PASS and RISC-V PASS, including real QEMU
 virtio keyboard/tablet events, pointer mapping, focus routing, shell input, and a desktop shortcut.
