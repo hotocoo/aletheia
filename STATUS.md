@@ -1,6 +1,12 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (CROSS-TARGET 1 kHz DESKTOP CADENCE — ADR-132 raises the interactive
+**As of:** 2026-09-09, latest (POINTER FAST LANE — ADR-133 gives the interactive desktop pump a
+one-event pointer fast lane before the bounded keyboard burst, preventing a noisy keyboard from
+delaying cursor/focus input behind the full keyboard budget while preserving the existing bounded
+work and authority paths. `cargo test --manifest-path kernel-core/Cargo.toml` passed with **133 unit
+tests plus all integration/doc tests**; `scripts/vinput-e2e.sh` passed with the real virtio
+keyboard/tablet workflow. This is a latency/fairness improvement, not an interrupt-driven virtio
+claim. True device-interrupt delivery remains open. Before that: CROSS-TARGET 1 kHz DESKTOP CADENCE — ADR-132 raises the interactive
 aarch64 and RISC-V timer-driven desktop pump from 250 Hz to 1 kHz / 1 ms nominal cadence, matching
 x86-64. The timer remains a wake signal and all compositor/input/framebuffer work stays foreground-only.
 The change is intended to reduce timer-driven input latency; interrupt-driven virtio-input remains open.

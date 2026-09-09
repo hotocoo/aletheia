@@ -1555,6 +1555,15 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         {
             self.close_switcher();
         }
+
+        // Pointer input gets a one-event fast lane before the keyboard burst. A noisy keyboard
+        // must not make cursor motion/click-to-focus wait behind the full keyboard budget. The
+        // follow-up loop below still drains the bounded pointer budget, so this changes only
+        // latency/fairness, not the total amount of work a pump may perform.
+        if let Some(ev) = self.tab.next_event() {
+            self.handle_pointer_event(ev);
+        }
+
         for _ in 0..EVENTS_PER_TICK {
             match self.kb.next_event() {
                 Some(ev) => {
@@ -1933,24 +1942,31 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 None => break,
             }
         }
+
         for _ in 0..EVENTS_PER_TICK {
             match self.tab.next_event() {
-                Some(ev) => {
-                    if let Ok(batch) = vinput::route_pointer_motion(
-                        &mut self.pt_dec,
-                        &mut self.comp,
-                        self.sess,
-                        ev,
-                    ) {
-                        self.pointer_batch(batch);
-                    }
-                }
+                Some(ev) => self.handle_pointer_event(ev),
                 None => break,
             }
         }
         self.drain_window();
         self.refresh_monitor(frames_free, frames_total);
         self.repaint();
+    }
+
+    /// Route one pointer event through the same decoder/session path used by the bounded pump.
+    /// Keeping this as a small method makes the latency fast lane share exactly the normal
+    /// authority and mapping path rather than introducing a second pointer implementation.
+    #[inline]
+    fn handle_pointer_event(&mut self, ev: vinput::RawEvent) {
+        if let Ok(batch) = vinput::route_pointer_motion(
+            &mut self.pt_dec,
+            &mut self.comp,
+            self.sess,
+            ev,
+        ) {
+            self.pointer_batch(batch);
+        }
     }
 
     /// The console's output reaches the terminal window (ADR-083). A window a user closed is
