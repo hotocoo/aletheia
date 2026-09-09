@@ -965,7 +965,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         check!(
             crate::gdt::kernel_stack_top() as usize > low
-                && crate::gdt::kernel_stack_top() as usize - low <= 16 * 1024,
+                && crate::gdt::kernel_stack_top() as usize - low <= crate::gdt::KSTACK_SIZE,
             "guard: RSP0 points above the guard, into the usable stack only"
         );
         check!(

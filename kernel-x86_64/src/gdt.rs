@@ -16,10 +16,13 @@ use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
 
-/// Ring-0 stack the CPU loads via `TSS.RSP0` on every ring3->ring0 transition. 16 KiB, 16-aligned.
+/// Ring-0 stack the CPU loads via `TSS.RSP0` on every ring3->ring0 transition. 64 KiB, 16-aligned.
+/// The larger stack is deliberate: the deepest supervisor entry paths have grown beyond the original
+/// 16 KiB budget, leaving too little headroom for nested kernel work. The guard page remains immediately
+/// below the stack and the live-map audit still proves it is unmapped.
 /// One stack suffices because the kernel runs IF=0 during the user-mode suite, so entries never
 /// nest (each fully unwinds back to the scheduler before the next `iretq`).
-const KSTACK_SIZE: usize = 16 * 1024;
+pub const KSTACK_SIZE: usize = 64 * 1024;
 /// One page BELOW the stack, reserved as a guard (REQ-MM-007, ALET-P1-012). The stack grows down from
 /// `RSP0`; without a guard an overflow walks straight into whatever `.bss` put next to it, corrupting it
 /// silently. `kmap` leaves this page UNMAPPED, so an overflow takes a #PF at the first byte past the
