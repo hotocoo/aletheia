@@ -311,14 +311,30 @@ impl ClientSurface {
                 got_bytes: buf.len(),
             });
         }
+        // The external representation and the internal representation are both LSB-first
+        // bitmaps. Copy complete words directly instead of doing one divide/shift/mask per
+        // pixel. This path is used by every terminal repaint, so the old O(pixels) bit twiddling
+        // was needlessly expensive even though the data already had the exact packing we need.
+        let full_words = self.bits.len().min(buf.len() / core::mem::size_of::<u64>());
+        for word in 0..full_words {
+            let at = word * core::mem::size_of::<u64>();
+            self.bits[word] = u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
+        }
+
+        let tail_at = full_words * core::mem::size_of::<u64>();
+        if tail_at < buf.len() {
+            let mut tail = [0u8; 8];
+            let tail_len = buf.len() - tail_at;
+            tail[..tail_len].copy_from_slice(&buf[tail_at..]);
+            self.bits[full_words] = u64::from_le_bytes(tail);
+        }
+
+        // A non-64-aligned surface has padding bits in its final word. They are not pixels and
+        // must never become observable through a later packed fill or resize copy.
         let pixels = self.width as usize * self.height as usize;
-        for i in 0..pixels {
-            let ink = buf[i / 8] & (1 << (i % 8)) != 0;
-            if ink {
-                self.bits[i / 64] |= 1u64 << (i % 64);
-            } else {
-                self.bits[i / 64] &= !(1u64 << (i % 64));
-            }
+        let used = pixels % 64;
+        if used != 0 {
+            self.bits[pixels / 64] &= (1u64 << used) - 1;
         }
         self.whole_damage = true;
         self.damage.clear();
