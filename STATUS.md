@@ -1,6 +1,12 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (HARDWARE PERFORMANCE RUNG — `kernel-x86_64/src/hwpm.rs` now drives an
+**As of:** 2026-09-09, latest (EXPERIENCE/PERFORMANCE OBSERVABILITY — the hosted GUI now has a
+capability-gated Performance surface with average, P95, P99, max, and bounded rolling request-dispatch
+latency telemetry; the service keeps a fixed 256-sample window with no per-request allocation. The GUI
+also sends a strict browser security-header policy (CSP, CORP, Permissions-Policy, no-store) while
+keeping bearer tokens out of rendered capability/telemetry data. Targeted GUI/security verification:
+3/3 tests passed. Same-host QEMU/TCG comparative benchmark remains independently measured below.
+Before that: HARDWARE PERFORMANCE RUNG — `kernel-x86_64/src/hwpm.rs` now drives an
 explicit Intel HWP performance posture when architectural HWP is present: min=`guaranteed`,
 max=`highest`, desired=`highest`, EPP=0, with MSR readback verification; this stays strictly inside
 the CPU-advertised envelope and does not pretend to be unlocked-ratio overclocking. Current QEMU

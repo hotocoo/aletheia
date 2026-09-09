@@ -16,14 +16,15 @@ const GUI_HTML: &str = r##"<!doctype html>
 <section id="approvals" class="hidden"><h1>Approvals</h1><div id="approvalsBody" class="card"></div></section>
 <section id="audit" class="hidden"><h1>Audit</h1><div id="auditBody" class="card"></div></section>
 <section id="trace" class="hidden"><h1>Action trace</h1><div id="traceBody" class="card trace"></div></section>
+<section id="performance" class="hidden"><h1>Performance</h1><div class="muted">Live request-dispatch telemetry for the hosted Core. These figures measure Aletheia's service path; they are not CPU-frequency or thermal measurements.</div><div class="grid" id="perfStats"></div><div class="card"><h2>Interpretation</h2><p>Use this surface to catch regressions in the Core boundary. Hardware frequency, package power, thermals, and device-specific utilization require the native hardware backend and are intentionally not fabricated here.</p></div></section>
 <section id="setup"><h1>Session</h1><div class="muted">Bootstrap root capability once, then keep it in this browser session.</div><div class="toolbar"><input id="subject" value="human:operator" placeholder="subject"><button class="action" onclick="bootstrap()">Bootstrap</button><button class="action danger" onclick="logout()">Forget session</button></div><div id="setupStatus" class="status" role="status" aria-live="polite"></div></section>
 </main><div id="toast" class="toast hidden" role="status" aria-live="polite"></div><div id="palette" class="palette hidden" role="dialog" aria-modal="true" aria-label="Command palette"><div class="palette-card"><input id="paletteInput" autocomplete="off" placeholder="Jump to a surface or action…"><div id="paletteList"></div></div></div><script>
-const tabs=['dashboard','world','capabilities','approvals','audit','trace','setup'];let token=sessionStorage.getItem('aletheia.token')||'';let paletteIndex=0;let toastTimer;let activeTab=token?(sessionStorage.getItem('aletheia.surface')||'dashboard'):'setup';
+const tabs=['dashboard','world','capabilities','approvals','audit','trace','performance','setup'];let token=sessionStorage.getItem('aletheia.token')||'';let paletteIndex=0;let toastTimer;let activeTab=token?(sessionStorage.getItem('aletheia.surface')||'dashboard'):'setup';
 const nav=document.getElementById('nav');let paletteReturnFocus=null;tabs.forEach((x,i)=>{let b=document.createElement('button');b.type='button';b.textContent=x[0].toUpperCase()+x.slice(1);b.onclick=()=>show(x);b.setAttribute('aria-controls',x);if(i===0)b.classList.add('active');nav.appendChild(b)});
 function updateSessionIndicator(){let ready=Boolean(token);document.getElementById('sessionDot').classList.toggle('ready',ready);document.getElementById('sessionLabel').textContent=ready?'Session ready':'No session'}
-function show(id){activeTab=id;sessionStorage.setItem('aletheia.surface',id);tabs.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));[...nav.children].forEach((b,i)=>{let active=tabs[i]===id;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});if(id==='dashboard')loadStats();if(id==='world')loadWorld();if(id==='capabilities')loadCaps();if(id==='approvals')loadApprovals();if(id==='audit')loadAudit()}
+function show(id){activeTab=id;sessionStorage.setItem('aletheia.surface',id);tabs.forEach(x=>document.getElementById(x).classList.toggle('hidden',x!==id));[...nav.children].forEach((b,i)=>{let active=tabs[i]===id;b.classList.toggle('active',active);if(active)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});if(id==='dashboard')loadStats();if(id==='world')loadWorld();if(id==='capabilities')loadCaps();if(id==='approvals')loadApprovals();if(id==='audit')loadAudit();if(id==='performance')loadPerformance()}
 function notify(message){let el=document.getElementById('toast');el.textContent=message;el.classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.add('hidden'),3000)}
-function refreshCurrent(){let active=activeTab;if(active==='dashboard')loadStats();else if(active==='world')loadWorld();else if(active==='capabilities')loadCaps();else if(active==='approvals')loadApprovals();else if(active==='audit')loadAudit();notify('Refreshed '+active)}
+function refreshCurrent(){let active=activeTab;if(active==='dashboard')loadStats();else if(active==='world')loadWorld();else if(active==='capabilities')loadCaps();else if(active==='approvals')loadApprovals();else if(active==='audit')loadAudit();else if(active==='performance')loadPerformance();notify('Refreshed '+active)}
 const paletteActions=[...tabs.map(x=>({label:'Open '+x[0].toUpperCase()+x.slice(1),run:()=>show(x)})),{label:'Refresh current surface',run:refreshCurrent},{label:'Focus intent editor',run:()=>{show('dashboard');document.getElementById('intent').focus()}}];
 function openPalette(){paletteReturnFocus=document.activeElement;document.getElementById('palette').classList.remove('hidden');document.getElementById('paletteInput').value='';paletteIndex=0;renderPalette();document.getElementById('paletteInput').focus()}
 function closePalette(){document.getElementById('palette').classList.add('hidden');if(paletteReturnFocus&&typeof paletteReturnFocus.focus==='function')paletteReturnFocus.focus();paletteReturnFocus=null}
@@ -45,6 +46,7 @@ async function loadCaps(){let el=document.getElementById('capsBody');el.innerHTM
 async function loadApprovals(){let el=document.getElementById('approvalsBody');el.innerHTML='<div role=status>Loading approvals…</div>';try{let p=await call({op:'ListApprovals'});el.innerHTML=p.length?p.map(x=>`<div class=card><b>${esc(x.id)}</b><pre>${esc(JSON.stringify(x.intent,null,2))}</pre><button class=action data-approval="${esc(x.id)}" data-granted="true">Grant</button> <button class="action danger" data-approval="${esc(x.id)}" data-granted="false">Deny</button></div>`).join(''):'<div class=status>No pending approvals.</div>'}catch(e){el.innerHTML='<div class="status error" role=alert>'+esc(e.message)+'</div>'}}
 async function resolve(id,granted){try{let t=await call({op:'ResolveApproval',approval_id:id,granted});show('trace');renderTrace(t)}catch(e){alert(e.message)}}
 async function loadAudit(){let el=document.getElementById('auditBody');el.innerHTML='<div role=status>Loading audit events…</div>';try{let a=await call({op:'QueryAudit',limit:100});el.innerHTML=a.length?'<pre>'+esc(JSON.stringify(a,null,2))+'</pre>':'<div class=status>No audit events are visible to this session.</div>'}catch(e){el.innerHTML='<div class="status error" role=alert>'+esc(e.message)+'</div>'}}
+async function loadPerformance(){let el=document.getElementById('perfStats');if(!token){el.innerHTML='<div class="card">Bootstrap session first.</div>';return}busy(el,true);try{let p=await call({op:'QueryPerformance'});let ns=v=>Number(v||0).toLocaleString();el.innerHTML=`<div class=card>Requests<div class=value>${ns(p.requests)}</div></div><div class=card>Average latency<div class=value>${ns(p.average_ns)} ns</div></div><div class=card>P95 latency<div class=value>${ns(p.p95_ns)} ns</div></div><div class=card>P99 latency<div class=value>${ns(p.p99_ns)} ns</div></div><div class=card>Max latency<div class=value>${ns(p.max_ns)} ns</div></div><div class=card>Rolling samples<div class=value>${ns(p.sample_window)}</div></div>`}catch(e){el.innerHTML='<div class="card status error" role=alert>'+esc(e.message)+'</div>'}finally{busy(el,false)}}
 async function submitIntent(approve){try{let subject=document.getElementById('subject').value;let text=document.getElementById('intent').value;let d=await call({op:'SubmitIntent',intent:{subject,verb:{Read:{id:text}}},approve});document.getElementById('intentResult').innerHTML='<pre>'+esc(JSON.stringify(d,null,2))+'</pre>';renderTrace(d);show('trace')}catch(e){document.getElementById('intentResult').textContent=e.message}}
 function renderTrace(t){document.getElementById('traceBody').innerHTML='<div><b>subject</b><span>'+esc(t.subject)+'</span></div><div><b>intent</b><span>'+esc(t.intent)+'</span></div><div><b>context</b><span>'+esc((t.context_provenance||[]).join(', ')||'(none)')+'</span></div><div><b>interpreter</b><span>'+esc(t.interpreter)+'</span></div><div><b>plan</b><span>'+esc(t.proposed_plan_raw||'')+'</span></div><div><b>validation</b><span>'+esc(t.validation)+'</span></div><div><b>capability</b><span>'+esc(t.capability_decision)+'</span></div><div><b>approval</b><span>'+esc(t.approval)+'</span></div><div><b>execution</b><span>'+esc(t.execution)+'</span></div><div><b>verification</b><span>'+esc(t.verification)+'</span></div><div><b>result</b><span>'+esc(JSON.stringify(t.result))+'</span></div><div><b>outcome</b><span>'+String(t.ok)+'</span></div>'}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -62,24 +64,49 @@ pub fn serve_gui(mut service: crate::service::CoreService, bind: &str) -> std::i
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let mut buf = [0u8; 65536];
-        let n = match stream.read(&mut buf) { Ok(n) => n, Err(_) => continue };
+        let n = match stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
         let req = String::from_utf8_lossy(&buf[..n]);
         let first = req.lines().next().unwrap_or("");
-        let (method, path) = first.split_once(' ').map(|(a,b)| (a,b.split(' ').next().unwrap_or(""))).unwrap_or(("", ""));
+        let (method, path) = first
+            .split_once(' ')
+            .map(|(a, b)| (a, b.split(' ').next().unwrap_or("")))
+            .unwrap_or(("", ""));
         let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
         let (status, content_type, payload) = match (method, path) {
             ("GET", "/") => ("200 OK", "text/html; charset=utf-8", GUI_HTML.to_string()),
-            ("POST", "/api/request") => match serde_json::from_str::<crate::service::Request>(body) {
+            ("POST", "/api/request") => match serde_json::from_str::<crate::service::Request>(body)
+            {
                 Ok(r) => {
                     let response = service.handle(r);
-                    let status = if response.ok { "200 OK" } else { "403 Forbidden" };
-                    (status, "application/json", serde_json::to_string(&response).unwrap_or_else(|_| "{\"ok\":false,\"error\":\"serialization failure\"}".into()))
+                    let status = if response.ok {
+                        "200 OK"
+                    } else {
+                        "403 Forbidden"
+                    };
+                    (
+                        status,
+                        "application/json",
+                        serde_json::to_string(&response).unwrap_or_else(|_| {
+                            "{\"ok\":false,\"error\":\"serialization failure\"}".into()
+                        }),
+                    )
                 }
-                Err(e) => ("400 Bad Request", "application/json", serde_json::json!({"ok":false,"error":format!("bad request: {e}")}).to_string()),
+                Err(e) => (
+                    "400 Bad Request",
+                    "application/json",
+                    serde_json::json!({"ok":false,"error":format!("bad request: {e}")}).to_string(),
+                ),
             },
-            _ => ("404 Not Found", "text/plain; charset=utf-8", "not found".into()),
+            _ => (
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                "not found".into(),
+            ),
         };
-        let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\n\r\n{payload}", payload.len());
+        let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: camera=(), microphone=(), geolocation=(), usb=()\r\n\r\n{payload}", payload.len());
         let _ = stream.write_all(response.as_bytes());
     }
     Ok(())

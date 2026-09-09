@@ -74,9 +74,16 @@ pub enum Request {
     /// experience (query): inspect the semantic world model. Capability-gated per entity.
     QueryWorld { caps: Vec<String> },
     /// experience (query): semantic keyword search over authorized entities.
-    Search { caps: Vec<String>, query: String, limit: usize },
+    Search {
+        caps: Vec<String>,
+        query: String,
+        limit: usize,
+    },
     /// experience (query): inspect capability metadata without exposing bearer tokens.
     QueryCapabilities { caps: Vec<String> },
+    /// experience/performance (query): inspect request-dispatch latency telemetry without exposing
+    /// capability material. Protected by the same audit-read authority as other operator telemetry.
+    QueryPerformance { caps: Vec<String> },
     /// components (command): install untrusted WASM (hex-encoded bytes) as an Application entity.
     InstallComponent {
         caps: Vec<String>,
@@ -122,6 +129,69 @@ impl Response {
 /// capability-checked Core operation. This is the ONLY object apps and tests should touch.
 pub struct CoreService {
     core: SysCore,
+    perf: PerformanceCounters,
+}
+
+#[derive(Debug)]
+struct PerformanceCounters {
+    requests: u64,
+    total_ns: u128,
+    max_ns: u128,
+    samples: [u64; 256],
+    sample_len: usize,
+    sample_cursor: usize,
+}
+
+impl Default for PerformanceCounters {
+    fn default() -> Self {
+        Self {
+            requests: 0,
+            total_ns: 0,
+            max_ns: 0,
+            samples: [0; 256],
+            sample_len: 0,
+            sample_cursor: 0,
+        }
+    }
+}
+
+impl PerformanceCounters {
+    fn record(&mut self, elapsed_ns: u128) {
+        self.requests = self.requests.saturating_add(1);
+        self.total_ns = self.total_ns.saturating_add(elapsed_ns);
+        self.max_ns = self.max_ns.max(elapsed_ns);
+        self.samples[self.sample_cursor] = elapsed_ns.min(u64::MAX as u128) as u64;
+        self.sample_cursor = (self.sample_cursor + 1) % self.samples.len();
+        self.sample_len = self.sample_len.saturating_add(1).min(self.samples.len());
+    }
+
+    fn percentile(&self, percent: usize) -> u64 {
+        if self.sample_len == 0 {
+            return 0;
+        }
+        let mut sorted = self.samples;
+        sorted[..self.sample_len].sort_unstable();
+        let rank = ((self.sample_len - 1) * percent).div_ceil(100);
+        sorted[rank]
+    }
+
+    fn snapshot(&self) -> Value {
+        let average_ns = if self.requests == 0 {
+            0
+        } else {
+            self.total_ns / self.requests as u128
+        };
+        json!({
+            "requests": self.requests,
+            "total_ns": self.total_ns,
+            "average_ns": average_ns,
+            "max_ns": self.max_ns,
+            "p95_ns": self.percentile(95),
+            "p99_ns": self.percentile(99),
+            "sample_window": self.sample_len,
+            "scope": "hosted-core-request-dispatch",
+        })
+    }
 }
 
 impl CoreService {
@@ -138,6 +208,7 @@ impl CoreService {
     ) -> crate::domain::Result<Self> {
         Ok(CoreService {
             core: SysCore::open(dir, model)?,
+            perf: PerformanceCounters::default(),
         })
     }
 
@@ -149,6 +220,13 @@ impl CoreService {
 
     /// Dispatch one request. Authorization happens inside the Core operations, not here.
     pub fn handle(&mut self, req: Request) -> Response {
+        let started = std::time::Instant::now();
+        let response = self.handle_inner(req);
+        self.perf.record(started.elapsed().as_nanos());
+        response
+    }
+
+    fn handle_inner(&mut self, req: Request) -> Response {
         match req {
             Request::BootstrapOwner { subject } => match self.core.bootstrap_owner(&subject) {
                 Ok(cap) => Response::ok(json!({ "token": cap.token, "subject": subject })),
@@ -268,12 +346,30 @@ impl CoreService {
             ),
             Request::QueryCapabilities { caps } => {
                 if matches!(
-                    self.core.caps().evaluate("audit.read", &crate::capabilities::Target::default(), &caps),
+                    self.core.caps().evaluate(
+                        "audit.read",
+                        &crate::capabilities::Target::default(),
+                        &caps
+                    ),
                     crate::capabilities::Decision::Deny(_)
                 ) {
                     Response::err("not permitted to inspect capabilities")
                 } else {
                     Response::ok(Value::Array(self.core.caps().inspect()))
+                }
+            }
+            Request::QueryPerformance { caps } => {
+                if matches!(
+                    self.core.caps().evaluate(
+                        "audit.read",
+                        &crate::capabilities::Target::default(),
+                        &caps,
+                    ),
+                    crate::capabilities::Decision::Deny(_)
+                ) {
+                    Response::err("not permitted to inspect performance telemetry")
+                } else {
+                    Response::ok(self.perf.snapshot())
                 }
             }
             Request::InstallComponent {
