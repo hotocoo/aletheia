@@ -169,6 +169,9 @@ fn emit(s: &str) {
 /// virtio keyboard's keystrokes that the input session routed to the focused window (ADR-083).
 #[cfg(feature = "interactive")]
 fn getc() -> Option<u8> {
+    // Service timer-deferred desktop work before consuming input. The PIT IRQ is intentionally
+    // only a wakeup, keeping hard-IRQ latency bounded while the GUI gets a 1 ms service cadence.
+    crate::desktop::service_pending();
     crate::conirq::pop().or_else(crate::desktop::term_getc)
 }
 

@@ -1,4 +1,4 @@
-//! 8254 PIT channel 0 as the periodic timer that drives IRQ0. Programmed to 250 Hz in mode 3
+//! 8254 PIT channel 0 as the periodic timer that drives IRQ0. Programmed to 1 kHz in mode 3
 //! (square wave). The IRQ0 handler increments `TICKS`; the boot path spins until enough ticks
 //! accumulate, which is the live proof that interrupts + the timer are actually firing (not merely
 //! configured) after `ExitBootServices`.
@@ -10,9 +10,9 @@ const CHANNEL0: u16 = 0x40;
 const COMMAND: u16 = 0x43;
 const PIT_BASE_HZ: u32 = 1_193_182;
 
-/// Timer interrupt frequency. 250 Hz cuts the worst-case timer-driven desktop input wait from
-/// 10 ms to 4 ms without imposing the 10x interrupt/compositor pressure of a 1 kHz global tick.
-pub const FREQ_HZ: u32 = 250;
+/// Timer interrupt frequency. 1 kHz bounds timer-driven interactive work to one millisecond;
+/// the IRQ path remains deliberately tiny because desktop work is deferred to the foreground.
+pub const FREQ_HZ: u32 = 1_000;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 

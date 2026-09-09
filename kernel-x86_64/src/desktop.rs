@@ -9,8 +9,8 @@
 //! # The concurrency posture, stated rather than implied
 //!
 //! This kernel is single-running-CPU (the SMP suite parks its APs). Two contexts touch the
-//! desktop and they never overlap: the IRQ0 (PIT) handler, which calls [`tick_pump`] at 100 Hz
-//! with IF=0 by construction; and the main thread, which enters ONLY through [`with_desktop`],
+//! desktop and they never overlap: the IRQ0 (PIT) handler, which calls [`request_pump`],
+//! and the main thread, which enters through [`service_pending`] / [`with_desktop`],
 //! inside `without_interrupts`. Neither can preempt the other, so every mutation is serialized
 //! by the CPU's interrupt flag and no lock is needed — and none is taken, because the main
 //! thread also holds console locks that an IRQ path must never spin on.
@@ -27,10 +27,13 @@ use crate::virtio::{Gpu, InputDev, X86Virtio};
 type Desktop = CoreDesktop<X86Virtio, PciTransport>;
 
 static mut DESKTOP: Option<Desktop> = None;
-/// Pump enable — set once by [`install`], never cleared. Before it is set, [`tick_pump`] is one
+/// Pump enable — set once by [`install`], never cleared. Before it is set, [`request_pump`] is one
 /// relaxed load and a return, which is why it is safe to call unconditionally from IRQ0 during
 /// the whole boot.
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Set by IRQ0 and consumed by the foreground context. Keeping the desktop pump out of interrupt
+/// context removes compositor, input-device, and framebuffer work from the hard IRQ latency path.
+static PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Bring the desktop up and hand back the GPU function's FULL grant list (backing pages
 /// included) for the VT-d window builder. Called BEFORE the vt-d gate: every page the desktop
@@ -60,17 +63,29 @@ pub fn install(
     Ok(grants)
 }
 
-/// The pump, on IRQ0. See the module docs for why no lock is taken.
-pub fn tick_pump() {
+/// Request desktop service from IRQ0. See the module docs for the deferred-work posture.
+pub fn request_pump() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    // SAFETY: IRQ context, IF=0 — the main thread only touches the static inside
-    // `without_interrupts`, so no other reference exists while this one lives.
-    let d = unsafe { (*core::ptr::addr_of_mut!(DESKTOP)).as_mut() };
-    let Some(d) = d else { return };
-    // SAFETY: the devices are live (DRIVER_OK at boot) and this is the sole live reference.
-    unsafe { d.pump(crate::frames::free_count(), crate::frames::total_count()) };
+    PENDING.store(true, Ordering::Release);
+}
+
+/// Foreground-side desktop service. One atomic exchange coalesces timer ticks while the shell is
+/// busy and keeps compositor, input-device, and framebuffer work out of the hard IRQ path.
+#[cfg(feature = "interactive")]
+pub fn service_pending() {
+    if !PENDING.swap(false, Ordering::Acquire) || !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        // SAFETY: interrupts are disabled for the entire mutable borrow, so IRQ0 cannot race the
+        // singleton. The devices remain live for the machine's lifetime after install().
+        let d = unsafe { (*core::ptr::addr_of_mut!(DESKTOP)).as_mut() };
+        if let Some(d) = d {
+            unsafe { d.pump(crate::frames::free_count(), crate::frames::total_count()) };
+        }
+    });
 }
 
 /// Did this machine install a live desktop? One relaxed load; the console's interrupt bring-up

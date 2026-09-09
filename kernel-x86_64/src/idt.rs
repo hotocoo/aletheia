@@ -159,10 +159,9 @@ extern "x86-interrupt" fn double_fault(frame: InterruptStackFrame, _err: u64) ->
 
 extern "x86-interrupt" fn timer(_frame: InterruptStackFrame) {
     crate::pit::tick();
-    // The live desktop's pump (ADR-080): drains the input devices, routes through the
-    // session, and shows a changed frame. One relaxed atomic load when no desktop was
-    // installed, so calling it unconditionally during the whole boot is free.
-    crate::desktop::tick_pump();
+    // Only wake the foreground desktop service here. Device draining, window routing, and
+    // framebuffer work must not extend hard-IRQ latency (ADR-080).
+    crate::desktop::request_pump();
     crate::pic::eoi(TIMER_VECTOR);
 }
 
