@@ -1,6 +1,11 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (LIVE GUI E2E PARITY — ADR-127 adds `scripts/desktop-e2e-dt.sh`, which
+**As of:** 2026-09-09, latest (HOSTED GUI TRANSPORT HARDENING — ADR-128 makes the Experience HTTP
+boundary incrementally framed and bounded at 64 KiB, rejects malformed framing and cross-origin browser
+requests, adds short read/write timeouts, and strengthens browser isolation headers. Targeted GUI tests
+remain green; live `aletheiad gui` returned HTTP 200 with the security headers and an evil Origin was
+refused with HTTP 403. Oversized-body server rejection is implemented but its live probe was not counted
+because the local curl client refused to construct the oversized payload. Before that: LIVE GUI E2E PARITY — ADR-127 adds `scripts/desktop-e2e-dt.sh`, which
 boots the actual `interactive` aarch64 and RISC-V kernels and drives real QEMU virtio keyboard/tablet
 events through the timer-pumped desktop. Verified pointer mapping, click-to-focus, hardware keyboard
 execution of `help`, and desktop keyboard window-management on BOTH targets; integrated into

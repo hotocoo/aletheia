@@ -54,59 +54,164 @@ updateSessionIndicator();show(activeTab);if(!token)setStatus(document.getElement
 document.getElementById('approvalsBody').addEventListener('click',e=>{let button=e.target.closest('button[data-approval]');if(!button)return;resolve(button.dataset.approval,button.dataset.granted==='true')});
 </script></body></html>"##;
 
+/// Maximum HTTP request size accepted by the hosted GUI. The parser refuses a larger
+/// `Content-Length` before reading the body, so an attacker cannot turn the fixed receive buffer
+/// into an allocation or truncation oracle.
+const MAX_GUI_REQUEST: usize = 64 * 1024;
+
 /// Run the hosted Experience GUI. Bound to loopback so browser access stays local; all state-changing
-/// operations still traverse the same capability-gated CoreService request boundary.
+/// operations still traverse the same capability-gated CoreService request boundary. The HTTP seam
+/// is deliberately small and fail-closed: bounded headers/body, explicit same-origin checks for
+/// browser requests, and no permissive CORS path.
 pub fn serve_gui(mut service: crate::service::CoreService, bind: &str) -> std::io::Result<()> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     let listener = TcpListener::bind(bind)?;
+    let expected_origin = format!("http://{bind}");
     eprintln!("experience GUI: http://{bind}");
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
         let mut buf = [0u8; 65536];
-        let n = match stream.read(&mut buf) {
+        let mut n = match stream.read(&mut buf) {
             Ok(n) => n,
             Err(_) => continue,
         };
-        let req = String::from_utf8_lossy(&buf[..n]);
+        // Header parsing is incremental: TCP is a byte stream, so one read is not a request.
+        // Keep the receive path allocation-free and refuse an unterminated header once the fixed
+        // request ceiling is exhausted.
+        while !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") && n < buf.len() {
+            match stream.read(&mut buf[n..]) {
+                Ok(0) => break,
+                Ok(m) => n += m,
+                Err(_) => break,
+            }
+        }
+        if !buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+            let response =
+                "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            let _ = stream.write_all(response.as_bytes());
+            continue;
+        }
+        let header_end = buf[..n]
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("request header terminator was checked above")
+            + 4;
+        let content_length = {
+            let req = match std::str::from_utf8(&buf[..header_end]) {
+                Ok(req) => req,
+                Err(_) => {
+                    let response =
+                        "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+            };
+            req[..header_end - 4]
+                .lines()
+                .skip(1)
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim())
+                })
+                .map(|value| value.parse::<usize>().ok())
+                .unwrap_or(Some(0))
+        };
+        if let Some(len) = content_length {
+            if len > MAX_GUI_REQUEST || header_end.saturating_add(len) > buf.len() {
+                let response = "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+            let target = header_end + len;
+            while n < target {
+                match stream.read(&mut buf[n..target]) {
+                    Ok(0) => break,
+                    Ok(m) => n += m,
+                    Err(_) => break,
+                }
+            }
+        }
+        let req = match std::str::from_utf8(&buf[..n]) {
+            Ok(req) => req,
+            Err(_) => {
+                let response =
+                    "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes());
+                continue;
+            }
+        };
         let first = req.lines().next().unwrap_or("");
         let (method, path) = first
             .split_once(' ')
             .map(|(a, b)| (a, b.split(' ').next().unwrap_or("")))
             .unwrap_or(("", ""));
-        let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+        let headers = &req[..header_end - 4];
+        let body = &req[header_end..n];
+        let origin_ok = headers
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("origin")
+                    .then(|| value.trim())
+            })
+            .map(|origin| origin == expected_origin)
+            .unwrap_or(true);
+        let framing_ok = content_length
+            .map(|len| len == body.len() && len <= MAX_GUI_REQUEST)
+            .unwrap_or(false);
         let (status, content_type, payload) = match (method, path) {
-            ("GET", "/") => ("200 OK", "text/html; charset=utf-8", GUI_HTML.to_string()),
-            ("POST", "/api/request") => match serde_json::from_str::<crate::service::Request>(body)
-            {
-                Ok(r) => {
-                    let response = service.handle(r);
-                    let status = if response.ok {
-                        "200 OK"
-                    } else {
-                        "403 Forbidden"
-                    };
-                    (
-                        status,
+            ("GET", "/") if origin_ok => {
+                ("200 OK", "text/html; charset=utf-8", GUI_HTML.to_string())
+            }
+            ("POST", "/api/request") if origin_ok && framing_ok => {
+                match serde_json::from_str::<crate::service::Request>(body) {
+                    Ok(r) => {
+                        let response = service.handle(r);
+                        let status = if response.ok {
+                            "200 OK"
+                        } else {
+                            "403 Forbidden"
+                        };
+                        (
+                            status,
+                            "application/json",
+                            serde_json::to_string(&response).unwrap_or_else(|_| {
+                                "{\"ok\":false,\"error\":\"serialization failure\"}".into()
+                            }),
+                        )
+                    }
+                    Err(e) => (
+                        "400 Bad Request",
                         "application/json",
-                        serde_json::to_string(&response).unwrap_or_else(|_| {
-                            "{\"ok\":false,\"error\":\"serialization failure\"}".into()
-                        }),
-                    )
+                        serde_json::json!({"ok":false,"error":format!("bad request: {e}")})
+                            .to_string(),
+                    ),
                 }
-                Err(e) => (
-                    "400 Bad Request",
-                    "application/json",
-                    serde_json::json!({"ok":false,"error":format!("bad request: {e}")}).to_string(),
-                ),
-            },
+            }
+            (_, _) if !origin_ok => (
+                "403 Forbidden",
+                "text/plain; charset=utf-8",
+                "cross-origin request refused".into(),
+            ),
+            (_, _) if !framing_ok => (
+                "413 Payload Too Large",
+                "text/plain; charset=utf-8",
+                "request body exceeds the GUI limit or has invalid framing".into(),
+            ),
             _ => (
                 "404 Not Found",
                 "text/plain; charset=utf-8",
                 "not found".into(),
             ),
         };
-        let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: camera=(), microphone=(), geolocation=(), usb=()\r\n\r\n{payload}", payload.len());
+        let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nCross-Origin-Opener-Policy: same-origin\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\r\nCross-Origin-Resource-Policy: same-origin\r\nPermissions-Policy: camera=(), microphone=(), geolocation=(), usb=()\r\n\r\n{payload}", payload.len());
         let _ = stream.write_all(response.as_bytes());
     }
     Ok(())
