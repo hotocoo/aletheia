@@ -1,6 +1,14 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (EXPERIENCE/PERFORMANCE OBSERVABILITY — the hosted GUI now has a
+**As of:** 2026-09-09, latest (LIVE GUI E2E PARITY — ADR-127 adds `scripts/desktop-e2e-dt.sh`, which
+boots the actual `interactive` aarch64 and RISC-V kernels and drives real QEMU virtio keyboard/tablet
+events through the timer-pumped desktop. Verified pointer mapping, click-to-focus, hardware keyboard
+execution of `help`, and desktop keyboard window-management on BOTH targets; integrated into
+`scripts/e2e-all.sh`. Full `REQUIRE_DESKTOP=1 bash scripts/e2e-all.sh` passed: aarch64 PASS, RISC-V PASS,
+x86-64 PASS, live GUI PASS; VirtualBox remains SKIP because this validation host is arm64. Same-host
+QEMU/TCG comparative benchmark also re-ran: Aletheia boot median 3050 ms, idle 1.7%, typed echo
+3 ms/op in the 25-op sample; Linux boot median 2043 ms, idle 2.7%, typed echo 36 ms/op. Before that:
+EXPERIENCE/PERFORMANCE OBSERVABILITY — the hosted GUI now has a
 capability-gated Performance surface with average, P95, P99, max, and bounded rolling request-dispatch
 latency telemetry; the service keeps a fixed 256-sample window with no per-request allocation. The GUI
 also sends a strict browser security-header policy (CSP, CORP, Permissions-Policy, no-store) while

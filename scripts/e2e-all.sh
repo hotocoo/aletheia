@@ -33,6 +33,7 @@ aarch64_res="not-run"
 riscv_res="not-run"
 x86_res="not-run"
 vbox_res="not-run"
+desktop_res="not-run"
 
 hr() { printf '========================================================================\n'; }
 
@@ -71,6 +72,17 @@ if printf '%s' "$vbox_out" | grep -q "VM-E2E-VBOX: SKIP"; then
   vbox_res="SKIP (VirtualBox absent, or a host that cannot virtualize x86-64 — the script says which)"
 elif [ "$vbox_rc" -eq 0 ]; then vbox_res="PASS"; else vbox_res="FAIL"; fi
 
+hr; echo "==> [5/5] live GUI workflow on aarch64 + RISC-V (ADR-127)"; hr
+desktop_out="$(bash "$ROOT/scripts/desktop-e2e-dt.sh" 2>&1)"; desktop_rc=$?
+printf '%s\n' "$desktop_out"
+if printf '%s' "$desktop_out" | grep -q "DESKTOP-E2E-DT: PASS"; then
+  desktop_res="PASS"
+elif printf '%s' "$desktop_out" | grep -q "DESKTOP-E2E-.*: SKIP"; then
+  desktop_res="SKIP (one or more DT QEMU emulators unavailable)"
+else
+  desktop_res="FAIL"
+fi
+
 hr; echo "E2E SUMMARY"; hr
 printf '  aarch64 (full)      : %s\n' "$aarch64_res"
 printf '  riscv64 (full)      : %s\n' "$riscv_res"
@@ -78,6 +90,7 @@ printf '  x86-64  (image)     : %s\n' "$x86_res"
 # The VirtualBox rung gates the exit code below, so it belongs in the summary too: a leg that can
 # fail the run and does not appear here is a leg whose SKIP reads as "not attempted".
 printf '  x86-64  (VirtualBox): %s\n' "$vbox_res"
+printf '  live GUI (DT targets): %s\n' "$desktop_res"
 hr
 
 fail=0
@@ -91,6 +104,11 @@ esac
 case "$vbox_res" in
   PASS) ;;
   SKIP*) [ "$REQUIRE_VBOX" = "1" ] && { echo "VirtualBox rung skipped but REQUIRE_VBOX=1 -> fail"; fail=1; } ;;
+  *) fail=1 ;;
+esac
+case "$desktop_res" in
+  PASS) ;;
+  SKIP*) [ "${REQUIRE_DESKTOP:-0}" = "1" ] && { echo "live GUI skipped but REQUIRE_DESKTOP=1 -> fail"; fail=1; } ;;
   *) fail=1 ;;
 esac
 
