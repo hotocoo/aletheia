@@ -94,20 +94,22 @@ band would be a different machine, whatever its CPU.
 
 ### Why modeled first
 
-The same reason as ADR-071, plus one specific to power: QEMU TCG exposes NO frequency control
-to the guest — no P-state MSRs, no CPPC, no ACPI \_PSS objects whose contents a guest could
-honor. A "hardware rung" attempted today could only prove that code RAN, not that anything
-ENFORCED. The model rung proves the enforcement semantics exhaustively now; when a real
-platform (or an emulator that grows the feature) exposes frequency control, the hardware
-implementation must satisfy the same contract the software already proved — the SoftIommu
-posture exactly.
+The same reason as ADR-071, plus one specific to power: the QEMU TCG platform used by the
+current x86-64 gate exposes no architectural HWP performance actuator. A "hardware rung"
+cannot claim a frequency change merely because a write executed. The model rung therefore
+remains the policy proof, while the x86 backend now detects Intel HWP and, when exposed,
+programs only the CPU's own advertised highest-performance point. This is a real hardware
+performance request, but not an unlocked-ratio overclock; CPUs without HWP are reported as
+unsupported and are never probed through guessed MSRs.
 
 ## Consequences
 
-* **Named non-claims.** This wave delivers the CONTRACT, not silicon: no MSR/CPPC/ACPI
-  programming, no battery, no system sleep/wake (S3), no voltage rail enforcement beyond
-  recording mV in the ladder, and no thermodynamic temperature simulation — callers report
-  temperatures, the contract decides. All of it stays scoped in the gap register.
+* **Named non-claims.** The x86 backend now has an architectural Intel HWP actuator, but it does
+  not claim unlocked-ratio/electrical overclocking, voltage-rail programming, battery management,
+  system sleep/wake (S3), or thermodynamic temperature simulation. Callers report temperatures;
+  the policy contract decides. AMD CPPC and platform-specific unlocked-ratio control remain
+  separate backends to implement only when their hardware ceilings and authorization semantics can
+  be proved.
 * **The cooldown is the governance axis in miniature.** During cooldown even a valid grant is
   refused: some refusals are about the machine's state, not the caller's authority. The ADR
   deliberately does NOT add an approval seam to lift a cooldown early — heat does not negotiate.

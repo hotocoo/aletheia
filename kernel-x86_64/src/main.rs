@@ -37,6 +37,7 @@ mod fwcfg;
 mod gdt;
 mod hal;
 mod heap;
+mod hwpm;
 mod idt;
 mod kmap;
 mod pci;
@@ -239,7 +240,48 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     kprintln!("[hal] rdtsc monotonic sample: {}", ActiveHal::timer_ticks());
     match hal::calibrate_tsc() {
         Some(hz) => kprintln!("[hal] TSC calibrated against PIT: {} Hz", hz),
-        None => kprintln!("[hal] WARNING: TSC calibration failed; latency reports remain uncalibrated"),
+        None => {
+            kprintln!("[hal] WARNING: TSC calibration failed; latency reports remain uncalibrated")
+        }
+    }
+
+    // Hardware performance control (ADR-076): use an architectural actuator when the CPU
+    // exposes one. HWP's capability MSR is the hard hardware envelope; requesting its highest
+    // point is therefore a real hardware performance request without pretending that Aletheia can
+    // create an unlocked electrical/ratio overclock. Unsupported CPUs are reported, never guessed.
+    match hwpm::probe() {
+        hwpm::HwPmStatus::Hwp {
+            lowest,
+            highest,
+            guaranteed,
+            most_efficient,
+        } => {
+            kprintln!(
+                "[hwpm] Intel HWP: lowest={} highest={} guaranteed={} efficient={}",
+                lowest,
+                highest,
+                guaranteed,
+                most_efficient
+            );
+            match hwpm::request_hardware_max() {
+                Ok(_) => match hwpm::requested_max() {
+                    Some(actual) if actual == highest => kprintln!(
+                        "[hwpm] VERIFIED: hardware performance ceiling requested at {}",
+                        actual
+                    ),
+                    Some(actual) => kprintln!(
+                        "[hwpm] WARNING: hardware clamped request to {} (capability {})",
+                        actual,
+                        highest
+                    ),
+                    None => kprintln!("[hwpm] WARNING: HWP readback unavailable"),
+                },
+                Err(_) => kprintln!("[hwpm] WARNING: HWP performance request refused"),
+            }
+        }
+        hwpm::HwPmStatus::Unsupported => {
+            kprintln!("[hwpm] no architectural HWP performance actuator; no unsafe MSR probing");
+        }
     }
 
     // --- physical memory management (P5): take ownership of the RAM the firmware handed us ---
