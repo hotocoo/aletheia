@@ -1,6 +1,11 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-09, latest (PER-CPU HARDWARE PERFORMANCE POSTURE — ADR-129 applies the architectural
+**As of:** 2026-09-09, latest (CROSS-TARGET DESKTOP CADENCE — ADR-131 raises the interactive aarch64 and
+RISC-V timer-driven desktop pump from 100 Hz to 250 Hz / 4 ms nominal cadence, matching x86-64. The
+live DT workflow was re-run after the change: aarch64 PASS and RISC-V PASS, including real QEMU
+virtio keyboard/tablet events, pointer mapping, focus routing, shell input, and a desktop shortcut.
+This is explicitly a timer-latency posture; interrupt-driven virtio input remains open. Before that:
+PER-CPU HARDWARE PERFORMANCE POSTURE — ADR-129 applies the architectural
 HWP performance request independently on every x86-64 AP after it enters long mode, closing the
 multi-core gap where only the BSP received the requested performance posture; the SMP gate now
 requires every online AP to accept its own request when HWP is available, while unsupported CPUs
