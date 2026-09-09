@@ -431,8 +431,8 @@ features = os.environ.get('VINPUT_FEATURES', 'interactive,input-msix')
 if 'input-msix' in features:
     check(msix is not None and int(msix.group(1)) > 0 and int(msix.group(2)) > 0,
           'interrupt: live MSI-X handler fired and produced wake samples (%r)' % (msix.groups() if msix else None,))
-    check('PIT desktop watchdog reduced to 100 Hz' in log_text(),
-          'interrupt: MSI-X mode reduced the periodic desktop watchdog to 100 Hz')
+    check('PIT desktop watchdog reduced to 60 Hz' in log_text(),
+          'interrupt: MSI-X mode reduced the periodic desktop watchdog to 60 Hz')
 else:
     check(msix is not None and int(msix.group(1)) == 0 and int(msix.group(5)) > 0,
           'timer A/B: no MSI-X interrupts and timer wake samples are live (%r)' % (msix.groups() if msix else None,))

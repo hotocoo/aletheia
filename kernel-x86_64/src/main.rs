@@ -1545,9 +1545,15 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                         // rather than paying the old 1 kHz desktop interrupt/compositor cadence on
                         // every idle millisecond; this watchdog is only a recovery path if an
                         // interrupt is lost and is not the normal input wake mechanism.
-                        pit::init_at_hz(100);
+                        // Both input functions now have an interrupt-driven MSI-X wake path, so
+                        // the PIT is only a display/housekeeping watchdog. 60 Hz is the natural
+                        // frame cadence: it bounds timer-driven repaint work to one display frame
+                        // while removing 40% of the periodic wakeups versus the former 100 Hz
+                        // watchdog. Input latency is not paid here because MSI-X wakes the pump
+                        // immediately on device activity.
+                        pit::init_at_hz(60);
                         kprintln!(
-                            "[input-msix] performance mode: PIT desktop watchdog reduced to 100 Hz"
+                            "[input-msix] performance mode: PIT desktop watchdog reduced to 60 Hz"
                         );
                     } else {
                         kprintln!("[input-msix] fallback: one or more input functions remain timer-polled");
