@@ -36,3 +36,12 @@ wat = "1"
 
 [profile.dev]
 opt-level = 0
+
+# Performance profile for repeatable local benchmarking. Keeps debug builds usable
+# while enabling realistic CPU optimisation measurements for the hosted core.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
