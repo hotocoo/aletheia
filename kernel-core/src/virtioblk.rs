@@ -160,6 +160,10 @@ pub trait Transport {
     /// Bind one queue's device notification to a transport-specific interrupt vector. Legacy or
     /// MMIO transports return false and retain their existing wake path; PCI transports may map
     /// the vector through MSI-X. The driver never treats a false result as proof of interrupts.
+    ///
+    /// # Safety
+    /// The caller must ensure the transport registers are validly mapped and queue configuration
+    /// follows the transport synchronization requirements.
     unsafe fn configure_queue_interrupt(&self, _queue: u16, _vector: u16) -> bool {
         false
     }

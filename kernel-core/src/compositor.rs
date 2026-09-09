@@ -1118,7 +1118,12 @@ impl Compositor {
         // Collect screen regions into a fixed stack buffer. This is the compositor hot path:
         // cloning z-order and growing a Vec per frame made a repaint pay heap traffic even though
         // the desktop's damage bound is already known. Keep the bound structural and allocation-free.
-        let mut regions = [Rect { x: 0, y: 0, w: 0, h: 0 }; MAX_DAMAGE_RECTS + 1];
+        let mut regions = [Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }; MAX_DAMAGE_RECTS + 1];
         let mut region_count = 0usize;
         let mut whole = self.whole_scanout_damage;
         if !whole {

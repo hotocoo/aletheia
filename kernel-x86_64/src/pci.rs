@@ -242,9 +242,7 @@ pub unsafe fn enable_msix(bdf: Bdf, vector: u8) -> Result<usize, &'static str> {
     let bir = (table & 0x7) as u8;
     let offset = (table & 0xffff_fff8) as u64;
     let bar = unsafe { bar_base(&env, bdf, bir) }.ok_or("MSI-X table names an invalid BAR")?;
-    let table_bytes = count
-        .checked_mul(16)
-        .ok_or("MSI-X table size overflow")?;
+    let table_bytes = count.checked_mul(16).ok_or("MSI-X table size overflow")?;
     if offset > u64::MAX - table_bytes as u64 {
         return Err("MSI-X table address overflow");
     }

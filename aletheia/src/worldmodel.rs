@@ -122,14 +122,7 @@ mod tests {
             })
             .unwrap();
 
-        let ids = traverse_filtered(
-            &store,
-            &a,
-            "related",
-            Dir::Outgoing,
-            4,
-            |id| id != &hidden,
-        );
+        let ids = traverse_filtered(&store, &a, "related", Dir::Outgoing, 4, |id| id != &hidden);
         assert!(ids.is_empty(), "forbidden bridge must stop traversal");
     }
 }

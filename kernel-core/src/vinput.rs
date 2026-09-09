@@ -524,6 +524,10 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
     /// context. The caller may use the returned `used_buffer` bit to wake the foreground pump;
     /// all queue harvesting remains bounded and stays in [`next_event`]. A transport that has no
     /// interrupt wiring reports no pending event rather than pretending polling is an IRQ.
+    ///
+    /// # Safety
+    /// The caller must ensure the transport interrupt state is valid and that interrupt servicing
+    /// is not concurrently executed by another path.
     pub unsafe fn service_interrupt(&self) -> (bool, bool) {
         let bits = self.transport.interrupt_status();
         if bits == 0 {

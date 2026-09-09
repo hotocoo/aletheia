@@ -668,10 +668,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         return Ok(0);
     }
     let planned = found.min(MAX_CPUS - 1);
-    let hwp_supported = matches!(
-        crate::hwpm::probe(),
-        crate::hwpm::HwPmStatus::Hwp { .. }
-    );
+    let hwp_supported = matches!(crate::hwpm::probe(), crate::hwpm::HwPmStatus::Hwp { .. });
 
     // LAPIC up on the BSP (ICR sends require it); preserve the firmware's LVT/virtual-wire state.
     // SAFETY: rdmsr IA32_APIC_BASE at ring 0; bits 12..36 = the xAPIC MMIO base.

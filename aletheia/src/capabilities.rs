@@ -109,8 +109,16 @@ impl CapEngine {
             }));
         }
         out.sort_by(|a, b| {
-            a["subject"].as_str().unwrap_or("").cmp(b["subject"].as_str().unwrap_or(""))
-                .then_with(|| a["action"].as_str().unwrap_or("").cmp(b["action"].as_str().unwrap_or("")))
+            a["subject"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["subject"].as_str().unwrap_or(""))
+                .then_with(|| {
+                    a["action"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["action"].as_str().unwrap_or(""))
+                })
         });
         out
     }

@@ -81,7 +81,10 @@ impl ShellHost for Host {
     fn input_irq_stats(&self) -> Option<((u64, u64, u64, u64), (u64, u64, u64))> {
         #[cfg(feature = "input-msix")]
         {
-            Some((crate::idt::input_msix_stats(), crate::idt::timer_wakeup_stats()))
+            Some((
+                crate::idt::input_msix_stats(),
+                crate::idt::timer_wakeup_stats(),
+            ))
         }
         #[cfg(not(feature = "input-msix"))]
         {

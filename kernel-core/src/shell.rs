@@ -779,7 +779,7 @@ pub trait ShellHost {
     /// Optional target-native interrupt telemetry: (MSI-X IRQ hits, sampled wakeups, total TSC
     /// cycles, maximum TSC cycles). The tuple is deliberately optional because non-x86 targets
     /// have different interrupt-controller domains and must not fabricate x86 counters.
-    fn input_irq_stats(&self) -> Option<((u64, u64, u64, u64), (u64, u64, u64))> {
+    fn input_irq_stats(&self) -> Option<InputIrqStats> {
         None
     }
     /// Processors this kernel brought up. Defaulted to one because a target that has not answered
@@ -1147,9 +1147,13 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                         f.kb_doorbells,
                         f.pt_doorbells
                     );
-                    if let Some(((hits, samples, total_cycles, max_cycles), (timer_samples, timer_total, timer_max))) = host.input_irq_stats() {
-                        let avg = if samples == 0 { 0 } else { total_cycles / samples };
-                        let timer_avg = if timer_samples == 0 { 0 } else { timer_total / timer_samples };
+                    if let Some((
+                        (hits, samples, total_cycles, max_cycles),
+                        (timer_samples, timer_total, timer_max),
+                    )) = host.input_irq_stats()
+                    {
+                        let avg = total_cycles.checked_div(samples).unwrap_or(0);
+                        let timer_avg = timer_total.checked_div(timer_samples).unwrap_or(0);
                         outf!(
                             out,
                             "msix: hits {} wake-samples {} avg-cycles {} max-cycles {} | timer: samples {} avg-cycles {} max-cycles {}",
@@ -2276,3 +2280,4 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
 
     Ok(n)
 }
+type InputIrqStats = ((u64, u64, u64, u64), (u64, u64, u64));

@@ -219,12 +219,7 @@ fn compress_context(context: &mut AiContext, budget: ContextBudget) {
 }
 
 fn summarize_context(context: &AiContext) -> String {
-    let focus = context
-        .direct
-        .focus
-        .as_ref()
-        .map(|id| id.as_str())
-        .unwrap_or("none");
+    let focus = context.direct.focus.as_deref().unwrap_or("none");
     format!(
         "subject={} focus={} world={} relationships={} memory={}",
         context.direct.subject,

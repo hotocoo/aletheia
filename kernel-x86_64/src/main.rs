@@ -1535,7 +1535,9 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                         .and_then(|b| unsafe { pci::enable_msix(b, idt::INPUT_MSIX_VECTOR).ok() });
                     kprintln!(
                         "[input-msix] keyboard={:?} tablet={:?} vector={:#x}",
-                        kb_msix, tab_msix, idt::INPUT_MSIX_VECTOR
+                        kb_msix,
+                        tab_msix,
+                        idt::INPUT_MSIX_VECTOR
                     );
                     if kb_msix.is_some() && tab_msix.is_some() {
                         kprintln!("[input-msix] VERIFIED: both live input functions use MSI-X wake delivery");
@@ -1544,12 +1546,16 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                         // every idle millisecond; this watchdog is only a recovery path if an
                         // interrupt is lost and is not the normal input wake mechanism.
                         pit::init_at_hz(100);
-                        kprintln!("[input-msix] performance mode: PIT desktop watchdog reduced to 100 Hz");
+                        kprintln!(
+                            "[input-msix] performance mode: PIT desktop watchdog reduced to 100 Hz"
+                        );
                     } else {
                         kprintln!("[input-msix] fallback: one or more input functions remain timer-polled");
                     }
                 } else {
-                    kprintln!("[input-msix] unavailable: xAPIC MSI target is not usable on this CPU");
+                    kprintln!(
+                        "[input-msix] unavailable: xAPIC MSI target is not usable on this CPU"
+                    );
                 }
                 #[cfg(not(feature = "input-msix"))]
                 kprintln!("[input-msix] disabled by build feature: timer wake path selected for A/B qualification");

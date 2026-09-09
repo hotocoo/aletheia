@@ -18,8 +18,8 @@
 //! scratch disk and requires the invariant marker.
 use kernel_core::virtioblk::{self, InitReport, VirtioHal};
 use kernel_core::virtiogpu::{self, VirtioGpu};
-use kernel_core::Hal;
 use kernel_core::virtionet::{self, VirtioNet};
+use kernel_core::Hal;
 
 use crate::frames;
 use crate::pci::{self, Bdf, PciTransport};

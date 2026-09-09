@@ -7,9 +7,9 @@
 //! compiler emits the correct interrupt prologue/epilogue + `iretq`).
 
 use crate::cell::Racy;
+use core::sync::atomic::{AtomicU64, Ordering};
 use kernel_core::faultclass::{kind_name, x86_verdict, FaultVerdict};
 use kernel_core::reentry::ReentryGuard;
-use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use x86_64::{PrivilegeLevel, VirtAddr};
 
@@ -188,7 +188,12 @@ pub fn sample_timer_wakeup(last_seq: &AtomicU64) {
     TIMER_TOTAL_CYCLES.fetch_add(cycles, Ordering::Relaxed);
     let mut old = TIMER_MAX_CYCLES.load(Ordering::Relaxed);
     while cycles > old {
-        match TIMER_MAX_CYCLES.compare_exchange_weak(old, cycles, Ordering::Relaxed, Ordering::Relaxed) {
+        match TIMER_MAX_CYCLES.compare_exchange_weak(
+            old,
+            cycles,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => break,
             Err(observed) => old = observed,
         }
@@ -276,9 +281,9 @@ extern "x86-interrupt" fn timer(_frame: InterruptStackFrame) {
     crate::pit::tick();
     #[cfg(feature = "input-msix")]
     {
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    TIMER_IRQ_TSC.store(tsc, Ordering::Release);
-    TIMER_IRQ_SEQ.fetch_add(1, Ordering::AcqRel);
+        let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+        TIMER_IRQ_TSC.store(tsc, Ordering::Release);
+        TIMER_IRQ_SEQ.fetch_add(1, Ordering::AcqRel);
     }
     // Acknowledge the PIC before the wakeup store so interrupt-controller service is released
     // before any foreground bookkeeping is requested.

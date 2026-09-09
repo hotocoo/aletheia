@@ -15,9 +15,9 @@
 //! by the CPU's interrupt flag and no lock is needed — and none is taken, because the main
 //! thread also holds console locks that an IRQ path must never spin on.
 
-use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "input-msix")]
 use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::vec::Vec;
 use kernel_core::desktop::{Desktop as CoreDesktop, PAGES};
