@@ -53,6 +53,8 @@ const R_QUEUE_NUM_MAX: usize = 0x034;
 const R_QUEUE_NUM: usize = 0x038;
 const R_QUEUE_READY: usize = 0x044;
 const R_QUEUE_NOTIFY: usize = 0x050;
+const R_INTERRUPT_STATUS: usize = 0x060;
+const R_INTERRUPT_ACK: usize = 0x064;
 const R_STATUS: usize = 0x070;
 const R_QUEUE_DESC_LOW: usize = 0x080;
 const R_QUEUE_DESC_HIGH: usize = 0x084;
@@ -199,6 +201,23 @@ pub trait Transport {
     /// The transport's registers must be mapped and the caller must not call these concurrently — the
     /// driver calls them in the order VIRTIO 1.1 §3.1.1 requires, with one request in flight.
     unsafe fn notify(&self, queue: u16);
+    /// Read the transport's interrupt status. Bit 0 means one or more used buffers are ready;
+    /// bit 1 means a device configuration change. A transport without a wired interrupt source
+    /// returns zero rather than fabricating delivery.
+    ///
+    /// # Safety
+    /// The transport's registers must be mapped and the caller must not call these concurrently.
+    unsafe fn interrupt_status(&self) -> u32 {
+        0
+    }
+    /// Acknowledge the transport interrupt bits that were observed. The value is a bit mask and
+    /// is intentionally transport-local because virtio-mmio uses a dedicated ACK register while
+    /// virtio-pci's legacy ISR is read-to-ack.
+    ///
+    /// # Safety
+    /// The transport's interrupt register must be mapped and the caller must acknowledge only bits
+    /// it has actually observed.
+    unsafe fn ack_interrupt(&self, _bits: u32) {}
     /// Read 8 bytes of device-specific config space at `off` (blk capacity is at 0).
     ///
     /// # Safety
@@ -388,6 +407,12 @@ impl Transport for MmioTransport {
     }
     unsafe fn notify(&self, queue: u16) {
         w32(self.base, R_QUEUE_NOTIFY, queue as u32);
+    }
+    unsafe fn interrupt_status(&self) -> u32 {
+        r32(self.base, R_INTERRUPT_STATUS)
+    }
+    unsafe fn ack_interrupt(&self, bits: u32) {
+        w32(self.base, R_INTERRUPT_ACK, bits);
     }
     unsafe fn config_u64(&self, off: usize) -> u64 {
         r64_config(self.base, off)

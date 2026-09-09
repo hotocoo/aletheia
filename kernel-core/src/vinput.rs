@@ -74,6 +74,10 @@ const STATUS_QUEUE: u16 = 1;
 
 /// `struct virtio_input_event`: type (u16), code (u16), value (u32) — 8 bytes, one per buffer.
 pub const EVENT_SIZE: usize = 8;
+/// Virtio interrupt status bit: one or more used-buffer notifications are pending.
+pub const INTERRUPT_USED_BUFFER: u32 = 1 << 0;
+/// Virtio interrupt status bit: device configuration changed.
+pub const INTERRUPT_CONFIG_CHANGE: u32 = 1 << 1;
 /// Re-post several consumed receive buffers per device notification. Four keeps the device
 /// supplied ring ahead of the consumer while cutting MMIO doorbells on bursty input.
 const REPOST_KICK_BATCH: u8 = 4;
@@ -509,6 +513,22 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
     }
     pub fn local_refusals(&self) -> u64 {
         self.local_refusals.get()
+    }
+
+    /// Consume a transport interrupt notification without doing compositor work in interrupt
+    /// context. The caller may use the returned `used_buffer` bit to wake the foreground pump;
+    /// all queue harvesting remains bounded and stays in [`next_event`]. A transport that has no
+    /// interrupt wiring reports no pending event rather than pretending polling is an IRQ.
+    pub unsafe fn service_interrupt(&self) -> (bool, bool) {
+        let bits = self.transport.interrupt_status();
+        if bits == 0 {
+            return (false, false);
+        }
+        self.transport.ack_interrupt(bits);
+        (
+            bits & INTERRUPT_USED_BUFFER != 0,
+            bits & INTERRUPT_CONFIG_CHANGE != 0,
+        )
     }
 
     /// The gate denies by default on BOTH queues — proved per queue because each owns its own
