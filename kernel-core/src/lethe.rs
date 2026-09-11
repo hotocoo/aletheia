@@ -614,6 +614,24 @@ pub struct GovernReport {
     pub pm_refusals: u32,
 }
 
+impl GovernReport {
+    /// Fold one domain-step's report into a running total. Saturating so a long-lived
+    /// resident governor (ADR-079) reports honestly at the counter ceiling instead of
+    /// wrapping to a smaller number than it has already earned.
+    pub fn merge(&mut self, other: &GovernReport) {
+        self.steps = self.steps.saturating_add(other.steps);
+        self.consultations = self.consultations.saturating_add(other.consultations);
+        self.decisive = self.decisive.saturating_add(other.decisive);
+        self.abstains = self.abstains.saturating_add(other.abstains);
+        self.out_of_range = self.out_of_range.saturating_add(other.out_of_range);
+        self.degenerate = self.degenerate.saturating_add(other.degenerate);
+        self.moves = self.moves.saturating_add(other.moves);
+        self.parks = self.parks.saturating_add(other.parks);
+        self.wakes = self.wakes.saturating_add(other.wakes);
+        self.pm_refusals = self.pm_refusals.saturating_add(other.pm_refusals);
+    }
+}
+
 /// The ADR-076 demand map, exactly as `PmEngine::govern` computes it: the demand register
 /// mapped onto the governor range, never above nominal. The advised path must reproduce this
 /// bit-for-bit when it abstains, so it is written ONCE here and the suite pins it against the
@@ -656,14 +674,37 @@ pub fn govern_advised(
     let mut report = GovernReport::default();
     let ids = pm.domain_ids();
     for id in ids {
+        let step = govern_one_advised(pm, advisor, obs, id, now, temp_of(id));
+        report.merge(&step);
+    }
+    report
+}
+
+/// One advised governor step over ONE domain — the sweep body of [`govern_advised`], lifted
+/// so a resident governor (ADR-079) can service domains one per tick without duplicating the
+/// proven decision path. Same observe-then-consult-then-act order, same named APIs, same
+/// census; an unregistered domain yields an all-zero report and touches nothing.
+///
+/// `temp_mc` is passed in rather than read through a closure because the resident caller
+/// samples the sensor once, for the one domain it is about to service, on the tick it is
+/// servicing it.
+pub fn govern_one_advised(
+    pm: &mut PmEngine,
+    advisor: Option<&Advisor>,
+    obs: &mut PmObserver,
+    id: u32,
+    now: u64,
+    temp_mc: i32,
+) -> GovernReport {
+    let mut report = GovernReport::default();
+    {
         let demand = match pm.demand(id) {
             Some(d) => d,
-            None => continue,
+            None => return report,
         };
         let current_idx = pm.point_index(id).unwrap_or(0);
         let (nominal_idx, _span) = pm.governor_shape(id).unwrap_or((0, 1));
         let trip_mc = pm.trip_temp_mc(id).unwrap_or(0);
-        let temp_mc = temp_of(id);
         obs.observe(id, demand, temp_mc, current_idx, now);
         report.steps += 1;
 

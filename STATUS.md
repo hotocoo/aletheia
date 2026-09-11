@@ -1,6 +1,6 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-08-28 (LETHE — the resident performance advisor — advises the
+**As of:** 2026-09-12 (THE ADVISOR TAKES THE WATCH — Lethe is RESIDENT: `kernel-core/src/lethed.rs` runs on the clock, services exactly one domain per tick round-robin with constant allocation-free work, MEASURES demand from busy/idle accounting over disjoint renormalizing windows, and treats the TICK as an authority question — a replayed, rolled-back, too-eager, nested or unattached tick is a named refusal that moves no state and lands in a census that balances at every instant; a window past the staleness ceiling is RESYNCED and the advisor withheld until a full 16-sample window of post-gap truth refills rather than guessed through; a latched thermal cooldown OUTRANKS the advisor for its whole duration; the resident holds no grant so the overclock band is unreachable by construction; every act flows through ADR-078's lifted sweep body so the advisor-absent path stays bit-identical to the ADR-076 baseline — 14 boot invariants on all three targets (lethed=14), seven pinned cross-CPU (159 -> 166), 15 host proofs; NOT YET: nothing calls `tick` from a real timer IRQ and no MSR/CPPC/ACPI programming exists — REQ-PM-002, ADR-079); before that: 2026-08-28 (LETHE — the resident performance advisor — advises the
 power/performance contract: `kernel-core/src/lethe.rs` verifies a frozen integer model (two
 decision trees in one `ALTH1` blob, a 12-feature contract hash making moved feature meanings a
 named refusal) and its advised governor path consults it once per domain per step — FREQ advice
@@ -41,7 +41,71 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..078`.
 
-## Current wave — Lethe, the resident performance advisor (2026-08-28, ADR-078)
+## Current wave — the advisor takes the watch (2026-09-12, ADR-079)
+
+ADR-078 published a named non-claim: *no live governor thread exists yet*. This wave closes it.
+`kernel-core/src/lethed.rs` is **the watch** — Lethe resident, running on the clock — and it closes
+the gap without loosening a single bound.
+
+The question a resident governor raises is not "what should the clock be" (ADR-078 answered that).
+It is **who gets to make the machine act, and how often**. A governor driven by the timer interrupt
+is reachable by anything that can influence when the timer fires, so the contract here is about the
+TICK, not the clock:
+
+* **The cadence is authority.** A tick is admitted only if it is strictly newer than the last
+  admitted tick and at least `min_gap` beyond it. A replayed or rolled-back timestamp is
+  `NotMonotone`, a too-eager one is `TooSoon`, a nested one is `Reentered` (the ADR-039 guard), an
+  empty watch is `NoDomains`, an unusable cadence is `BadCadence`. A refused tick moves NO state —
+  not the cursor, not the history, not the contract — and lands in a census that balances at every
+  instant. A host proof fires 10,000 ticks at a floor of 1,000 and asserts exactly 10 admissions:
+  churn, which on real silicon is energy and heat, cannot be amplified through this door.
+* **A stale window is not a window.** Past the staleness ceiling the machine moved without us, so
+  the governor RESYNCS — forgets every window, withholds the advisor until a full 16-sample window
+  refills with post-gap truth, and says how many times it did so. The same rule covers cold boot,
+  so the advisor is never consulted on a partially-filled ring: a feature built from six samples of
+  sixteen is not a weak signal, it is a false one. Withholding is ADR-056 applied to time.
+* **The work per tick is bounded, constant, and allocation-free.** Exactly one domain per tick,
+  round-robin: one demand read, one sensor read, one depth-3 tree walk, at most one contract act —
+  independent of domain count. The attached list is a fixed array claimed once, deliberately not
+  `domain_ids()`, which allocates.
+* **Demand is MEASURED, not declared.** `DemandMeter` turns busy/idle accounting into a percentage
+  over disjoint windows whose counters RENORMALIZE rather than saturate — saturation would destroy
+  the ratio and report a fully loaded domain as 1%, so an unconsumed window degrades in precision,
+  never in truth.
+* **The ceiling outranks the advisor.** While a thermal cooldown is latched the governor stands
+  down, even though the contract would permit a raise inside the governor range, because raising
+  silicon the thermal contract just clamped is how a machine oscillates at its trip point. It still
+  parks a genuinely idle domain — the one act that can only help while cooling.
+* **No new authority.** The resident holds no grant and offers no token, so the overclock band is
+  unreachable BY CONSTRUCTION, not by policy.
+
+Every act flows through `lethe::govern_one_advised` — ADR-078's sweep body, lifted unchanged, all
+32 pre-existing `lethe` and `pm` proofs still green — so the resident inherits that wave's proofs
+whole, including the one that matters most: with the advisor absent the advised path drives the
+machine through the SAME clock sequence as the untouched ADR-076 baseline. `PmEngine::govern` is
+byte-for-byte unchanged; `PmEngine::cooldown_remaining` became public, read-only, so the resident
+can see the ceiling holding and stand down on its own.
+
+Proofs: 15 host tests in `kernel-core/tests/lethed.rs` (adversarial clock streams that jump, stall
+and run BACKWARDS with the census asserted to balance at every step; the berserk-timer rate limit;
+stale resync and full-window rewarm; the advisor-free resident landing exactly on the baseline
+demand map over 40 randomized trials; no point above nominal over 4,000 ticks; demanded silicon
+never parked over 3,000 ticks; heat outranking the advisor for a whole 200-tick cooldown with
+`pm_refusals == 0`; meter exactness across the entire 0..=100 range and under `u64::MAX` input;
+capacity bounding; round-robin fairness), plus 14 invariants booting on all three targets
+(`[lethed] ALL 14 RESIDENT GOVERNOR INVARIANTS HOLD`, boot fails 620+i, `lethed=14`), and seven
+pinned cross-CPU in the conformance contract (159 -> 166 named behaviors).
+
+Named non-claims, in register: this wave makes the governor RESIDENT, not HARDWARE. Nothing calls
+`tick` from a real timer IRQ yet — the watch is built, proved and booted on three targets, and
+wiring it to each target's timer interrupt and to the scheduler's busy/idle accounting is the next
+rung, deliberately separate so the contract is proved before it is connected. The kernel still
+programs no MSR/CPPC/ACPI frequency control (QEMU TCG exposes none to a guest, the ADR-071
+posture), temperature is still reported by a caller rather than simulated thermodynamically, and
+ADR-078's benchmark numbers still live in the trainer's documented cost model — they say nothing
+about Linux, Windows, or any real operating system.
+
+## Previous wave — Lethe, the resident performance advisor (2026-08-28, ADR-078)
 
 The power/performance contract (ADR-076) made frequency AUTHORITY and heat a HARD CEILING; this
 wave gives its governor a MEMORY that obeys it. `kernel-core/src/lethe_contract.rs` + `kernel-core/src/lethe.rs`

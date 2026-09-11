@@ -285,6 +285,13 @@ CONTRACT=(
   "lethe: demanded silicon is never parked; every park happened at zero demand"
   "lethe: with the advisor absent the advised path is bit-identical to the baseline governor"
   "lethe: the observer is bounded - slots refuse overflow, rings saturate, no history means no guess"
+  "lethed: a replayed or rolled-back tick is refused by name and moves nothing"
+  "lethed: a tick sooner than the cadence floor is refused and rate-limits churn"
+  "lethed: exactly one domain is serviced per tick, round-robin over the watch"
+  "lethed: the advisor is withheld until a full window of post-resync truth exists"
+  "lethed: a stale window is resynced and the advisor withheld, never guessed through"
+  "lethed: while the thermal cooldown is latched the governor stands down and heat wins"
+  "lethed: the resident holds no grant, so no reachable point leaves the governor range"
 )
 
 hr() { printf '========================================================================\n'; }

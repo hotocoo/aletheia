@@ -527,6 +527,26 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // ADR-079 - the advisor takes the WATCH. The resident governor runs on the clock: one
+    // domain per tick, demand MEASURED from real accounting, a cadence that refuses a replayed
+    // or berserk timer by name, and a thermal ceiling that outranks the model for the whole
+    // cooldown. It mints no grant, so the overclock band is unreachable by construction.
+    kprintln!("");
+    kprintln!("--- lethed resident governor selftests (the advisor takes the watch) ---");
+    match kernel_core::lethed::lethed_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[lethed] ALL {} RESIDENT GOVERNOR INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[lethed] FAILED lethed invariant {}: {}", idx, name);
+            ActiveHal::exit(620 + idx as i32);
+        }
+    }
+
     // the advisory property itself — an abstaining model schedules bit-identically to the model-free
     // kernel, and priority is never traded for risk — alongside exact parity with the trainer and a
     // NAMED refusal for every way a blob can be wrong. The printed invariant NAME is the
