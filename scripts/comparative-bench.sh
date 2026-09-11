@@ -125,15 +125,23 @@ typed_workload() {
 boot_median() {
   local label="$1" marker="$2"; shift 2
   local -a samples=()
+  local -a splits=()
   local i
   for i in $(seq 1 "$BOOT_SAMPLES"); do
     boot_and_measure "$label-$i" "$marker" "$@" || return 1
     samples+=("$BOOT_MS")
+    [ -n "${SPLIT_MS:-}" ] && splits+=("$SPLIT_MS")
     # Only the last run's idle number is kept: idle is idle, and it is already a median over samples.
   done
   BOOT_MS="$(printf '%s\n' "${samples[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')"
   BOOT_ALL="$(printf '%s ' "${samples[@]}")"
   printf '    boot to a prompt: median %s ms over %s runs (%s)\n' "$BOOT_MS" "$BOOT_SAMPLES" "$BOOT_ALL"
+  SPLIT_MEDIAN=""
+  if [ "${#splits[@]}" -gt 0 ]; then
+    SPLIT_MEDIAN="$(printf '%s\n' "${splits[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')"
+    printf '    firmware share: %s ms — kernel share: %s ms (the part this project wrote)\n' \
+      "$SPLIT_MEDIAN" "$((BOOT_MS - SPLIT_MEDIAN))"
+  fi
   return 0
 }
 
@@ -153,8 +161,20 @@ boot_and_measure() {
   # SECOND of quantization on a two-to-three second number: every boot time was rounded up to
   # roughly the next poll, and a gap between two legs could be mostly the sleep. 5 ms is far below
   # anything either guest can do and makes the reported difference the guests' difference.
+  # OPTIONAL SPLIT. `SPLIT_MARKER` names the line a guest prints the moment it owns the machine,
+  # so the total can be divided into the share spent in firmware and the share spent in the kernel.
+  # Aletheia boots through OVMF; the Linux leg is `-kernel`-loaded and skips firmware entirely, so
+  # comparing their TOTALS compares two different boot paths. This is how that stops being a
+  # caveat in prose and becomes a number.
+  SPLIT_MS=""
+  local split_seen=0
   local deadline=$((SECONDS + BOOT_TIMEOUT))
   while ! grep -q "$marker" "$log" 2>/dev/null; do
+    if [ -n "${SPLIT_MARKER:-}" ] && [ "$split_seen" -eq 0 ] \
+       && grep -q "$SPLIT_MARKER" "$log" 2>/dev/null; then
+      SPLIT_MS=$(( $(python3 -c 'import time;print(int(time.time()*1000))') - t0 ))
+      split_seen=1
+    fi
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "  FAIL [$label] the guest exited before it reached a prompt"
       sed -n '$p' "$log"; exec 9>&-; return 1
@@ -227,6 +247,7 @@ cp "$OVMF_VARS_F" "$WORK/al-vars.fd"
 dd if=/dev/zero of="$WORK/al-s.img" bs=1048576 count=1 2>/dev/null
 dd if=/dev/zero of="$WORK/al-p.img" bs=1048576 count=1 2>/dev/null
 
+SPLIT_MARKER="calling ExitBootServices"
 if boot_median aletheia "aletheia> " \
     qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -nographic \
     -drive "if=pflash,format=raw,unit=0,file=$OVMF_CODE_F,readonly=on" \
@@ -235,12 +256,13 @@ if boot_median aletheia "aletheia> " \
     -drive "if=none,format=raw,file=$WORK/al-s.img,id=blk0" -device virtio-blk-pci,drive=blk0 \
     -drive "if=none,format=raw,file=$WORK/al-p.img,id=blk1" -device virtio-blk-pci,drive=blk1 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot; then
-  AL_BOOT_MS="$BOOT_MS"; AL_IDLE="$IDLE_CPU"; AL_WL_MS="$WORKLOAD_MS"
+  AL_KERNEL_MS=$((BOOT_MS - ${SPLIT_MEDIAN:-0})); AL_FW_MS="${SPLIT_MEDIAN:-}"; AL_BOOT_MS="$BOOT_MS"; AL_IDLE="$IDLE_CPU"; AL_WL_MS="$WORKLOAD_MS"
 else
   fail=1
 fi
 
 # ---------------------------------------------------------------------------------------------
+SPLIT_MARKER=""
 hr; echo "==> Linux (same host, same qemu-system-x86_64, same TCG, same -m/-smp/-cpu)"; hr
 
 if ! curl -sI --max-time 20 "$KERNEL_URL" >/dev/null 2>&1; then
@@ -372,6 +394,8 @@ hr; echo "RESULTS — same host, same emulator, same emulation mode, same end st
 printf '%-28s | %-18s | %-18s | %-18s\n' "" "Aletheia (x86-64)" "Linux 6.12-lts" "Redox OS"
 printf '%-28s-+-%-18s-+-%-18s-+-%-18s\n' "----------------------------" "------------------" "------------------" "------------------"
 printf '%-28s | %-18s | %-18s | %-18s\n' "boot to a prompt" "${AL_BOOT_MS:-FAIL} ms" "${LX_BOOT_MS:-SKIP} ms" "${RX_BOOT_MS:-SKIP} ms"
+printf '%-28s | %-18s | %-18s | %-18s\n' "  of which firmware (OVMF)" "${AL_FW_MS:-n/a} ms" "none (-kernel)" "-"
+printf '%-28s | %-18s | %-18s | %-18s\n' "  of which this kernel" "${AL_KERNEL_MS:-n/a} ms" "${LX_BOOT_MS:-SKIP} ms" "-"
 printf '%-28s | %-18s | %-18s | %-18s\n' "idle host CPU at prompt" "${AL_IDLE:-FAIL} %" "${LX_IDLE:-SKIP} %" "${RX_IDLE:-SKIP} %"
 printf '%-28s | %-18s | %-18s | %-18s\n' "bootable payload" "${AL_BYTES:-FAIL} B" "${LX_BYTES:-SKIP} B" "${RX_BYTES:-SKIP} B"
 printf '%-28s | %-18s | %-18s | %-18s\n' "typed echo round-trip" "${AL_WL_MS:-FAIL} ms" "${LX_WL_MS:-SKIP} ms" "n/a (login)"

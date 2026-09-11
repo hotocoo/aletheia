@@ -2,39 +2,40 @@
 ==> Aletheia (x86-64, UEFI, interactive console)
 ========================================================================
     bootable payload: aletheia-kernel-x86_64.efi — 1439744 bytes
-    booted to a prompt in 2485 ms
-    typed workload: 25 echo round-trips in 68 ms => 2 ms/op end-to-end
+    booted to a prompt in 2480 ms
+    typed workload: 25 echo round-trips in 64 ms => 2 ms/op end-to-end
     idle host CPU while nobody is typing: 0.0% (median of 6 samples: 0.0 0.0 0.0 0.0 0.0 0.0 )
-scripts/comparative-bench.sh: line 140: 81335 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
-    booted to a prompt in 2479 ms
-    typed workload: 25 echo round-trips in 65 ms => 2 ms/op end-to-end
+scripts/comparative-bench.sh: line 148: 10340 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 2509 ms
+    typed workload: 25 echo round-trips in 71 ms => 2 ms/op end-to-end
     idle host CPU while nobody is typing: 0.0% (median of 6 samples: 0.0 0.0 0.0 0.0 0.0 0.0 )
-scripts/comparative-bench.sh: line 140: 81846 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
-    booted to a prompt in 2499 ms
-    typed workload: 25 echo round-trips in 68 ms => 2 ms/op end-to-end
+scripts/comparative-bench.sh: line 148: 10917 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 2514 ms
+    typed workload: 25 echo round-trips in 69 ms => 2 ms/op end-to-end
     idle host CPU while nobody is typing: 0.0% (median of 6 samples: 0.0 0.0 0.0 0.0 0.0 0.0 )
-    boot to a prompt: median 2485 ms over 3 runs (2485 2479 2499 )
-scripts/comparative-bench.sh: line 242: 82370 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    boot to a prompt: median 2509 ms over 3 runs (2480 2509 2514 )
+    firmware share: 1427 ms — kernel share: 1082 ms (the part this project wrote)
+scripts/comparative-bench.sh: line 263: 11498 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
 ========================================================================
 ==> Linux (same host, same qemu-system-x86_64, same TCG, same -m/-smp/-cpu)
 ========================================================================
 --> no Docker: building the busybox initramfs from the Alpine minirootfs tarball
 --> fetching https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/netboot/vmlinuz-lts
-    bootable payload: vmlinuz + initramfs — 14163376 bytes
+    bootable payload: vmlinuz + initramfs — 14163373 bytes
     kernel: 6.12.81-0-lts
     booted to a prompt in 1786 ms
-    typed workload: 25 echo round-trips in 658 ms => 26 ms/op end-to-end
-    idle host CPU while nobody is typing: 0.6% (median of 6 samples: 0.8 0.6 0.7 0.5 0.7 0.6 )
-scripts/comparative-bench.sh: line 140: 82935 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
-    booted to a prompt in 1765 ms
-    typed workload: 25 echo round-trips in 710 ms => 28 ms/op end-to-end
-    idle host CPU while nobody is typing: 0.3% (median of 6 samples: 0.4 0.2 0.3 0.4 0.6 0.3 )
-scripts/comparative-bench.sh: line 140: 83433 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
-    booted to a prompt in 1799 ms
-    typed workload: 25 echo round-trips in 675 ms => 27 ms/op end-to-end
-    idle host CPU while nobody is typing: 0.6% (median of 6 samples: 0.8 0.7 0.6 0.6 0.8 0.5 )
-    boot to a prompt: median 1786 ms over 3 runs (1786 1765 1799 )
-scripts/comparative-bench.sh: line 317: 83929 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    typed workload: 25 echo round-trips in 805 ms => 32 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.2% (median of 6 samples: 0.2 0.1 0.4 0.2 0.3 0.1 )
+scripts/comparative-bench.sh: line 148: 12136 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 1779 ms
+    typed workload: 25 echo round-trips in 806 ms => 32 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.2% (median of 6 samples: 0.2 0.3 0.2 0.4 0.6 0.1 )
+scripts/comparative-bench.sh: line 148: 12661 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 1814 ms
+    typed workload: 25 echo round-trips in 783 ms => 31 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.3% (median of 6 samples: 0.5 0.2 0.3 0.5 0.6 0.3 )
+    boot to a prompt: median 1786 ms over 3 runs (1786 1779 1814 )
+scripts/comparative-bench.sh: line 339: 13222 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
 ========================================================================
 ==> Redox OS — not run (set WITH_REDOX=1; the image is ~70 MB)
 ========================================================================
@@ -50,10 +51,12 @@ RESULTS — same host, same emulator, same emulation mode, same end state
 ========================================================================
                              | Aletheia (x86-64)  | Linux 6.12-lts     | Redox OS          
 -----------------------------+--------------------+--------------------+-------------------
-boot to a prompt             | 2485 ms            | 1786 ms            | SKIP ms           
-idle host CPU at prompt      | 0.0 %              | 0.6 %              | SKIP %            
-bootable payload             | 1439744 B          | 14163376 B         | SKIP B            
-typed echo round-trip        | 68 ms              | 675 ms             | n/a (login)       
+boot to a prompt             | 2509 ms            | 1786 ms            | SKIP ms           
+  of which firmware (OVMF)   | 1427 ms            | none (-kernel)     | -                 
+  of which this kernel       | 1082 ms            | 1786 ms            | -                 
+idle host CPU at prompt      | 0.0 %              | 0.3 %              | SKIP %            
+bootable payload             | 1439744 B          | 14163373 B         | SKIP B            
+typed echo round-trip        | 69 ms              | 783 ms             | n/a (login)       
 privileged lines of code     | 42078 (Rust)       | ~40M (C, cited)    | n/a               
 ========================================================================
 OTHER RUST OPERATING SYSTEMS — attributes, not numbers.

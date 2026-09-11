@@ -63,7 +63,7 @@ Idle host CPU at the prompt, measured across three independent runs:
 | | before | after |
 |---|---|---|
 | Aletheia | 0.5 % | **0.0 %** |
-| Linux 6.12-lts | 0.6 % | 0.6 % |
+| Linux 6.12-lts | 0.2-0.6 % | 0.2-0.3 % |
 
 The column flipped, and it flipped because a real periodic cost was found and removed, not because
 a measurement was chosen differently.
@@ -72,10 +72,10 @@ The full table after both fixes (`docs/evidence/perf001`, three runs):
 
 | Column | Aletheia | Linux 6.12-lts | Winner |
 |---|---|---|---|
-| boot to a prompt | 2485-2498 ms | 1769-1786 ms | Linux, by ~0.71 s |
-| idle host CPU at prompt | 0.0 % | 0.6 % | **Aletheia** |
+| boot to a prompt (total) | 2507-2516 ms | 1780-1790 ms | Linux, by ~0.72 s |
+| idle host CPU at prompt | 0.0 % | 0.2-0.3 % | **Aletheia** |
 | bootable payload | 1,439,744 B | 14,163,373 B | **Aletheia**, 9.8x |
-| typed echo round-trip | 65-69 ms | 623-675 ms | **Aletheia**, ~9.5x |
+| typed echo round-trip | 64-69 ms | 751-783 ms | **Aletheia**, ~11.3x |
 | privileged lines of code | 42,078 Rust | ~40M C (cited) | **Aletheia**, ~950x |
 
 ## Consequences
@@ -86,6 +86,9 @@ The full table after both fixes (`docs/evidence/perf001`, three runs):
   the obvious next piece of work and **has not been done**, so no part of that gap is currently
   excused. The round-trip win carries a kernel-space/user-space asymmetry stated beside it. The
   payload win is mostly a size difference.
+  *(Superseded in part by ADR-082, which measured the split rather than leaving it as prose: OVMF
+  costs ~1429 ms and this kernel's own share is ~1082 ms against Linux's ~1786 ms. The TOTAL boot
+  column is still lost, and is still reported as lost.)*
 * **Nothing here measures security.** The idle column is a performance result. Capability and
   isolation claims live in the invariant suites and their ADRs.
 * **No other operating system is measured.** Windows, macOS, the BSDs and every RTOS are absent

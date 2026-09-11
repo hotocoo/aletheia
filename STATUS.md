@@ -1,6 +1,6 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-12 (A PARKED MACHINE COSTS NOTHING — the comparative benchmark said Aletheia LOST the idle column at 0.5% host CPU against Linux; two defects behind it, instrument then kernel: `boot_and_measure` polled with `sleep 1`, putting one SECOND of quantization on a 2-3 s measurement (now 5 ms; same binaries measure 2487 vs 1773 ms where the coarse poll said 3065 vs 2044, gap ~1.02 s -> ~0.71 s, pre-fix numbers RETIRED not reconciled), and the Linux leg needed Docker so the comparison SKIPped on daemon-less hosts (now builds the same busybox initramfs from Alpine's minirootfs with host tooling); then the kernel — masking IRQ0 at the 8259A stops DELIVERY but not the 8254 COUNTING, so the emulator modelled a device ticking 100x/s for a sleeping guest, and `pit::quiesce()` reprograms channel 0 to mode 0 (no reload) so the counter runs down once and STOPS. Idle 0.5% -> 0.0% across three runs against Linux 0.6%: four of five columns now to Aletheia (idle, payload 9.8x, typed round-trip ~9.5x, privileged LOC ~950x), boot to prompt STILL LOST by ~0.71 s and not excused — Aletheia boots through OVMF while the Linux leg is `-kernel`-loaded, and splitting that total into firmware and kernel shares is NOT done. NOTHING here measures security; NO other OS is measured — REQ-PERF-001, ADR-081); before that: 2026-09-12 (THE WATCH IS WIRED TO THE CLOCK — the resident governor runs on each target's REAL timer interrupt: x86-64's IRQ0 and the aarch64/RISC-V timer traps drive `lethed::resident`, one governor behind one lock for the machine's whole uptime, entered only through the new `SpinLock::try_lock` because a handler that spun for a lock held by the code it interrupted would deadlock the core — a miss is a COUNTED stand-down, reported never gated; an uncommissioned watch is a no-op so the interrupt may be wired first, and a second commissioning is refused; demand MEASURED from the machine's own busy/idle split (halted core -> 0% measured, governor at lowest point; working core -> 100% measured, governor at nominal and no further, nobody supplying either number); temperature a NAMED stand-in on every target; gated are the contract properties never the numbers (census balances, zero contract refusals, governor range never left, measured demand answered, advisor consulted live on x86-64 — boot fails 614-619); 15 boot invariants on all three targets (lethed=15, VirtualBox gate too); NOT YET: live consultation is x86-64 ONLY because aarch64/RISC-V arm their timer only for the ring-3 run and see six slices, under one 16-sample window, and say so; still no MSR/CPPC/ACPI programming; still NOTHING claimed about other operating systems — REQ-PM-002, ADR-080); before that: 2026-09-12 (THE ADVISOR TAKES THE WATCH — Lethe is RESIDENT: `kernel-core/src/lethed.rs` runs on the clock, services exactly one domain per tick round-robin with constant allocation-free work, MEASURES demand from busy/idle accounting over disjoint renormalizing windows, and treats the TICK as an authority question — a replayed, rolled-back, too-eager, nested or unattached tick is a named refusal that moves no state and lands in a census that balances at every instant; a window past the staleness ceiling is RESYNCED and the advisor withheld until a full 16-sample window of post-gap truth refills rather than guessed through; a latched thermal cooldown OUTRANKS the advisor for its whole duration; the resident holds no grant so the overclock band is unreachable by construction; every act flows through ADR-078's lifted sweep body so the advisor-absent path stays bit-identical to the ADR-076 baseline — 14 boot invariants on all three targets (lethed=14), seven pinned cross-CPU (159 -> 166), 15 host proofs; NOT YET: nothing calls `tick` from a real timer IRQ and no MSR/CPPC/ACPI programming exists — REQ-PM-002, ADR-079); before that: 2026-08-28 (LETHE — the resident performance advisor — advises the
+**As of:** 2026-09-12 (THE BOOT CLOCK IS SPLIT — the one column Aletheia lost carried a caveat in prose (it boots through OVMF; the Linux leg is `-kernel`-loaded and skips firmware), and a caveat that excuses a loss without measuring it is worth nothing, so it is now MEASURED: `boot_and_measure` timestamps `calling ExitBootServices` as well as the prompt, yielding firmware and kernel shares medianed over the same runs. OVMF costs ~1429 ms; ALETHEIA'S OWN KERNEL reaches an interactive prompt in ~1082 ms against Linux's ~1786 ms, about 1.65x faster — while STILL losing the total by ~0.72 s, because splitting a number does not win it and a machine booting through firmware takes longer than one handed the CPU. NON-CLAIM: the kernel shares are far closer to like-for-like than the totals but not identical work — Linux's includes loading and decompressing a 14.16 MB payload, Aletheia's starts from a 1.44 MB image firmware already placed; and NO boot path was optimized, the same binary was measured more carefully — REQ-PERF-001, ADR-082); before that: 2026-09-12 (A PARKED MACHINE COSTS NOTHING — the comparative benchmark said Aletheia LOST the idle column at 0.5% host CPU against Linux; two defects behind it, instrument then kernel: `boot_and_measure` polled with `sleep 1`, putting one SECOND of quantization on a 2-3 s measurement (now 5 ms; same binaries measure 2487 vs 1773 ms where the coarse poll said 3065 vs 2044, gap ~1.02 s -> ~0.71 s, pre-fix numbers RETIRED not reconciled), and the Linux leg needed Docker so the comparison SKIPped on daemon-less hosts (now builds the same busybox initramfs from Alpine's minirootfs with host tooling); then the kernel — masking IRQ0 at the 8259A stops DELIVERY but not the 8254 COUNTING, so the emulator modelled a device ticking 100x/s for a sleeping guest, and `pit::quiesce()` reprograms channel 0 to mode 0 (no reload) so the counter runs down once and STOPS. Idle 0.5% -> 0.0% across three runs against Linux 0.6%: four of five columns now to Aletheia (idle, payload 9.8x, typed round-trip ~9.5x, privileged LOC ~950x), boot to prompt STILL LOST by ~0.71 s and not excused — Aletheia boots through OVMF while the Linux leg is `-kernel`-loaded, and splitting that total into firmware and kernel shares is NOT done. NOTHING here measures security; NO other OS is measured — REQ-PERF-001, ADR-081); before that: 2026-09-12 (THE WATCH IS WIRED TO THE CLOCK — the resident governor runs on each target's REAL timer interrupt: x86-64's IRQ0 and the aarch64/RISC-V timer traps drive `lethed::resident`, one governor behind one lock for the machine's whole uptime, entered only through the new `SpinLock::try_lock` because a handler that spun for a lock held by the code it interrupted would deadlock the core — a miss is a COUNTED stand-down, reported never gated; an uncommissioned watch is a no-op so the interrupt may be wired first, and a second commissioning is refused; demand MEASURED from the machine's own busy/idle split (halted core -> 0% measured, governor at lowest point; working core -> 100% measured, governor at nominal and no further, nobody supplying either number); temperature a NAMED stand-in on every target; gated are the contract properties never the numbers (census balances, zero contract refusals, governor range never left, measured demand answered, advisor consulted live on x86-64 — boot fails 614-619); 15 boot invariants on all three targets (lethed=15, VirtualBox gate too); NOT YET: live consultation is x86-64 ONLY because aarch64/RISC-V arm their timer only for the ring-3 run and see six slices, under one 16-sample window, and say so; still no MSR/CPPC/ACPI programming; still NOTHING claimed about other operating systems — REQ-PM-002, ADR-080); before that: 2026-09-12 (THE ADVISOR TAKES THE WATCH — Lethe is RESIDENT: `kernel-core/src/lethed.rs` runs on the clock, services exactly one domain per tick round-robin with constant allocation-free work, MEASURES demand from busy/idle accounting over disjoint renormalizing windows, and treats the TICK as an authority question — a replayed, rolled-back, too-eager, nested or unattached tick is a named refusal that moves no state and lands in a census that balances at every instant; a window past the staleness ceiling is RESYNCED and the advisor withheld until a full 16-sample window of post-gap truth refills rather than guessed through; a latched thermal cooldown OUTRANKS the advisor for its whole duration; the resident holds no grant so the overclock band is unreachable by construction; every act flows through ADR-078's lifted sweep body so the advisor-absent path stays bit-identical to the ADR-076 baseline — 14 boot invariants on all three targets (lethed=14), seven pinned cross-CPU (159 -> 166), 15 host proofs; NOT YET: nothing calls `tick` from a real timer IRQ and no MSR/CPPC/ACPI programming exists — REQ-PM-002, ADR-079); before that: 2026-08-28 (LETHE — the resident performance advisor — advises the
 power/performance contract: `kernel-core/src/lethe.rs` verifies a frozen integer model (two
 decision trees in one `ALTH1` blob, a 12-feature contract hash making moved feature meanings a
 named refusal) and its advised governor path consults it once per domain per step — FREQ advice
@@ -41,7 +41,42 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..078`.
 
-## Current wave — a parked machine costs nothing (2026-09-12, ADR-081)
+## Current wave — the boot clock is split (2026-09-12, ADR-082)
+
+ADR-081 left one column lost and refused to spend the caveat that might have excused it: *splitting
+Aletheia's total into a firmware share and a kernel share has not been done, so no part of that gap
+is currently excused.* A caveat that excuses a loss without measuring it is worth nothing. Either
+the firmware share is real and can be shown, or the caveat should be deleted.
+
+`boot_and_measure` now takes an optional `SPLIT_MARKER` — the line a guest prints the moment it owns
+the machine, which for Aletheia is `calling ExitBootServices`. One boot yields two numbers, medianed
+over the same runs as everything else. The marker is cleared before the Linux leg, because Linux has
+no firmware share here: `-kernel` loading is the start of its own work, so its total IS its kernel
+share.
+
+| | Aletheia | Linux 6.12-lts |
+|---|---|---|
+| boot to a prompt (total) | 2507 / 2516 / 2509 ms | 1790 / 1780 / 1786 ms |
+| of which firmware (OVMF) | 1431 / 1429 / 1427 ms | none (`-kernel`) |
+| **of which this kernel** | **1076 / 1087 / 1082 ms** | **1790 / 1780 / 1786 ms** |
+
+The caveat was real, and it was most of the gap. On the part each project actually wrote, Aletheia
+reaches an interactive prompt in ~1082 ms against ~1786 ms — about **1.65x faster** — while STILL
+losing the total by ~0.72 s, because it pays for UEFI and the other leg does not. Both statements
+are true and neither replaces the other; the table prints all three rows so a reader cannot take one
+without seeing the others.
+
+Named non-claims, in register: splitting a number does not win it — the TOTAL boot column is still
+lost and still reported as lost, because a machine that boots through firmware takes longer to reach
+a prompt than one handed the CPU, and that is the honest end-to-end experience. The two kernel
+shares are far closer to like-for-like than the totals were but are NOT identical work: Linux's
+1786 ms includes QEMU loading and decompressing a 14.16 MB kernel-plus-initramfs payload, while
+Aletheia's 1082 ms starts from a 1.44 MB image firmware has already placed — part of the difference
+is the payload difference, priced separately in its own row, and anyone quoting the 1.65x owes the
+reader that sentence. This wave did NOT change the kernel: no boot path was optimized, the same
+binary was measured more carefully.
+
+## Previous wave — a parked machine costs nothing (2026-09-12, ADR-081)
 
 The comparative benchmark exists so "faster than Linux" is a measurable statement rather than an
 adjective. Run honestly, it said Aletheia **LOST** the idle column: 0.5% host CPU at the prompt
@@ -77,10 +112,10 @@ interactive ttyS0 shell):
 
 | Column | Aletheia | Linux 6.12-lts | Winner |
 |---|---|---|---|
-| boot to a prompt | 2485-2498 ms | 1769-1786 ms | Linux, by ~0.71 s |
-| idle host CPU at prompt | 0.0 % | 0.6 % | **Aletheia** |
+| boot to a prompt (total) | 2507-2516 ms | 1780-1790 ms | Linux, by ~0.72 s |
+| idle host CPU at prompt | 0.0 % | 0.2-0.3 % | **Aletheia** |
 | bootable payload | 1,439,744 B | 14,163,373 B | **Aletheia**, 9.8x |
-| typed echo round-trip | 65-69 ms | 623-675 ms | **Aletheia**, ~9.5x |
+| typed echo round-trip | 64-69 ms | 751-783 ms | **Aletheia**, ~11.3x |
 | privileged lines of code | 42,078 Rust | ~40M C (cited) | **Aletheia**, ~950x |
 
 Named non-claims, in register: four of five is NOT "Aletheia beats Linux". Boot time is still lost
