@@ -1,0 +1,31 @@
+========================================================================
+==> boot profile: where Aletheia's own boot time goes
+========================================================================
+--> profiling /Users/acotech/workspace/Aletheia-lethe/kernel-x86_64/build/aletheia-x86_64-bench.img
+    total to prompt: 2407 ms   firmware share: 1360 ms   kernel share: 1047 ms
+
+========================================================================
+TOP 15 GAPS AFTER ExitBootServices — the kernel's own time, attributed
+========================================================================
+   147.1 ms   after: [mlsched] ALL 12 LIVE-ADVISORY INVARIANTS HOLD
+   136.4 ms   after: [mlrisk] ALL 22 RISK-ADVISOR INVARIANTS HOLD
+    92.5 ms   after:   [pass  3] mlrisk-stress: out-of-box rows still abstain when they arrive at rate
+    79.6 ms   after: --- SMP selftests (MADT + INIT-SIPI-SIPI bring-up + cross-core concurrency substrate) --
+    64.1 ms   after: --- benchmark selftests (this machine measures itself) ---
+    63.5 ms   after: [bench] not hardware truth. GATED: work done, fairness, steady state.
+    60.7 ms   after:   [pass 11] ring3: the advisor was consulted once per real user-mode task — a live spa
+    54.3 ms   after: [uefi] calling ExitBootServices — Aletheia takes ownership of the machine
+    50.0 ms   after: --- soak selftests (lifecycles under repetition: storage, grants, tasks) ---
+    40.8 ms   after: [boot] interrupts enabled (sti); waiting for timer IRQs...
+    38.8 ms   after: [lethed] the watch under load: 12 of 12 ticks admitted, 0 consulted, 12 warm-up, demand 
+    11.0 ms   after: [mm] EFER.NXE + CR4.SMEP enabled — W^X enforceable by paging, user pages not ring-0 ex
+     7.9 ms   after:   [pass  5] mlrisk: every verdict and range guard matches the trainer exactly
+     7.3 ms   after:   [pass  4] mlrisk: every margin matches the trainer exactly
+     7.0 ms   after:   [pass  8] mlrisk: an all-zero input abstains as DEGENERATE, not as a constant opinion
+
+READ THIS CAREFULLY. A gap is wall-clock between one line appearing and the next. It is
+evidence that work happened BETWEEN those prints — not that the work belongs to either line,
+and not that printing was slow. A gap also includes serial transmission of the line that
+closes it. Use this to decide where to look, never as a measurement of a named subsystem.
+========================================================================
+boot-profile: PASS (profile printed; no claim made)
