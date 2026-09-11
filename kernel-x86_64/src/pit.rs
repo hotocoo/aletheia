@@ -43,6 +43,27 @@ pub fn init() {
     }
 }
 
+/// Stop channel 0 from free-running, for a machine that has nothing left to do but wait.
+///
+/// Masking IRQ0 at the PIC stops the interrupt being DELIVERED; it does not stop the 8254 from
+/// counting. The emulator still models a device that ticks 100 times a second, and a host that is
+/// emulating a counter is a host burning CPU on behalf of a guest that is asleep — which is
+/// exactly what the idle column of `scripts/comparative-bench.sh` measures, and exactly where this
+/// kernel was losing it.
+///
+/// Mode 0 (interrupt on terminal count) does not reload: the counter runs down once and then sits
+/// there. So this is not "a slower tick", it is the last tick. Anything that needs a periodic
+/// timer again calls [`init`], which reprograms mode 3 from scratch.
+#[cfg(feature = "interactive")]
+pub fn quiesce() {
+    unsafe {
+        // Channel 0, access lobyte/hibyte, mode 0 (one-shot), binary.
+        Port::<u8>::new(COMMAND).write(0x30u8);
+        Port::<u8>::new(CHANNEL0).write(0xFFu8);
+        Port::<u8>::new(CHANNEL0).write(0xFFu8);
+    }
+}
+
 /// Restart channel 0's count from the top, so the caller gets a WHOLE period before the next IRQ0
 /// rather than whatever remains of the current one.
 ///

@@ -50,6 +50,10 @@ static mut KEYS: Keymap = Keymap::new();
 #[cfg(feature = "interactive")]
 pub fn init() {
     crate::pic::mask_timer();
+    // Masking stops DELIVERY; the 8254 keeps counting and the emulator keeps modelling it, so a
+    // parked guest still costs the host a hundred wakeups a second. Stop the counter as well —
+    // the console is the state this machine waits in, and waiting should cost nothing.
+    crate::pit::quiesce();
     serial::rx_interrupt_enable();
     crate::pic::unmask_serial();
     // SAFETY: single-core console; the vector is installed by `idt::init` before this runs.

@@ -149,14 +149,18 @@ boot_and_measure() {
   "${argv[@]}" < "$fifo" > "$log" 2>&1 &
   local pid=$!
 
-  local waited=0
+  # POLL GRANULARITY IS PART OF THE MEASUREMENT. This loop used to `sleep 1`, which put one
+  # SECOND of quantization on a two-to-three second number: every boot time was rounded up to
+  # roughly the next poll, and a gap between two legs could be mostly the sleep. 5 ms is far below
+  # anything either guest can do and makes the reported difference the guests' difference.
+  local deadline=$((SECONDS + BOOT_TIMEOUT))
   while ! grep -q "$marker" "$log" 2>/dev/null; do
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "  FAIL [$label] the guest exited before it reached a prompt"
       sed -n '$p' "$log"; exec 9>&-; return 1
     fi
-    sleep 1; waited=$((waited + 1))
-    if [ "$waited" -ge "$BOOT_TIMEOUT" ]; then
+    sleep 0.005
+    if [ "$SECONDS" -ge "$deadline" ]; then
       echo "  FAIL [$label] no prompt within ${BOOT_TIMEOUT}s"
       kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1
     fi
