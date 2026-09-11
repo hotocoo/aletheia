@@ -11,18 +11,40 @@ shell on ttyS0 waiting for input. Every number below is measured across that lin
 
 ## What the three runs said
 
-| Column | Aletheia (x86-64) | Linux 6.12-lts | Verdict |
-|---|---|---|---|
-| boot to a prompt (total) | 2507 / 2516 / 2509 ms | 1790 / 1780 / 1786 ms | **Linux, by ~0.72 s** |
-| — of which firmware (OVMF) | 1431 / 1429 / 1427 ms | none (`-kernel`) | — |
-| — of which this kernel | 1076 / 1087 / 1082 ms | 1790 / 1780 / 1786 ms | **Aletheia, ~1.65x** |
-| idle host CPU at prompt | 0.0 / 0.0 / 0.0 % | 0.3 / 0.2 / 0.3 % | **Aletheia** |
-| bootable payload | 1,439,744 B | 14,163,372 B | **Aletheia, 9.8x smaller** |
-| typed echo round-trip | 69 / 64 / 69 ms | 751 / 774 / 783 ms | **Aletheia, ~11.3x faster** |
-| privileged lines of code | 42,078 (Rust, counted) | ~40M (C, cited) | **Aletheia, ~950x less** |
+| Column | Aletheia (x86-64) | Linux 6.12-lts | Redox OS | Verdict |
+|---|---|---|---|---|
+| boot to a prompt (total) | 2500 / 2514 / 2517 ms | 1777 / 1817 / 1805 ms | 11427 / 11371 / 11438 ms | Linux, by ~0.71 s |
+| — of which firmware (OVMF) | 1429 / 1432 / 1439 ms | none (`-kernel`) | UEFI, not split | — |
+| — of which this kernel | 1071 / 1082 / 1078 ms | 1777 / 1817 / 1805 ms | — | **Aletheia, ~1.67x** |
+| idle host CPU at prompt | 0.0 / 0.0 / 0.0 % | 0.7 / 0.7 / 0.3 % | 3.4 / 3.4 / 3.3 % | **Aletheia** |
+| bootable payload | 1,439,744 B | 14,163,373 B | 536,870,912 B | **Aletheia, 9.8x / 373x** |
+| typed echo round-trip | 65 / 65 / 66 ms | 695 / 661 / 783 ms | n/a (login) | **Aletheia, ~10.9x** |
+| privileged lines of code | 42,078 (Rust, counted) | ~40M (C, cited) | n/a | **Aletheia, ~950x less** |
 
-Four columns of five to Aletheia, one to Linux — and the one Aletheia loses splits: it loses the
-TOTAL because it boots through UEFI firmware, and wins the share each project actually wrote. Tight spreads, same direction every run.
+Against Linux: four columns of five to Aletheia, one to Linux — and the one Aletheia loses splits,
+because it loses the TOTAL through UEFI firmware while winning the share each project actually
+wrote. Against Redox: every measured column, including the boot total.
+
+**Redox is the fair boot comparison.** It boots through UEFI like Aletheia, so both pay firmware and
+their TOTALS are directly comparable in a way neither is with the `-kernel`-loaded Linux leg:
+2500-2517 ms against 11371-11438 ms, about **4.5x**. Tight spreads, same direction every run.
+
+## Redox had to be made measurable first
+
+The Redox leg had always been opt-in and had always SKIPped here, reporting only "did not reach a
+login prompt". That was the harness describing its own inability to press a key, not a fact about
+Redox: its bootloader draws a video-mode picker and waits on the **UEFI console**, which under
+`-nographic` nobody can answer. The guest was blocked, not slow. Three fixes:
+
+* it now gets the same OVMF pflash Aletheia does, because it is a UEFI image;
+* the picker is released with `sendkey ret` through the QEMU **monitor** — that drives FIRMWARE,
+  never the measured system, and every serial byte still comes from the same path as the other legs;
+* it is excluded from the typed-workload leg **and only that leg**, because logging in would measure
+  how well this script drives somebody else's OS.
+
+A latent harness bug surfaced on the way: with `WORKLOAD_OPS=0`, `set -u` met an unbound
+`WORKLOAD_MS` and killed the run mid-leg. Turning the workload leg off is now a supported thing to
+do.
 
 ## Two things changed in the instrument, and both mattered
 

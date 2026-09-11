@@ -2,46 +2,105 @@
 ==> Aletheia (x86-64, UEFI, interactive console)
 ========================================================================
     bootable payload: aletheia-kernel-x86_64.efi — 1439744 bytes
-    booted to a prompt in 2516 ms
-    typed workload: 25 echo round-trips in 71 ms => 2 ms/op end-to-end
+    booted to a prompt in 2521 ms
+    typed workload: 25 echo round-trips in 65 ms => 2 ms/op end-to-end
     idle host CPU while nobody is typing: 0.0% (median of 6 samples: 0.0 0.0 0.0 0.0 0.0 0.0 )
-scripts/comparative-bench.sh: line 148:  6890 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
-    booted to a prompt in 2506 ms
-    typed workload: 25 echo round-trips in 68 ms => 2 ms/op end-to-end
+scripts/comparative-bench.sh: line 152: 39723 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 2508 ms
+    typed workload: 25 echo round-trips in 72 ms => 2 ms/op end-to-end
     idle host CPU while nobody is typing: 0.0% (median of 6 samples: 0.0 0.0 0.0 0.0 0.0 0.0 )
-scripts/comparative-bench.sh: line 148:  7476 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
-    booted to a prompt in 2523 ms
-    typed workload: 25 echo round-trips in 64 ms => 2 ms/op end-to-end
+scripts/comparative-bench.sh: line 152: 40318 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 2514 ms
+    typed workload: 25 echo round-trips in 65 ms => 2 ms/op end-to-end
     idle host CPU while nobody is typing: 0.0% (median of 6 samples: 0.0 0.0 0.0 0.0 0.0 0.0 )
-    boot to a prompt: median 2516 ms over 3 runs (2516 2506 2523 )
-    firmware share: 1429 ms — kernel share: 1087 ms (the part this project wrote)
-scripts/comparative-bench.sh: line 263:  8065 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    boot to a prompt: median 2514 ms over 3 runs (2521 2508 2514 )
+    firmware share: 1432 ms — kernel share: 1082 ms (the part this project wrote)
+scripts/comparative-bench.sh: line 304: 40907 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
 ========================================================================
 ==> Linux (same host, same qemu-system-x86_64, same TCG, same -m/-smp/-cpu)
 ========================================================================
 --> no Docker: building the busybox initramfs from the Alpine minirootfs tarball
 --> fetching https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/netboot/vmlinuz-lts
-    bootable payload: vmlinuz + initramfs — 14163371 bytes
+    bootable payload: vmlinuz + initramfs — 14163373 bytes
     kernel: 6.12.81-0-lts
-    booted to a prompt in 1780 ms
-    typed workload: 25 echo round-trips in 795 ms => 31 ms/op end-to-end
-    idle host CPU while nobody is typing: 0.2% (median of 6 samples: 0.4 0.2 0.2 0.1 0.5 0.6 )
-scripts/comparative-bench.sh: line 148:  8705 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
-    booted to a prompt in 1772 ms
-    typed workload: 25 echo round-trips in 767 ms => 30 ms/op end-to-end
-    idle host CPU while nobody is typing: 0.3% (median of 6 samples: 0.3 0.3 0.1 0.3 0.4 0.4 )
-scripts/comparative-bench.sh: line 148:  9256 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
-    booted to a prompt in 1805 ms
-    typed workload: 25 echo round-trips in 774 ms => 30 ms/op end-to-end
-    idle host CPU while nobody is typing: 0.2% (median of 6 samples: 0.2 0.2 0.1 0.2 0.5 0.1 )
-    boot to a prompt: median 1780 ms over 3 runs (1780 1772 1805 )
-scripts/comparative-bench.sh: line 339:  9772 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 1796 ms
+    typed workload: 25 echo round-trips in 651 ms => 26 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.6% (median of 6 samples: 0.6 0.7 0.5 0.6 0.6 0.5 )
+scripts/comparative-bench.sh: line 152: 41544 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 1817 ms
+    typed workload: 25 echo round-trips in 785 ms => 31 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.3% (median of 6 samples: 0.4 0.2 0.2 0.3 0.5 0.3 )
+scripts/comparative-bench.sh: line 152: 42045 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 1831 ms
+    typed workload: 25 echo round-trips in 661 ms => 26 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.7% (median of 6 samples: 0.8 0.7 0.6 0.6 0.7 0.7 )
+    boot to a prompt: median 1817 ms over 3 runs (1796 1817 1831 )
+scripts/comparative-bench.sh: line 380: 42573 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
 ========================================================================
-==> Redox OS — not run (set WITH_REDOX=1; the image is ~70 MB)
+==> Redox OS (same host, same emulator, same flags)
 ========================================================================
+    bootable payload: whole disk image — 536870912 bytes
+    booted to a prompt in 11480 ms
+scripts/comparative-bench.sh: line 230: 43087 Terminated: 15          ( sleep 8; for _ in $(seq 1 40);
+do
+    grep -q "$marker" "$log" 2> /dev/null && break; python3 - "$MONITOR_SOCK" $MONITOR_KEYS  2> /dev/null <<'EOPY'
+import socket, sys, time
+sock, keys = sys.argv[1], sys.argv[2:]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock)
+time.sleep(0.3)
+for k in keys:
+    s.sendall(("sendkey %s\n" % k).encode())
+    time.sleep(0.3)
+s.close()
+EOPY
+ || true sleep 2;
+done )
+    idle host CPU while nobody is typing: 3.4% (median of 6 samples: 3.5 3.5 3.4 3.2 3.3 3.4 )
+scripts/comparative-bench.sh: line 152: 43086 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 11349 ms
+scripts/comparative-bench.sh: line 230: 45123 Terminated: 15          ( sleep 8; for _ in $(seq 1 40);
+do
+    grep -q "$marker" "$log" 2> /dev/null && break; python3 - "$MONITOR_SOCK" $MONITOR_KEYS  2> /dev/null <<'EOPY'
+import socket, sys, time
+sock, keys = sys.argv[1], sys.argv[2:]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock)
+time.sleep(0.3)
+for k in keys:
+    s.sendall(("sendkey %s\n" % k).encode())
+    time.sleep(0.3)
+s.close()
+EOPY
+ || true sleep 2;
+done )
+    idle host CPU while nobody is typing: 3.5% (median of 6 samples: 3.6 3.5 3.5 3.5 3.5 3.3 )
+scripts/comparative-bench.sh: line 152: 45122 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 11371 ms
+scripts/comparative-bench.sh: line 230: 47249 Terminated: 15          ( sleep 8; for _ in $(seq 1 40);
+do
+    grep -q "$marker" "$log" 2> /dev/null && break; python3 - "$MONITOR_SOCK" $MONITOR_KEYS  2> /dev/null <<'EOPY'
+import socket, sys, time
+sock, keys = sys.argv[1], sys.argv[2:]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock)
+time.sleep(0.3)
+for k in keys:
+    s.sendall(("sendkey %s\n" % k).encode())
+    time.sleep(0.3)
+s.close()
+EOPY
+ || true sleep 2;
+done )
+    idle host CPU while nobody is typing: 3.4% (median of 6 samples: 3.5 3.4 3.3 3.7 3.4 3.4 )
+    boot to a prompt: median 11371 ms over 3 runs (11480 11349 11371 )
 ========================================================================
 ==> trusted computing base, counted from source
 ========================================================================
+scripts/comparative-bench.sh: line 444: 47248 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
     Aletheia x86-64 kernel + shared core: 42078 lines of Rust
     occurrences of `unsafe`: 422 total, of which 159 are in the shared core
     (Linux 6.12 is roughly 40 million lines of C, essentially all of it privileged. That
@@ -51,12 +110,12 @@ RESULTS — same host, same emulator, same emulation mode, same end state
 ========================================================================
                              | Aletheia (x86-64)  | Linux 6.12-lts     | Redox OS          
 -----------------------------+--------------------+--------------------+-------------------
-boot to a prompt             | 2516 ms            | 1780 ms            | SKIP ms           
-  of which firmware (OVMF)   | 1429 ms            | none (-kernel)     | -                 
-  of which this kernel       | 1087 ms            | 1780 ms            | -                 
-idle host CPU at prompt      | 0.0 %              | 0.2 %              | SKIP %            
-bootable payload             | 1439744 B          | 14163371 B         | SKIP B            
-typed echo round-trip        | 64 ms              | 774 ms             | n/a (login)       
+boot to a prompt             | 2514 ms            | 1817 ms            | 11371 ms          
+  of which firmware (OVMF)   | 1432 ms            | none (-kernel)     | -                 
+  of which this kernel       | 1082 ms            | 1817 ms            | -                 
+idle host CPU at prompt      | 0.0 %              | 0.7 %              | 3.4 %             
+bootable payload             | 1439744 B          | 14163373 B         | 536870912 B       
+typed echo round-trip        | 65 ms              | 661 ms             | n/a (login)       
 privileged lines of code     | 42078 (Rust)       | ~40M (C, cited)    | n/a               
 ========================================================================
 OTHER RUST OPERATING SYSTEMS — attributes, not numbers.

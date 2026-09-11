@@ -59,6 +59,10 @@ WORKLOAD_OPS="${WORKLOAD_OPS:-25}"
 BOOT_SAMPLES="${BOOT_SAMPLES:-3}"
 
 fail=0
+# `set -u` plus an early return from typed_workload (WORKLOAD_OPS=0) left this unbound and killed
+# the run mid-leg. Declared once, so turning the workload leg off is a supported thing to do.
+WORKLOAD_MS=""
+MONITOR_PID=""
 hr() { printf '========================================================================\n'; }
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
@@ -157,6 +161,35 @@ boot_and_measure() {
   "${argv[@]}" < "$fifo" > "$log" 2>&1 &
   local pid=$!
 
+  # SOME GUESTS DO NOT LISTEN TO THE SERIAL LINE BEFORE THEIR KERNEL STARTS. Redox's bootloader
+  # draws a video-mode picker and waits on the UEFI CONSOLE, which under `-nographic` nobody can
+  # answer — the guest is blocked, not slow, and a harness that reported "no prompt" would be
+  # reporting its own inability to press a key. `MONITOR_KEYS` names keys to send through the QEMU
+  # monitor until the marker appears. This drives FIRMWARE, never the measured workload: the
+  # typed-workload leg still goes over the serial line like every other guest's.
+  if [ -n "${MONITOR_SOCK:-}" ] && [ -n "${MONITOR_KEYS:-}" ]; then
+    (
+      sleep 8
+      for _ in $(seq 1 40); do
+        grep -q "$marker" "$log" 2>/dev/null && break
+        python3 - "$MONITOR_SOCK" $MONITOR_KEYS <<'EOPY' 2>/dev/null || true
+import socket, sys, time
+sock, keys = sys.argv[1], sys.argv[2:]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock)
+time.sleep(0.3)
+for k in keys:
+    s.sendall(("sendkey %s\n" % k).encode())
+    time.sleep(0.3)
+s.close()
+EOPY
+        sleep 2
+      done
+    ) &
+    MONITOR_PID=$!
+  fi
+
   # POLL GRANULARITY IS PART OF THE MEASUREMENT. This loop used to `sleep 1`, which put one
   # SECOND of quantization on a two-to-three second number: every boot time was rounded up to
   # roughly the next poll, and a gap between two legs could be mostly the sleep. 5 ms is far below
@@ -186,6 +219,7 @@ boot_and_measure() {
     fi
   done
   t1="$(python3 -c 'import time;print(int(time.time()*1000))')"
+  [ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null; MONITOR_PID=""
   BOOT_MS=$((t1 - t0))
   echo "    booted to a prompt in ${BOOT_MS} ms"
 
@@ -201,7 +235,14 @@ boot_and_measure() {
   done
   # The guest stays ALIVE for the typed-workload leg: boot and idle say how a machine waits,
   # the workload says how it ANSWERS. Only after it does the guest get put down.
-  typed_workload "$label" "$log" || { kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1; }
+  # Redox is excluded from the typed-workload leg, and only from that leg: its image boots to a
+  # login prompt, and the credentials are printed on its own console rather than guessed — but
+  # logging in would be measuring how well this script drives somebody else's OS, not how well
+  # that OS answers. Its boot and idle numbers are measured exactly like everyone else's.
+  case "$label" in
+    redox*) : ;;
+    *) typed_workload "$label" "$log" || { kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1; } ;;
+  esac
   kill -9 "$pid" 2>/dev/null
   exec 9>&-
 
@@ -363,12 +404,30 @@ if [ "${WITH_REDOX:-0}" = "1" ]; then
     # Redox's own marker: it prints a login prompt on the serial console. Matched on `login:` rather
     # than a shell prompt because the image boots to a getty, and forcing it further would be
     # measuring how well this script can drive somebody else's OS.
-    if boot_median redox "login:" \
-        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -nographic -no-reboot \
+    #
+    # TWO THINGS THIS LEG NEEDS THAT THE OTHERS DO NOT, both properties of Redox's image rather
+    # than of Redox's kernel. (1) It boots through UEFI, so it gets the same OVMF pflash Aletheia
+    # does — which also makes its total directly comparable to Aletheia's total, since both pay
+    # firmware and the Linux leg does not. (2) Its bootloader draws a video-mode picker and waits
+    # on the UEFI CONSOLE; under `-nographic` nobody can answer it, and the guest sits there
+    # blocked. It is released with `sendkey ret` through the QEMU monitor. That drives FIRMWARE,
+    # not the measured system: every serial byte still comes from the same code path as the other
+    # legs. Reported here because a reader should know this leg needed a keypress the others did
+    # not.
+    MONITOR_SOCK="$WORK/redox-mon.sock"
+    MONITOR_KEYS="ret"
+    rm -f "$MONITOR_SOCK"
+    if boot_median redox "redox login:" \
+        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -display none -serial stdio \
+        -no-reboot -monitor "unix:$MONITOR_SOCK,server,nowait" \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE_F" \
         -drive "format=raw,file=$WORK/redox.img"; then
-      RX_BOOT_MS="$BOOT_MS"; RX_IDLE="$IDLE_CPU"
+      RX_BOOT_MS="$BOOT_MS"; RX_IDLE="$IDLE_CPU"; MONITOR_SOCK=""; MONITOR_KEYS=""
     else
       echo "  Redox did not reach a login prompt on this host — reported, not hidden."
+      echo "  last serial bytes seen from the Redox guest:"
+      tail -c 400 "$WORK/redox-1.log" 2>/dev/null | tr -d '\000' | sed 's/^/    | /'
+      echo "  (monitor socket: $(test -S "$WORK/redox-mon.sock" && echo present || echo ABSENT))"
     fi
   fi
 else
