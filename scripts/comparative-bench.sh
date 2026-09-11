@@ -239,10 +239,44 @@ fi
 # ---------------------------------------------------------------------------------------------
 hr; echo "==> Linux (same host, same qemu-system-x86_64, same TCG, same -m/-smp/-cpu)"; hr
 
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "  Linux leg needs Docker to build the initramfs — SKIPPED (never a silent pass)."
-elif ! curl -sI --max-time 20 "$KERNEL_URL" >/dev/null 2>&1; then
+if ! curl -sI --max-time 20 "$KERNEL_URL" >/dev/null 2>&1; then
   echo "  Linux leg needs network access to fetch the kernel — SKIPPED (never a silent pass)."
+elif ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  # NO DOCKER: build the SAME initramfs from Alpine's own minirootfs tarball using the host's
+  # curl/tar/cpio/gzip. Docker was only ever a way to get a static busybox and a cpio; requiring a
+  # container daemon to run the comparison meant the comparison did not run on machines that have
+  # no daemon, which is the failure mode this harness exists to avoid. The guest ends in the same
+  # state either way — an interactive shell on ttyS0 — so the measurement is unchanged; only the
+  # way the bytes were assembled differs, and that is stated here rather than hidden.
+  echo "--> no Docker: building the busybox initramfs from the Alpine minirootfs tarball"
+  MINIROOT_URL="${MINIROOT_URL:-https://dl-cdn.alpinelinux.org/alpine/$ALPINE_VER/releases/x86_64/alpine-minirootfs-3.21.3-x86_64.tar.gz}"
+  if ! command -v cpio >/dev/null 2>&1; then
+    echo "  Linux leg needs cpio to build the initramfs — SKIPPED (never a silent pass)."
+  elif ! curl -sL --max-time 300 -o "$WORK/minirootfs.tar.gz" "$MINIROOT_URL" \
+       || [ ! -s "$WORK/minirootfs.tar.gz" ]; then
+    echo "  Linux leg could not fetch the minirootfs — SKIPPED (never a silent pass)."
+  else
+    mkdir -p "$WORK/mr" "$WORK/ir/bin" "$WORK/ir/lib" "$WORK/ir/dev" "$WORK/ir/proc" "$WORK/ir/sys"
+    # Alpine's busybox is linked against musl, not static like the busybox-static package the
+    # Docker path installs, so the loader and libc have to come along or /init dies before it can
+    # print anything. Extracting them is the whole difference between the two paths.
+    tar -xzf "$WORK/minirootfs.tar.gz" -C "$WORK/mr" ./bin/busybox ./lib 2>/dev/null \
+      || tar -xzf "$WORK/minirootfs.tar.gz" -C "$WORK/mr" bin/busybox lib 2>/dev/null
+    if [ ! -s "$WORK/mr/bin/busybox" ]; then
+      echo "  FAIL: the minirootfs carried no busybox"; fail=1
+    else
+      cp "$WORK/mr/bin/busybox" "$WORK/ir/bin/busybox"
+      chmod +x "$WORK/ir/bin/busybox"
+      for so in "$WORK/mr"/lib/ld-musl-*.so.* "$WORK/mr"/lib/libc.musl-*.so.*; do
+        [ -e "$so" ] && cp -a "$so" "$WORK/ir/lib/"
+      done
+      for a in sh cat echo mount sleep; do ln -sf busybox "$WORK/ir/bin/$a"; done
+      printf '#!/bin/busybox sh\n/bin/busybox mount -t proc proc /proc 2>/dev/null\n/bin/busybox mount -t sysfs sys /sys 2>/dev/null\n/bin/busybox echo LINUX-BENCH-PROMPT-READY\nexec /bin/busybox sh\n' > "$WORK/ir/init"
+      chmod +x "$WORK/ir/init"
+      ( cd "$WORK/ir" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "$WORK/initramfs.gz" ) \
+        || { echo "  FAIL: the initramfs did not build"; fail=1; }
+    fi
+  fi
 else
   echo "--> building a busybox initramfs whose /init prints a marker and execs a shell"
   # The guest must end in the SAME state as Aletheia's: an interactive shell on the serial line,
@@ -256,8 +290,9 @@ else
     chmod +x /ir/init
     cd /ir && find . | cpio -o -H newc 2>/dev/null | gzip -9 > /out/initramfs.gz
   ' >/dev/null 2>&1 || { echo "  FAIL: the initramfs did not build"; fail=1; }
+fi
 
-  if [ -s "$WORK/initramfs.gz" ]; then
+if [ -s "$WORK/initramfs.gz" ]; then
     echo "--> fetching $KERNEL_URL"
     if curl -sL --max-time 300 -o "$WORK/vmlinuz" "$KERNEL_URL" && [ -s "$WORK/vmlinuz" ]; then
       LX_BYTES=$(( $(wc -c < "$WORK/vmlinuz") + $(wc -c < "$WORK/initramfs.gz") ))
@@ -274,7 +309,6 @@ else
     else
       echo "  FAIL: the kernel did not download"; fail=1
     fi
-  fi
 fi
 
 # ---------------------------------------------------------------------------------------------

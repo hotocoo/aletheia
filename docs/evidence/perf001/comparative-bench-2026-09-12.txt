@@ -1,0 +1,135 @@
+========================================================================
+==> Aletheia (x86-64, UEFI, interactive console)
+========================================================================
+    bootable payload: aletheia-kernel-x86_64.efi — 1439744 bytes
+    booted to a prompt in 3070 ms
+    typed workload: 25 echo round-trips in 63 ms => 2 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.5% (median of 6 samples: 0.5 0.5 0.5 0.5 0.5 0.5 )
+scripts/comparative-bench.sh: line 140: 43148 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 3070 ms
+    typed workload: 25 echo round-trips in 67 ms => 2 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.5% (median of 6 samples: 0.5 0.4 0.5 0.5 0.5 0.5 )
+scripts/comparative-bench.sh: line 140: 43228 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 3062 ms
+    typed workload: 25 echo round-trips in 69 ms => 2 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.5% (median of 6 samples: 0.5 0.5 0.5 0.5 0.5 0.5 )
+scripts/comparative-bench.sh: line 1: 43310 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    boot to a prompt: median 3070 ms over 3 runs (3070 3070 3062 )
+========================================================================
+==> Linux (same host, same qemu-system-x86_64, same TCG, same -m/-smp/-cpu)
+========================================================================
+--> no Docker: building the busybox initramfs from the Alpine minirootfs tarball
+--> fetching https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64/netboot/vmlinuz-lts
+    bootable payload: vmlinuz + initramfs — 14163372 bytes
+    kernel: 6.12.81-0-lts
+    booted to a prompt in 2044 ms
+    typed workload: 25 echo round-trips in 791 ms => 31 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.3% (median of 6 samples: 0.6 0.3 0.1 0.6 0.2 0.4 )
+scripts/comparative-bench.sh: line 140: 43436 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 2046 ms
+    typed workload: 25 echo round-trips in 600 ms => 24 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.7% (median of 6 samples: 0.7 0.6 0.8 0.7 0.7 0.7 )
+scripts/comparative-bench.sh: line 140: 43648 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+    booted to a prompt in 2047 ms
+    typed workload: 25 echo round-trips in 719 ms => 28 ms/op end-to-end
+    idle host CPU while nobody is typing: 0.3% (median of 6 samples: 0.3 0.5 0.5 0.3 0.2 0.2 )
+    boot to a prompt: median 2046 ms over 3 runs (2044 2046 2047 )
+scripts/comparative-bench.sh: line 313: 43821 Killed: 9               "${argv[@]}" < "$fifo" > "$log" 2>&1
+========================================================================
+==> Redox OS — not run (set WITH_REDOX=1; the image is ~70 MB)
+========================================================================
+========================================================================
+==> trusted computing base, counted from source
+========================================================================
+    Aletheia x86-64 kernel + shared core: 42053 lines of Rust
+    occurrences of `unsafe`: 421 total, of which 159 are in the shared core
+    (Linux 6.12 is roughly 40 million lines of C, essentially all of it privileged. That
+     number is not measured here and is cited only for scale.)
+========================================================================
+RESULTS — same host, same emulator, same emulation mode, same end state
+========================================================================
+                             | Aletheia (x86-64)  | Linux 6.12-lts     | Redox OS          
+-----------------------------+--------------------+--------------------+-------------------
+boot to a prompt             | 3070 ms            | 2046 ms            | SKIP ms           
+idle host CPU at prompt      | 0.5 %              | 0.3 %              | SKIP %            
+bootable payload             | 1439744 B          | 14163372 B         | SKIP B            
+typed echo round-trip        | 69 ms              | 719 ms             | n/a (login)       
+privileged lines of code     | 42053 (Rust)       | ~40M (C, cited)    | n/a               
+========================================================================
+OTHER RUST OPERATING SYSTEMS — attributes, not numbers.
+
+Redox is the only one of these that ships a bootable x86-64 image you can download and run, which is
+why it is the only one with a measured column above (and only when WITH_REDOX=1). For the rest, a
+number would have to come from somebody else's benchmark on somebody else's hardware, which is the
+exact thing this script exists to refuse. What is comparable without running them is what they have
+DECIDED, and that is stated here with no claim of superiority attached:
+
+  Redox      microkernel, Rust, capability-ish (scheme/URL namespaces), POSIX-compatible userspace,
+             self-hosting, x86-64/aarch64/riscv64. Much further along than Aletheia in userspace.
+  seL4       microkernel, C, capability-based, and FORMALLY VERIFIED — functional correctness proved
+             against its spec on selected configurations. Nothing in Aletheia is verified in that
+             sense, and no amount of testing is the same claim.
+  Theseus    Rust, "intralingual" design: safety enforced by the language and a single address space
+             rather than by hardware boundaries. A different bet from Aletheia's, which uses the MMU
+             and ring 3 and does not assume the compiler is the only thing between tasks.
+  Hubris     Rust, memory-protected, no dynamic allocation, statically-defined task set at build
+             time. Deployed in real hardware. A deliberately smaller problem than a general OS.
+  Redshirt / rust-vmm / others — components rather than comparable systems.
+
+WHERE ALETHEIA IS ACTUALLY DIFFERENT, stated as a design claim rather than a benchmark result:
+the capability check and the intent->action pipeline are the SAME path for a human at the console and
+for a model driving it (ADR-053/054/055). The model does not get an API around the OS; it gets the
+operator's surface with the operator's authority, validated against the kernel's own command table,
+and it cannot type a line a person could not have typed. Whether that is worth anything is not
+something a boot-time number can answer.
+HOW TO READ THIS.
+
+  boot to a prompt              NO WINNER IS CLAIMED, and the history of this line is the reason.
+                                The text here first predicted Aletheia would win; the first run said
+                                Linux, 2053 ms against 4068; the second run on the same binaries said
+                                3070 against 3080. One sample had been read as a result, twice, in
+                                opposite directions. It is now a median over BOOT_SAMPLES runs, and
+                                the individual samples are printed so the spread is visible rather
+                                than hidden behind the median. Under TCG on a workstation that is
+                                also running other things, treat a difference smaller than the spread
+                                as no difference.
+
+                                One structural asymmetry IS real and is Aletheia's to own: it boots
+                                through OVMF, a full UEFI firmware implementation, while the Linux
+                                leg is loaded directly by QEMU with `-kernel` and skips firmware
+                                entirely. That is a boot-PATH difference, not evidence about either
+                                kernel's speed.
+
+  bootable payload              Aletheia wins by a wide margin, and the win is mostly the size
+                                difference rather than a design victory: Linux ships drivers for
+                                hardware Aletheia has never heard of. Reported because it is true
+                                and measured, NOT because it is a fair fight.
+
+  idle CPU at the prompt        A fair comparison, and the one worth having: both guests are doing
+                                the same amount of work (none), on the same emulator, and the number
+                                says whether the kernel knows how to wait. Parity with Linux here is
+                                the claim -- and until REQ-CON-006 it was not true: Aletheia's
+                                console loop spun, and an idle machine cost a whole core.
+
+  typed echo round-trip         The same fair shape, under LOAD: N 'echo' round-trips typed into
+                                each guest's shell, wall-clocked end-to-end. It exercises the whole
+                                interactive path -- tty/input ring, line editor, dispatcher,
+                                output formatting, serial transmission -- and doubles as a small
+                                stress test: a dropped keystroke hangs the leg and FAILS it, never
+                                passes quietly. Stated asymmetry: Aletheia's dispatcher runs in
+                                KERNEL space while busybox sh runs in USER space over syscalls;
+                                that is a design difference between the systems, not a controlled
+                                variable, and this column prices it in rather than hiding it.
+
+  privileged lines of code      The column that does not depend on an emulator, a host, or a
+                                workload. It is how much code must be correct for the machine to be
+                                correct, and it is the one number where Aletheia's design -- rather
+                                than its youth -- is doing the work.
+
+WHAT ALETHEIA DOES NOT WIN, stated because a benchmark that omits it is advertising:
+  * throughput of anything real. There is no scheduler tuning, no page-cache, no SMP work stealing
+    under load, and the filesystem is one flat namespace on one block device.
+  * hardware support. Linux boots on the machine you own; Aletheia boots on three emulated boards.
+  * everything in docs/MATURITY.md, which grades every subsystem and says plainly that nothing here
+    is production-ready.
+comparative-bench: PASS
