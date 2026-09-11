@@ -202,6 +202,20 @@ jobs:
       - name: Boot both, measure time-to-prompt, idle CPU, payload size and TCB
         run: ./scripts/comparative-bench.sh
 
+  security-surface:
+    name: Attack surface against a real Linux kernel, under a named threat model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # REQ-SEC-002, ADR-083. Counts what is countable on BOTH sides from primary sources —
+      # Aletheia's syscall surface from its own ABI decode table, Linux's from the kernel tree's
+      # syscall_64.tbl at a pinned tag. It produces NO verdict: a smaller surface is one input to
+      # risk, not a safety claim. The job gates on the Aletheia side (the capability table this
+      # design depends on must still exist); the Linux column SKIPs loudly when offline rather
+      # than failing the pipeline on a CDN.
+      - name: Measure syscall surface, capability gating, privileged LOC and unsafe density
+        run: ./scripts/security-surface.sh
+
   traceability:
     name: Requirement traceability (delivered ⇒ evidence)
     runs-on: ubuntu-latest

@@ -1,0 +1,67 @@
+========================================================================
+==> attack surface: Aletheia vs Linux v6.12 (threat model: unprivileged local code
+    already executing, trying to obtain authority it was not granted)
+========================================================================
+--> Aletheia syscall surface (counted from kernel-core/src/syscall.rs)
+    syscalls in the ABI:                 11
+    of which gated by a named capability: 8 (in 7 policy arms)
+    remainder carry no object authority:  3 (yield, exit, register check)
+--> Linux syscall surface (counted from the kernel tree's own syscall_64.tbl)
+    x86-64 syscalls (common + 64):        375
+--> privileged code (the code that runs with the machine's full authority)
+    Aletheia, counted, non-comment Rust:  39984
+    Linux 6.12, cited, C:                 ~40,000,000 (not counted here; see the honesty note)
+--> memory-unsafe surface inside privileged code
+    Aletheia: 806 `unsafe` occurrences in 39984 lines — 2.02% of privileged lines
+    Linux:    n/a — C has no such marker, so 100% of its privileged code is memory-unsafe by
+              language and none of it is delimited. This is a LANGUAGE difference, not a
+              measurement of either kernel's defect density.
+--> ambient authority on the syscall path
+    Aletheia: every effect-bearing syscall names a capability action in ONE table
+              (Syscall::capability), and the boundary consults it before the effect.
+              Proved on every boot by the ring-3/EL0/U-mode suites, not by this script.
+    Linux:    a process acts with the ambient authority of its uid plus its capability set;
+              confinement is OPT-IN and external (seccomp, SELinux/AppArmor, namespaces).
+              That is a different model, deliberately, and it carries workloads this one
+              cannot run.
+========================================================================
+SUMMARY — attack surface only, under the threat model named at the top
+========================================================================
+                                         | Aletheia             | Linux v6.12         
+-----------------------------------------+----------------------+---------------------
+syscalls exposed to user space           | 11                   | 375                 
+of which capability-gated                | 8                    | 0 (model differs)   
+privileged lines of code                 | 39984                | ~40M (cited)        
+privileged code in a safe language       | yes, except 806 unsafe | no                  
+
+    syscall surface ratio: Linux exposes 34.1x as many entry points.
+
+HOW TO READ THIS — and what it is NOT evidence for.
+
+  A smaller surface is not a safer system. Surface is ONE input to risk. The others — maturity,
+  adversarial review, exploit economics, defense in depth, and the simple fact that Linux has been
+  attacked by professionals for thirty years while Aletheia has never been attacked by anyone —
+  are not measured here, and every one of them favours Linux.
+
+  The syscall ratio is real and it is also unfair. Linux's 300+ entry points exist because it runs
+  containers, graphics stacks, io_uring, BPF, and thirty years of ABI promises. Aletheia has
+  eleven because it does almost nothing yet. Removing features is not a security technique; the
+  claim worth making is narrower, and it is this: on the syscall path Aletheia has, authority is
+  named in one table and checked before the effect, rather than being ambient and confined later
+  by an opt-in mechanism. That is a DESIGN difference and it is what the boot-gated ring-3/EL0/
+  U-mode suites prove.
+
+  "capability-gated: 0" for Linux is not a criticism and not a bug. Linux's model is ambient
+  authority bounded by uid and capability sets, with confinement added on top. Counting it as zero
+  in this column means "this kernel does not gate syscalls on per-object capabilities", which is
+  true and intentional, not a finding.
+
+  NOT MEASURED HERE AT ALL: exploitability, defect density, CVE history, side channels,
+  speculative execution, firmware, supply chain (ADR-067), or any other operating system. Windows,
+  macOS, the BSDs and every RTOS are absent. No claim is made about them.
+
+  NOT A VERDICT. This script prints a surface comparison. It does not say which system is safer,
+  because that question is not answered by counting, and docs/MATURITY.md says plainly that nothing
+  here is production-ready.
+========================================================================
+security-surface: PASS (surface measured; no verdict claimed)
