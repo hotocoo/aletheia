@@ -234,6 +234,44 @@ pub extern "C" fn kmain() -> ! {
     // with the advisor absent or abstaining the advised path is bit-identical to the ADR-076
     // baseline governor; every way the blob can be wrong is a named refusal; and parity with
     // the trainer is a committed fixture replayed through the live observer.
+
+    // ADR-080 — stand the watch before the ring-3 run, so real timer interrupts drive it.
+    {
+        use kernel_core::pm::{OperatingPoint, PmEngine};
+        const LADDER: [OperatingPoint; 4] = [
+            OperatingPoint {
+                khz: 600_000,
+                mv: 700,
+            },
+            OperatingPoint {
+                khz: 1_200_000,
+                mv: 800,
+            },
+            OperatingPoint {
+                khz: 1_800_000,
+                mv: 900,
+            },
+            OperatingPoint {
+                khz: 2_400_000,
+                mv: 1_050,
+            },
+        ];
+        let mut pm = PmEngine::new(0x5E1F_0080);
+        match pm.register_domain(0, &LADDER, 1_800_000, 2_400_000, 95_000) {
+            Ok(()) => {
+                let stood = kernel_core::lethed::resident::commission(
+                    pm,
+                    kernel_core::lethed::Cadence::default(),
+                    kernel_core::lethe::BUNDLED_ADVISOR,
+                );
+                kprintln!(
+                    "[lethed] watch commissioned: {} (1 domain, 4-point ladder, nominal 1.8 GHz)",
+                    stood
+                );
+            }
+            Err(e) => kprintln!("[lethed] watch NOT commissioned: {:?}", e),
+        }
+    }
     kprintln!("");
     kprintln!("--- lethe advisor selftests (the power governor learns) ---");
     match kernel_core::lethe::Advisor::load(kernel_core::lethe::BUNDLED_ADVISOR) {
@@ -547,6 +585,43 @@ pub extern "C" fn kmain() -> ! {
         Err((idx, name)) => {
             kprintln!("[usermode] FAILED at EL0 invariant {}: {}", idx, name);
             semihosting::exit(80 + idx as i32);
+        }
+    }
+
+    // ADR-080 — the watch stood through the ring-3 run above, driven by REAL timer interrupts.
+    // The gated claims are the contract's, not the numbers': every tick accounted for, no
+    // contract refusal, and the governor range never left.
+    match kernel_core::lethed::resident::census() {
+        Some(c) if c.admitted > 0 && c.balances() && c.pm_refusals == 0 => {
+            let idx = kernel_core::lethed::resident::point_index(0).unwrap_or(255);
+            kprintln!(
+                "[lethed] THE WATCH IS LIVE: {} of {} real timer IRQs admitted, {} consulted, \
+                 {} warm-up, demand {}% measured, point index {} of nominal 2 ({} lock stand-downs)",
+                c.admitted,
+                c.offered,
+                c.consulted_steps,
+                c.warmup_steps,
+                kernel_core::lethed::resident::demand(0).unwrap_or(255),
+                idx,
+                kernel_core::lethed::resident::contended()
+            );
+            if idx > 2 {
+                kprintln!("[lethed] LIVE WATCH LEFT THE GOVERNOR RANGE");
+                semihosting::exit(616);
+            }
+        }
+        Some(c) => {
+            kprintln!(
+                "[lethed] THE WATCH IS NOT LIVE: offered {} admitted {} refusals {}",
+                c.offered,
+                c.admitted,
+                c.pm_refusals
+            );
+            semihosting::exit(619);
+        }
+        None => {
+            kprintln!("[lethed] THE WATCH IS NOT STANDING");
+            semihosting::exit(619);
         }
     }
 

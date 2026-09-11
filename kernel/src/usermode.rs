@@ -549,6 +549,15 @@ const GICC_CTLR: usize = 0x000;
 const GICC_PMR: usize = 0x004;
 const GICC_IAR: usize = 0x00C;
 const GICC_EOIR: usize = 0x010;
+/// Real timer interrupts taken since boot — the monotone clock the resident governor is driven
+/// by on this target (ADR-080).
+static TIMER_IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Reported die temperature, in milli-degrees C. A STAND-IN, and named as one: QEMU 'virt'
+/// exposes no thermal sensor to a guest, so the handler reports a fixed benign temperature rather
+/// than inventing a curve. The power contract still owns what a trip would mean (ADR-056).
+const THERMAL_STANDIN_MC: i32 = 40_000;
+
 const TIMER_INTID: u32 = 30; // EL1 physical timer PPI
 const SPURIOUS: u32 = 1023;
 /// Preemption slice length in timer ticks (CNTFRQ ~62.5 MHz on QEMU 'virt' → ~8 ms). Value is not
@@ -632,6 +641,15 @@ pub extern "C" fn el0_irq() {
     }
     timer_arm(); // re-arm FIRST (level-triggered), before EOI
     gicc_w32(GICC_EOIR, iar);
+
+    // ADR-080 — the resident governor stands its watch on this real timer interrupt. A ring-3
+    // task was running when it fired, so the slice just closed was genuinely BUSY; saying so is
+    // what makes the governor's demand a measurement rather than an assumption. Both calls are
+    // no-ops until the watch is commissioned, and neither ever waits on the watch lock — a
+    // handler that spun for a lock held by the code it interrupted would deadlock the core.
+    let slice = TIMER_IRQS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    kernel_core::lethed::resident::account(0, 1, 0);
+    kernel_core::lethed::resident::on_timer_tick(slice, THERMAL_STANDIN_MC);
     // SAFETY: single-threaded; only the running task's IRQ writes this, read by the scheduler.
     unsafe {
         let s = &mut *addr_of_mut!(SCHED);

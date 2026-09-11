@@ -112,7 +112,7 @@ REQUIRED=(
   'ALL 12 LETHE ADVISOR INVARIANTS HOLD'
   # The resident governor (REQ-PM-002, ADR-079) stands the watch on every CPU: the tick contract
   # depends on no device, so a second hypervisor must prove it too.
-  'ALL 14 RESIDENT GOVERNOR INVARIANTS HOLD'
+  'ALL 15 RESIDENT GOVERNOR INVARIANTS HOLD'
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'

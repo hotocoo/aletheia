@@ -41,6 +41,23 @@ impl<T> SpinLock<T> {
         }
         SpinGuard { lock: self }
     }
+
+    /// Take the lock if it is free RIGHT NOW, or return `None` without spinning.
+    ///
+    /// This is the only form an interrupt handler may use. A handler runs on top of whatever it
+    /// interrupted, so if the interrupted code already holds this lock, `lock()` would spin
+    /// forever waiting for code that cannot run until the handler returns — a deadlock on one
+    /// core, with no second core to blame for it. `try_lock` turns that into a refusal the caller
+    /// can count and skip, which is the ADR-039 posture applied to locks rather than to sections.
+    pub fn try_lock(&self) -> Option<SpinGuard<'_, T>> {
+        match self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        {
+            Ok(_) => Some(SpinGuard { lock: self }),
+            Err(_) => None,
+        }
+    }
 }
 
 /// RAII guard proving exclusive ownership of the locked value.

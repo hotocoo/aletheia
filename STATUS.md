@@ -1,6 +1,6 @@
 # Aletheia — Implementation Status
 
-**As of:** 2026-09-12 (THE ADVISOR TAKES THE WATCH — Lethe is RESIDENT: `kernel-core/src/lethed.rs` runs on the clock, services exactly one domain per tick round-robin with constant allocation-free work, MEASURES demand from busy/idle accounting over disjoint renormalizing windows, and treats the TICK as an authority question — a replayed, rolled-back, too-eager, nested or unattached tick is a named refusal that moves no state and lands in a census that balances at every instant; a window past the staleness ceiling is RESYNCED and the advisor withheld until a full 16-sample window of post-gap truth refills rather than guessed through; a latched thermal cooldown OUTRANKS the advisor for its whole duration; the resident holds no grant so the overclock band is unreachable by construction; every act flows through ADR-078's lifted sweep body so the advisor-absent path stays bit-identical to the ADR-076 baseline — 14 boot invariants on all three targets (lethed=14), seven pinned cross-CPU (159 -> 166), 15 host proofs; NOT YET: nothing calls `tick` from a real timer IRQ and no MSR/CPPC/ACPI programming exists — REQ-PM-002, ADR-079); before that: 2026-08-28 (LETHE — the resident performance advisor — advises the
+**As of:** 2026-09-12 (THE WATCH IS WIRED TO THE CLOCK — the resident governor runs on each target's REAL timer interrupt: x86-64's IRQ0 and the aarch64/RISC-V timer traps drive `lethed::resident`, one governor behind one lock for the machine's whole uptime, entered only through the new `SpinLock::try_lock` because a handler that spun for a lock held by the code it interrupted would deadlock the core — a miss is a COUNTED stand-down, reported never gated; an uncommissioned watch is a no-op so the interrupt may be wired first, and a second commissioning is refused; demand MEASURED from the machine's own busy/idle split (halted core -> 0% measured, governor at lowest point; working core -> 100% measured, governor at nominal and no further, nobody supplying either number); temperature a NAMED stand-in on every target; gated are the contract properties never the numbers (census balances, zero contract refusals, governor range never left, measured demand answered, advisor consulted live on x86-64 — boot fails 614-619); 15 boot invariants on all three targets (lethed=15, VirtualBox gate too); NOT YET: live consultation is x86-64 ONLY because aarch64/RISC-V arm their timer only for the ring-3 run and see six slices, under one 16-sample window, and say so; still no MSR/CPPC/ACPI programming; still NOTHING claimed about other operating systems — REQ-PM-002, ADR-080); before that: 2026-09-12 (THE ADVISOR TAKES THE WATCH — Lethe is RESIDENT: `kernel-core/src/lethed.rs` runs on the clock, services exactly one domain per tick round-robin with constant allocation-free work, MEASURES demand from busy/idle accounting over disjoint renormalizing windows, and treats the TICK as an authority question — a replayed, rolled-back, too-eager, nested or unattached tick is a named refusal that moves no state and lands in a census that balances at every instant; a window past the staleness ceiling is RESYNCED and the advisor withheld until a full 16-sample window of post-gap truth refills rather than guessed through; a latched thermal cooldown OUTRANKS the advisor for its whole duration; the resident holds no grant so the overclock band is unreachable by construction; every act flows through ADR-078's lifted sweep body so the advisor-absent path stays bit-identical to the ADR-076 baseline — 14 boot invariants on all three targets (lethed=14), seven pinned cross-CPU (159 -> 166), 15 host proofs; NOT YET: nothing calls `tick` from a real timer IRQ and no MSR/CPPC/ACPI programming exists — REQ-PM-002, ADR-079); before that: 2026-08-28 (LETHE — the resident performance advisor — advises the
 power/performance contract: `kernel-core/src/lethe.rs` verifies a frozen integer model (two
 decision trees in one `ALTH1` blob, a 12-feature contract hash making moved feature meanings a
 named refusal) and its advised governor path consults it once per domain per step — FREQ advice
@@ -41,7 +41,60 @@ plainly that **nothing here is production-ready** — read it before quoting any
 **Sources of truth:** `docs/Aletheia_Product_Requirements_Document.md` (PRD-003),
 `docs/Aletheia_Software_Architecture_Document.md` (SAD-002), `docs/adr/ADR-001..078`.
 
-## Current wave — the advisor takes the watch (2026-09-12, ADR-079)
+## Current wave — the watch is wired to the clock (2026-09-12, ADR-080)
+
+ADR-079 closed with a named non-claim: *nothing calls `tick` from a real timer interrupt yet*. This
+wave closes that one. The resident governor is now driven by each target's real periodic interrupt,
+on demand it measures from the machine's own busy/idle split, with nobody declaring anything on its
+behalf.
+
+Two failure modes come free with wiring a governor to an interrupt handler, and both are refused by
+construction:
+
+* **The lock is never waited on.** A handler runs on top of what it interrupted, so if the
+  interrupted code held the watch lock, spinning would wait for code that cannot run until the
+  handler returns — a one-core deadlock with no second core to blame. `SpinLock::try_lock` (new,
+  and the only form a handler may use) turns that into `contended()`, a counted stand-down that is
+  REPORTED, never gated: a nonzero count is a fact about the machine, not a fault in it.
+* **An uncommissioned watch is a no-op.** The interrupt may be wired before the governor is stood,
+  in either order; an early tick does nothing rather than crashing or acting on stale state. And
+  `commission` refuses a second call, so a live governor is never silently replaced.
+
+Demand comes from the machine: on x86-64 the IRQ0 handler reads an IDLE flag the boot path sets
+around its `hlt`, so a tick that woke a halted core is an IDLE tick and one that interrupted working
+code is a BUSY tick; on aarch64 and RISC-V the timer trap fires while a ring-3/U-mode task runs, so
+the slice it closes is busy. Temperature is a fixed STAND-IN on every target and named as one in the
+source — no target exposes a thermal sensor to a guest, and inventing a curve would be the thing
+ADR-056 forbids.
+
+What the machine prints — the same governor, the same boot, two opposite regimes:
+
+```
+[lethed] THE WATCH IS LIVE: 5 of 5 real IRQ0 ticks admitted, demand 0% measured, point index 0
+[lethed] the watch under load: 14 of 14 ticks admitted, demand 100% measured, point index 2 of nominal 2
+[lethed] THE ADVISOR IS CONSULTED LIVE: 1 consultations over 16 admitted real timer ticks
+```
+
+Core halted: measured 0%, governor at the lowest point. Core working: measured 100%, governor at
+nominal and no further. Nobody supplied either number.
+
+Gated are the contract's properties, never the numbers: the census balances, `pm_refusals == 0`, the
+governor range is never left, measured demand is actually answered, and on x86-64 the advisor is
+genuinely consulted on live measurements (boot fails 619/618/617/616/615/614 respectively). A
+fifteenth boot invariant joins `lethed_suite` on all three targets — the machine-wide watch is stood
+exactly once and is a no-op until it is — and the VirtualBox gate requires the marker too
+(`lethed=15` on all four gates).
+
+Named non-claims, in register: **the advisor reaches live consultation on x86-64 only.** aarch64 and
+RISC-V arm their timer for the ring-3 run and disarm it after, so their watch sees six slices — under
+one 16-sample window — and correctly reports itself still WARMING rather than claiming a
+consultation it did not make. Giving those targets a free-running periodic tick is a separate rung.
+Still no MSR/CPPC/ACPI frequency programming (QEMU TCG exposes no frequency control to a guest, the
+ADR-071 posture). And still nothing about other operating systems: this says the governor is live,
+measured and bounded on THIS kernel, not that its power management beats Linux, Windows or anything
+else — no such comparison has been run.
+
+## Previous wave — the advisor takes the watch (2026-09-12, ADR-079)
 
 ADR-078 published a named non-claim: *no live governor thread exists yet*. This wave closes it.
 `kernel-core/src/lethed.rs` is **the watch** — Lethe resident, running on the clock — and it closes

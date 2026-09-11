@@ -225,16 +225,86 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         ActiveHal::current_privilege()
     );
 
+    // ADR-080 — stand the watch BEFORE the first interrupt can arrive. From here the resident
+    // governor is driven by real IRQ0 ticks, on demand it measures itself, with no caller
+    // declaring anything on its behalf.
+    {
+        use kernel_core::pm::{OperatingPoint, PmEngine};
+        const LADDER: [OperatingPoint; 4] = [
+            OperatingPoint {
+                khz: 600_000,
+                mv: 700,
+            },
+            OperatingPoint {
+                khz: 1_200_000,
+                mv: 800,
+            },
+            OperatingPoint {
+                khz: 1_800_000,
+                mv: 900,
+            },
+            OperatingPoint {
+                khz: 2_400_000,
+                mv: 1_050,
+            },
+        ];
+        let mut pm = PmEngine::new(0x5E1F_0080);
+        match pm.register_domain(0, &LADDER, 1_800_000, 2_400_000, 95_000) {
+            Ok(()) => {
+                let stood = kernel_core::lethed::resident::commission(
+                    pm,
+                    kernel_core::lethed::Cadence::default(),
+                    kernel_core::lethe::BUNDLED_ADVISOR,
+                );
+                kprintln!(
+                    "[lethed] watch commissioned: {} (1 domain, 4-point ladder, nominal 1.8 GHz)",
+                    stood
+                );
+            }
+            Err(e) => kprintln!("[lethed] watch NOT commissioned: {:?}", e),
+        }
+    }
+
     x86_64::instructions::interrupts::enable();
     kprintln!("[boot] interrupts enabled (sti); waiting for timer IRQs...");
     let target = 5u64;
     while pit::ticks() < target {
+        // The core really is asleep here, so the tick that wakes it is an IDLE tick. Saying so is
+        // what makes the governor's demand a measurement rather than an assumption.
+        pit::set_idle(true);
         x86_64::instructions::hlt();
+        pit::set_idle(false);
     }
     kprintln!(
         "[timer] OK: {} ticks via IRQ0 — interrupts + timer are LIVE",
         pit::ticks()
     );
+
+    // The watch is LIVE: this is the ADR-079 non-claim closing. Ticks reached the governor from a
+    // real periodic interrupt, not from a test loop.
+    match kernel_core::lethed::resident::census() {
+        Some(c) if c.admitted > 0 && c.balances() => kprintln!(
+            "[lethed] THE WATCH IS LIVE: {} of {} real IRQ0 ticks admitted, demand {}% measured, \
+             point index {} (census balances, {} lock stand-downs)",
+            c.admitted,
+            c.offered,
+            kernel_core::lethed::resident::demand(0).unwrap_or(255),
+            kernel_core::lethed::resident::point_index(0).unwrap_or(255),
+            kernel_core::lethed::resident::contended()
+        ),
+        Some(c) => {
+            kprintln!(
+                "[lethed] THE WATCH IS NOT LIVE: offered {} admitted {}",
+                c.offered,
+                c.admitted
+            );
+            ActiveHal::exit(619);
+        }
+        None => {
+            kprintln!("[lethed] THE WATCH IS NOT STANDING");
+            ActiveHal::exit(619);
+        }
+    }
     kprintln!("[hal] rdtsc monotonic sample: {}", ActiveHal::timer_ticks());
 
     // --- physical memory management (P5): take ownership of the RAM the firmware handed us ---
@@ -544,6 +614,92 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         Err((idx, name)) => {
             kprintln!("[lethed] FAILED lethed invariant {}: {}", idx, name);
             ActiveHal::exit(620 + idx as i32);
+        }
+    }
+
+    // ADR-080 — the watch has now been standing across every suite above, with interrupts on and
+    // the core genuinely working. The governor should have MEASURED that and responded. Compare
+    // against the idle reading taken right after `sti`: same machine, same governor, opposite
+    // regime, and the only thing that changed is what the machine was actually doing.
+    match kernel_core::lethed::resident::census() {
+        Some(c) => {
+            let demand = kernel_core::lethed::resident::demand(0).unwrap_or(255);
+            let idx = kernel_core::lethed::resident::point_index(0).unwrap_or(255);
+            kprintln!(
+                "[lethed] the watch under load: {} of {} ticks admitted, {} consulted, {} warm-up, \
+                 demand {}% measured, point index {} of nominal 2 ({} lock stand-downs, {} contract refusals)",
+                c.admitted,
+                c.offered,
+                c.consulted_steps,
+                c.warmup_steps,
+                demand,
+                idx,
+                kernel_core::lethed::resident::contended(),
+                c.pm_refusals
+            );
+            // Gated, because these are the properties the wave claims — not the numbers.
+            if !c.balances() {
+                kprintln!("[lethed] LIVE CENSUS DOES NOT BALANCE");
+                ActiveHal::exit(618);
+            }
+            if c.pm_refusals != 0 {
+                kprintln!("[lethed] LIVE WATCH DREW CONTRACT REFUSALS");
+                ActiveHal::exit(617);
+            }
+            if idx > 2 {
+                kprintln!("[lethed] LIVE WATCH LEFT THE GOVERNOR RANGE");
+                ActiveHal::exit(616);
+            }
+            if demand > 0 && kernel_core::lethed::resident::point_index(0) == Some(0) {
+                kprintln!("[lethed] LIVE WATCH DID NOT ANSWER MEASURED DEMAND");
+                ActiveHal::exit(615);
+            }
+        }
+        None => {
+            kprintln!("[lethed] THE WATCH STOPPED STANDING");
+            ActiveHal::exit(619);
+        }
+    }
+
+    // A boot is short — 14 ticks of interrupt-on time is less than one observation window, so the
+    // advisor above was still warming. Run the machine, awake and working, until a FULL window has
+    // been observed, then prove the advisor was really consulted on live measurements. The spin is
+    // deadline-bounded so a dead timer fails the gate instead of hanging it.
+    {
+        let deadline = pit::ticks() + 200;
+        while pit::ticks() < deadline {
+            let consulted = kernel_core::lethed::resident::census()
+                .map(|c| c.consulted_steps)
+                .unwrap_or(0);
+            if consulted > 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        match kernel_core::lethed::resident::census() {
+            Some(c) if c.consulted_steps > 0 => kprintln!(
+                "[lethed] THE ADVISOR IS CONSULTED LIVE: {} consultations over {} admitted real \
+                 timer ticks ({} warm-up, {} resyncs, {} cooldown holds, demand {}%, point {})",
+                c.consulted_steps,
+                c.admitted,
+                c.warmup_steps,
+                c.resyncs,
+                c.cooldown_holds,
+                kernel_core::lethed::resident::demand(0).unwrap_or(255),
+                kernel_core::lethed::resident::point_index(0).unwrap_or(255)
+            ),
+            Some(c) => {
+                kprintln!(
+                    "[lethed] THE ADVISOR WAS NEVER CONSULTED LIVE: {} admitted, {} warm-up",
+                    c.admitted,
+                    c.warmup_steps
+                );
+                ActiveHal::exit(614);
+            }
+            None => {
+                kprintln!("[lethed] THE WATCH STOPPED STANDING");
+                ActiveHal::exit(619);
+            }
         }
     }
 

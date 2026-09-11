@@ -66,6 +66,15 @@ const SIE_STIE: u64 = 1 << 5; // Supervisor Timer Interrupt Enable
 
 // --- Timer preemption tuning (QEMU virt `time` CSR = 10 MHz) --------------------------------
 const SLICE_TICKS: u64 = 50_000; // ~5 ms slice: long enough to run, short enough to preempt fast
+/// Real timer interrupts taken since boot — the monotone clock the resident governor is driven by
+/// on this target (ADR-080).
+static TIMER_IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Reported die temperature, in milli-degrees C. A STAND-IN, and named as one: QEMU 'virt' exposes
+/// no thermal sensor to a guest, so the handler reports a fixed benign temperature rather than
+/// inventing a curve. The power contract still owns what a trip would mean (ADR-056).
+const THERMAL_STANDIN_MC: i32 = 40_000;
+
 const SPIN_COUNTDOWN: u64 = 0x1000_0000; // dead-timer escape: a never-firing timer self-exits < watchdog
 const SLICES: usize = 6; // 3 preemptions per task
 const NTASK: usize = 2;
@@ -453,6 +462,14 @@ extern "C" fn _user_trap_rust(frame: *mut TrapFrame) {
             timer_arm(); // re-arm (this is what clears the pending timer) BEFORE returning
                          // SAFETY: single-owner static; no concurrent access (see `current`).
             unsafe { (*addr_of_mut!(SCHED)).preempted = true };
+
+            // ADR-080 — the resident governor stands its watch on this real S-mode timer interrupt.
+            // A U-mode task was running when it fired, so the slice just closed was genuinely BUSY.
+            // Both calls are no-ops until the watch is commissioned, and neither ever waits on the
+            // watch lock — spinning for a lock held by the interrupted code would deadlock the core.
+            let slice = TIMER_IRQS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+            kernel_core::lethed::resident::account(0, 1, 0);
+            kernel_core::lethed::resident::on_timer_tick(slice, THERMAL_STANDIN_MC);
         }
         return;
     }

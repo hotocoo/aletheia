@@ -70,7 +70,7 @@ fn the_boot_suite_passes_on_the_host_too() {
     })
     .expect("every resident-governor invariant holds");
     assert_eq!(n, last);
-    assert!(n >= 13, "the suite must not silently shrink: {n} checks");
+    assert!(n >= 15, "the suite must not silently shrink: {n} checks");
 }
 
 #[test]

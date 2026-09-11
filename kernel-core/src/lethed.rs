@@ -455,6 +455,125 @@ impl ResidentGovernor {
     }
 }
 
+/// The machine-wide watch — one governor, behind one lock, for the machine's whole uptime.
+///
+/// ADR-079 built and proved the watch; this is what lets a real timer interrupt *stand* it. The
+/// discipline here is entirely about the fact that the caller is an interrupt handler:
+///
+/// * **The lock is never waited on.** A handler runs on top of whatever it interrupted, so if the
+///   interrupted code held this lock, spinning would wait for code that cannot run until the
+///   handler returns — a one-core deadlock. Every entry point uses
+///   [`SpinLock::try_lock`](crate::sync::SpinLock::try_lock) and counts a miss instead.
+/// * **A miss is a counted refusal, not a retry.** [`contended`] is the machine's own witness that
+///   the watch is sharing time with something; a governor that silently retried would hide it.
+/// * **An uncommissioned watch does nothing at all.** Before [`commission`] the handler's call is
+///   a no-op, so wiring the interrupt first and the governor second is safe in either order.
+pub mod resident {
+    use super::{Cadence, Census, ResidentGovernor, TickOutcome};
+    use crate::lethe::Advisor;
+    use crate::pm::PmEngine;
+    use crate::sync::SpinLock;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    struct Watch {
+        pm: PmEngine,
+        gov: ResidentGovernor,
+        advisor: Option<Advisor<'static>>,
+    }
+
+    static WATCH: SpinLock<Option<Watch>> = SpinLock::new(None);
+    /// Times a caller found the watch busy and stood down rather than waiting.
+    static CONTENDED: AtomicU64 = AtomicU64::new(0);
+
+    /// Stand the watch: take ownership of a configured engine, attach every registered domain,
+    /// and load the bundled advisor. Returns `false` if the watch is already commissioned or the
+    /// lock is held — commissioning is a boot-path act and never retries either.
+    pub fn commission(pm: PmEngine, cadence: Cadence, advisor_bytes: &'static [u8]) -> bool {
+        let mut slot = match WATCH.try_lock() {
+            Some(s) => s,
+            None => {
+                CONTENDED.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+        };
+        if slot.is_some() {
+            return false;
+        }
+        let mut gov = ResidentGovernor::new(cadence);
+        for id in pm.domain_ids() {
+            gov.attach(id);
+        }
+        *slot = Some(Watch {
+            pm,
+            gov,
+            advisor: Advisor::load(advisor_bytes).ok(),
+        });
+        true
+    }
+
+    /// Is the watch standing?
+    pub fn active() -> bool {
+        WATCH.try_lock().map(|w| w.is_some()).unwrap_or(false)
+    }
+
+    /// Drive one tick from a timer interrupt. Safe to call before [`commission`]; safe to call
+    /// while another core or the interrupted code holds the watch.
+    pub fn on_timer_tick(now: u64, temp_mc: i32) -> Option<TickOutcome> {
+        let mut slot = match WATCH.try_lock() {
+            Some(s) => s,
+            None => {
+                CONTENDED.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
+        let w = slot.as_mut()?;
+        // The borrow has to be split: `tick` takes the engine mutably and the advisor by shared
+        // reference, and they live in the same struct.
+        let Watch { pm, gov, advisor } = w;
+        Some(gov.tick(pm, advisor.as_ref(), now, |_| temp_mc))
+    }
+
+    /// Account elapsed work for a domain from the scheduler or the idle path.
+    pub fn account(domain: u32, busy: u64, idle: u64) -> bool {
+        let mut slot = match WATCH.try_lock() {
+            Some(s) => s,
+            None => {
+                CONTENDED.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+        };
+        match slot.as_mut() {
+            Some(w) => {
+                w.gov.account(domain, busy, idle);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The live tick census, or `None` if the watch is not standing or is busy.
+    pub fn census() -> Option<Census> {
+        WATCH.try_lock()?.as_ref().map(|w| w.gov.census())
+    }
+
+    /// The live operating-point index of a domain, for a console or a boot proof.
+    pub fn point_index(domain: u32) -> Option<usize> {
+        WATCH.try_lock()?.as_ref()?.pm.point_index(domain)
+    }
+
+    /// The demand the contract currently holds for a domain.
+    pub fn demand(domain: u32) -> Option<u8> {
+        WATCH.try_lock()?.as_ref()?.pm.demand(domain)
+    }
+
+    /// How many times a caller found the watch busy and stood down instead of waiting. This is
+    /// reported, never gated: a nonzero count means the watch shared time with something, which
+    /// is a fact about the machine, not a fault in it.
+    pub fn contended() -> u64 {
+        CONTENDED.load(Ordering::Relaxed)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The in-kernel invariant suite. Kept small on purpose: the boot heap never frees (ADR-063), so
 // boot proves the promises that must hold on this silicon, and the exhaustive sweeps live in
@@ -799,6 +918,34 @@ pub fn lethed_suite(
         check!(
             all_ok && !over && dup && g.attached() == MAX_DOMAINS,
             "lethed: the watch is capacity-bounded and attaching is idempotent"
+        );
+    }
+
+    // 14 - the machine-wide watch is commissioned exactly once, and is a no-op until it is.
+    // Whichever side of commissioning this suite runs on, the property is the same one: a timer
+    // interrupt can never find a half-stood watch. On a kernel that has already stood its watch,
+    // a second commissioning is refused rather than silently replacing a live governor; on one
+    // that has not, an early interrupt is a no-op rather than a crash or a stale act.
+    {
+        let holds = if resident::active() {
+            let mut spare = suite_engine();
+            let _ = spare.register_domain(
+                99,
+                &[crate::pm::OperatingPoint {
+                    khz: 600_000,
+                    mv: 700,
+                }],
+                600_000,
+                600_000,
+                95_000,
+            );
+            !resident::commission(spare, Cadence::default(), crate::lethe::BUNDLED_ADVISOR)
+        } else {
+            resident::on_timer_tick(1, 40_000).is_none() && resident::census().is_none()
+        };
+        check!(
+            holds,
+            "lethed: the machine-wide watch is stood exactly once and is a no-op until it is"
         );
     }
 
