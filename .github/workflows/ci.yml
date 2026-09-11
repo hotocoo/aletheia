@@ -65,6 +65,23 @@ jobs:
       - name: Boot riscv64 kernel in VM and assert 11/11 invariants + exit 0
         run: ./scripts/vm-e2e-riscv.sh
 
+  desktop-e2e-dt:
+    name: The LIVE desktop on both device-tree targets (compositor -> window manager -> scanout)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU (aarch64 + riscv64)
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc && (sudo apt-get install -y qemu-system-riscv || true)
+      - name: Install Rust nightly + rust-src (for build-std)
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup component add rust-src --toolchain nightly-2026-08-09
+      # Boots the interactive image on BOTH device-tree targets and drives the real desktop to a
+      # composed scanout. The x86-64 desktop has its own gate; this is the rung that keeps the two
+      # DT targets from drifting away from it (ADR-085, ADR-127).
+      - name: Boot the live desktop on aarch64 and riscv64
+        run: ./scripts/desktop-e2e-dt.sh
+
   keyboard-e2e:
     name: A person at the machine's own keyboard (i8042 -> IRQ1 -> decoder -> line editor)
     runs-on: ubuntu-latest
@@ -329,5 +346,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+  lethe-pin:
+    name: The upstream Lethe pin is well-formed and described (no network)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Aletheia tracks Lethe by COMMIT, not by "latest". This refuses a pin that has rotted into
+      # something nobody can act on. Moving the pin is scripts/sync-lethe.sh, which an operator
+      # runs because it needs the network (docs/LETHE-INTEGRATION.md).
+      - name: Validate third_party/lethe.pin
+        run: ./scripts/check-lethe-pin.sh
+
       - name: Assert no architecture or claimed VM gate is unenforced by CI
         run: ./scripts/check-ci-parity.sh

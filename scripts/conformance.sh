@@ -315,7 +315,17 @@ CONTRACT=(
   "textgrid: printable bytes land in cells, carriage return returns, backspace erases one"
   "textgrid: a newline on the last row scrolls exactly one row"
   "textgrid: rendering is pixel-exact - solid title band, glyph bits at the cell, blank elsewhere"
-  "textgrid: the close box is painted exactly where the window manager hit-tests it"
+  "textgrid: title-bar lifecycle controls are painted in exact manager hit-test slots"
+
+  # The desktop's shell conventions (ADR-136): the same reachability on every CPU, every persona.
+  "persona: the in-house convention reproduces the historic packed panel layout"
+  "persona: every persona keeps every affordance inside the scanout"
+  "persona: no persona lets two affordances claim the same pixel"
+  "persona: every cluster pixel resolves to the affordance that owns it"
+  "persona: the panel is pinned to the edge the persona declares"
+  "persona: cycling forward reaches every persona and returns to the start"
+  "persona: only the macOS convention puts the window controls on the leading edge"
+  "persona: a scanout too narrow for a convention degrades to packed order"
 
   # Windows are a managed set (ADR-084): the same routing decision on every CPU.
   "wm: the close box, the drag band and the client area are exactly the painted chrome"

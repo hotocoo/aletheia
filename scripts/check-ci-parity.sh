@@ -88,10 +88,14 @@ ci_set="$gh_set"
 #                              consumes the fixture (aletheia/tests/sdk_component.rs) rather than
 #                              rebuilding it, so that a wasm toolchain is not a condition of running
 #                              the test suite
+#   sync-lethe.sh              an operator's tool that FETCHES the upstream Lethe over the network
+#                              and rewrites third_party/lethe.pin. A gate that needs the internet
+#                              goes red for reasons unrelated to the change under test; the CI half
+#                              is check-lethe-pin.sh, which validates the pin offline and IS run
 #   lib-markers.sh             a SOURCED library of marker helpers — it executes inside each VM
 #                              gate that CI runs (vm-e2e.sh, vm-e2e-riscv.sh, smoke-test.sh), the
 #                              same relationship sbom.py has to quality-gate.sh
-EXEMPT="e2e-all.sh build-all.sh run-interactive.sh vbox-install.sh serial-console.ps1 linux_pipe_bench.sh sbom.py build-example-component.sh lib-markers.sh"
+EXEMPT="e2e-all.sh build-all.sh run-interactive.sh vbox-install.sh serial-console.ps1 linux_pipe_bench.sh sbom.py build-example-component.sh lib-markers.sh sync-lethe.sh"
 
 echo "== [2] every gate script in scripts/ is executed by CI or explicitly exempt"
 unrun=0

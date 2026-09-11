@@ -157,7 +157,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # map by design — the same arch-independent suites must prove the same counts over either bus, and
 # a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
 source "$ROOT/scripts/lib-markers.sh"
-RISCV_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 fsstorm=5 linebuf=4 shellstorm=4 gpu=13 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 reclaim=9 selftest=13 smp=22 soak=12 textgrid=7 schedstorm=5 wm=14 wmstorm=6 usermode=32 vault=14 vinput=10 virtio=21 vm=66"
+RISCV_EXPECTED="bench=12 cap=14 compose=8 compositor=14 conring=9 console=42 dma=9 fbcon=6 fs=15 fsstorm=5 linebuf=4 shellstorm=4 gpu=13 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 reclaim=9 selftest=13 smp=22 soak=12 persona=8 textgrid=7 schedstorm=5 wm=14 wmstorm=6 usermode=32 vault=14 vinput=10 virtio=21 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

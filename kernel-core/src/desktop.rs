@@ -31,6 +31,7 @@ use core::fmt::Write as _;
 
 use crate::compositor::{Compositor, CursorShape, EventKind, Rect};
 use crate::fbcon::{ComposeSink, Surface};
+use crate::persona::{self, ChromeHit, ChromeLayout, ShellPersona};
 use crate::shell::InputFacts;
 use crate::textgrid::TextGrid;
 use crate::vinput::{self, Button, ConfigWrite, KeyDecoder, PointerDecoder, VirtioInput};
@@ -138,9 +139,11 @@ const TASKBAR_COLS: u32 = 100;
 /// added.
 const TASKBAR_ROWS: u32 = 2;
 const TASKBAR_X: i32 = 0;
-const TASKBAR_BUTTON_W: u32 = 18 * crate::textgrid::CELL;
-const TASKBAR_Y: i32 =
-    H as i32 - (TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H) as i32;
+/// One application button. Fourteen cells is the widest button for which the launcher, the three
+/// application buttons and all four workspace buttons still END inside the 640px scanout. At the
+/// previous eighteen cells the strip needed 720px, so workspaces 3 and 4 were painted past the
+/// right edge and could not be reached with the pointer at all.
+const TASKBAR_BUTTON_W: u32 = 14 * crate::textgrid::CELL;
 /// The first taskbar button is the desktop launcher. It deliberately occupies the same fixed
 /// cell band used by the keyboard launcher layout, so pointer and keyboard navigation describe
 /// one stable affordance instead of two subtly different hit maps.
@@ -153,6 +156,26 @@ const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
 /// the hit map independent from the taskbar's status text.
 const TASKBAR_WS_X: u32 = TASKBAR_HELP_X + TASKBAR_BUTTON_W;
 const TASKBAR_WS_W: u32 = 7 * crate::textgrid::CELL;
+/// The panel's total height, including the title band the compositor paints above its rows.
+const TASKBAR_H: u32 = TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H;
+/// How many managed application buttons the panel carries: terminal, monitor, shortcuts.
+const TASKBAR_BUTTONS: u32 = 3;
+/// The chrome's fixed measurements, handed to the persona policy. These are the SAME numbers the
+/// pre-persona constants encode, so `ShellPersona::Aletheia` reproduces the historic layout and
+/// every GUI proof recorded before personas existed keeps its meaning.
+const CHROME: persona::ChromeMetrics = persona::ChromeMetrics {
+    surface_w: W,
+    surface_h: H,
+    panel_h: TASKBAR_H,
+    launcher_w: TASKBAR_MENU_W,
+    button_w: TASKBAR_BUTTON_W,
+    button_count: TASKBAR_BUTTONS,
+    workspace_w: TASKBAR_WS_W,
+    workspace_count: MAX_WORKSPACES as u32,
+};
+/// Cycle the desktop's shell persona. Alt+P is free on every persona and is deliberately NOT a
+/// window or workspace accelerator, so changing the convention can never also move a window.
+const KEY_P: u16 = 25;
 // The widest numbered command is `9 minimize focused` (18 cells); one extra cell leaves the
 // selection marker visible without truncating the accelerator label.
 const MENU_COLS: u32 = 20;
@@ -249,6 +272,10 @@ struct TaskbarFacts {
     workspace: u8,
     workspace_counts: [u8; MAX_WORKSPACES as usize],
     keyboard_target: u8,
+    /// The shell convention in force. It joins the repaint signature because a persona change
+    /// moves every affordance: without it the panel would keep the previous layout's pixels until
+    /// some unrelated fact happened to change.
+    persona: ShellPersona,
 }
 
 /// The machine's live desktop: its devices, its decoders, its compositor and input session, its
@@ -294,6 +321,11 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     /// Last title-bar click: window id, scanout position and timer tick. Kept as presentation
     /// input state only; it never becomes window-manager ownership state.
     last_title_click: Option<(u32, u32, u32, u64)>,
+    /// The active shell convention. Presentation-only: it moves chrome, never authority.
+    persona: ShellPersona,
+    /// The persona's resolved geometry, recomputed once per persona change rather than per event
+    /// so the pointer hot path stays a handful of comparisons.
+    chrome: ChromeLayout,
 }
 
 /// Decide whether a title-bar press is the second click of a double click. This pure predicate
@@ -414,47 +446,60 @@ fn is_key_press_or_repeat(ty: u16, value: u32) -> bool {
     ty == vinput::EV_KEY && (value == 1 || value == 2)
 }
 
-/// Resolve a taskbar x-coordinate to either the desktop launcher or one managed application.
-/// Keeping the hit map pure makes the launcher boundary testable without a live compositor.
-fn taskbar_target(x: u32) -> Option<u32> {
-    if x < TASKBAR_MENU_W {
-        Some(MENU)
-    } else if (TASKBAR_TERM_X..TASKBAR_MON_X).contains(&x) {
-        Some(WINDOW)
-    } else if (TASKBAR_MON_X..TASKBAR_MON_X + TASKBAR_BUTTON_W).contains(&x) {
-        Some(MONITOR)
-    } else if (TASKBAR_HELP_X..TASKBAR_HELP_X + TASKBAR_BUTTON_W).contains(&x) {
-        Some(HELP)
-    } else {
-        None
+/// Advance the panel's write cursor to the cell that starts at pixel `x`, padding with spaces.
+///
+/// The cursor only ever moves FORWARD: a cluster whose text already overran its slot keeps what it
+/// painted rather than wrapping onto the next row, because a wrapped panel row would silently
+/// shift every affordance below it away from the hit map.
+fn pad_to_column(grid: &mut TextGrid, x: u32) {
+    let target = x / crate::textgrid::CELL;
+    while grid.cursor().0 < target {
+        grid.put(b' ');
+    }
+}
+
+/// Whether this event is the persona cycle accelerator: Alt+P, without Ctrl. Requiring Alt alone
+/// keeps Ctrl+Alt free for the window accelerators, so the convention key can never be mistaken
+/// for a command that moves or closes a window.
+fn is_persona_shortcut(ty: u16, code: u16, value: u32, alt: bool, ctrl: bool) -> bool {
+    ty == vinput::EV_KEY && code == KEY_P && value == 1 && alt && !ctrl
+}
+
+/// The managed application each panel button launches, in panel order. The persona decides WHERE
+/// the cluster sits; this array decides what the cluster contains, so a convention change can
+/// never silently reorder the applications.
+const TASKBAR_APPS: [u32; TASKBAR_BUTTONS as usize] = [WINDOW, MONITOR, HELP];
+
+/// Resolve a taskbar x-coordinate to either the desktop launcher or one managed application under
+/// the active persona's chrome layout. Keeping the hit map pure makes the launcher boundary
+/// testable without a live compositor, for every persona.
+fn taskbar_target(chrome: &ChromeLayout, x: u32) -> Option<u32> {
+    match chrome.hit(CHROME, x) {
+        ChromeHit::Launcher => Some(MENU),
+        ChromeHit::Button(n) => TASKBAR_APPS.get(n as usize).copied(),
+        _ => None,
     }
 }
 
 /// Resolve the taskbar's workspace strip to the user-facing workspace number. This is separate
 /// from `taskbar_target` because workspaces are desktop state, not managed application windows.
-fn taskbar_workspace_target(x: u32) -> Option<u8> {
-    if x < TASKBAR_WS_X || x >= TASKBAR_WS_X + TASKBAR_WS_W * MAX_WORKSPACES as u32 {
-        return None;
+fn taskbar_workspace_target(chrome: &ChromeLayout, x: u32) -> Option<u8> {
+    match chrome.hit(CHROME, x) {
+        ChromeHit::Workspace(n) => Some(n),
+        _ => None,
     }
-    Some(((x - TASKBAR_WS_X) / TASKBAR_WS_W + 1) as u8)
 }
 
 /// Return a stable presentation id for the taskbar affordance under the pointer. Zero means
 /// ordinary taskbar chrome; 1 is the launcher, 2..=4 are the managed application buttons and
-/// 10..=13 are workspaces 1..=4. The id is presentation-only and never becomes WM authority.
-fn taskbar_hover_target(x: u32) -> u8 {
-    if x < TASKBAR_MENU_W {
-        1
-    } else if (TASKBAR_TERM_X..TASKBAR_MON_X).contains(&x) {
-        2
-    } else if (TASKBAR_MON_X..TASKBAR_MON_X + TASKBAR_BUTTON_W).contains(&x) {
-        3
-    } else if (TASKBAR_HELP_X..TASKBAR_HELP_X + TASKBAR_BUTTON_W).contains(&x) {
-        4
-    } else if let Some(workspace) = taskbar_workspace_target(x) {
-        9 + workspace
-    } else {
-        0
+/// 10..=13 are workspaces 1..=4. The id is presentation-only and never becomes WM authority, and
+/// it is persona-independent: the same affordance keeps the same id wherever the persona puts it.
+fn taskbar_hover_target(chrome: &ChromeLayout, x: u32) -> u8 {
+    match chrome.hit(CHROME, x) {
+        ChromeHit::Launcher => 1,
+        ChromeHit::Button(n) => 2 + n as u8,
+        ChromeHit::Workspace(n) => 9 + n,
+        ChromeHit::None => 0,
     }
 }
 
@@ -657,7 +702,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             b"F6/Arrows/Tab  keyboard taskbar navigation",
             b"Space/Enter  activate taskbar selection",
             b"1-9  select a start-menu command",
-            b"",
+            b"Alt+P  cycle the shell persona",
         ];
         for line in HELP_LINES {
             help.write(line);
@@ -672,8 +717,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let tok_taskbar = comp
             .mint_surface(TASKBAR, tbw, tbh)
             .map_err(|_| "the taskbar surface was refused")?;
-        comp.attach(TASKBAR, tok_taskbar, TASKBAR_X, TASKBAR_Y)
-            .map_err(|_| "the taskbar placement was refused")?;
+        comp.attach(
+            TASKBAR,
+            tok_taskbar,
+            TASKBAR_X,
+            ShellPersona::default().layout(CHROME).panel_y,
+        )
+        .map_err(|_| "the taskbar placement was refused")?;
         let mut taskbar_packed = Vec::new();
         taskbar.render_packed(b"desktop", &mut taskbar_packed);
         comp.fill_packed(TASKBAR, tok_taskbar, &taskbar_packed)
@@ -763,6 +813,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             term_input: VecDeque::with_capacity(TERM_INPUT_CAP),
             pointer: (W / 2, H / 2),
             last_title_click: None,
+            persona: ShellPersona::default(),
+            chrome: ShellPersona::default().layout(CHROME),
         };
         d.show_frame()?;
         Ok(d)
@@ -886,6 +938,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             true => 2,
         };
         let sig = TaskbarFacts {
+            persona: self.persona,
             terminal: state(WINDOW),
             monitor: state(MONITOR),
             help: state(HELP),
@@ -902,7 +955,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && (lx as u32) < tw
                         && (ly as u32) < th
                     {
-                        taskbar_hover_target(lx as u32)
+                        taskbar_hover_target(&self.chrome, lx as u32)
                     } else {
                         0
                     }
@@ -925,61 +978,51 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         }
         self.taskbar_sig = sig;
         self.taskbar.clear();
-        let terminal_focus = sig.focus == WINDOW;
-        let monitor_focus = sig.focus == MONITOR;
-        let help_focus = sig.focus == HELP;
+        // The painter walks to the SAME origins the hit map reads out of `self.chrome`. Writing
+        // the strip contiguously would paint the packed layout no matter which persona is in
+        // force, and the pointer would then activate a button the user cannot see.
+        pad_to_column(&mut self.taskbar, self.chrome.launcher_x);
         let _ = write!(
             self.taskbar,
-            "{}[menu] {}term {} {}mon {} {}help {} ",
+            "{}[menu]",
             if sig.hover == 1 || sig.keyboard_target == 1 {
                 ">"
             } else {
                 " "
             },
-            if terminal_focus || sig.hover == 2 || sig.keyboard_target == 2 {
-                ">"
-            } else {
-                " "
-            },
-            if self.wm.is_open(WINDOW) {
-                if self.wm.is_minimized(&self.comp, WINDOW) == Some(true) {
-                    "[hidden]"
-                } else {
-                    "[open]"
-                }
-            } else {
-                "[closed]"
-            },
-            if monitor_focus || sig.hover == 3 || sig.keyboard_target == 3 {
-                ">"
-            } else {
-                " "
-            },
-            if self.wm.is_open(MONITOR) {
-                if self.wm.is_minimized(&self.comp, MONITOR) == Some(true) {
-                    "[hidden]"
-                } else {
-                    "[open]"
-                }
-            } else {
-                "[closed]"
-            },
-            if help_focus || sig.hover == 4 || sig.keyboard_target == 4 {
-                ">"
-            } else {
-                " "
-            },
-            if self.wm.is_open(HELP) {
-                if self.wm.is_minimized(&self.comp, HELP) == Some(true) {
-                    "[hidden]"
-                } else {
-                    "[open]"
-                }
-            } else {
-                "[closed]"
-            },
         );
+        for (n, id) in TASKBAR_APPS.iter().enumerate() {
+            pad_to_column(
+                &mut self.taskbar,
+                self.chrome.buttons_x + n as u32 * TASKBAR_BUTTON_W,
+            );
+            let marked =
+                sig.focus == *id || sig.hover == 2 + n as u8 || sig.keyboard_target == 2 + n as u8;
+            let state = if self.wm.is_open(*id) {
+                if self.wm.is_minimized(&self.comp, *id) == Some(true) {
+                    "[hidden]"
+                } else {
+                    "[open]"
+                }
+            } else {
+                "[closed]"
+            };
+            let name = match *id {
+                WINDOW => "term",
+                MONITOR => "mon",
+                _ => "help",
+            };
+            let _ = write!(
+                self.taskbar,
+                "{}{name} {state}",
+                if marked { ">" } else { " " }
+            );
+        }
         for workspace in 1..=MAX_WORKSPACES {
+            pad_to_column(
+                &mut self.taskbar,
+                self.chrome.workspaces_x + (workspace as u32 - 1) * TASKBAR_WS_W,
+            );
             if sig.hover == 9 + workspace || sig.keyboard_target == 9 + workspace {
                 taskbar_put_hovered_workspace(
                     &mut self.taskbar,
@@ -1000,9 +1043,6 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     .put(b'0' + sig.workspace_counts[workspace as usize - 1]);
                 self.taskbar.put(b']');
             }
-            if workspace != MAX_WORKSPACES {
-                self.taskbar.write(b"   ");
-            }
         }
         // Keep diagnostics on the second row so the actionable application/workspace strip
         // remains visible on the 640px scanout instead of silently clipping its right edge.
@@ -1016,17 +1056,19 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         if hint.is_empty() {
             let _ = write!(
                 self.taskbar,
-                "status [{}] {}s  F6 navigate  Space/Enter activate",
+                "status [{}] {}s  shell:{}  Alt+P persona  F6 navigate",
                 if sig.keyboard_resize { "R" } else { "N" },
                 sig.uptime_s.min(999_999_999),
+                sig.persona.label(),
             );
         } else {
             let _ = write!(
                 self.taskbar,
-                "{}  |  status [{}] {}s",
+                "{}  |  status [{}] {}s  shell:{}",
                 hint,
                 if sig.keyboard_resize { "R" } else { "N" },
                 sig.uptime_s.min(999_999_999),
+                sig.persona.label(),
             );
         }
         self.taskbar
@@ -1054,11 +1096,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             return false;
         }
         let lx = lx as u32;
-        if let Some(workspace) = taskbar_workspace_target(lx) {
+        if let Some(workspace) = taskbar_workspace_target(&self.chrome, lx) {
             self.switch_workspace(workspace);
             return true;
         }
-        let Some(target) = taskbar_target(lx) else {
+        let Some(target) = taskbar_target(&self.chrome, lx) else {
             return false;
         };
         if target == MENU {
@@ -1141,8 +1183,17 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let Some((mw, mh)) = self.comp.surface_size(MENU) else {
             return;
         };
-        let x = TASKBAR_X.saturating_add(TASKBAR_MENU_W as i32 / 2) - mw as i32 / 2;
-        let y = TASKBAR_Y - mh as i32 - MENU_MARGIN;
+        // The launcher is wherever the persona put it, and the menu unfolds AWAY from the panel's
+        // edge: above a bottom panel, below a top one. Anchoring to the constant would have put
+        // the menu off-screen the moment a persona moved the panel to the top.
+        let launcher_centre = TASKBAR_X
+            .saturating_add(self.chrome.launcher_x as i32)
+            .saturating_add(TASKBAR_MENU_W as i32 / 2);
+        let x = launcher_centre - mw as i32 / 2;
+        let y = match self.chrome.edge {
+            persona::PanelEdge::Bottom => self.chrome.panel_y - mh as i32 - MENU_MARGIN,
+            persona::PanelEdge::Top => self.chrome.panel_y + TASKBAR_H as i32 + MENU_MARGIN,
+        };
         let max_x = W.saturating_sub(mw) as i32;
         let max_y = H.saturating_sub(mh) as i32;
         self.menu_selected = 0;
@@ -1441,6 +1492,41 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Toggle the keyboard reference window through the same manager used by every application
     /// surface. Showing help therefore changes focus and z-order normally instead of bypassing
     /// the desktop's ownership boundary.
+    /// Advance to the next shell persona and move the chrome to match.
+    ///
+    /// A persona change is a MOVE, never a rebuild: the panel surface, its token, its grid and
+    /// every managed window survive untouched, and only the panel's origin and the cached hit-map
+    /// geometry change. That is what keeps the switch allocation-free on a heap that never frees
+    /// (ADR-063) and what keeps it from being a back door into window authority — no window is
+    /// created, destroyed, focused or reordered here.
+    pub fn cycle_persona(&mut self) -> ShellPersona {
+        self.set_persona(self.persona.next())
+    }
+
+    /// Adopt `persona` and reposition the panel. Returns the persona now in force.
+    pub fn set_persona(&mut self, persona: ShellPersona) -> ShellPersona {
+        self.persona = persona;
+        self.chrome = persona.layout(CHROME);
+        let _ = self
+            .comp
+            .move_surface(TASKBAR, self.taskbar_token, TASKBAR_X, self.chrome.panel_y);
+        // The hover id is geometry-derived, so a moved panel invalidates it: recompute from the
+        // pointer's CURRENT position rather than leaving a button lit under nothing.
+        self.refresh_cursor_shape();
+        self.persona
+    }
+
+    /// The persona in force. Presentation state, exposed for the boot proof and the panel text.
+    pub fn persona(&self) -> ShellPersona {
+        self.persona
+    }
+
+    /// The persona's resolved chrome geometry, exposed so the boot proof can assert the SAME
+    /// value the hit map and the painter use rather than a recomputed copy of it.
+    pub fn chrome(&self) -> ChromeLayout {
+        self.chrome
+    }
+
     fn toggle_help(&mut self) {
         if self.wm.is_open(HELP) {
             let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, HELP);
@@ -1710,6 +1796,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     let alt_minimize = is_minimize_shortcut(ev.ty, ev.code, ev.value, alt);
                     let alt_maximize = is_maximize_shortcut(ev.ty, ev.code, ev.value, alt);
                     let context_menu = is_context_menu_shortcut(ev.ty, ev.code, ev.value, shift);
+                    let persona_cycle = is_persona_shortcut(ev.ty, ev.code, ev.value, alt, ctrl);
                     let alt_launcher = if ev.ty == vinput::EV_KEY {
                         alt_window_launcher(ev.code, ev.value, alt)
                     } else {
@@ -1916,6 +2003,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                             let _ = self.activate_taskbar_target(target);
                         }
                         self.taskbar_keyboard_target = None;
+                        let _ = self.kb_dec.feed(ev);
+                    } else if persona_cycle {
+                        // Changing the convention closes transient chrome first: a menu anchored
+                        // to the old launcher position would otherwise be left floating beside a
+                        // launcher that has moved.
+                        self.close_menu();
+                        self.close_switcher();
+                        self.cycle_persona();
                         let _ = self.kb_dec.feed(ev);
                     } else if help_toggle {
                         self.close_menu();
@@ -2219,7 +2314,7 @@ mod tests {
             b"F6/Arrows/Tab  keyboard taskbar navigation",
             b"Space/Enter  activate taskbar selection",
             b"1-9  select a start-menu command",
-            b"",
+            b"Alt+P  cycle the shell persona",
         ];
         assert_eq!(HELP_LINES.len(), super::HELP_ROWS as usize);
         assert!(HELP_LINES
@@ -2355,53 +2450,152 @@ mod tests {
     }
 
     #[test]
-    fn taskbar_launcher_has_a_dedicated_start_region() {
-        assert_eq!(taskbar_target(0), Some(super::MENU));
-        assert_eq!(taskbar_target(super::TASKBAR_MENU_W - 1), Some(super::MENU));
-        assert_eq!(taskbar_target(super::TASKBAR_TERM_X), Some(super::WINDOW));
-        assert_eq!(taskbar_target(super::TASKBAR_MON_X), Some(super::MONITOR));
-        assert_eq!(taskbar_target(super::TASKBAR_HELP_X), Some(super::HELP));
-        assert_eq!(
-            taskbar_target(super::TASKBAR_HELP_X + super::TASKBAR_BUTTON_W),
-            None
-        );
+    fn the_boot_suites_chrome_is_the_chrome_the_desktop_actually_paints() {
+        // The boot proof is only evidence about THIS desktop if it measures this desktop. A
+        // divergence here would let the suite pass on geometry the machine never paints.
+        assert_eq!(super::CHROME, super::persona::LIVE_CHROME);
     }
 
     #[test]
-    fn taskbar_workspace_strip_has_four_disjoint_targets() {
-        for workspace in 1..=super::MAX_WORKSPACES {
-            let start = super::TASKBAR_WS_X + (workspace as u32 - 1) * super::TASKBAR_WS_W;
-            assert_eq!(taskbar_workspace_target(start), Some(workspace));
-            assert_eq!(
-                taskbar_workspace_target(start + super::TASKBAR_WS_W - 1),
-                Some(workspace)
+    fn the_default_persona_reproduces_the_historic_packed_taskbar_constants() {
+        let chrome = super::ShellPersona::default().layout(super::CHROME);
+        assert_eq!(chrome.launcher_x, 0);
+        assert_eq!(chrome.buttons_x, super::TASKBAR_TERM_X);
+        assert_eq!(chrome.workspaces_x, super::TASKBAR_WS_X);
+    }
+
+    #[test]
+    fn every_persona_keeps_all_four_workspace_buttons_inside_the_scanout() {
+        for persona in super::ShellPersona::ALL {
+            let chrome = persona.layout(super::CHROME);
+            let end = chrome.workspaces_x + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32;
+            assert!(
+                end <= super::W,
+                "{} paints workspace 4 past the right edge ({end} > {})",
+                persona.label(),
+                super::W
             );
         }
-        assert_eq!(taskbar_workspace_target(super::TASKBAR_WS_X - 1), None);
-        assert_eq!(
-            taskbar_workspace_target(
-                super::TASKBAR_WS_X + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32
-            ),
-            None
-        );
     }
 
     #[test]
-    fn taskbar_hover_map_is_stable_and_keeps_chrome_non_actionable() {
-        assert_eq!(taskbar_hover_target(0), 1);
-        assert_eq!(taskbar_hover_target(super::TASKBAR_TERM_X), 2);
-        assert_eq!(taskbar_hover_target(super::TASKBAR_MON_X), 3);
-        assert_eq!(taskbar_hover_target(super::TASKBAR_HELP_X), 4);
-        for workspace in 1..=super::MAX_WORKSPACES {
-            let start = super::TASKBAR_WS_X + (workspace as u32 - 1) * super::TASKBAR_WS_W;
-            assert_eq!(taskbar_hover_target(start), 9 + workspace);
+    fn taskbar_launcher_has_a_dedicated_start_region_under_every_persona() {
+        for persona in super::ShellPersona::ALL {
+            let chrome = persona.layout(super::CHROME);
+            let label = persona.label();
+            assert_eq!(
+                taskbar_target(&chrome, chrome.launcher_x),
+                Some(super::MENU),
+                "{label}"
+            );
+            assert_eq!(
+                taskbar_target(&chrome, chrome.launcher_x + super::TASKBAR_MENU_W - 1),
+                Some(super::MENU),
+                "{label}"
+            );
+            for (n, expected) in super::TASKBAR_APPS.iter().enumerate() {
+                let x = chrome.buttons_x + n as u32 * super::TASKBAR_BUTTON_W;
+                assert_eq!(taskbar_target(&chrome, x), Some(*expected), "{label}");
+            }
+            let past = chrome.buttons_x + super::TASKBAR_BUTTON_W * super::TASKBAR_BUTTONS;
+            assert_eq!(taskbar_target(&chrome, past), None, "{label}");
         }
-        assert_eq!(
-            taskbar_hover_target(
-                super::TASKBAR_WS_X + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32
-            ),
-            0
-        );
+    }
+
+    #[test]
+    fn taskbar_workspace_strip_has_four_disjoint_targets_under_every_persona() {
+        for persona in super::ShellPersona::ALL {
+            let chrome = persona.layout(super::CHROME);
+            let label = persona.label();
+            for workspace in 1..=super::MAX_WORKSPACES {
+                let start = chrome.workspaces_x + (workspace as u32 - 1) * super::TASKBAR_WS_W;
+                assert_eq!(
+                    taskbar_workspace_target(&chrome, start),
+                    Some(workspace),
+                    "{label}"
+                );
+                assert_eq!(
+                    taskbar_workspace_target(&chrome, start + super::TASKBAR_WS_W - 1),
+                    Some(workspace),
+                    "{label}"
+                );
+            }
+            assert_eq!(
+                taskbar_workspace_target(
+                    &chrome,
+                    chrome.workspaces_x + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32
+                ),
+                None,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn taskbar_hover_map_is_stable_across_personas_and_keeps_chrome_non_actionable() {
+        for persona in super::ShellPersona::ALL {
+            let chrome = persona.layout(super::CHROME);
+            let label = persona.label();
+            // The id belongs to the affordance, not to the pixel: moving the cluster must not
+            // renumber it, or the keyboard strip and the pointer strip would disagree.
+            assert_eq!(
+                taskbar_hover_target(&chrome, chrome.launcher_x),
+                1,
+                "{label}"
+            );
+            for n in 0..super::TASKBAR_BUTTONS {
+                let x = chrome.buttons_x + n * super::TASKBAR_BUTTON_W;
+                assert_eq!(taskbar_hover_target(&chrome, x), 2 + n as u8, "{label}");
+            }
+            for workspace in 1..=super::MAX_WORKSPACES {
+                let start = chrome.workspaces_x + (workspace as u32 - 1) * super::TASKBAR_WS_W;
+                assert_eq!(
+                    taskbar_hover_target(&chrome, start),
+                    9 + workspace,
+                    "{label}"
+                );
+            }
+            assert_eq!(
+                taskbar_hover_target(
+                    &chrome,
+                    chrome.workspaces_x + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32
+                ),
+                0,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_persona_accelerator_is_alt_p_and_never_fires_with_ctrl_held() {
+        assert!(super::is_persona_shortcut(
+            super::vinput::EV_KEY,
+            super::KEY_P,
+            1,
+            true,
+            false
+        ));
+        assert!(!super::is_persona_shortcut(
+            super::vinput::EV_KEY,
+            super::KEY_P,
+            1,
+            true,
+            true
+        ));
+        assert!(!super::is_persona_shortcut(
+            super::vinput::EV_KEY,
+            super::KEY_P,
+            1,
+            false,
+            false
+        ));
+        assert!(!super::is_persona_shortcut(
+            super::vinput::EV_KEY,
+            super::KEY_P,
+            0,
+            true,
+            false
+        ));
     }
 
     #[test]

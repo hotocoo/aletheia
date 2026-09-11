@@ -1322,6 +1322,32 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // The shell personas (the GUI's convention rung): a user arrives with Windows, macOS or
+    // GNOME muscle memory, and Aletheia can meet any of them without the window manager gaining
+    // a second opinion about authority. The policy is pure, so every CPU proves the SAME
+    // reachability contract the desktop's hit map and painter both read.
+    kprintln!("");
+    kprintln!(
+        "--- shell-persona selftests (the desktop's conventions: reachable on every layout) ---"
+    );
+    match kernel_core::persona::persona_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[persona] ALL {} SHELL-PERSONA INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[persona] FAILED at shell-persona invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(700 + idx as i32);
+        }
+    }
+
     // The window manager (ALET-P2-021's window rung, ADR-084): windows are a managed SET -
     // chrome the painter and the hit test agree on, a press that routes to the topmost window
     // alone, a close that ends a window's surface, queue and token together, and focus that

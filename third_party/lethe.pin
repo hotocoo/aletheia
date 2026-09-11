@@ -1,0 +1,13 @@
+# The upstream Lethe revision Aletheia's integration surface is written against.
+#
+# See docs/LETHE-INTEGRATION.md for what this pin does and does not mean. In short: it records
+# WHICH Lethe the contract tracks. It does not imply that Lethe's engine runs on this kernel; it
+# cannot, until the kernel grows TCP and TLS (docs/LETHE-INTEGRATION.md, Track 2).
+#
+# Update with: scripts/sync-lethe.sh
+# Validated in CI by: scripts/check-lethe-pin.sh
+
+remote = ssh://git@github.com/hotocoo/lethe.git
+branch = main
+commit = d105cd3fc7b0b16005d96d8570e646f36ea5eed6
+taken  = 2026-09-11

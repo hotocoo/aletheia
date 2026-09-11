@@ -33,7 +33,18 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-09, latest (X86 INTERACTIVE INPUT — ADR-135 makes the existing virtio-input MSI-X
+**As of:** 2026-09-11, latest (THE DESKTOP SHELL PERSONA — ADR-136 turns the desktop's layout
+convention into an explicit pure value. `ShellPersona::{Aletheia, Windows, Macos, Gnome}` resolves
+the chrome's measurements into ONE `ChromeLayout` that the panel painter and all three hit maps
+read, so they cannot disagree; `Alt+P` cycles the convention as a MOVE that rebuilds no surface and
+allocates nothing. The in-house persona reproduces the historic layout byte for byte. 8 new boot
+invariants hold on all three CPUs (`persona=8`); the conformance contract grew 205 -> 213 core
+behaviours. The reachability invariant FOUND and closed a live defect: at eighteen cells per
+application button the chrome needed 720px on a 640px scanout, so workspace buttons 3 and 4 were
+painted off the right edge and could not be clicked; the button is now fourteen cells. Also repaired
+three doc/CI gates that were red on main before this wave — a stale `textgrid` conformance row, an
+undocumented `hwpm.rs` asm site with drifted unsafe counts, and `scripts/desktop-e2e-dt.sh` running
+in no CI job. Previously: X86 INTERACTIVE INPUT — ADR-135 makes the existing virtio-input MSI-X
 wake path the default for the `interactive` x86-64 build. The interrupt remains wake+EOI only and a
 100 Hz PIT is retained as a lost-interrupt watchdog. `scripts/vinput-e2e.sh` passed with real QEMU
 keyboard/tablet events and reported **29 MSI-X hits / 29 wake samples**; the live workflow also
@@ -930,6 +941,7 @@ randomness could not be the mechanism — the lifecycle had to be safe BY CONSTR
 Both pipelines (GitHub Actions and GitLab CI) execute exactly these scripts, each asserted by
 scripts/check-ci-parity.sh against this file: scripts/build-all.sh (every crate on its own
 toolchain, host crates tested), scripts/check-boundary-docs.sh, scripts/check-ci-parity.sh,
+scripts/check-lethe-pin.sh (the upstream Lethe pin, validated offline — docs/LETHE-INTEGRATION.md),
 scripts/check-register.sh, scripts/check-traceability.sh, scripts/comparative-bench.sh,
 scripts/conformance.sh (the cross-CPU core contract), scripts/console-agent-e2e.sh,
 scripts/console-ai-e2e.sh, scripts/console-e2e.sh, scripts/keyboard-e2e.sh, scripts/vinput-e2e.sh (the live
@@ -939,7 +951,9 @@ packaged and BOOTED from their own VMDKs on every push; on every `vX.Y.Z` tag
 .github/workflows/release.yml publishes the same package as GitHub release assets, REQ-REL-001,
 docs/RELEASING.md), and the four VM gates — scripts/vm-e2e.sh (aarch64),
 scripts/vm-e2e-riscv.sh (RISC-V), scripts/vm-e2e-x86.sh (x86-64 under OVMF) and
-scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung).
+scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/desktop-e2e-dt.sh
+(the LIVE desktop on both device-tree targets — it was invoked only by the aggregate runner until
+2026-09-11, which check-ci-parity.sh refuses; it now has its own CI job).
 
 
 ### 2026-09-08 — Security threat-model maintenance
@@ -972,6 +986,22 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung).
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-11 — Lethe: the upstream is pinned, and the honest scope is written down
+
+- `docs/LETHE-INTEGRATION.md` states the position plainly: **Lethe's engine does not run on the Aletheia kernel, and this tree does not claim it does.** Lethe is C++ over the host OS web view (WKWebView / WebKitGTK / WebView2); Aletheia is `no_std` bare metal with no libc, no hosted process model, and — the decisive gap — **no TCP and no TLS**. The stack is virtio-net + ARP + DHCP + UDPv4; `grep -rn tcp kernel-core/src` returns nothing.
+- What IS delivered is the tracking half: `third_party/lethe.pin` records the upstream remote, branch, commit and date Aletheia's integration surface is written against; `scripts/sync-lethe.sh` fetches upstream, shows what moved since the pin, and rewrites it (operator-run — it needs the network, so it is not a gate); `scripts/check-lethe-pin.sh` IS a CI gate and refuses a malformed pin, an abbreviated commit, an unfetchable remote, a future date, or a pin the integration doc does not describe. Pinned at upstream `main` `d105cd3f`, verified against the real remote.
+- The page also stages what "built in" would actually require, in dependency order: TCP, then TLS 1.3, then a bounded HTTP/1.1 client, then a browser window as a managed desktop window, then a fail-closed content subset, and finally Lethe's SECURITY CONTRACT adopted natively as boot-proved invariants (HTTPS-first with plaintext refused, third-party tracker hosts refused, fixed low-entropy user agent, ephemeral-by-default site data). That last one is the sense in which Lethe can genuinely be built in to this kernel: not the binary, the contract. **None of those six stages is started**, and the page says so rather than implying progress.
+
+### 2026-09-11 — the desktop shell persona (ADR-136)
+
+- The desktop's layout convention is no longer four compiled-in constants. `kernel-core/src/persona.rs` is a pure, allocation-free, arch-neutral policy: `ShellPersona::{Aletheia, Windows, Macos, Gnome}` maps `ChromeMetrics` to a `ChromeLayout` carrying the panel edge, the panel's y origin, each cluster's x origin, and the title-bar control side. The desktop's painter and all three hit maps now read that one value.
+- `Alt+P` cycles the persona. The change is a MOVE: the panel surface, its token, its grid and every managed window survive untouched, and nothing is allocated — required on a heap that never frees (ADR-063). The persona is presentation-only and never becomes window-manager authority.
+- `ShellPersona::Aletheia` reproduces the historic packed layout exactly, so the default boot is visually unchanged and every GUI proof recorded before this wave keeps its meaning.
+- **A live defect the new invariant exposed, and closed:** the application button was eighteen cells, so launcher + three buttons + four workspace buttons needed 720px on a 640px scanout. Workspace buttons 3 and 4 were painted past the right edge and were unclickable. The button is now fourteen cells (624px total) and invariant 2 asserts every affordance ends inside the scanout, under every persona.
+- New boot family `persona=8` on all three CPUs; conformance contract 205 -> 213 core behaviours; `kernel-core` host tests 133 -> 155 unit tests. Full local chain re-run: **build-all PASS, vm-e2e (aarch64) PASS, vm-e2e-riscv PASS, vm-e2e-x86 PASS (three boots, exit 33), desktop-e2e-dt PASS on both DT targets, conformance PASS (213 behaviours on all three targets)**.
+- **Named as still open:** `ControlSide` is declared and proved, but `wm`'s title-bar painter and hit map still place the controls on the trailing edge unconditionally — so the macOS persona differs from macOS in exactly that respect. There is also no way to persist a chosen persona across a reboot. Both are recorded in the gap register rather than implied away.
+- **Repaired three gates that were already red on `main` before this wave:** the conformance contract still named a `textgrid` behaviour by its old wording ("the close box is painted…") after the invariant was renamed to cover all three title-bar controls; `docs/ASM-BOUNDARY.md` did not list the two `rdmsr`/`wrmsr` sites in `kernel-x86_64/src/hwpm.rs` and `docs/UNSAFE-AUDIT.md`'s counts had drifted (kernel-core 184 -> 194, kernel-x86_64 269 -> 305, reconciled against the tree with the deltas attributed); and `scripts/desktop-e2e-dt.sh` was executed by no CI job, which `check-ci-parity.sh` refuses — it now has its own workflow job.
 
 ### 2026-09-09 — x86 MSI-X watchdog cadence optimization
 
