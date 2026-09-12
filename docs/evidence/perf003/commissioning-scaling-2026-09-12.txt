@@ -1,0 +1,21 @@
+mlsched::commission scaling — native, host, --release (REQ-PERF-001, ADR-086)
+measured 2026-09-12 via a temporary kernel-core integration test
+
+  tasks      time        admitted
+    512      0.37 ms          512
+   1024      0.69 ms         1024
+   2048      1.39 ms         2048
+   4096      2.64 ms         4096
+
+Linear in task count (4x tasks -> 4.0x time). No quadratic term.
+
+The same call — commission(4_096, 7) — accounts for ~147 ms of the boot profile in
+docs/evidence/perf002, inside a --release image (opt-level = 3, lto = true) running under
+QEMU TCG. 147 / 2.64 ~= 56x, which is the normal range for TCG on compute-bound integer code.
+
+CONCLUSION: there is no algorithmic win available in commissioning. The verification is not
+slow; the emulator is.
+
+NOT MEASURED: the remaining ~588 ms of boot-time self-verification was not timed natively, and
+no native boot of Aletheia or Linux exists to compare. The 56x figure applies to this one
+component and is NOT extrapolated across the rest.

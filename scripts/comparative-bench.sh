@@ -379,6 +379,50 @@ if [ -s "$WORK/initramfs.gz" ]; then
 fi
 
 # ---------------------------------------------------------------------------------------------
+# FreeBSD — the first PRODUCTION kernel on this bench besides Linux, on the same emulator.
+#
+# ATTEMPTED, AND CURRENTLY BLOCKED, AND SAID SO. FreeBSD's stock VM image boots its loader with
+# output on the serial line but hands the KERNEL a VGA console, so no login prompt ever reaches
+# ttyu0. Forcing it needs one of:
+#   * a `/boot.config` in the guest containing `-h`, or `console="comconsole"` in loader.conf —
+#     both are edits to somebody else's disk image, which this bench does not make; or
+#   * pausing the loader countdown and typing `boot -h`, which its loader does not accept from the
+#     QEMU monitor's `sendkey` (unlike Redox's, which does — see ADR-084).
+#
+# So this leg SKIPs with the reason rather than reporting "FreeBSD did not boot", which would be
+# the ADR-084 mistake again: a harness blaming a kernel for its own inability to press a key.
+# Point FREEBSD_IMG at an image whose serial console is already enabled and it measures normally.
+#
+# OPT-IN: the image is ~600 MB compressed, ~2.5 GB expanded.
+#   WITH_FREEBSD=1 [FREEBSD_IMG=/path/to/serial-enabled.qcow2] ./scripts/comparative-bench.sh
+# ---------------------------------------------------------------------------------------------
+FB_BOOT_MS=""; FB_IDLE=""; FB_BYTES=""
+if [ "${WITH_FREEBSD:-0}" = "1" ]; then
+  hr; echo "==> FreeBSD (same host, same emulator, same flags)"; hr
+  FB_IMG="${FREEBSD_IMG:-}"
+  if [ -z "$FB_IMG" ]; then
+    echo "  FreeBSD's stock VM image gives its KERNEL a VGA console, so no login prompt reaches"
+    echo "  ttyu0 and there is nothing on the serial line to measure. Enabling it means editing"
+    echo "  somebody else's disk image (/boot.config with -h, or console=\"comconsole\"), which this"
+    echo "  bench does not do. Its loader also ignores the QEMU monitor's sendkey, so it cannot be"
+    echo "  driven from outside the way Redox's can (ADR-084)."
+    echo "  SKIPPED — set FREEBSD_IMG to a serial-enabled image to measure it (never a silent pass)."
+  elif [ ! -f "$FB_IMG" ]; then
+    echo "  FREEBSD_IMG=$FB_IMG does not exist — SKIPPED (never a silent pass)."
+  else
+    FB_BYTES="$(wc -c < "$FB_IMG" | tr -d ' ')"
+    echo "    bootable payload: whole disk image — $FB_BYTES bytes"
+    if boot_median freebsd "login:" \
+        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -nographic -no-reboot \
+        -drive "format=qcow2,file=$FB_IMG"; then
+      FB_BOOT_MS="$BOOT_MS"; FB_IDLE="$IDLE_CPU"
+    else
+      echo "  FreeBSD did not reach a login prompt on this host — reported, not hidden."
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------------------------
 # Redox — the other Rust operating system that ships a bootable x86-64 image, on the same emulator.
 #
 # Included because "compare against other Rust OSes" is otherwise a table of adjectives. Redox is
