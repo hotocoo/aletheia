@@ -125,6 +125,19 @@ impl ShellHost for Host {
         }
         false
     }
+
+    /// A real TCP conversation with a peer, over the device the boot suite proved (ADR-140). A
+    /// machine with no network keeps the trait's default refusal instead of reporting an empty
+    /// answer that would read as a silent peer.
+    fn tcp_fetch(
+        &self,
+        ip: [u8; 4],
+        port: u16,
+        request: &[u8],
+        reply: &mut [u8],
+    ) -> Result<usize, &'static str> {
+        crate::netstatic::fetch(ip, port, request, reply)
+    }
 }
 
 /// Blocks for the console's scratch namespace when no disk is attached.

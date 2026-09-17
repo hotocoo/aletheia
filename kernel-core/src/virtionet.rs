@@ -653,10 +653,68 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
 
 /// The network invariant suite (REQ-NET-001/002), reported through a caller-supplied logger like every
 /// other suite. Returns the number of invariants proved, or `(index, name)` of the first failure.
+/// The live device, seen as the three methods a TCP client needs (ADR-139's `Ipv4Link`).
+///
+/// The peer's MAC is resolved ONCE, when the link is made, rather than per segment: ARP on every
+/// transmission would put a broadcast and a wait in front of every acknowledgement, and the cache
+/// that would prevent that is already inside the driver.
+pub struct NetLink<'a, H: VirtioHal, T: Transport> {
+    dev: &'a VirtioNet<H, T>,
+    peer_mac: [u8; 6],
+}
+
+impl<'a, H: VirtioHal, T: Transport> NetLink<'a, H, T> {
+    /// Resolve the peer's MAC and hand back a link to it.
+    ///
+    /// # Safety
+    /// The device must be live: its queues are published and its buffers posted.
+    pub unsafe fn resolve(dev: &'a VirtioNet<H, T>, peer: [u8; 4]) -> Result<Self, NetError> {
+        let peer_mac = dev.arp_resolve(peer)?;
+        Ok(NetLink { dev, peer_mac })
+    }
+}
+
+impl<H: VirtioHal, T: Transport> crate::tcpnet::Ipv4Link for NetLink<'_, H, T> {
+    fn send_ipv4(&self, datagram: &[u8]) -> Result<(), crate::tcpnet::LinkError> {
+        // SAFETY: a `NetLink` is only constructed by `resolve`, which requires a live device, and
+        // the device outlives the link by the borrow.
+        unsafe { self.dev.send_ipv4_to(self.peer_mac, datagram) }.map_err(|e| match e {
+            NetError::TooLong => crate::tcpnet::LinkError::TooLong,
+            _ => crate::tcpnet::LinkError::Device,
+        })
+    }
+
+    fn recv_ipv4(
+        &self,
+        spins: u64,
+        protocol: u8,
+        out: &mut [u8],
+    ) -> Result<usize, crate::tcpnet::LinkError> {
+        // SAFETY: as above.
+        unsafe { self.dev.recv_ipv4_into(spins, protocol, out) }.map_err(|e| match e {
+            NetError::TooLong => crate::tcpnet::LinkError::TooLong,
+            _ => crate::tcpnet::LinkError::Device,
+        })
+    }
+
+    fn local_ip(&self) -> [u8; 4] {
+        GUEST_IP
+    }
+}
+
+/// What the network suite returns: how many invariants held, and the device itself.
+///
+/// Named because the pair is the whole point of ADR-140 — a suite that consumed the only NIC meant
+/// a kernel that proved its network and then had none.
+pub type NetProof<H, T> = (usize, VirtioNet<H, T>);
+
+/// The network contract, proved against the real device. The device is HANDED BACK on success so
+/// the machine can keep using it (ADR-140): a suite that consumed the only NIC would mean a kernel
+/// that proves its network and then has none.
 pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     dev: VirtioNet<H, T>,
     mut log: F,
-) -> Result<usize, (usize, &'static str)> {
+) -> Result<NetProof<H, T>, (usize, &'static str)> {
     let mut n = 0usize;
     macro_rules! check {
         ($name:expr, $cond:expr) => {{
@@ -751,7 +809,7 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
         matches!(&offer2, Ok(o) if o.yiaddr == GUEST_IP)
     );
 
-    Ok(n)
+    Ok((n, dev))
 }
 
 #[cfg(test)]

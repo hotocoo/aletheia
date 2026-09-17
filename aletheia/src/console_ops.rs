@@ -101,7 +101,12 @@ fn parse(usage: &'static str, doc: &'static str) -> ConsoleOp {
 /// approval on the day someone adds `format`.
 fn risk_of(name: &str) -> Risk {
     match name {
-        "write" | "append" | "touch" | "cp" | "mv" | "rm" | "reboot" | "halt" => Risk::Destructive,
+        // `tcp` is destructive in the sense that matters for approval: it is OUTWARD FACING. It
+        // announces this machine to a peer that did not ask, and sends it bytes the operator
+        // typed. Nothing on this medium changes, and it still requires approval.
+        "write" | "append" | "touch" | "cp" | "mv" | "rm" | "reboot" | "halt" | "tcp" => {
+            Risk::Destructive
+        }
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
         | "history" | "echo" | "clear" | "input" => Risk::Safe,
@@ -298,6 +303,7 @@ mod tests {
                     | "rm"
                     | "reboot"
                     | "halt"
+                    | "tcp"
                     | "help"
                     | "ver"
                     | "arch"

@@ -33,6 +33,7 @@ mod frames;
 mod fwcfg;
 mod hal;
 mod heap;
+mod netstatic;
 mod pci;
 mod semihosting;
 mod shellio;
@@ -879,7 +880,14 @@ pub extern "C" fn kmain() -> ! {
                 kprintln!("  [FAIL {:>2}] {}", n, name);
             }
         }) {
-            Ok(n) => kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n),
+            Ok((n, dev)) => {
+                kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n);
+                // Keep the device the suite just proved (ADR-140): a kernel that proves
+                // its network and then drops it has no network.
+                // SAFETY: boot path, single-threaded, before any other context can reach
+                // the static.
+                unsafe { crate::netstatic::keep(dev) };
+            }
             Err((idx, name)) => {
                 kprintln!("[net] FAILED at network invariant {}: {}", idx, name);
                 semihosting::exit(220 + idx as i32);

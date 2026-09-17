@@ -15,7 +15,7 @@ process and thread model, a filesystem with a user profile, a full TLS stack, an
 of roughly Chromium's size.
 
 Aletheia is a `no_std` bare-metal Rust kernel. It has no libc, no C++ runtime, no hosted process
-model, and — still the decisive gap — **no TLS**. The network stack is virtio-net, ARP, DHCP, UDPv4
+model, and — now the decisive gap — **no TLS**. The network stack is virtio-net, ARP, DHCP, UDPv4
 and, since ADR-138, **TCP** (`kernel-core/src/virtionet.rs`, `arpcache.rs`, `dhcp.rs`, `udpv4.rs`,
 `tcp.rs`, `tcpconn.rs`). The TCP that exists is the transport's CONTRACT — a bounded state machine
 proved at boot on all three CPUs — and it is not yet attached to virtio-net, so no live machine
@@ -24,7 +24,8 @@ opens a socket yet.
 A browser needs, in order: TCP, TLS, HTTP, a URL/resource fetch model, a content parser, a layout
 engine, and a renderer that can reach the compositor. Aletheia has the compositor, the window
 manager and the surfaces (ADR-077 through ADR-137). Of the seven things above it now has the first
-one, as a contract rather than as a live socket; the other six are not started.
+one for real — a live TCP conversation with a peer this repository did not write — and the other
+six are not started.
 
 So "make Lethe built in" decomposes into two honest tracks, and this page keeps them apart.
 
@@ -52,7 +53,7 @@ why they are worth doing in this order rather than chasing the browser directly.
 
 | Stage | What it is | Status |
 |---|---|---|
-| N1 | **TCP** over the existing IPv4/virtio-net path: connection state machine, retransmission, windowing, teardown, all fail-closed and proved at boot like every other contract here | **DELIVERED (ADR-138)** — the transport's contract, as a bounded state machine with no device in it: `kernel-core/src/tcp.rs` + `kernel-core/src/tcpconn.rs`, 24 boot invariants on all three CPUs (`tcp=9`, `tcpconn=15`). Not yet attached to virtio-net: no live machine opens a socket, so what holds is the contract, not yet a conversation |
+| N1 | **TCP** over the existing IPv4/virtio-net path: connection state machine, retransmission, windowing, teardown, all fail-closed and proved at boot like every other contract here | **DELIVERED (ADR-138/139/140)** — the transport's contract as a bounded state machine with no device in it (`tcp.rs` + `tcpconn.rs`, 24 boot invariants on all three CPUs), the join to a real link (`tcpnet.rs`, 3 more), and a LIVE conversation: the console's `tcp ADDR PORT TEXT` dials a real socket server on the host in `scripts/tcp-e2e.sh`, and the peer's own answer comes back on the serial line. One connection at a time, no listening socket, no DNS |
 | N2 | **TLS 1.3 client**: certificate validation against a pinned trust root, no downgrade path | not started |
 | N3 | **HTTP/1.1 client** over N1+N2, bounded by construction (no unbounded response buffering on a heap that never frees — ADR-063) | not started |
 | N4 | **A browser window in the desktop**: a managed window like the terminal and monitor, owning a URL/navigation state model, driven by the existing window manager and input session | not started |

@@ -776,6 +776,23 @@ pub trait ShellHost {
     fn input_dropped(&self) -> u64 {
         0
     }
+    /// Open a TCP connection to `ip:port`, send `request`, and copy the peer's answer into
+    /// `reply`, returning how many bytes came back (ADR-140).
+    ///
+    /// Defaulted to a named refusal because most machines this console runs on have no network
+    /// device: a target with no NIC says so rather than reporting a zero-length answer that would
+    /// look like a peer with nothing to say. The target owns the device, chooses the initial
+    /// sequence number, and bounds the wait; the console only asks.
+    fn tcp_fetch(
+        &self,
+        _ip: [u8; 4],
+        _port: u16,
+        _request: &[u8],
+        _reply: &mut [u8],
+    ) -> Result<usize, &'static str> {
+        Err("this machine has no network device")
+    }
+
     /// The machine's live input session, if the target installed one (ALET-P2-021's hardware
     /// rung, ADR-080). Default `None` — a target with no desktop says so instead of reporting
     /// zeros that would look like a session nobody can steer.
@@ -842,6 +859,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "input",
         "the machine's input session: cursor, focus, counters",
+    ),
+    (
+        "tcp ADDR PORT TEXT",
+        "open a TCP connection, send TEXT, print what comes back",
     ),
     (
         "mlstat",
@@ -1211,6 +1232,42 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             report_risk_advisor(out);
+        }
+        "tcp" => {
+            // A network conversation is a WRITE to the world, not an inspection of this machine:
+            // it announces this host to a peer that did not ask. Authorized as such.
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let (addr, tail) = split_first(rest);
+            let (port_text, text) = split_first(tail);
+            let Some(ip) = parse_ipv4_address(addr) else {
+                out("usage: tcp ADDR PORT TEXT (ADDR is dotted quad, e.g. 10.0.2.2)");
+                return Outcome::Continue;
+            };
+            let Ok(port) = port_text.parse::<u16>() else {
+                out("usage: tcp ADDR PORT TEXT (PORT is 1..65535)");
+                return Outcome::Continue;
+            };
+            if port == 0 || text.is_empty() {
+                out("usage: tcp ADDR PORT TEXT (PORT is 1..65535, TEXT is what to send)");
+                return Outcome::Continue;
+            }
+            // Bounded here as well as inside the stack: the console prints what comes back, and a
+            // terminal is not a place to put an unbounded answer.
+            let mut reply = [0u8; 512];
+            match host.tcp_fetch(ip, port, text.as_bytes(), &mut reply) {
+                Ok(n) => {
+                    outf!(out, "tcp {}: {} byte(s) back", port, n);
+                    match core::str::from_utf8(&reply[..n]) {
+                        Ok(answer) => out(answer),
+                        // A peer may answer with anything at all. Bytes that would drive the
+                        // terminal are shown, never executed (the same rule the file panel keeps).
+                        Err(_) => out("(the answer is not text)"),
+                    }
+                }
+                Err(why) => outf!(out, "tcp: {}", why),
+            }
         }
         "lsblk" => {
             if !authorize(host, ShellAction::Inspect, out) {
@@ -1758,6 +1815,28 @@ impl Session {
     pub fn prompt(&mut self, out: &mut dyn FnMut(&str)) {
         self.started = true;
         out(PROMPT);
+    }
+}
+
+/// Parse a dotted-quad IPv4 address, refusing everything that is not one.
+///
+/// Deliberately strict: four parts, each a decimal number that fits a byte, nothing else. A
+/// console that accepts `10.0.2` and guesses is a console that connects somewhere the operator did
+/// not name.
+pub fn parse_ipv4_address(text: &str) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut seen = 0usize;
+    for part in text.split('.') {
+        if seen == 4 || part.is_empty() || part.len() > 3 {
+            return None;
+        }
+        out[seen] = part.parse::<u8>().ok()?;
+        seen += 1;
+    }
+    if seen == 4 {
+        Some(out)
+    } else {
+        None
     }
 }
 
@@ -2353,7 +2432,38 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
         usage_ok
     );
 
-    // 41. A command line ends on return, and on nothing else. The desktop's file panel is
+    // 41. The `tcp` command refuses everything that is not an address and a port, by name, before
+    //      anything is put on a wire. A console that guesses at `10.0.2` connects somewhere the
+    //      operator did not name.
+    let bad_addresses = [
+        "",
+        "10.0.2",
+        "10.0.2.2.2",
+        "10.0.2.300",
+        "ten.zero.two.two",
+        "10..2.2",
+    ];
+    let mut address_ok = parse_ipv4_address("10.0.2.2") == Some([10, 0, 2, 2])
+        && parse_ipv4_address("0.0.0.0") == Some([0, 0, 0, 0])
+        && parse_ipv4_address("255.255.255.255") == Some([255, 255, 255, 255]);
+    for bad in bad_addresses {
+        address_ok &= parse_ipv4_address(bad).is_none();
+    }
+    check!(
+        "console: an address that is not a dotted quad is refused rather than guessed at",
+        address_ok
+    );
+
+    // 42. A machine with no network says so. The default host seam refuses by name, so a target
+    //      without a NIC cannot report a zero-length answer that reads as a silent peer.
+    let (log, _) = transcript("tcp 10.0.2.2 7 hello\r", host, &mut fs, dev);
+    let (usage, _) = transcript("tcp 10.0.2.2 hello\r", host, &mut fs, dev);
+    check!(
+        "console: tcp refuses a bad port by usage and a missing network by name",
+        usage.contains("usage: tcp") && (log.contains("tcp: ") || log.contains("byte(s) back"))
+    );
+
+    // 43. A command line ends on return, and on nothing else. The desktop's file panel is
     //     refreshed off this predicate (ADR-137), so a byte that wrongly counted as a line end
     //     would read the directory on every keystroke a human types.
     check!(
@@ -2366,7 +2476,7 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && !ends_a_command(b' ')
     );
 
-    // 42. The serviced loop hands the namespace out once before the first prompt and once per
+    // 44. The serviced loop hands the namespace out once before the first prompt and once per
     //     completed line — never mid-line. This is what lets a GUI panel show the namespace
     //     without ever holding the filesystem itself.
     let mut phases: Vec<ServicePhase> = Vec::new();

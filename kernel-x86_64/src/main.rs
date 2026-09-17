@@ -40,6 +40,7 @@ mod heap;
 mod hwpm;
 mod idt;
 mod kmap;
+mod netstatic;
 mod pci;
 mod pic;
 mod pit;
@@ -1208,7 +1209,14 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                     kprintln!("  [FAIL {:>2}] {}", n, name);
                 }
             }) {
-                Ok(n) => kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n),
+                Ok((n, dev)) => {
+                    kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n);
+                    // Keep the device the suite just proved (ADR-140): a kernel that proves
+                    // its network and then drops it has no network.
+                    // SAFETY: boot path, single-threaded, before any other context can reach
+                    // the static.
+                    unsafe { crate::netstatic::keep(dev) };
+                }
                 Err((idx, name)) => {
                     kprintln!("[net] FAILED at network invariant {}: {}", idx, name);
                     ActiveHal::exit(220 + idx as i32);

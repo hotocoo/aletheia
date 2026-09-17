@@ -375,6 +375,11 @@ CONTRACT=(
   "tcpconn: two hundred segments in and out allocate nothing at all"
 
 
+
+  # The console can open a real connection (ADR-140): the same refusals on every CPU.
+  "console: an address that is not a dotted quad is refused rather than guessed at"
+  "console: tcp refuses a bad port by usage and a missing network by name"
+
   # Where TCP meets a real link (ADR-139): the join is bounded on every CPU, with no device in
   # the proof.
   "tcpnet: a request goes out over the link and the peer's answer comes back"

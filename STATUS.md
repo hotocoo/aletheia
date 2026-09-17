@@ -33,7 +33,21 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-17, latest (TCP MEETS THE LINK — ADR-139 gives the transport somewhere to run
+**As of:** 2026-09-17, latest (THE FIRST LIVE TCP CONVERSATION — ADR-140. This kernel has now
+spoken TCP to a program it did not write, driven by a person at a console. `net_suite` hands the
+proved device back instead of consuming the only NIC (the kernel used to prove its network and then
+have none), each target keeps it in a boot-written static that only the console's thread reads, and
+the console gained one command: `tcp ADDR PORT TEXT`. Every bound is this machine's — the local
+port, an initial sequence number drawn from the clock because it must be unpredictable on a real
+network, a fifth-of-a-second retransmission timeout, a poll budget and a 512-byte reply — so a peer
+can make this slow but cannot make it unbounded. The new gate `scripts/tcp-e2e.sh` (in CI) starts a
+REAL socket server on the host loopback and dials it from the guest through QEMU's user network:
+the peer's own transcript shows the request arriving, and the answer the PEER prefixes comes back on
+the serial line, so a console echoing its own input cannot pass. A port nobody listens on is refused
+by name rather than hanging. `tcp` is classified DESTRUCTIVE for hosted approval: nothing on the
+medium changes, and it is outward facing — it announces this machine to a peer that did not ask.
+2 new console invariants (`console=46`) on all three CPUs. Still absent above the transport: no
+TLS, no HTTP, no DNS, one connection at a time, no listening socket. Previously: TCP MEETS THE LINK — ADR-139 gives the transport somewhere to run
 without giving the driver an opinion about TCP. `kernel-core/src/tcpnet.rs` names what a TCP client
 needs from a network as an `Ipv4Link` of exactly three methods (send a datagram, take one addressed
 to us, say our own address) and carries one request/response conversation over it inside a BUDGET of
@@ -1028,6 +1042,17 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-17 — the first live TCP conversation (ADR-140)
+
+- After ADR-138 and ADR-139 this kernel had proved a transport and a join, and had still never opened a socket. It also had a plain defect in the network bring-up: `net_suite` **consumed** the device, so the kernel proved its network and then had none.
+- `net_suite` now hands the device back, each target keeps it in `netstatic.rs` (one static, written once at boot, read only by the console's own thread between keystrokes — the desktop singleton's posture, for the same reason), and the console gained `tcp ADDR PORT TEXT` through a new defaulted `ShellHost::tcp_fetch`. A machine with no NIC keeps the default, which is a **named refusal** rather than a zero-length answer that would read as a silent peer.
+- **Every bound is this machine's, not the peer's:** the local port walks upward per connection, the initial sequence number is drawn from the clock (it must be unpredictable on a real network), the retransmission timeout is a fifth of a second, the poll budget is fixed, and the reply buffer is 512 bytes. A peer can make this slow; it cannot make it unbounded. A non-text answer is named rather than executed — a peer's answer is the least trustworthy input this machine has.
+- **`scripts/tcp-e2e.sh` is the proof, and it does not mock the peer.** It starts a real socket server on the host loopback; QEMU's user network maps `10.0.2.2` to that host. A scripted operator types `tcp 10.0.2.2 1 nobody-listens-here` (which must be refused BY NAME, not by a hang) and then dials the live peer. Three separate things are asserted: the console printed an answer, the answer carries a prefix **the peer added** (so a console echoing its own input cannot pass), and the peer's own transcript shows the request arriving. Serial in, TCP out, TCP in, serial out. Both device-tree targets, and the job runs in CI.
+- `tcp` is classified **destructive** for hosted approval (`aletheia/src/console_ops.rs`). Nothing on the medium changes; the classification is still right, because the command is outward facing.
+- 2 new console invariants (`console=46`) on all three CPUs: an address that is not a dotted quad is refused rather than guessed at, and a bad port is refused by usage while a missing network is refused by name.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS, tcp-e2e PASS on both DT targets, console-e2e PASS, quality-gate PASS, doc gates PASS**.
+- **Named as still open:** no TLS, no HTTP, no DNS (the operator types an address), one connection at a time, no listening socket, and the live gate covers the two device-tree targets while x86-64 runs the identical code path.
 
 ### 2026-09-17 — where TCP meets the link (ADR-139)
 
