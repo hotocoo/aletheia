@@ -908,6 +908,52 @@ pub extern "C" fn kmain() -> ! {
         },
     }
 
+    // TCP (REQ-NET-004, ADR-138): the transport every protocol a browser needs sits on, proved as
+    // BYTES (the wire: checksum over the pseudo-header, an offset that cannot lie, wrapping
+    // sequence arithmetic) and as a STATE MACHINE (the connection: what is acceptable, what an
+    // acknowledgement means, when a segment is retransmitted, and when a peer is declared gone).
+    // Neither half touches the NIC, so both hold on a machine with no network attached.
+    kprintln!("");
+    kprintln!(
+        "--- tcp wire selftests (segments parsed fail-closed, built with a correct checksum) ---"
+    );
+    match kernel_core::tcp::tcp_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[tcp] ALL {} TCP-WIRE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[tcp] FAILED at tcp-wire invariant {}: {}", idx, name);
+            ActiveHal::exit(720 + idx as i32);
+        }
+    }
+
+    kprintln!("");
+    kprintln!("--- tcp connection selftests (a bounded state machine against a hostile peer) ---");
+    match kernel_core::tcpsuite::tcpconn_suite(
+        &mut || crate::heap::used_bytes(),
+        |n, passed, name| {
+            if passed {
+                kprintln!("  [pass {:>2}] {}", n, name);
+            } else {
+                kprintln!("  [FAIL {:>2}] {}", n, name);
+            }
+        },
+    ) {
+        Ok(n) => kprintln!("[tcpconn] ALL {} TCP-CONNECTION INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[tcpconn] FAILED at tcp-connection invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(740 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu device, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the

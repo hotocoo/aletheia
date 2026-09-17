@@ -346,6 +346,34 @@ CONTRACT=(
   "console: a command line ends on return and on no other byte"
   "console: the serviced loop settles once before the prompt and once per command line"
 
+
+  # TCP, the transport a browser needs (ADR-138, Lethe stage N1): the same bytes refused and the
+  # same state machine on every CPU, with no network device in the proof.
+  "tcp: a built segment parses back to exactly what was written"
+  "tcp: a segment with any flipped byte is refused by checksum, not read"
+  "tcp: a segment re-addressed in flight fails the pseudo-header checksum"
+  "tcp: a data offset below the header or past the buffer is refused by name"
+  "tcp: fewer bytes than a header is refused as too short"
+  "tcp: sequence comparison is wrapping, and a zero window contains nothing"
+  "tcp: a segment's sequence length counts SYN and FIN as well as its bytes"
+  "tcp: an urgent segment and a zero port are refused by name"
+  "tcp: a buffer too small refuses and writes nothing at all"
+  "tcpconn: a closed connection transmits nothing and refuses to send by name"
+  "tcpconn: open sends one SYN and stays quiet until the timer expires"
+  "tcpconn: an unanswered SYN is retransmitted to the budget, then the peer is gone"
+  "tcpconn: only a SYN+ACK acknowledging our own SYN opens the connection"
+  "tcpconn: data is sent one MSS at a time and an acknowledgement frees exactly its bytes"
+  "tcpconn: a zero window stops data, and the bytes stay staged rather than lost"
+  "tcpconn: an acknowledgement of data never sent is refused and changes nothing"
+  "tcpconn: in-order data is readable once and acknowledged by exactly its length"
+  "tcpconn: an out-of-order segment is dropped, re-acknowledged and counted"
+  "tcpconn: data with no room is dropped without acknowledging it"
+  "tcpconn: a reset ends the connection by name and it transmits nothing after"
+  "tcpconn: a close sends FIN after the staged bytes and walks to TIME-WAIT"
+  "tcpconn: the peer's FIN opens CLOSE-WAIT, and ours closes the connection from there"
+  "tcpconn: a segment for another port pair is refused by name and not counted as ours"
+  "tcpconn: two hundred segments in and out allocate nothing at all"
+
   # Windows are a managed set (ADR-084): the same routing decision on every CPU.
   "wm: the close box, the drag band and the client area are exactly the painted chrome"
   "wm: a press in the overlap routes to the topmost window and raises it, alone"

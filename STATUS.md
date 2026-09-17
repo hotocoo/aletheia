@@ -33,7 +33,24 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-17, latest (THE FILE PANEL AND THE NAMESPACE CROSSING — ADR-137 gives the
+**As of:** 2026-09-17, latest (TCP, THE TRANSPORT A BROWSER NEEDS — ADR-138 closes stage N1 of
+`docs/LETHE-INTEGRATION.md`, which that page named as the blocker for everything below it. TCP
+arrives the way every other contract in this tree arrives: as a bounded model with no device in it.
+`kernel-core/src/tcp.rs` is the wire (a data offset that lies about the buffer is refused, the
+checksum is verified over the pseudo-header so a segment re-addressed in flight cannot verify, and
+sequence numbers are compared as WRAPPING differences rather than integers); `kernel-core/src/
+tcpconn.rs` is the connection (RFC 793's client states over fixed send and receive buffers, a fixed
+retransmission timeout, and a budget after which a silent peer is declared gone BY NAME rather than
+waited on forever). Nothing is reassembled, and data the receive buffer cannot keep is never
+acknowledged — a stack that acknowledges what it dropped has lost it silently. 24 new boot
+invariants (`tcp=9`, `tcpconn=15`) hold on all three CPUs, proved by driving REAL bytes through the
+real builder and parser; the conformance contract grew 228 -> 252 core behaviours. The allocation
+claim is measured, not asserted: two hundred segments in and out move the platform's own heap
+watermark by zero. Host tests flip every single BIT of a valid segment (all refused), drop every
+third segment on a scripted peer (every byte still arrives in order), and stall a peer completely
+(the connection ends inside its budget). **Not yet attached to virtio-net:** no live machine opens
+a socket in this wave, so what is delivered is the transport's contract, and the integration page
+says exactly that. Previously: THE FILE PANEL AND THE NAMESPACE CROSSING — ADR-137 gives the
 desktop a fourth managed window that shows what is on the disk, without giving the desktop a disk.
 `kernel-core/src/filepanel.rs` is a bounded, allocation-free MODEL: it allocates once at
 construction, reuses that row storage for every listing, and is total on an empty listing, on one
@@ -1000,6 +1017,18 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-17 — TCP: the transport a browser needs, as a bounded state machine (ADR-138)
+
+- `docs/LETHE-INTEGRATION.md` named TCP as **the blocker for everything below it** — stages N2 (TLS 1.3) through N6 (Lethe's policy contract adopted natively) all sit on a transport this tree did not have. This wave delivers it, and the page now says so rather than claiming more than that.
+- **Two modules, split so neither needs the other to be provable.** `kernel-core/src/tcp.rs` is the wire: parsing that refuses rather than reads (a data offset that lies about the buffer, a checksum that does not verify over the pseudo-header, a zero port, an urgent pointer this stack has no channel for), building that writes both checksums correctly or writes nothing at all, and sequence arithmetic done as **wrapping differences** — `a < b` on `u32` is wrong exactly at the wrap, which is unreachable by casual testing and reachable by a peer. `kernel-core/src/tcpconn.rs` is the connection: RFC 793's client states, fixed buffers, a fixed retransmission timeout and a retransmission budget.
+- **No device in the proof.** The connection is fed parsed segments and hands back bytes to transmit; it never touches virtio-net, so it holds on a machine with no NIC attached and a slow device can never be a stalled state machine. Same posture as the file panel owning no block device (ADR-137).
+- **Four bounds, each a named refusal rather than a silent drop:** nothing is reassembled (an out-of-order segment is dropped and re-acknowledged, so the peer's retransmission is what makes progress); data with no room does NOT advance the acknowledgement, so the peer sends it again after the application reads; a peer that stops acknowledging is declared gone after the budget; and nothing is allocated after construction, measured against the platform's own heap watermark across two hundred segments in and out.
+- New boot families `tcp=9` and `tcpconn=15` on all three CPUs. The suite drives **real bytes**: every step builds a segment with the builder, parses it with the parser, and hands the view to the connection, so a connection cannot pass while disagreeing with what is on the wire. Conformance contract **228 -> 252** core behaviours.
+- Host tests (`kernel-core/tests/tcp.rs`) attack the same code from the other side: every single **bit** of a valid segment is flipped and must be refused; a scripted peer drops every third segment and every byte still arrives in order, with retransmits counted; a peer that stops acknowledging ends the connection inside its budget instead of spinning; and a full receive buffer defers data rather than losing it.
+- **A defect the host tests found and closed:** a connection opened at tick zero had no "one timeout ago" to point at, so its first SYN waited a whole retransmission timeout. The handshake now carries an explicit `syn_due` fact rather than inferring urgency from a timer that has not started.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64) PASS, vm-e2e-riscv PASS, vm-e2e-x86 PASS, conformance PASS (252 behaviours on all three targets), quality-gate PASS, and the four doc gates PASS**.
+- **Named as still open:** the connection is not attached to virtio-net, so no live machine opens a socket yet; there is no listening socket, no selective acknowledgement, no window scaling, no RTT estimation and no congestion control beyond the peer's advertised window; and stages N2 through N6 of the Lethe integration remain not started.
 
 ### 2026-09-17 — the file panel, and the namespace crossing that feeds it (ADR-137)
 
