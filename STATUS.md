@@ -33,7 +33,22 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-18, latest (THE TLS 1.3 KEY SCHEDULE — ADR-141 starts Lethe stage N2 at the
+**As of:** 2026-09-18, latest (X25519, THE KEY EXCHANGE — ADR-142 gives stage N2 its second rung:
+RFC 7748's Montgomery ladder over GF(2^255-19), with fixed 255 iterations, a masked conditional swap
+rather than a branch, a fixed inversion chain, no allocation, clamping inside the function and the
+peer's high bit masked. The part that matters most is a REFUSAL: an all-zero shared secret is
+`X25519Refusal::SmallOrder`, because RFC 8446 §7.4.2 requires aborting there — a peer sending a
+small-order point is making both sides agree on a key it already knows, and an implementation that
+returns those 32 zero bytes has handed its caller a key that works perfectly and protects nothing.
+The zero test is constant-time, because branching on it would leak which peers are hostile. 7 new
+boot invariants (`x25519=7`) on all three CPUs against RFC 7748's published vectors; conformance
+266 -> 273 core behaviours. The host tests pin public keys and shared secrets against OpenSSL
+through Python's `cryptography`, refuse ALL SEVEN published small-order points, and run RFC 7748's
+iterated ladder a thousand rounds — an error anywhere in the field arithmetic diverges under
+iteration and never comes back. The first run found one: the ladder constant was 121666 rather than
+a24 = 121665, and every vector failed at once, which is why the vectors are in the boot suite rather
+than in a comment. **This kernel still cannot speak TLS:** no record layer, no handshake state
+machine, no certificates, no trust root. Previously: THE TLS 1.3 KEY SCHEDULE — ADR-141 starts Lethe stage N2 at the
 part where a mistake is invisible. A wrong length is a failed handshake; a wrong ORDER is a key
 derived from zeros that looks exactly like a correct key to every test written about it, and only
 the peer can tell. So `kernel-core/src/hkdf.rs` is a state machine, not a bag of functions: Early ->
@@ -1056,6 +1071,17 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-18 — X25519, the key exchange (ADR-142)
+
+- ADR-141 built the schedule that turns a shared secret into traffic keys and left the shared secret undefined. `kernel-core/src/x25519.rs` is RFC 7748's Montgomery ladder over GF(2^255-19), field elements as five 51-bit limbs so every product fits a `u128` and every sum fits a `u64`.
+- **The properties are stated rather than implied**, because the ones easy to lose are the ones a reader cannot see: fixed 255 iterations whatever the scalar, a conditional swap that is a mask rather than an `if`, a fixed inversion chain rather than a loop over exponent bits, no allocation, clamping inside the function (a caller who forgets is not a caller who gets a different answer), and the peer's high bit masked as the RFC requires.
+- **The refusal is the point.** `x25519` returns a `Result`, and an all-zero shared secret is `SmallOrder`. RFC 8446 §7.4.2 requires aborting: the all-zero output happens when the peer sends a point of small order, which is a cheap remote way to make both sides agree on a key the attacker already knows. An implementation that returns those zeros has handed its caller a key that works and protects nothing. The zero test is constant-time — branching on the secret would leak which peers are hostile, and the answer is a refusal either way.
+- New boot family `x25519=7` on all three CPUs: RFC 7748 §6.1's published pairs in both directions, §5.2's scalar-multiplication vector, the small-order refusal, clamping, the masked high bit, and sensitivity. Conformance contract **266 -> 273** core behaviours.
+- **Cross-implementation agreement on the host** (`kernel-core/tests/x25519.rs`): public keys and shared secrets for four key pairs taken from OpenSSL through Python's `cryptography`, **all seven** published small-order points refused by name, and RFC 7748's iterated ladder run **a thousand rounds**, matching at round 1 and round 1000. An error anywhere in the field arithmetic diverges under iteration and never comes back, which makes that one test worth more than any number of single-shot vectors.
+- **A defect the vectors caught immediately:** the ladder constant was written 121666 rather than a24 = (A-2)/4 = 121665. Every vector failed at once. That is why the published vectors are in the boot suite rather than in a comment.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (273 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** no record layer over the AEAD, no handshake state machine, no certificate parsing or signature verification, no trust root — this kernel cannot speak TLS, and the integration page says so.
 
 ### 2026-09-18 — the TLS 1.3 key schedule (ADR-141)
 

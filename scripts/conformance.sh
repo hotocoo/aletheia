@@ -381,6 +381,17 @@ CONTRACT=(
   "console: tcp refuses a bad port by usage and a missing network by name"
 
 
+
+  # The key exchange (ADR-142): the same published vectors and the same small-order refusal
+  # on every CPU.
+  "x25519: the base point derives RFC 7748's published public keys"
+  "x25519: both sides of RFC 7748's exchange reach the published shared secret"
+  "x25519: RFC 7748's scalar-multiplication vector holds exactly"
+  "x25519: a small-order peer key is refused by name rather than yielding zeros"
+  "x25519: the scalar is clamped inside the function, exactly as RFC 7748 says"
+  "x25519: the high bit of a peer's u-coordinate is masked off, as the RFC requires"
+  "x25519: a different private scalar reaches a different secret, and both sides agree"
+
   # The TLS 1.3 key schedule (ADR-141): the same derivations, the same order, the same
   # refusals on every CPU.
   "hkdf: extraction and expansion match RFC 5869's published vector"

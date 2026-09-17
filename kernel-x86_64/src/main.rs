@@ -1313,6 +1313,31 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // The KEY EXCHANGE (REQ-SEC-TLS-002, ADR-142, Lethe stage N2's second rung): RFC 7748's
+    // Montgomery ladder, with the small-order refusal RFC 8446 requires. A peer that sends a
+    // point of small order is trying to make both sides agree on a key it already knows; an
+    // implementation that returns the all-zero secret has handed the caller a working, worthless
+    // key.
+    kprintln!("");
+    kprintln!("--- key-exchange selftests (X25519: RFC 7748 vectors, small-order refused) ---");
+    match kernel_core::x25519::x25519_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[x25519] ALL {} KEY-EXCHANGE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[x25519] FAILED at key-exchange invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(800 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu function, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the
