@@ -383,6 +383,19 @@ CONTRACT=(
 
 
 
+
+  # The TLS 1.3 handshake (ADR-144): the same order, the same downgrade check, and the same
+  # fail-closed peer verification on every CPU.
+  "tlshandshake: the ClientHello offers exactly one suite, one group and one scheme"
+  "tlshandshake: a TLS 1.3 ServerHello derives handshake keys that did not exist before"
+  "tlshandshake: RFC 8446's downgrade sentinel ends the handshake by name"
+  "tlshandshake: a suite this client did not offer is refused by name"
+  "tlshandshake: with no verifier installed the peer is refused and no traffic keys exist"
+  "tlshandshake: a message out of order ends the handshake rather than being processed"
+  "tlshandshake: a length field that lies about the buffer is refused by name"
+  "tlshandshake: the transcript binds the keys to every byte of what was said"
+  "tlshandshake: the Finished value is deterministic over the transcript and compared in constant time"
+
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.
   "tlsrecord: a sealed record opens to the same bytes and the same inner content type"

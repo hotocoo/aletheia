@@ -88,6 +88,7 @@ pub mod tcpnet;
 pub mod tcpsuite;
 pub mod teardown;
 pub mod textgrid;
+pub mod tlshandshake;
 pub mod tlsrecord;
 pub mod udpv4;
 pub mod usermem;

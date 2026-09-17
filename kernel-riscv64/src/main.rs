@@ -1053,6 +1053,31 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // The TLS 1.3 HANDSHAKE (REQ-SEC-TLS-004, ADR-144, stage N2's fourth rung). The rung that
+    // matters most here is a REFUSAL: this client cannot reach application traffic without a
+    // certificate verifier, and the only verifier this kernel ships refuses everything. A
+    // handshake that completed without checking who it is talking to would look encrypted and
+    // protect nothing, so the suite proves that no sequence of messages reaches traffic keys.
+    kprintln!("");
+    kprintln!("--- handshake selftests (TLS 1.3: ordered, downgrade-checked, fail-closed) ---");
+    match kernel_core::tlshandshake::tlshandshake_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[tlshandshake] ALL {} HANDSHAKE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[tlshandshake] FAILED at handshake invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(840 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu device, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the

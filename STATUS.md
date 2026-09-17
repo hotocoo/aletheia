@@ -33,7 +33,21 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-18, latest (THE TLS 1.3 RECORD LAYER — ADR-143 builds the part of TLS where
+**As of:** 2026-09-18, latest (THE TLS 1.3 HANDSHAKE, BUILT SO IT CANNOT BE USED INSECURELY —
+ADR-144. A TLS handshake that completes without checking who it is talking to is worse than no TLS
+at all, because it looks encrypted, and certificate verification is the one step whose absence
+produces no error, no warning and no visible difference. This kernel has no X.509 parser, no
+signature verification and no trust root — so the handshake takes its verifier as a CONSTRUCTOR
+ARGUMENT, the only implementation in the tree refuses every peer, and `application_keys()` returns
+`None` on every path. The boot suite and a host test prove the negative directly: no sequence of
+messages, in any order, reaches application traffic keys. When a real verifier arrives it will be an
+addition rather than the removal of a guard someone has to remember. The rest is the usual shape:
+the offer is exactly one suite, one group, one signature scheme and one key share; RFC 8446's
+downgrade sentinels are checked (a client that ignores them can be talked down to TLS 1.2 by anyone
+in the path); every parse refuses rather than reads; the transcript binds the keys to every byte of
+what was said; Finished is compared in constant time. 9 new boot invariants (`tlshandshake=9`) on
+all three CPUs; conformance 282 -> 291 core behaviours. **This kernel still cannot speak TLS** —
+and now it cannot pretend to either. Previously: THE TLS 1.3 RECORD LAYER — ADR-143 builds the part of TLS where
 every mistake is silent. A sequence that does not advance reuses a nonce and lets anyone watching
 XOR two records together; a header that is not associated data lets an attacker rewrite a length in
 flight; a content type read from the OUTER header (which always says `application_data`) lets a peer
@@ -1086,6 +1100,19 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-18 — the TLS 1.3 handshake, built so it cannot be used insecurely (ADR-144)
+
+- The handshake drives the three rungs before it: ClientHello out, ServerHello in, keys derived from the transcript, the server's flight checked, Finished exchanged. It is also the rung where a partial implementation is **dangerous** rather than merely incomplete: a handshake that completes without checking who it is talking to looks encrypted and protects nothing, and the missing step produces no error, no warning and no visible difference.
+- This kernel has no X.509 parser, no signature verification and no trust root. So certificate verification is a **constructor argument** (`PeerVerifier`), the only implementation in the tree is `RefuseAllPeers`, and every handshake stops at the server's `Certificate` with `PeerUnverified`. `application_keys()` returns `None` on every path — proved as a NEGATIVE both in the boot suite and in a host test that walks every message type from every stage.
+- When a real verifier arrives it is an **addition**, not the removal of a guard someone has to remember. That is the difference between a fail-closed default and a documented caution.
+- The offer is exactly what this client can honour: one cipher suite (ChaCha20-Poly1305), one group (x25519), one signature scheme (Ed25519), one key share. Advertising more invites a server to choose something the client must then refuse.
+- **RFC 8446 §4.1.3's downgrade sentinels are checked.** A client that ignores them can be talked down to TLS 1.2 by anyone in the path, and everything above would still look like it worked.
+- Every parse refuses rather than reads (a lying length, a version that is not TLS 1.3, an unoffered suite or group, a malformed key share, a message out of order); the transcript binds the keys to every byte of what was said; Finished is compared in constant time, because a byte-by-byte early exit lets a peer learn the expected value one byte at a time.
+- New boot family `tlshandshake=9` on all three CPUs; conformance contract **282 -> 291** core behaviours.
+- **A trap this wave hit and closed, again:** the first version allocated an 80 KB workspace per handshake and the suite built ten, which exhausted the aarch64 kernel's heap exactly as ADR-137's file-panel suite once did. The workspace is now 18 KB and `restart` reuses it, so the suite allocates one.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (291 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** X.509 parsing, signature verification, a trust root and name checking — the verifier itself. Until it lands this kernel cannot speak TLS.
 
 ### 2026-09-18 — the TLS 1.3 record layer (ADR-143)
 
