@@ -33,7 +33,21 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-17, latest (THE FIRST LIVE TCP CONVERSATION — ADR-140. This kernel has now
+**As of:** 2026-09-18, latest (THE TLS 1.3 KEY SCHEDULE — ADR-141 starts Lethe stage N2 at the
+part where a mistake is invisible. A wrong length is a failed handshake; a wrong ORDER is a key
+derived from zeros that looks exactly like a correct key to every test written about it, and only
+the peer can tell. So `kernel-core/src/hkdf.rs` is a state machine, not a bag of functions: Early ->
+Handshake -> Master, with every out-of-order derivation a NAMED, counted refusal. HKDF's 255-block
+bound is enforced by a refusal rather than a wrapping counter (a counter that wraps repeats key
+material); a label too long for the wire format is refused rather than truncated (a truncated label
+is a different label, deriving a different key in silence); the `HkdfLabel` encoding is exposed so
+the bytes this kernel writes can be read rather than assumed. 9 new boot invariants (`hkdf=9`) on
+all three CPUs against RFC 5869's published vectors and RFC 8446's exact encoding; conformance
+257 -> 266 core behaviours. The host tests add what a boot suite cannot: the traffic keys and the
+full handshake/application secrets are checked against an INDEPENDENT implementation written from
+the RFCs, because a key schedule that agrees only with itself derives keys no peer can reproduce.
+**This kernel still cannot speak TLS:** no key exchange, no record layer, no handshake state
+machine, no certificates, no trust root. Previously: THE FIRST LIVE TCP CONVERSATION — ADR-140. This kernel has now
 spoken TCP to a program it did not write, driven by a person at a console. `net_suite` hands the
 proved device back instead of consuming the only NIC (the kernel used to prove its network and then
 have none), each target keeps it in a boot-written static that only the console's thread reads, and
@@ -1042,6 +1056,17 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-18 — the TLS 1.3 key schedule (ADR-141)
+
+- With stage N1 delivered, `docs/LETHE-INTEGRATION.md` names TLS 1.3 as the next blocker. A TLS client decomposes into a key schedule, a key exchange, a record layer, a handshake state machine and certificate verification; this wave takes the first, because it is the part where a mistake is **invisible**. A wrong length fails a handshake loudly. A wrong order derives a key from zeros that looks exactly like a correct one.
+- `kernel-core/src/hkdf.rs` is therefore a **state machine with named refusals**: Early -> Handshake -> Master, each stage's secrets existing only there, every out-of-order derivation counted. It is built entirely on primitives this kernel already proves at boot (SHA-256, HMAC-SHA-256 — ADR-069); nothing new is invented at the bottom, and nothing allocates.
+- **Bounds that are refusals, not comments:** HKDF's 255-block limit is enforced rather than reached by a wrapping counter (which would repeat key material); a label or context too long for `opaque label<7..255>` is refused rather than truncated; the per-record nonce is a function, because a nonce reused across two records under one key destroys the AEAD entirely.
+- `write_hkdf_label` is **exposed rather than hidden**. That encoding is the domain separation between TLS and everything else that expands a secret, and the only way to know which bytes this kernel writes is to be able to look at them.
+- New boot family `hkdf=9` on all three CPUs: RFC 5869's published vectors including the empty-salt case TLS starts from, RFC 8446's exact label bytes, the block bound, the over-long label refusal, the schedule's ordering, the distinctness of every derived secret, traffic keys plus record nonce, and determinism with one-bit sensitivity. Conformance contract **257 -> 266** core behaviours.
+- **Cross-implementation agreement** (`kernel-core/tests/hkdf.rs`): the traffic keys and the full client/server handshake and application secrets are pinned against values produced by an INDEPENDENT HKDF written from the RFCs in Python. A key schedule that agrees only with itself is invisible to any test it writes about itself.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (266 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** no key exchange (X25519), no record layer over the AEAD, no handshake state machine, no certificate parsing or signature verification, and no trust root — so this kernel cannot speak TLS, and the integration page says so rather than counting a key schedule as a client.
 
 ### 2026-09-17 — the first live TCP conversation (ADR-140)
 

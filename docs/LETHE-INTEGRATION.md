@@ -15,7 +15,7 @@ process and thread model, a filesystem with a user profile, a full TLS stack, an
 of roughly Chromium's size.
 
 Aletheia is a `no_std` bare-metal Rust kernel. It has no libc, no C++ runtime, no hosted process
-model, and — now the decisive gap — **no TLS**. The network stack is virtio-net, ARP, DHCP, UDPv4
+model, and — still the decisive gap — **no TLS** (the key schedule exists; the client does not). The network stack is virtio-net, ARP, DHCP, UDPv4
 and, since ADR-138, **TCP** (`kernel-core/src/virtionet.rs`, `arpcache.rs`, `dhcp.rs`, `udpv4.rs`,
 `tcp.rs`, `tcpconn.rs`). The TCP that exists is the transport's CONTRACT — a bounded state machine
 proved at boot on all three CPUs — and it is not yet attached to virtio-net, so no live machine
@@ -54,7 +54,7 @@ why they are worth doing in this order rather than chasing the browser directly.
 | Stage | What it is | Status |
 |---|---|---|
 | N1 | **TCP** over the existing IPv4/virtio-net path: connection state machine, retransmission, windowing, teardown, all fail-closed and proved at boot like every other contract here | **DELIVERED (ADR-138/139/140)** — the transport's contract as a bounded state machine with no device in it (`tcp.rs` + `tcpconn.rs`, 24 boot invariants on all three CPUs), the join to a real link (`tcpnet.rs`, 3 more), and a LIVE conversation: the console's `tcp ADDR PORT TEXT` dials a real socket server on the host in `scripts/tcp-e2e.sh`, and the peer's own answer comes back on the serial line. One connection at a time, no listening socket, no DNS |
-| N2 | **TLS 1.3 client**: certificate validation against a pinned trust root, no downgrade path | not started |
+| N2 | **TLS 1.3 client**: certificate validation against a pinned trust root, no downgrade path | **started (ADR-141)** — the KEY SCHEDULE is delivered and proved on all three CPUs (`hkdf=9`), with cross-implementation agreement on the host. Still missing: the key exchange (X25519), the record layer, the handshake state machine, certificate parsing and signature verification, and a trust root. This kernel cannot speak TLS yet |
 | N3 | **HTTP/1.1 client** over N1+N2, bounded by construction (no unbounded response buffering on a heap that never frees — ADR-063) | not started |
 | N4 | **A browser window in the desktop**: a managed window like the terminal and monitor, owning a URL/navigation state model, driven by the existing window manager and input session | not started |
 | N5 | **Content**: a bounded, fail-closed subset renderer into the window's `TextGrid` / compositor surface. This is where "a browser" starts being a real word | not started |

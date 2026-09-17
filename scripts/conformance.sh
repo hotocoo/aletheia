@@ -380,6 +380,19 @@ CONTRACT=(
   "console: an address that is not a dotted quad is refused rather than guessed at"
   "console: tcp refuses a bad port by usage and a missing network by name"
 
+
+  # The TLS 1.3 key schedule (ADR-141): the same derivations, the same order, the same
+  # refusals on every CPU.
+  "hkdf: extraction and expansion match RFC 5869's published vector"
+  "hkdf: an empty salt and empty info derive the published answer, not a special case"
+  "hkdf: expansion beyond 255 blocks is refused by name, never wrapped"
+  "hkdf: the TLS label structure is written exactly as RFC 8446 specifies"
+  "hkdf: a label or context that does not fit the wire format is refused, not truncated"
+  "hkdf: the schedule refuses every secret that belongs to a stage it has not reached"
+  "hkdf: the schedule walks its stages and every derived secret is distinct"
+  "hkdf: traffic keys derive, and the record nonce mixes the sequence into the IV"
+  "hkdf: derivation is deterministic, and one flipped bit changes every secret below it"
+
   # Where TCP meets a real link (ADR-139): the join is bounded on every CPU, with no device in
   # the proof.
   "tcpnet: a request goes out over the link and the peer's answer comes back"

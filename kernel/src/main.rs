@@ -959,6 +959,30 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // The TLS 1.3 KEY SCHEDULE (REQ-SEC-TLS-001, ADR-141, Lethe stage N2's first rung): HKDF over
+    // the SHA-256 this kernel already proves, and the ordered schedule RFC 8446 specifies. The
+    // order is the security argument - a traffic secret derived before the key exchange was mixed
+    // in is a key derived from zeros that looks exactly like a correct one.
+    kprintln!("");
+    kprintln!("--- key-derivation selftests (HKDF + the TLS 1.3 schedule: ordered, bounded) ---");
+    match kernel_core::hkdf::hkdf_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[hkdf] ALL {} KEY-DERIVATION INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[hkdf] FAILED at key-derivation invariant {}: {}",
+                idx,
+                name
+            );
+            semihosting::exit(780 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu device, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the
