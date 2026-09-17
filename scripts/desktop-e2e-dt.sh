@@ -105,16 +105,26 @@ def command(c):
         if 'session:' in tail and 'aletheia>' in tail: return tail
         time.sleep(.1)
     raise RuntimeError('serial command timed out: '+c)
+# The machine is ASYNCHRONOUS: a QMP-injected event reaches the device, and the desktop's pump
+# picks it up on its own tick. Asking once and asserting is a race that a loaded runner loses, so
+# every assertion about a device event re-reads the machine's own readout until it agrees or a
+# bound is spent. The bound is what turns "slow" into a failure instead of a hang.
+def eventually(pred, why, secs=20):
+    end=time.time()+secs; last=''
+    while time.time()<end:
+        last=command('input')
+        if pred(last): return last
+    raise RuntimeError('the machine never reported '+why+': '+last[-300:])
 t=txt(); assert '[desktop] LIVE:' in t; assert 'ALL 10 INPUT-HARDWARE INVARIANTS HOLD' in t
 o=command('input'); m=re.search(r'events posted (\d+) dropped (\d+)',o); assert m and m.group(1)=='0' and m.group(2)=='0'
 send([{'type':'abs','data':{'axis':'x','value':16384}},{'type':'abs','data':{'axis':'y','value':16384}}])
-o=command('input'); assert 'cursor: (320, 120) shown' in o
+eventually(lambda o: 'cursor: (320, 120) shown' in o, 'the pointer move')
 send([{'type':'btn','data':{'button':'left','down':True}}]); send([{'type':'btn','data':{'button':'left','down':False}}])
-o=command('input'); assert re.search(r'focus: surface \d+ \(0 queued\)',o)
+eventually(lambda o: re.search(r'focus: surface \d+ \(0 queued\)',o) is not None, 'the click')
 keys('help\n'); assert wait('commands:',30)
 # Exercise a desktop-only action through the real keyboard path; Alt+F9 must be consumed by the desktop.
 send([{'type':'key','data':{'down':True,'key':{'type':'qcode','data':'alt'}}},{'type':'key','data':{'down':True,'key':{'type':'qcode','data':'f9'}}},{'type':'key','data':{'down':False,'key':{'type':'qcode','data':'f9'}}},{'type':'key','data':{'down':False,'key':{'type':'qcode','data':'alt'}}}])
-time.sleep(.4); o=command('input'); assert 'windows:' in o
+eventually(lambda o: 'windows:' in o, 'the window set after Alt+F9')
 print('DESKTOP LIVE E2E: PASS')
 PY
   kill -9 "$pid" 2>/dev/null || true; trap - RETURN; rm -f "$qmp" "$ser"
