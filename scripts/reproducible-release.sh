@@ -31,6 +31,23 @@ echo "build 2: $TWO_SHA"
 
 if ! cmp -s "$ONE" "$TWO"; then
   echo "REPRODUCIBILITY: FAIL (same source/toolchain/config produced different release bytes)"
+  # Name WHICH file drifted. A digest that differs tells you the package is not reproducible; it
+  # does not tell you whether the cause is a compiler, an image writer or a timestamp, and the two
+  # builds are gone by the time anyone reads the log.
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -qo "$ONE" -d "$TMP/one-x" && unzip -qo "$TWO" -d "$TMP/two-x"
+    ( cd "$TMP/one-x" && find . -type f | sort ) > "$TMP/one-list"
+    ( cd "$TMP/two-x" && find . -type f | sort ) > "$TMP/two-list"
+    if ! cmp -s "$TMP/one-list" "$TMP/two-list"; then
+      echo "  the two packages do not even contain the same files:"
+      diff "$TMP/one-list" "$TMP/two-list" | head -20
+    fi
+    while IFS= read -r f; do
+      if ! cmp -s "$TMP/one-x/$f" "$TMP/two-x/$f"; then
+        echo "  DIFFERS: $f ($(wc -c < "$TMP/one-x/$f") vs $(wc -c < "$TMP/two-x/$f") bytes)"
+      fi
+    done < "$TMP/one-list"
+  fi
   exit 1
 fi
 if ! cmp -s "$TMP/one/aletheia-$VERSION-x86_64-vmware.zip.sha256" "$TMP/two/aletheia-$VERSION-x86_64-vmware.zip.sha256"; then
