@@ -382,6 +382,19 @@ CONTRACT=(
 
 
 
+
+  # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
+  # refusals on every CPU.
+  "tlsrecord: a sealed record opens to the same bytes and the same inner content type"
+  "tlsrecord: the outer type says application data while the inner type is the truth"
+  "tlsrecord: padding is inside the AEAD, changes the wire length, and is stripped exactly"
+  "tlsrecord: a flipped bit in the header, the ciphertext or the tag is refused, never read"
+  "tlsrecord: the sequence advances, so identical content is never identical on the wire"
+  "tlsrecord: a record opened out of order fails its tag rather than being accepted"
+  "tlsrecord: framing answers incomplete and bad-header without touching the AEAD"
+  "tlsrecord: an all-padding inner plaintext is a decode error, not an invented type"
+  "tlsrecord: a rekey resets the sequence and changes the bytes on the wire with it"
+
   # The key exchange (ADR-142): the same published vectors and the same small-order refusal
   # on every CPU.
   "x25519: the base point derives RFC 7748's published public keys"

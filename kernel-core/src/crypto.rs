@@ -439,6 +439,113 @@ fn aead_mac_data(aad: &[u8], ciphertext: &[u8]) -> Vec<u8> {
     mac
 }
 
+/// How much scratch [`aead_seal_into`] and [`aead_open_into`] need for a given AEAD input: the
+/// padded associated data, the padded ciphertext, and the two little-endian lengths.
+///
+/// Stated as a function because the record layer above this one allocates its workspace ONCE, at
+/// construction, on a heap that never frees (ADR-063) — and a buffer sized by guesswork there is a
+/// refusal on the first long record.
+pub fn aead_scratch_len(aad_len: usize, ciphertext_len: usize) -> usize {
+    aad_len.next_multiple_of(16) + ciphertext_len.next_multiple_of(16) + 16
+}
+
+/// Build RFC 8439's MAC input into the caller's buffer: AAD, padded to sixteen; ciphertext, padded
+/// to sixteen; then both lengths as little-endian 64-bit words. One implementation, used by the
+/// allocation-free path and (through it) by the allocating one, so the two cannot drift.
+fn write_mac_data(aad: &[u8], ciphertext: &[u8], out: &mut [u8]) -> Option<usize> {
+    let need = aead_scratch_len(aad.len(), ciphertext.len());
+    if out.len() < need {
+        return None;
+    }
+    out[..need].fill(0);
+    let mut n = 0;
+    out[n..n + aad.len()].copy_from_slice(aad);
+    n = aad.len().next_multiple_of(16);
+    out[n..n + ciphertext.len()].copy_from_slice(ciphertext);
+    n += ciphertext.len().next_multiple_of(16);
+    out[n..n + 8].copy_from_slice(&(aad.len() as u64).to_le_bytes());
+    out[n + 8..n + 16].copy_from_slice(&(ciphertext.len() as u64).to_le_bytes());
+    Some(need)
+}
+
+/// Authenticated encryption into the caller's buffers, allocating NOTHING.
+///
+/// `out` receives ciphertext || 16-byte tag and must be at least `plaintext.len() + 16`; `scratch`
+/// must be at least [`aead_scratch_len`]. Returns how many bytes were written.
+pub fn aead_seal_into(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    plaintext: &[u8],
+    out: &mut [u8],
+    scratch: &mut [u8],
+) -> Result<usize, AeadError> {
+    if out.len() < plaintext.len() + 16 {
+        return Err(AeadError::Truncated);
+    }
+    let poly_block = chacha20_block(key, 0, nonce);
+    let mut poly_key = [0u8; 32];
+    poly_key.copy_from_slice(&poly_block[..32]);
+
+    let blocks = plaintext.len().div_ceil(64);
+    for i in 0..blocks {
+        let ks = chacha20_block(key, 1 + i as u32, nonce);
+        let start = i * 64;
+        let end = core::cmp::min(start + 64, plaintext.len());
+        for (j, b) in plaintext[start..end].iter().enumerate() {
+            out[start + j] = b ^ ks[j];
+        }
+    }
+    let n = write_mac_data(aad, &out[..plaintext.len()], scratch).ok_or(AeadError::Truncated)?;
+    let tag = poly1305(&poly_key, &scratch[..n]);
+    out[plaintext.len()..plaintext.len() + 16].copy_from_slice(&tag);
+    Ok(plaintext.len() + 16)
+}
+
+/// Authenticated decryption into the caller's buffer, allocating NOTHING.
+///
+/// The tag is verified BEFORE any plaintext is written: a failed open leaves `out` untouched and
+/// yields [`AeadError::Authenticate`], never a decryption of unauthenticated data.
+pub fn aead_open_into(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    sealed: &[u8],
+    out: &mut [u8],
+    scratch: &mut [u8],
+) -> Result<usize, AeadError> {
+    if sealed.len() < 16 {
+        return Err(AeadError::Truncated);
+    }
+    let split = sealed.len() - 16;
+    let (ct, tag) = sealed.split_at(split);
+    if out.len() < ct.len() {
+        return Err(AeadError::Truncated);
+    }
+    let poly_block = chacha20_block(key, 0, nonce);
+    let mut poly_key = [0u8; 32];
+    poly_key.copy_from_slice(&poly_block[..32]);
+    let n = write_mac_data(aad, ct, scratch).ok_or(AeadError::Truncated)?;
+    let expected = poly1305(&poly_key, &scratch[..n]);
+    let mut diff = 0u8;
+    for i in 0..16 {
+        diff |= expected[i] ^ tag[i];
+    }
+    if diff != 0 {
+        return Err(AeadError::Authenticate);
+    }
+    let blocks = ct.len().div_ceil(64);
+    for i in 0..blocks {
+        let ks = chacha20_block(key, 1 + i as u32, nonce);
+        let start = i * 64;
+        let end = core::cmp::min(start + 64, ct.len());
+        for (j, b) in ct[start..end].iter().enumerate() {
+            out[start + j] = b ^ ks[j];
+        }
+    }
+    Ok(ct.len())
+}
+
 /// Authenticated encryption (RFC 8439): returns ciphertext || 16-byte tag. Block 0 of the
 /// keystream is the one-time Poly1305 key and encryption starts at block counter 1, so a caller
 /// must never reuse (key, nonce) — which is precisely what the constructed nonces upstream

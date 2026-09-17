@@ -33,7 +33,22 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-18, latest (X25519, THE KEY EXCHANGE — ADR-142 gives stage N2 its second rung:
+**As of:** 2026-09-18, latest (THE TLS 1.3 RECORD LAYER — ADR-143 builds the part of TLS where
+every mistake is silent. A sequence that does not advance reuses a nonce and lets anyone watching
+XOR two records together; a header that is not associated data lets an attacker rewrite a length in
+flight; a content type read from the OUTER header (which always says `application_data`) lets a peer
+claim a record is whatever it likes; a failed tag returned as a soft error gives an attacker one
+guess per record for the life of the connection. So each of those is an invariant rather than a
+comment: `kernel-core/src/tlsrecord.rs` is a pair of sequence-numbered state machines over the
+ChaCha20-Poly1305 this kernel already proves, the header IS the associated data, the real content
+type is the last non-zero byte of the decrypted inner plaintext, an all-padding inner plaintext is a
+decode error, a failed tag is FATAL, the sequence is refused rather than wrapped, and a rekey
+resets it only because the key changes with it. One allocation at construction; none per record,
+because the record rate is the peer's to choose. 9 new boot invariants (`tlsrecord=9`) on all three
+CPUs; conformance 273 -> 282 core behaviours. On the host it interoperates with OpenSSL in BOTH
+directions: it opens what OpenSSL sealed, and sealing the same content here produces exactly the
+same bytes. **This kernel still cannot speak TLS:** no handshake state machine, no certificates, no
+trust root. Previously: X25519, THE KEY EXCHANGE — ADR-142 gives stage N2 its second rung:
 RFC 7748's Montgomery ladder over GF(2^255-19), with fixed 255 iterations, a masked conditional swap
 rather than a branch, a fixed inversion chain, no allocation, clamping inside the function and the
 peer's high bit masked. The part that matters most is a REFUSAL: an all-zero shared secret is
@@ -1071,6 +1086,17 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-18 — the TLS 1.3 record layer (ADR-143)
+
+- A record layer is small — a five-byte header, an AEAD, a counter — and it is the part of TLS where the failures do not announce themselves. A sequence that does not advance reuses a nonce (and two records can then be XORed together by anyone watching); an unauthenticated header lets an attacker rewrite a length in flight; a content type read from the outer header lets a peer claim a record is anything; a failed tag returned softly gives an attacker one guess per record, forever.
+- `kernel-core/src/tlsrecord.rs` makes each of those an invariant: the header is the associated data, the real content type is the last non-zero byte of the decrypted inner plaintext (the outer byte always says `application_data`, which is what keeps the handshake's stage off the wire), padding is inside the AEAD, a failed tag is **fatal**, the sequence is refused rather than wrapped, and `rekey` resets the sequence only because the key changes with it.
+- **One allocation, at construction** (a 33 KB workspace); none per record, because the record rate is the peer's to choose and this heap never frees. `reset` reuses the workspace — which is also what keeps the boot suite to two layers instead of twenty-six, the same trap ADR-137's file-panel suite hit.
+- `kernel-core/src/crypto.rs` gained allocation-free AEAD entry points (`aead_seal_into`, `aead_open_into`, `aead_scratch_len`) over caller-owned buffers; the `Vec`-returning versions remain for callers off the hot path.
+- New boot family `tlsrecord=9` on all three CPUs; conformance contract **273 -> 282** core behaviours.
+- **Interoperability, both directions, on the host:** a record produced by OpenSSL over ADR-141's key schedule opens here byte for byte, and sealing the same content here produces exactly the same record. A layer that frames, pads or nonces differently from the specification is perfectly self-consistent and cannot talk to anything. The host tests also run a full-size 2^14 record, two thousand records with no repeated ciphertext and no lost ordering, and a sweep of **every single bit** of a record requiring each one to be authenticated.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (282 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** no handshake state machine (ClientHello through Finished, with the transcript hash), no certificate parsing, no signature verification, no trust root — this kernel cannot speak TLS, and the integration page says so.
 
 ### 2026-09-18 — X25519, the key exchange (ADR-142)
 

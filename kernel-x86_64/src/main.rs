@@ -1338,6 +1338,30 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // The TLS 1.3 RECORD LAYER (REQ-SEC-TLS-003, ADR-143, stage N2's third rung): the AEAD this
+    // kernel already proves, under a sequence-numbered nonce, with the header as associated data
+    // and the real content type INSIDE the encryption. Almost every way to get a record layer
+    // wrong is silent, so each one is an invariant here.
+    kprintln!("");
+    kprintln!("--- record-layer selftests (TLS 1.3 records: sequenced, authenticated, padded) ---");
+    match kernel_core::tlsrecord::tlsrecord_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[tlsrecord] ALL {} RECORD-LAYER INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[tlsrecord] FAILED at record-layer invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(820 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu function, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the
