@@ -49,6 +49,15 @@ if ! cmp -s "$ONE" "$TWO"; then
         # printed here is the only evidence anyone will have of a drift that does not reproduce
         # on the machine reading the log.
         cmp "$TMP/one-x/$f" "$TMP/two-x/$f" 2>&1 | head -3 | sed 's/^/    /'
+        # A manifest is small and is the one file whose CONTENT names the others, so print both
+        # sides of it: a drift there says which packaged file's digest moved even when the file
+        # itself compares equal (which is the shape of a digest taken at the wrong moment).
+        case "$f" in
+          *SHA256SUMS|*.sha256|*.txt)
+            echo "    --- build one:"; sed 's/^/      /' "$TMP/one-x/$f"
+            echo "    --- build two:"; sed 's/^/      /' "$TMP/two-x/$f"
+            ;;
+        esac
         off="$(cmp "$TMP/one-x/$f" "$TMP/two-x/$f" 2>/dev/null | sed -n 's/.*byte \([0-9]*\),.*/\1/p' | head -1)"
         if [ -n "$off" ] && command -v xxd >/dev/null 2>&1; then
           start=$(( off > 64 ? off - 64 : 0 ))
