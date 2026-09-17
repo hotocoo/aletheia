@@ -45,6 +45,17 @@ if ! cmp -s "$ONE" "$TWO"; then
     while IFS= read -r f; do
       if ! cmp -s "$TMP/one-x/$f" "$TMP/two-x/$f"; then
         echo "  DIFFERS: $f ($(wc -c < "$TMP/one-x/$f") vs $(wc -c < "$TMP/two-x/$f") bytes)"
+        # Where, and what. The two builds are deleted when this script exits, so a byte offset
+        # printed here is the only evidence anyone will have of a drift that does not reproduce
+        # on the machine reading the log.
+        cmp "$TMP/one-x/$f" "$TMP/two-x/$f" 2>&1 | head -3 | sed 's/^/    /'
+        off="$(cmp "$TMP/one-x/$f" "$TMP/two-x/$f" 2>/dev/null | sed -n 's/.*byte \([0-9]*\),.*/\1/p' | head -1)"
+        if [ -n "$off" ] && command -v xxd >/dev/null 2>&1; then
+          start=$(( off > 64 ? off - 64 : 0 ))
+          echo "    first difference at byte $off; 128 bytes of context from each build:"
+          xxd -s "$start" -l 128 "$TMP/one-x/$f" | sed 's/^/      one /'
+          xxd -s "$start" -l 128 "$TMP/two-x/$f" | sed 's/^/      two /'
+        fi
       fi
     done < "$TMP/one-list"
   fi
