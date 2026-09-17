@@ -1263,6 +1263,24 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    kprintln!("");
+    kprintln!(
+        "--- tcp pump selftests (where a connection meets a link: bounded, never overflowing) ---"
+    );
+    match kernel_core::tcpnet::tcpnet_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[tcpnet] ALL {} TCP-PUMP INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[tcpnet] FAILED at tcp-pump invariant {}: {}", idx, name);
+            ActiveHal::exit(760 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu function, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the

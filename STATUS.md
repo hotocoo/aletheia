@@ -33,7 +33,18 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-17, latest (TCP, THE TRANSPORT A BROWSER NEEDS — ADR-138 closes stage N1 of
+**As of:** 2026-09-17, latest (TCP MEETS THE LINK — ADR-139 gives the transport somewhere to run
+without giving the driver an opinion about TCP. `kernel-core/src/tcpnet.rs` names what a TCP client
+needs from a network as an `Ipv4Link` of exactly three methods (send a datagram, take one addressed
+to us, say our own address) and carries one request/response conversation over it inside a BUDGET of
+poll turns, naming its refusal when the budget is spent rather than waiting on a peer's decision.
+`virtionet.rs` gains exactly two carrying methods and no more. A reply larger than the caller's
+buffer is truncated rather than overflowed, and bytes already received are never thrown away by an
+expiring budget. 3 new boot invariants (`tcpnet=3`) on all three CPUs, proved over a scripted link
+rather than a device; the conformance contract grew 252 -> 255 core behaviours. **No live machine
+opens a socket yet:** no console command and no boot-time conversation uses the join, so the first
+real TCP conversation on this kernel is still the next rung. Previously: TCP, THE TRANSPORT A
+BROWSER NEEDS — ADR-138 closes stage N1 of
 `docs/LETHE-INTEGRATION.md`, which that page named as the blocker for everything below it. TCP
 arrives the way every other contract in this tree arrives: as a bounded model with no device in it.
 `kernel-core/src/tcp.rs` is the wire (a data offset that lies about the buffer is refused, the
@@ -1017,6 +1028,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-17 — where TCP meets the link (ADR-139)
+
+- ADR-138 left the transport with nothing to carry it. The obvious place for the carrying is the driver, and that is the wrong place: a driver that knows about handshakes cannot be reviewed as a driver, and a state machine that can only be exercised through hardware is proved on one machine and hoped for on the others.
+- `kernel-core/src/tcpnet.rs` names what a TCP client actually needs from a network — `send_ipv4`, `recv_ipv4`, `local_ip` — as the `Ipv4Link` trait, and carries one request/response conversation over it: open, send the request once the handshake allows it, collect the reply until the peer closes, then close.
+- **Every loop is bounded.** `exchange` takes a budget of poll turns and a clock closure. When the budget is spent it says `BudgetSpent` rather than waiting on a peer's decision; a caller that wants to wait longer asks for more turns instead of getting an unbounded wait by accident. Bytes already received are returned rather than converted into a failure by an expiring budget.
+- **The reply buffer is the caller's bound, not the peer's.** A reply larger than the buffer is truncated and nothing is written past it, asserted with a guard pattern because that is the shape of the classic remote overflow.
+- `virtionet.rs` gains exactly two public methods (`send_ipv4_to`, `recv_ipv4_into`) and keeps no opinion about sequence numbers.
+- New boot family `tcpnet=3` on all three CPUs, proved over a scripted link (a peer that echoes, a peer that is deaf, a peer that says more than the buffer holds) rather than a device. Conformance contract **252 -> 255** core behaviours. Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (255 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** no live machine opens a socket — there is no console command and no boot-time conversation using the join, so the first real TCP conversation on this kernel is the next rung's work; and stages N2 through N6 of the Lethe integration remain not started.
 
 ### 2026-09-17 — TCP: the transport a browser needs, as a bounded state machine (ADR-138)
 

@@ -464,6 +464,78 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         })
     }
 
+    /// Carry one already-built IPv4 datagram to `target_mac`, and take one back.
+    ///
+    /// These two are the whole of what a TCP client needs from a network device (ADR-139), and
+    /// they are deliberately the ONLY thing this driver knows about TCP: no handshake, no
+    /// retransmission, no opinion about sequence numbers. Everything above them lives in
+    /// `kernel_core::tcpnet`, which can therefore be proved with no device attached.
+    ///
+    /// # Safety
+    /// The device must be live.
+    pub unsafe fn send_ipv4_to(
+        &self,
+        target_mac: [u8; 6],
+        datagram: &[u8],
+    ) -> Result<(), NetError> {
+        let mut frame = [0u8; ETH_HDR_LEN + 1500];
+        if ETH_HDR_LEN + datagram.len() > frame.len() {
+            return Err(NetError::TooLong);
+        }
+        frame[0..6].copy_from_slice(&target_mac);
+        frame[6..12].copy_from_slice(&self.mac);
+        put_be16(&mut frame, 12, ETHERTYPE_IPV4);
+        frame[ETH_HDR_LEN..ETH_HDR_LEN + datagram.len()].copy_from_slice(datagram);
+        self.send(&frame[..ETH_HDR_LEN + datagram.len()])
+    }
+
+    /// Wait up to `spins` device polls for one IPv4 datagram of `protocol` addressed to this
+    /// machine, copying it into `out`. `Ok(0)` means nothing arrived in the bounded wait, which is
+    /// a fact about this attempt rather than a claim about the peer.
+    ///
+    /// # Safety
+    /// The queues must be live.
+    pub unsafe fn recv_ipv4_into(
+        &self,
+        spins: u64,
+        protocol: u8,
+        out: &mut [u8],
+    ) -> Result<usize, NetError> {
+        let mut taken = 0usize;
+        let mut too_long = false;
+        let got = self.recv_until(spins, |f| {
+            if f.len() < ETH_HDR_LEN || be16(f, 12) != ETHERTYPE_IPV4 {
+                return None;
+            }
+            let body = &f[ETH_HDR_LEN..];
+            let Ok(ip) = udpv4::parse_ipv4(body) else {
+                return None;
+            };
+            if ip.protocol != protocol || ip.dst != GUEST_IP {
+                return None;
+            }
+            // The datagram's own declared length, not the frame's: Ethernet padding is not part of
+            // what a peer sent, and handing it upward would change the segment's checksum extent.
+            let total = be16(body, 2) as usize;
+            if total > body.len() {
+                return None;
+            }
+            if total > out.len() {
+                too_long = true;
+                return Some(());
+            }
+            out[..total].copy_from_slice(&body[..total]);
+            taken = total;
+            Some(())
+        });
+        match got {
+            Ok(()) if too_long => Err(NetError::TooLong),
+            Ok(()) => Ok(taken),
+            Err(NetError::Timeout) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Send one UDP datagram to `dport` at `target` and wait for a reply addressed to OUR port
     /// (`sport`), verified end to end: IPv4 header checksum, then UDP checksum over the
     /// pseudo-header — so a datagram re-addressed in flight cannot pass for a reply (ADR-060).

@@ -374,6 +374,13 @@ CONTRACT=(
   "tcpconn: a segment for another port pair is refused by name and not counted as ours"
   "tcpconn: two hundred segments in and out allocate nothing at all"
 
+
+  # Where TCP meets a real link (ADR-139): the join is bounded on every CPU, with no device in
+  # the proof.
+  "tcpnet: a request goes out over the link and the peer's answer comes back"
+  "tcpnet: a deaf peer costs the budget and is refused by name, never waited on forever"
+  "tcpnet: a reply larger than the caller's buffer is truncated, never overflowed"
+
   # Windows are a managed set (ADR-084): the same routing decision on every CPU.
   "wm: the close box, the drag band and the client area are exactly the painted chrome"
   "wm: a press in the overlap routes to the topmost window and raises it, alone"

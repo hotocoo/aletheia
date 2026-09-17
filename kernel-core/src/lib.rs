@@ -83,6 +83,7 @@ pub mod syscall;
 pub mod taskfeat;
 pub mod tcp;
 pub mod tcpconn;
+pub mod tcpnet;
 pub mod tcpsuite;
 pub mod teardown;
 pub mod textgrid;
