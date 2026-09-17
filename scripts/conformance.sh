@@ -384,6 +384,23 @@ CONTRACT=(
 
 
 
+
+  # The signature half of a certificate verifier (ADR-145): the same digests and the same
+  # refusals - malleable scalars, off-curve points, short inputs - on every CPU.
+  "sha512: the empty message hashes to FIPS 180-4's published digest"
+  "sha512: the published abc vector holds exactly"
+  "sha512: a message spanning the padding boundary hashes correctly"
+  "sha512: a thousand-byte message hashes correctly across many blocks"
+  "sha512: the digest is deterministic and changes with every input bit"
+  "ed25519: RFC 8032's published signature over the empty message verifies"
+  "ed25519: a signature does not verify over a message it was not made for"
+  "ed25519: a flipped bit in either half of the signature, or a different key, is refused"
+  "ed25519: a scalar at or above the group order is refused rather than accepted twice"
+  "ed25519: S exactly equal to the group order is refused by name"
+  "ed25519: a public key or R that is not on the curve is refused by name"
+  "ed25519: a short key or signature is refused before any byte of it is read"
+  "ed25519: the base point round-trips through compression and [0]B is the identity"
+
   # The TLS 1.3 handshake (ADR-144): the same order, the same downgrade check, and the same
   # fail-closed peer verification on every CPU.
   "tlshandshake: the ClientHello offers exactly one suite, one group and one scheme"

@@ -22,18 +22,22 @@
 
 /// A field element mod 2^255 - 19, as five limbs of 51 bits. Radix 2^51 keeps every product inside
 /// a `u128` and every sum inside a `u64`, which is what makes the arithmetic below branch-free.
+///
+/// Visible inside the crate because Ed25519 (ADR-145) is defined over the SAME field: two copies of
+/// this arithmetic would be two places for a carry bug to live, and only one of them would be the
+/// one with published vectors pointed at it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Fe([u64; 5]);
+pub(crate) struct Fe(pub(crate) [u64; 5]);
 
 const MASK51: u64 = (1u64 << 51) - 1;
 
 impl Fe {
-    const ZERO: Fe = Fe([0; 5]);
-    const ONE: Fe = Fe([1, 0, 0, 0, 0]);
+    pub(crate) const ZERO: Fe = Fe([0; 5]);
+    pub(crate) const ONE: Fe = Fe([1, 0, 0, 0, 0]);
 
     /// Decode 32 little-endian bytes. The high bit is masked off, as RFC 7748 §5 requires: a peer
     /// that sets it is not signalling anything, and honouring it would decode a different point.
-    fn from_bytes(bytes: &[u8; 32]) -> Fe {
+    pub(crate) fn from_bytes(bytes: &[u8; 32]) -> Fe {
         let load = |i: usize| -> u64 {
             let mut v = 0u64;
             for k in 0..8 {
@@ -55,7 +59,7 @@ impl Fe {
     }
 
     /// Fully reduce and encode as 32 little-endian bytes.
-    fn to_bytes(self) -> [u8; 32] {
+    pub(crate) fn to_bytes(self) -> [u8; 32] {
         let mut h = self.carry();
         // Conditionally subtract p = 2^255 - 19, twice, so the result is the canonical
         // representative. Done with arithmetic rather than a comparison branch.
@@ -90,7 +94,7 @@ impl Fe {
     }
 
     /// Propagate carries so every limb is below 2^51.
-    fn carry(self) -> Fe {
+    pub(crate) fn carry(self) -> Fe {
         let mut h = self.0;
         h[1] += h[0] >> 51;
         h[0] &= MASK51;
@@ -107,7 +111,7 @@ impl Fe {
         Fe(h)
     }
 
-    fn add(self, other: Fe) -> Fe {
+    pub(crate) fn add(self, other: Fe) -> Fe {
         let mut out = [0u64; 5];
         for (o, (a, b)) in out.iter_mut().zip(self.0.iter().zip(other.0.iter())) {
             *o = a + b;
@@ -116,7 +120,7 @@ impl Fe {
     }
 
     /// Subtraction with a bias of 2p, so no limb underflows before the carry pass.
-    fn sub(self, other: Fe) -> Fe {
+    pub(crate) fn sub(self, other: Fe) -> Fe {
         let mut out = [0u64; 5];
         out[0] = self.0[0] + 0x000F_FFFF_FFFF_FFDA - other.0[0];
         for (o, (a, b)) in out
@@ -129,7 +133,7 @@ impl Fe {
         Fe(out).carry()
     }
 
-    fn mul(self, other: Fe) -> Fe {
+    pub(crate) fn mul(self, other: Fe) -> Fe {
         let a = self.0;
         let b = other.0;
         // The reduction: 2^255 = 19 mod p, so a limb that overflows position 4 comes back
@@ -160,7 +164,7 @@ impl Fe {
         Fe::reduce_wide([c0, c1, c2, c3, c4])
     }
 
-    fn square(self) -> Fe {
+    pub(crate) fn square(self) -> Fe {
         self.mul(self)
     }
 
@@ -173,7 +177,7 @@ impl Fe {
         Fe::reduce_wide(wide)
     }
 
-    fn reduce_wide(c: [u128; 5]) -> Fe {
+    pub(crate) fn reduce_wide(c: [u128; 5]) -> Fe {
         let mut h = [0u64; 5];
         let mut carry = 0u128;
         for (limb, wide) in h.iter_mut().zip(c.iter()) {
@@ -190,7 +194,7 @@ impl Fe {
     /// Exchange `self` and `other` when `swap` is 1, leaving them alone when it is 0 — with no
     /// branch and no secret-dependent addressing. The whole ladder's constant-time property rests
     /// on this being arithmetic.
-    fn cswap(&mut self, other: &mut Fe, swap: u64) {
+    pub(crate) fn cswap(&mut self, other: &mut Fe, swap: u64) {
         let mask = 0u64.wrapping_sub(swap);
         for (a, b) in self.0.iter_mut().zip(other.0.iter_mut()) {
             let t = mask & (*a ^ *b);
@@ -202,7 +206,7 @@ impl Fe {
     /// The multiplicative inverse, by the standard fixed addition chain for p - 2. A fixed chain
     /// rather than a loop over exponent bits: the exponent is public here, but the shape keeps the
     /// timing independent of the VALUE being inverted.
-    fn invert(self) -> Fe {
+    pub(crate) fn invert(self) -> Fe {
         let z1 = self;
         let z2 = z1.square();
         let z8 = z2.square().square();

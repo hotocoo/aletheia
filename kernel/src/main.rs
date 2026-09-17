@@ -1057,6 +1057,41 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // SHA-512 and Ed25519 VERIFICATION (REQ-SEC-TLS-005, ADR-145): the half of a certificate
+    // verifier that checks signatures. Verification only - a TLS client checks signatures and
+    // never makes them, so there is no private-key path in this kernel at all.
+    kprintln!("");
+    kprintln!("--- digest selftests (SHA-512: FIPS 180-4 vectors, padding boundaries) ---");
+    match kernel_core::sha512::sha512_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[sha512] ALL {} DIGEST INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[sha512] FAILED at digest invariant {}: {}", idx, name);
+            semihosting::exit(860 + idx as i32);
+        }
+    }
+
+    kprintln!("");
+    kprintln!("--- signature selftests (Ed25519 verification: RFC 8032, malleability refused) ---");
+    match kernel_core::ed25519::ed25519_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[ed25519] ALL {} SIGNATURE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[ed25519] FAILED at signature invariant {}: {}", idx, name);
+            semihosting::exit(880 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu device, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the

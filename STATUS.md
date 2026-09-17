@@ -33,7 +33,20 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-18, latest (THE TLS 1.3 HANDSHAKE, BUILT SO IT CANNOT BE USED INSECURELY —
+**As of:** 2026-09-18, latest (SHA-512 AND ED25519 VERIFICATION — ADR-145 builds the signature
+half of the certificate verifier ADR-144's handshake refuses to run without. Verification ONLY: a
+TLS client checks signatures and never makes them, so this kernel has no private-key path at all.
+The curve arithmetic reuses X25519's field rather than copying it, because two carry chains are two
+places for a carry bug and only one would have published vectors pointed at it. The cofactored
+equation of RFC 8032 §5.1.7 is used deliberately: it accepts exactly what batch verifiers accept,
+and it removes a scalar reduction that has no published vectors of its own — the kind of code that
+is wrong quietly. What is NOT relaxed is malleability: S at or above the group order is refused by
+name, because accepting S+L accepts a second signature for one message. 13 new boot invariants
+(`sha512=5`, `ed25519=8`) on all three CPUs; conformance 291 -> 304 core behaviours. On the host,
+three signatures made by OpenSSL over keys and messages this kernel never saw all verify, every
+cross-pairing is refused, and every single bit of a signature and of a message is swept. **This
+kernel still cannot speak TLS:** no X.509 parsing, no clock for validity windows, no name checking,
+no trust root. Previously: THE TLS 1.3 HANDSHAKE, BUILT SO IT CANNOT BE USED INSECURELY —
 ADR-144. A TLS handshake that completes without checking who it is talking to is worse than no TLS
 at all, because it looks encrypted, and certificate verification is the one step whose absence
 produces no error, no warning and no visible difference. This kernel has no X.509 parser, no
@@ -1100,6 +1113,18 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-18 — SHA-512 and Ed25519 verification (ADR-145)
+
+- ADR-144's handshake refuses every peer because `PeerVerifier` has no permissive implementation. A real one needs a way to check a signature, a way to parse a certificate, and a trust root. This wave takes the first — the part with published vectors and an independent implementation to check against.
+- `kernel-core/src/sha512.rs` is FIPS 180-4 written as the specification reads (Ed25519 is defined over SHA-512, and a signature verified with the wrong hash is not verified). `kernel-core/src/ed25519.rs` is **verification only**: a client checks signatures and never makes them, so there is no private-key path in this kernel to leak.
+- The curve arithmetic **reuses X25519's field** rather than copying it: two carry chains are two places for a carry bug, and only one of them would have published vectors pointed at it.
+- **The cofactored equation, on purpose.** RFC 8032 §5.1.7 permits `[8S]B = [8]R + [8k]A`; using it means accepting exactly what batch verifiers accept (so this kernel cannot reject a chain everyone else takes) and letting `k` stay the full 512-bit hash, which removes a hundred lines of scalar reduction that have **no published vectors of their own**. What is not relaxed: `S` must be strictly below the group order, because accepting `S + L` accepts a second signature for one message.
+- New boot families `sha512=5` and `ed25519=8` on all three CPUs; conformance contract **291 -> 304** core behaviours.
+- **Independent agreement on the host:** three signatures made by OpenSSL over keys and messages this kernel never saw, all verifying; every cross-pairing of key, message and signature refused; every single bit of a signature and of a message swept, each required to break verification.
+- A vector chosen carefully rather than conveniently: the suite's "not a point" encoding is `y = 2`, checked in advance to be a non-residue. Most random 32-byte encodings **are** valid points, so a test that fills bytes with `0xff` and expects a refusal proves nothing.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (304 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** X.509 parsing, a clock for validity windows, name checking, and a trust root — until those land, `RefuseAllPeers` stays and this kernel cannot speak TLS.
 
 ### 2026-09-18 — the TLS 1.3 handshake, built so it cannot be used insecurely (ADR-144)
 
