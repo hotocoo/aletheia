@@ -31,6 +31,7 @@ use core::fmt::Write as _;
 
 use crate::compositor::{Compositor, CursorShape, EventKind, Rect};
 use crate::fbcon::{ComposeSink, Surface};
+use crate::filepanel::{FilePanel, FileRow, PanelAction};
 use crate::persona::{self, ChromeHit, ChromeLayout, ShellPersona};
 use crate::shell::InputFacts;
 use crate::textgrid::TextGrid;
@@ -113,6 +114,11 @@ const TASKBAR: u32 = 4;
 const HELP: u32 = 5;
 const MENU: u32 = 6;
 const SWITCHER: u32 = 7;
+/// The file manager window: the desktop's view of the namespace. It is a managed window like the
+/// terminal and the monitor, and it owns no block device — the platform feeds it a listing
+/// (`Desktop::set_file_listing`) from wherever it already holds the filesystem, for the same
+/// reason `pump` is handed the frame allocator's reading rather than calling the allocator.
+const FILES: u32 = 8;
 
 /// The terminal grid: 40 columns x 12 rows of the console's alphabet, placed so a gap of empty
 /// scanout remains for an "empty space" click.
@@ -127,8 +133,16 @@ const MON_ROWS: u32 = 6;
 const MON_X: i32 = 20;
 const MON_Y: i32 = 140;
 const MON_TITLE: &[u8] = b"monitor";
+/// The file manager's grid. Thirty-two columns fit the widest stored name plus its size, and
+/// eight visible rows leave the footer on screen inside a 240px-tall scanout.
+const FILES_COLS: u32 = 32;
+const FILES_ROWS: u32 = 9;
+const FILES_VISIBLE: usize = 8;
+const FILES_X: i32 = 40;
+const FILES_Y: i32 = 40;
+const FILES_TITLE: &[u8] = b"files";
 const HELP_COLS: u32 = 54;
-const HELP_ROWS: u32 = 18;
+const HELP_ROWS: u32 = 19;
 const HELP_X: i32 = 95;
 const HELP_Y: i32 = 30;
 const HELP_TITLE: &[u8] = b"shortcuts";
@@ -143,23 +157,21 @@ const TASKBAR_X: i32 = 0;
 /// application buttons and all four workspace buttons still END inside the 640px scanout. At the
 /// previous eighteen cells the strip needed 720px, so workspaces 3 and 4 were painted past the
 /// right edge and could not be reached with the pointer at all.
-const TASKBAR_BUTTON_W: u32 = 14 * crate::textgrid::CELL;
+const TASKBAR_BUTTON_W: u32 = 12 * crate::textgrid::CELL;
 /// The first taskbar button is the desktop launcher. It deliberately occupies the same fixed
 /// cell band used by the keyboard launcher layout, so pointer and keyboard navigation describe
 /// one stable affordance instead of two subtly different hit maps.
 const TASKBAR_MENU_W: u32 = 8 * crate::textgrid::CELL;
-const TASKBAR_TERM_X: u32 = 8 * crate::textgrid::CELL;
-const TASKBAR_MON_X: u32 = TASKBAR_TERM_X + TASKBAR_BUTTON_W;
-const TASKBAR_HELP_X: u32 = TASKBAR_MON_X + TASKBAR_BUTTON_W;
 /// Four fixed workspace buttons occupy the taskbar immediately after the application buttons.
 /// Seven cells per button leave room for a visible `[n]` label and a separator while keeping
 /// the hit map independent from the taskbar's status text.
-const TASKBAR_WS_X: u32 = TASKBAR_HELP_X + TASKBAR_BUTTON_W;
-const TASKBAR_WS_W: u32 = 7 * crate::textgrid::CELL;
+const TASKBAR_WS_W: u32 = 6 * crate::textgrid::CELL;
 /// The panel's total height, including the title band the compositor paints above its rows.
 const TASKBAR_H: u32 = TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::TITLE_H;
-/// How many managed application buttons the panel carries: terminal, monitor, shortcuts.
-const TASKBAR_BUTTONS: u32 = 3;
+/// How many managed application buttons the panel carries: terminal, monitor, files, shortcuts.
+/// Four twelve-cell buttons, a 64px launcher and four six-cell workspace buttons come to exactly
+/// 640px — the full scanout, with every affordance reachable (ADR-136's invariant 2).
+const TASKBAR_BUTTONS: u32 = 4;
 /// The chrome's fixed measurements, handed to the persona policy. These are the SAME numbers the
 /// pre-persona constants encode, so `ShellPersona::Aletheia` reproduces the historic layout and
 /// every GUI proof recorded before personas existed keeps its meaning.
@@ -179,12 +191,13 @@ const KEY_P: u16 = 25;
 // The widest numbered command is `9 minimize focused` (18 cells); one extra cell leaves the
 // selection marker visible without truncating the accelerator label.
 const MENU_COLS: u32 = 20;
-const MENU_ROWS: u32 = 9;
+const MENU_ROWS: u32 = 10;
 const MENU_MARGIN: i32 = 4;
 const MENU_TITLE: &[u8] = b"menu";
-const MENU_ITEMS: [&[u8]; 9] = [
+const MENU_ITEMS: [&[u8]; 10] = [
     b"terminal",
     b"monitor",
+    b"files",
     b"shortcuts",
     b"tile windows",
     b"cascade windows",
@@ -216,7 +229,8 @@ fn alt_window_launcher(code: u16, value: u32, alt: bool) -> Option<u32> {
     match code {
         KEY_1 => Some(WINDOW),
         KEY_2 => Some(MONITOR),
-        KEY_3 => Some(HELP),
+        KEY_3 => Some(FILES),
+        KEY_4 => Some(HELP),
         _ => None,
     }
 }
@@ -299,6 +313,17 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     help: TextGrid,
     help_packed: Vec<u8>,
     help_token: u64,
+    files: TextGrid,
+    files_packed: Vec<u8>,
+    files_token: u64,
+    /// The namespace view. It holds no device: the platform pushes listings into it.
+    panel: FilePanel,
+    /// Set when the panel's model changed and its window owes a repaint.
+    files_dirty: bool,
+    /// The last file-panel row pressed and when, for the double-click activation gesture.
+    last_panel_click: Option<(usize, u64)>,
+    /// The name the user activated, latched until the platform collects it.
+    file_activation: Option<[u8; crate::filepanel::NAME_CAP]>,
     taskbar: TextGrid,
     taskbar_packed: Vec<u8>,
     taskbar_token: u64,
@@ -458,6 +483,22 @@ fn pad_to_column(grid: &mut TextGrid, x: u32) {
     }
 }
 
+/// Whether this press is the second half of a double click on the SAME file-panel row.
+///
+/// Pure and separate from the title bar's predicate because the gestures differ: a title-bar
+/// double click tolerates pointer travel in pixels, while a row double click tolerates none —
+/// the row index either matches or the user aimed at a different file.
+fn is_panel_double_click(last: Option<(usize, u64)>, row: usize, now: u64, timer_hz: u64) -> bool {
+    let Some((prev_row, then)) = last else {
+        return false;
+    };
+    if prev_row != row || timer_hz == 0 {
+        return false;
+    }
+    let elapsed_ms = now.saturating_sub(then).saturating_mul(1000) / timer_hz;
+    elapsed_ms <= DOUBLE_CLICK_MS
+}
+
 /// Whether this event is the persona cycle accelerator: Alt+P, without Ctrl. Requiring Alt alone
 /// keeps Ctrl+Alt free for the window accelerators, so the convention key can never be mistaken
 /// for a command that moves or closes a window.
@@ -468,7 +509,7 @@ fn is_persona_shortcut(ty: u16, code: u16, value: u32, alt: bool, ctrl: bool) ->
 /// The managed application each panel button launches, in panel order. The persona decides WHERE
 /// the cluster sits; this array decides what the cluster contains, so a convention change can
 /// never silently reorder the applications.
-const TASKBAR_APPS: [u32; TASKBAR_BUTTONS as usize] = [WINDOW, MONITOR, HELP];
+const TASKBAR_APPS: [u32; TASKBAR_BUTTONS as usize] = [WINDOW, MONITOR, FILES, HELP];
 
 /// Resolve a taskbar x-coordinate to either the desktop launcher or one managed application under
 /// the active persona's chrome layout. Keeping the hit map pure makes the launcher boundary
@@ -690,7 +731,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             b"Alt+F4    close focused window",
             b"Alt+F9    minimize focused window",
             b"Alt+F10   maximize/restore focused",
-            b"Alt+1/2/3 open/focus terminal/monitor/help",
+            b"Alt+1/2/3/4 terminal/monitor/files/help",
             b"Ctrl+Tab  cycle focus",
             b"Ctrl+Alt+Arrows  snap focused window",
             b"Ctrl+Alt+Shift+Arrows  nudge window",
@@ -703,6 +744,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             b"Space/Enter  activate taskbar selection",
             b"1-9  select a start-menu command",
             b"Alt+P  cycle the shell persona",
+            b"Arrows/Enter browse and open in files",
         ];
         for line in HELP_LINES {
             help.write(line);
@@ -712,6 +754,17 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.render_packed(HELP_TITLE, &mut help_packed);
         comp.fill_packed(HELP, tok_help, &help_packed)
             .map_err(|_| "the shortcuts window's first paint was refused")?;
+        let mut files = TextGrid::new(FILES_COLS, FILES_ROWS);
+        let (fw, fh) = files.pixel_size();
+        let tok_files = wm
+            .open(&mut comp, FILES, fw, fh, FILES_X, FILES_Y)
+            .map_err(|_| "the files window was refused")?;
+        let panel = FilePanel::new(FILES_VISIBLE);
+        panel.render(&mut files);
+        let mut files_packed = Vec::new();
+        files.render_packed(FILES_TITLE, &mut files_packed);
+        comp.fill_packed(FILES, tok_files, &files_packed)
+            .map_err(|_| "the files window's first paint was refused")?;
         let taskbar = TextGrid::new(TASKBAR_COLS, TASKBAR_ROWS);
         let (tbw, tbh) = taskbar.pixel_size();
         let tok_taskbar = comp
@@ -795,6 +848,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             help,
             help_packed,
             help_token: tok_help,
+            files,
+            files_packed,
+            files_token: tok_files,
+            panel,
+            files_dirty: false,
+            last_panel_click: None,
+            file_activation: None,
             taskbar,
             taskbar_packed,
             taskbar_token: tok_taskbar,
@@ -880,6 +940,20 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             let _ = self
                 .comp
                 .fill_packed(HELP, self.help_token, &self.help_packed);
+        }
+        // The file panel repaints only when its MODEL changed. A listing arrives whenever the
+        // platform has one; re-rendering an unchanged listing would turn a quiet desktop into a
+        // per-refresh compose, which is exactly what ADR-080 bought and ADR-084 kept.
+        if self.files_dirty {
+            self.files_dirty = false;
+            self.panel.render(&mut self.files);
+        }
+        if self.files.take_dirty() {
+            self.files
+                .render_packed(FILES_TITLE, &mut self.files_packed);
+            let _ = self
+                .comp
+                .fill_packed(FILES, self.files_token, &self.files_packed);
         }
         self.refresh_taskbar();
         if self.comp.has_pending_damage() {
@@ -1010,6 +1084,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             let name = match *id {
                 WINDOW => "term",
                 MONITOR => "mon",
+                FILES => "files",
                 _ => "help",
             };
             let _ = write!(
@@ -1338,20 +1413,21 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         match self.menu_selected {
             0 => self.focus_or_restore_window(WINDOW),
             1 => self.focus_or_restore_window(MONITOR),
-            2 => self.focus_or_restore_window(HELP),
-            3 => {
+            2 => self.focus_or_restore_window(FILES),
+            3 => self.focus_or_restore_window(HELP),
+            4 => {
                 let _ = self.wm.tile_visible(&mut self.comp, self.sess);
                 self.sync_terminal_geometry();
             }
-            4 => {
+            5 => {
                 let _ = self.wm.cascade_visible(&mut self.comp, self.sess);
                 self.sync_terminal_geometry();
             }
-            5 => {
+            6 => {
                 let _ = self.wm.toggle_show_desktop(&mut self.comp, self.sess);
                 self.sync_terminal_geometry();
             }
-            6 => {
+            7 => {
                 if let Some(id) = self.comp.focus() {
                     let _ = self.wm.toggle_minimize(&mut self.comp, self.sess, id);
                     if id == WINDOW {
@@ -1359,7 +1435,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     }
                 }
             }
-            7 => {
+            8 => {
                 if let Some(id) = self.comp.focus() {
                     if self.wm.is_maximized(id).is_some() {
                         let _ = self.wm.toggle_maximize(&mut self.comp, self.sess, id);
@@ -1369,7 +1445,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     }
                 }
             }
-            8 => {
+            9 => {
                 if let Some(id) = self.comp.focus() {
                     let _ = self.wm.close(&mut self.comp, self.sess, id);
                     if id == WINDOW {
@@ -1516,6 +1592,105 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         self.persona
     }
 
+    /// Hand the file panel a fresh listing of the namespace.
+    ///
+    /// The desktop owns no block device on purpose: the platform already holds the filesystem
+    /// and the device, and threading a fourth generic parameter through three kernels to put
+    /// disk I/O on the compositor's tick would make a slow device a frozen cursor. The panel
+    /// reuses its row storage, so calling this on every change does not grow the heap.
+    pub fn set_file_listing<I: Iterator<Item = FileRow>>(
+        &mut self,
+        entries: I,
+        free_blocks: u32,
+        total_blocks: u32,
+    ) {
+        self.panel
+            .replace_listing(entries, free_blocks, total_blocks);
+        self.files_dirty = true;
+    }
+
+    /// The name the user last activated in the file panel, if any, and clear it.
+    ///
+    /// Activation is REPORTED rather than performed: the panel says which row, the desktop says
+    /// nothing about what opening it means, and the platform — which is the only part that holds
+    /// the device — decides. Returning the name (not an index) means a listing that changed
+    /// between the click and the read cannot open a different file than the one that was clicked.
+    pub fn take_file_activation(&mut self) -> Option<[u8; crate::filepanel::NAME_CAP]> {
+        self.file_activation.take()
+    }
+
+    /// Turn a scanout-space press into a file-panel row selection.
+    ///
+    /// The double click is the ACTIVATION, matching the title bar's maximize gesture and every
+    /// other desktop in the world; a single click only selects, so a mis-aimed click cannot open
+    /// a file.
+    fn file_panel_press(&mut self, px: u32, py: u32) {
+        let Some((x, y)) = self.comp.placement(FILES) else {
+            return;
+        };
+        let local_y = py as i32 - y - crate::textgrid::TITLE_H as i32;
+        if local_y < 0 || px < x as u32 {
+            return;
+        }
+        let row = local_y as usize / crate::textgrid::CELL as usize;
+        let action = self.panel.select_at_row(row);
+        self.apply_panel_action(action);
+        if let PanelAction::Selected(index) = action {
+            let now = H::timer_ticks();
+            if is_panel_double_click(self.last_panel_click, index, now, H::timer_freq_hz()) {
+                self.last_panel_click = None;
+                let activated = self.panel.activate();
+                self.apply_panel_action(activated);
+            } else {
+                self.last_panel_click = Some((index, now));
+            }
+        }
+    }
+
+    /// Route a key to the file panel when it holds focus. Returns whether the panel consumed it.
+    fn file_panel_key(&mut self, code: u16) -> bool {
+        if self.comp.focus() != Some(FILES) {
+            return false;
+        }
+        let action = match code {
+            KEY_UP => self.panel.step(false),
+            KEY_DOWN => self.panel.step(true),
+            KEY_HOME => self.panel.jump(false),
+            KEY_END => self.panel.jump(true),
+            KEY_ENTER => self.panel.activate(),
+            _ => return false,
+        };
+        self.apply_panel_action(action);
+        true
+    }
+
+    /// Turn a panel action into desktop state. A selection owes a repaint; an activation also
+    /// latches the NAME for the platform to collect.
+    fn apply_panel_action(&mut self, action: PanelAction) {
+        match action {
+            PanelAction::Selected(_) => self.files_dirty = true,
+            PanelAction::Activated(_) => {
+                self.files_dirty = true;
+                if let Some(row) = self.panel.selected_row() {
+                    let mut name = [0u8; crate::filepanel::NAME_CAP];
+                    let bytes = row.name();
+                    name[..bytes.len()].copy_from_slice(bytes);
+                    self.file_activation = Some(name);
+                }
+            }
+            PanelAction::Refused(_) => {}
+        }
+    }
+
+    /// The file panel's live counters, for the boot log and the `input` readout.
+    pub fn file_panel_facts(&self) -> (usize, u64, u64) {
+        (
+            self.panel.len(),
+            self.panel.listings,
+            self.panel.entries_dropped,
+        )
+    }
+
     /// The persona in force. Presentation state, exposed for the boot proof and the panel text.
     pub fn persona(&self) -> ShellPersona {
         self.persona
@@ -1551,10 +1726,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             };
             let lx = x as i32 - tx;
             let ly = y as i32 - ty;
-            if (lx >= 0 && lx < TASKBAR_MENU_W as i32
-                || lx >= TASKBAR_TERM_X as i32 && lx < (TASKBAR_HELP_X + TASKBAR_BUTTON_W) as i32
-                || lx >= TASKBAR_WS_X as i32
-                    && lx < (TASKBAR_WS_X + TASKBAR_WS_W * MAX_WORKSPACES as u32) as i32)
+            // The hand appears over an AFFORDANCE, and the persona decides where those are. This
+            // asks the same layout the hit map and the painter ask, so the cursor cannot promise
+            // a button that is not there.
+            let over_affordance = lx >= 0 && self.chrome.hit(CHROME, lx as u32) != ChromeHit::None;
+            if over_affordance
                 && ly >= crate::textgrid::TITLE_H as i32
                 && lx < tw as i32
                 && ly < th as i32
@@ -1690,8 +1866,15 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 }
                 // A closed terminal takes its unread keystrokes with it: bytes the console had
                 // not read belonged to a window that no longer exists.
-                if let Press::Closed(WINDOW) = self.wm.press(&mut self.comp, self.sess, px, py) {
-                    self.term_input.clear();
+                match self.wm.press(&mut self.comp, self.sess, px, py) {
+                    // A closed terminal takes its unread keystrokes with it.
+                    Press::Closed(WINDOW) => self.term_input.clear(),
+                    // A press in the file panel's CLIENT area picks a row. The window manager
+                    // has already decided the press belongs to this window and raised it; the
+                    // panel only turns a y coordinate into a row, and even that is refused by
+                    // name when it lands below the last file.
+                    Press::Focused(FILES) | Press::Dragging(FILES) => self.file_panel_press(px, py),
+                    _ => {}
                 }
             } else {
                 let _ = self.wm.release_at(&mut self.comp, self.sess, px, py);
@@ -2046,6 +2229,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else if menu_activate {
                         self.activate_menu_selection();
                         let _ = self.kb_dec.feed(ev);
+                    } else if ev.ty == vinput::EV_KEY
+                        && ev.value == 1
+                        && self.file_panel_key(ev.code)
+                    {
+                        // The file panel owns the arrows, Home/End and Enter WHILE IT HOLDS
+                        // FOCUS, and nowhere else — these are the terminal's keys the rest of
+                        // the time, so the test is focus, not the keycode.
+                        let _ = self.kb_dec.feed(ev);
                     } else if let Some((workspace, move_focused)) = workspace_key {
                         if move_focused {
                             let _ = self.wm.move_focused_to_workspace(
@@ -2266,6 +2457,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             windows: self.wm.count(),
             closes,
             drags,
+            panel_rows: self.panel.len(),
+            panel_listings: self.panel.listings,
+            panel_dropped: self.panel.entries_dropped,
         }
     }
 }
@@ -2302,7 +2496,7 @@ mod tests {
             b"Alt+F4    close focused window",
             b"Alt+F9    minimize focused window",
             b"Alt+F10   maximize/restore focused",
-            b"Alt+1/2/3 open/focus terminal/monitor/help",
+            b"Alt+1/2/3/4 terminal/monitor/files/help",
             b"Ctrl+Tab  cycle focus",
             b"Ctrl+Alt+Arrows  snap focused window",
             b"Ctrl+Alt+Shift+Arrows  nudge window",
@@ -2315,6 +2509,7 @@ mod tests {
             b"Space/Enter  activate taskbar selection",
             b"1-9  select a start-menu command",
             b"Alt+P  cycle the shell persona",
+            b"Arrows/Enter browse and open in files",
         ];
         assert_eq!(HELP_LINES.len(), super::HELP_ROWS as usize);
         assert!(HELP_LINES
@@ -2330,10 +2525,11 @@ mod tests {
     fn alt_number_launchers_select_the_taskbar_windows() {
         assert_eq!(alt_window_launcher(2, 1, true), Some(super::WINDOW));
         assert_eq!(alt_window_launcher(3, 1, true), Some(super::MONITOR));
-        assert_eq!(alt_window_launcher(4, 1, true), Some(super::HELP));
+        assert_eq!(alt_window_launcher(4, 1, true), Some(super::FILES));
+        assert_eq!(alt_window_launcher(5, 1, true), Some(super::HELP));
         assert_eq!(alt_window_launcher(2, 0, true), None);
         assert_eq!(alt_window_launcher(2, 1, false), None);
-        assert_eq!(alt_window_launcher(5, 1, true), None);
+        assert_eq!(alt_window_launcher(6, 1, true), None);
     }
 
     #[test]
@@ -2413,8 +2609,8 @@ mod tests {
 
     #[test]
     fn context_menu_selection_wraps_in_both_directions() {
-        assert_eq!(next_menu_selection(0, false), 8);
-        assert_eq!(next_menu_selection(8, true), 0);
+        assert_eq!(next_menu_selection(0, false), 9);
+        assert_eq!(next_menu_selection(9, true), 0);
         assert_eq!(next_menu_selection(2, false), 1);
         assert_eq!(next_menu_selection(2, true), 3);
     }
@@ -2422,7 +2618,7 @@ mod tests {
     #[test]
     fn start_menu_home_and_end_jump_to_bounded_commands() {
         assert_eq!(menu_keyboard_jump(true), 0);
-        assert_eq!(menu_keyboard_jump(false), 8);
+        assert_eq!(menu_keyboard_jump(false), 9);
     }
 
     #[test]
@@ -2445,7 +2641,7 @@ mod tests {
     fn menu_jump_and_number_navigation_accept_key_repeat() {
         assert!(is_key_press_or_repeat(super::vinput::EV_KEY, 2));
         assert_eq!(menu_keyboard_jump(true), 0);
-        assert_eq!(menu_keyboard_jump(false), 8);
+        assert_eq!(menu_keyboard_jump(false), 9);
         assert_eq!(menu_number_selection(super::KEY_9), Some(8));
     }
 
@@ -2460,8 +2656,11 @@ mod tests {
     fn the_default_persona_reproduces_the_historic_packed_taskbar_constants() {
         let chrome = super::ShellPersona::default().layout(super::CHROME);
         assert_eq!(chrome.launcher_x, 0);
-        assert_eq!(chrome.buttons_x, super::TASKBAR_TERM_X);
-        assert_eq!(chrome.workspaces_x, super::TASKBAR_WS_X);
+        assert_eq!(chrome.buttons_x, super::TASKBAR_MENU_W);
+        assert_eq!(
+            chrome.workspaces_x,
+            super::TASKBAR_MENU_W + super::TASKBAR_BUTTON_W * super::TASKBAR_BUTTONS
+        );
     }
 
     #[test]
@@ -2555,14 +2754,21 @@ mod tests {
                     "{label}"
                 );
             }
-            assert_eq!(
-                taskbar_hover_target(
-                    &chrome,
-                    chrome.workspaces_x + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32
-                ),
-                0,
-                "{label}"
-            );
+            // Chrome that belongs to no cluster is not actionable. At the live metrics the three
+            // clusters fill the 640px scanout exactly under some personas, so the honest test is
+            // "every pixel outside every cluster reports 0", not "the pixel after the workspaces
+            // reports 0" — which would be asserting a gap that a persona is entitled not to have.
+            for x in (0..super::W).step_by(8) {
+                let in_launcher =
+                    x >= chrome.launcher_x && x < chrome.launcher_x + super::TASKBAR_MENU_W;
+                let in_buttons = x >= chrome.buttons_x
+                    && x < chrome.buttons_x + super::TASKBAR_BUTTON_W * super::TASKBAR_BUTTONS;
+                let in_workspaces = x >= chrome.workspaces_x
+                    && x < chrome.workspaces_x + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32;
+                if !in_launcher && !in_buttons && !in_workspaces {
+                    assert_eq!(taskbar_hover_target(&chrome, x), 0, "{label} at x={x}");
+                }
+            }
         }
     }
 

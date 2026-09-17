@@ -479,6 +479,61 @@ fn halt_is_the_only_command_that_ends_the_session() {
 // TARGET differs — not that the suite was never true anywhere.
 // ---------------------------------------------------------------------------------------------
 
+// An idle turn is the only moment a live machine has to notice something that happened OUTSIDE
+// the keyboard — a click in the desktop's file panel (ADR-137). The hook runs there, and when it
+// printed, the typist gets their prompt back rather than a line of output with no prompt under it.
+#[test]
+fn the_serviced_loop_offers_idle_turns_and_reprompts_after_the_hook_printed() {
+    let host = TestHost;
+    let mut dev = device();
+    Filesystem::format(&mut dev).expect("format");
+    let mut fs = Filesystem::mount(&mut dev).expect("mount");
+
+    // Nothing typed on the first two turns, then `halt`.
+    let mut turns = 0u32;
+    let mut typed = b"halt\r".iter().copied();
+    let mut getc = move || {
+        turns += 1;
+        if turns <= 2 {
+            return None;
+        }
+        typed.next()
+    };
+
+    let mut log = String::new();
+    let mut idles = 0u32;
+    shell::run_loop_serviced(
+        &host,
+        &mut fs,
+        &mut dev,
+        &mut getc,
+        &mut |s| log.push_str(s),
+        &mut |phase, _, _, out| {
+            if phase != shell::ServicePhase::Idle {
+                return false;
+            }
+            idles += 1;
+            // Print on the FIRST idle turn only, so the test can tell a re-prompt caused by the
+            // hook from the prompts the session issues on its own.
+            if idles == 1 {
+                out("files: opened\r\n");
+                return true;
+            }
+            false
+        },
+    );
+
+    assert_eq!(idles, 2, "every idle turn must offer the hook a chance");
+    let opened = log
+        .find("files: opened")
+        .expect("the hook's output reached the console");
+    assert!(
+        log[opened..].contains(shell::PROMPT),
+        "a hook that printed must get the prompt re-issued under it"
+    );
+    assert!(log.contains("halting."), "the session still halts normally");
+}
+
 #[test]
 fn the_live_console_suite_passes_on_the_host_too() {
     let host = TestHost;

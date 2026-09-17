@@ -200,6 +200,28 @@ fn mount_or_format<D: BlockDevice>(dev: &mut D) -> Option<Filesystem> {
     Filesystem::mount(dev).ok()
 }
 
+/// The desktop's file panel, served from the console's namespace (ADR-137). The console is the
+/// only part of a live machine holding both a mounted filesystem and a device to read it with, so
+/// the panel is refreshed from here — between keystrokes, where blocking costs a human nothing.
+#[cfg(feature = "interactive")]
+fn serve_file_panel<D: BlockDevice>(
+    phase: shell::ServicePhase,
+    fs: &Filesystem,
+    dev: &mut D,
+    out: &mut dyn FnMut(&str),
+) -> bool {
+    kernel_core::filepanel::service_panel(
+        phase,
+        fs,
+        dev,
+        out,
+        &mut |rows, free, total| {
+            crate::desktop::set_file_listing(rows.iter().copied(), free, total)
+        },
+        &mut crate::desktop::take_file_activation,
+    )
+}
+
 #[cfg(feature = "interactive")]
 fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
     let host = Host::privileged();
@@ -213,7 +235,14 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
     // Interrupt-driven from here (REQ-CON-002, ADR-045): COM1 raises IRQ4, the handler moves the
     // bytes into the ring, and the loop reads the ring instead of polling a mostly-empty register.
     crate::conirq::init();
-    shell::run_loop(&host, &mut fs, &mut device, &mut getc, &mut emit);
+    shell::run_loop_serviced(
+        &host,
+        &mut fs,
+        &mut device,
+        &mut getc,
+        &mut emit,
+        &mut serve_file_panel,
+    );
     ActiveHal::exit(0)
 }
 

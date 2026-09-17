@@ -42,6 +42,7 @@ pub mod dma;
 pub mod faultclass;
 pub mod faultdev;
 pub mod fbcon;
+pub mod filepanel;
 pub mod font8x8;
 pub mod frameown;
 pub mod fs;

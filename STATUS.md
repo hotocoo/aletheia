@@ -33,7 +33,21 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-11, latest (THE DESKTOP SHELL PERSONA — ADR-136 turns the desktop's layout
+**As of:** 2026-09-17, latest (THE FILE PANEL AND THE NAMESPACE CROSSING — ADR-137 gives the
+desktop a fourth managed window that shows what is on the disk, without giving the desktop a disk.
+`kernel-core/src/filepanel.rs` is a bounded, allocation-free MODEL: it allocates once at
+construction, reuses that row storage for every listing, and is total on an empty listing, on one
+longer than its capacity and on a name longer than its row, counting every truncation. The console
+feeds it — it is the only component holding both a mounted filesystem and its device — through the
+new `shell::run_loop_serviced` hook, which reads the directory once per completed command line and
+does NO device work on an idle turn unless a row was activated, so a slow disk delays a typist
+rather than the compositor. Opening a row prints that object back through the console, bounded to
+512 bytes with every unprintable byte shown as a dot, so a panel pointed at a binary cannot drive
+the terminal. 13 new boot invariants (`filepanel=13`) and 2 more console invariants
+(`console=44`) hold on all three CPUs; the conformance contract grew 213 -> 228 core behaviours.
+The end-to-end proof is live rather than modelled: in `scripts/vinput-e2e.sh` a `write` typed on
+the serial wire appears in the panel on the next settle, and the row opened with the real virtio
+keyboard prints that object back on the serial wire. Previously: THE DESKTOP SHELL PERSONA — ADR-136 turns the desktop's layout
 convention into an explicit pure value. `ShellPersona::{Aletheia, Windows, Macos, Gnome}` resolves
 the chrome's measurements into ONE `ChromeLayout` that the panel painter and all three hit maps
 read, so they cannot disagree; `Alt+P` cycles the convention as a MOVE that rebuilds no surface and
@@ -986,6 +1000,18 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-17 — the file panel, and the namespace crossing that feeds it (ADR-137)
+
+- The desktop can now show you your own files. `kernel-core/src/filepanel.rs` holds `FilePanel`: a bounded list of rows, a selection and a scroll window, with **no block device in it**. It allocates once, at construction, and reuses that row storage for every listing — on a heap that never frees (ADR-063) a per-refresh allocation is a leak, and a file panel refreshes whenever the disk changes. It is total: defined on an empty listing, on one longer than `ROW_CAP`, and on a name longer than `NAME_CAP`, with every truncation counted rather than silent.
+- **The desktop never learns that a filesystem exists.** It owns the `files` window (`Alt+3`, the fourth taskbar button, a `files` menu item), turns presses and arrow keys into rows, and latches an activation as a **name** rather than an index — the listing can change between the click and the read, and reopening whatever now sits at row four is how a user loses the wrong file. The alternative (making `Desktop<H, T>` generic over `BlockDevice`) would have put directory reads on the compositor's tick, where a slow device is a frozen cursor.
+- **The console feeds it**, because on a live machine the console is the only component holding both a mounted `Filesystem` and the device to read it with. `shell::run_loop_serviced` hands the namespace to `filepanel::service_panel` in two phases: `Settled` once per completed command line (one directory read the operator already paid for by pressing return) and `Idle` on every idle turn, which does **no device work at all** unless a row was activated — that check is a take of an `Option<[u8; 24]>` and allocates nothing.
+- Opening a row prints the object the way `cat` would, bounded to 512 bytes, with every unprintable byte shown as a dot: a file panel must be safe to point at a binary, so bytes that would move the cursor or reprogram the terminal are shown rather than executed. A name that left the namespace between the click and the read is refused by name. When the hook prints, the loop re-issues the prompt.
+- New boot family `filepanel=13` on all three CPUs, plus 2 new console invariants (`console=44`: a command line ends on return and on no other byte; the serviced loop settles once before the first prompt and once per completed line, never mid-line and never for the line that halts the machine). Conformance contract **213 -> 228** core behaviours on all three targets.
+- **The end-to-end proof is live, not modelled.** `scripts/vinput-e2e.sh` now writes an object on the serial wire, checks it appears in the panel on the next settle (`files: N rows, M listings, K dropped` in the `input` readout), focuses the panel window with a real virtio-tablet click, opens the selected row with a real virtio-keyboard Enter, and waits for that object's bytes to come back on the serial wire. Serial in, GUI across, serial out.
+- **A trap this wave hit and closed:** the first version of the suite built its own 512 KB RAM disk for each of the three crossing checks. On a heap that never frees, three of those exhausted the aarch64 kernel's heap and the console suite died in the allocator. `filepanel_suite` now takes the caller's scratch device, the way `console_suite` already did.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64) PASS, vm-e2e-riscv PASS, vm-e2e-x86 PASS (three boots, exit 33), desktop-e2e-dt PASS on both DT targets, console-e2e PASS on all three, keyboard-e2e PASS, vinput-e2e PASS (including the new file-panel section), conformance PASS (228 behaviours on all three targets), quality-gate PASS, and the four doc gates PASS**.
+- **Named as still open:** the panel is fed only while the interactive console session is running, so a machine that never reaches the console shows an empty panel (which says so rather than inventing a listing); an opened object prints into the terminal rather than into a viewer window of its own; and the panel is read-only — there is no rename, delete or copy from the GUI.
 
 ### 2026-09-11 — Lethe: the upstream is pinned, and the honest scope is written down
 

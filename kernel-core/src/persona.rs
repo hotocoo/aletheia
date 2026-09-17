@@ -335,9 +335,9 @@ pub const LIVE_CHROME: ChromeMetrics = ChromeMetrics {
     surface_h: 240,
     panel_h: 2 * 8 + 10,
     launcher_w: 8 * 8,
-    button_w: 14 * 8,
-    button_count: 3,
-    workspace_w: 7 * 8,
+    button_w: 12 * 8,
+    button_count: 4,
+    workspace_w: 6 * 8,
     workspace_count: 4,
 };
 

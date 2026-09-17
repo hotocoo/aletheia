@@ -121,11 +121,11 @@ check_session() {
     # non-text inspection - and a console that only writes and reads is not one you can work in.
     grep -q "capability-secure microkernel" <<<"$log" || { echo "  FAIL [$label/first] ver did not answer"; bad=1; }
     # The LIVE desktop, if this machine brought one up (ADR-085): `input` is answered from the
-    # model the PUMP is mutating, so a readout naming both windows and the focused terminal is
+    # model the PUMP is mutating, so a readout naming every window and the focused terminal is
     # evidence that the timer fired and the pump ran without taking the fatal branch of an IRQ
     # path that is fatal by default for everything it does not name.
     if grep -q "\[desktop\] LIVE" <<<"$log"; then
-      grep -q "windows: 2 open" <<<"$log" || { echo "  FAIL [$label/first] the live desktop did not report its two windows"; bad=1; }
+      grep -q "windows: 4 open" <<<"$log" || { echo "  FAIL [$label/first] the live desktop did not report its four windows"; bad=1; }
       grep -q "focus: surface 2" <<<"$log" || { echo "  FAIL [$label/first] the terminal window did not hold focus"; bad=1; }
       grep -q "session: held" <<<"$log" || { echo "  FAIL [$label/first] the input session was not reported"; bad=1; }
     fi

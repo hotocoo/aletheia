@@ -147,3 +147,23 @@ pub fn facts() -> Option<kernel_core::shell::InputFacts> {
 pub fn window_count() -> usize {
     with_desktop(|d| d.window_count()).unwrap_or(0)
 }
+
+/// Publish the console's namespace to the desktop's file panel (ADR-137).
+///
+/// The console owns the filesystem and the device; the desktop owns only the view. The listing
+/// therefore crosses HERE, on the main thread between keystrokes, and never on the pump's tick.
+#[cfg(feature = "interactive")]
+pub fn set_file_listing<I: Iterator<Item = kernel_core::filepanel::FileRow>>(
+    entries: I,
+    free_blocks: u32,
+    total_blocks: u32,
+) {
+    let _ = with_desktop(|d| d.set_file_listing(entries, free_blocks, total_blocks));
+}
+
+/// The name the operator last opened in the file panel, if any. Cheap enough to ask on every idle
+/// turn of the console loop: it takes a latched value and allocates nothing.
+#[cfg(feature = "interactive")]
+pub fn take_file_activation() -> Option<[u8; kernel_core::filepanel::NAME_CAP]> {
+    with_desktop(|d| d.take_file_activation()).flatten()
+}

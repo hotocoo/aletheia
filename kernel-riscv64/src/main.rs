@@ -1036,6 +1036,31 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // The desktop's view of the NAMESPACE (the GUI's file rung): a bounded model with no device
+    // in it, so a slow disk can never be a frozen cursor. The panel is total — defined on an
+    // empty listing, on one larger than its capacity, and on a name longer than its row — and it
+    // reuses its row storage, which a heap that never frees (ADR-063) requires of anything that
+    // refreshes whenever the disk changes.
+    kprintln!("");
+    kprintln!("--- file-panel selftests (the desktop's view of the namespace: bounded, total) ---");
+    match kernel_core::filepanel::filepanel_suite(&mut disk, |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[filepanel] ALL {} FILE-PANEL INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[filepanel] FAILED at file-panel invariant {}: {}",
+                idx,
+                name
+            );
+            ActiveHal::exit(700 + idx as i32);
+        }
+    }
+
     // The window manager (ALET-P2-021's window rung, ADR-084): windows are a managed SET -
     // chrome the painter and the hit test agree on, a press that routes to the topmost window
     // alone, a close that ends a window's surface, queue and token together, and focus that

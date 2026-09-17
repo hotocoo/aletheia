@@ -740,6 +740,12 @@ pub struct InputFacts {
     pub closes: u64,
     /// Drags completed since boot (a press on a title band, then a release).
     pub drags: u64,
+    /// Rows the desktop's file panel is holding (ADR-137).
+    pub panel_rows: usize,
+    /// Listings the panel has taken since boot, so an operator can see it is being fed at all.
+    pub panel_listings: u64,
+    /// Entries dropped across every truncated listing, counted rather than silent.
+    pub panel_dropped: u64,
 }
 
 /// The facts a command may ask of the running target. Everything here is already established by the
@@ -1183,6 +1189,15 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                         f.windows,
                         f.closes,
                         f.drags
+                    );
+                    // The desktop's view of the namespace (ADR-137): the panel holds rows, it is
+                    // fed by this console, and anything it could not fit is counted.
+                    outf!(
+                        out,
+                        "files: {} rows, {} listings, {} dropped",
+                        f.panel_rows,
+                        f.panel_listings,
+                        f.panel_dropped
                     );
                 }
                 None => out("input: no machine input session on this target"),
@@ -1759,19 +1774,79 @@ pub fn run_loop<H: ShellHost, D: BlockDevice>(
     getc: &mut dyn FnMut() -> Option<u8>,
     out: &mut dyn FnMut(&str),
 ) {
+    run_loop_serviced(host, fs, dev, getc, out, &mut |_, _, _, _| false)
+}
+
+/// Why the loop is handing the namespace to a service hook. The phase is stated rather than
+/// inferred because the two callers cost different amounts: a settle may read the directory,
+/// an idle turn happens a thousand times a second and must not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServicePhase {
+    /// The namespace may have changed: the session just finished a command line (or is about to
+    /// show its first prompt). Reading the directory here costs one read per line a human types.
+    Settled,
+    /// Nothing was typed. The hook runs on every idle turn, so it must do no device work unless
+    /// something outside the console (a click in the desktop's file panel) asked for it.
+    Idle,
+}
+
+/// The service hook's shape, named so the three targets and this loop agree on it in one place:
+/// the phase, the namespace, the device it lives on, and somewhere to print. Returns whether it
+/// printed.
+pub type ServiceHook<'a, D> =
+    dyn FnMut(ServicePhase, &Filesystem, &mut D, &mut dyn FnMut(&str)) -> bool + 'a;
+
+/// The interactive loop with a SERVICE HOOK: the same session, plus somewhere for a target to
+/// answer for the namespace it owns while the console holds it (ADR-137).
+///
+/// The console is the only part of a live machine that has both a mounted filesystem and a device
+/// to read it with, so a GUI file panel cannot list the namespace by itself. Rather than lend the
+/// filesystem to the compositor — which would put disk latency on the frame path — the loop hands
+/// it out here, between keystrokes, where blocking costs a human nothing.
+///
+/// The hook returns whether it printed through `out`; the loop re-issues the prompt when it did,
+/// so output that arrives from outside the typist's line never eats the prompt.
+pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
+    host: &H,
+    fs: &mut Filesystem,
+    dev: &mut D,
+    getc: &mut dyn FnMut() -> Option<u8>,
+    out: &mut dyn FnMut(&str),
+    service: &mut ServiceHook<'_, D>,
+) {
     let mut session = Session::new();
+    // The first settle happens BEFORE the banner's prompt: a panel that opens with the desktop
+    // shows the namespace as it is, not as it will be once the operator types something.
+    let _ = service(ServicePhase::Settled, fs, dev, &mut *out);
     session.prompt(out);
     loop {
         let Some(byte) = getc() else {
+            if service(ServicePhase::Idle, fs, dev, &mut *out) {
+                session.prompt(out);
+            }
             // Nothing typed. Wait for an interrupt rather than asking again immediately; see
             // `ShellHost::idle`, which does nothing at all unless a target has said it is safe.
             host.idle();
             continue;
         };
+        let settles = ends_a_command(byte);
         if session.feed(byte, host, fs, dev, out) == Outcome::Halt {
             return;
         }
+        if settles && service(ServicePhase::Settled, fs, dev, &mut *out) {
+            session.prompt(out);
+        }
     }
+}
+
+/// Whether this byte ends a command line, and so leaves the namespace in whatever state the
+/// command left it.
+///
+/// Deliberately a predicate over the BYTE rather than a report from the editor: a line that was
+/// cancelled, empty, or refused still settles, and a settle that fires once too often costs one
+/// directory read while a settle that is missed shows a stale listing until the next command.
+pub fn ends_a_command(byte: u8) -> bool {
+    matches!(byte, b'\r' | b'\n')
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2276,6 +2351,43 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
     check!(
         "console: every command that needs an argument refuses to run without one",
         usage_ok
+    );
+
+    // 41. A command line ends on return, and on nothing else. The desktop's file panel is
+    //     refreshed off this predicate (ADR-137), so a byte that wrongly counted as a line end
+    //     would read the directory on every keystroke a human types.
+    check!(
+        "console: a command line ends on return and on no other byte",
+        ends_a_command(b'\r')
+            && ends_a_command(b'\n')
+            && !ends_a_command(b'a')
+            && !ends_a_command(0x08)
+            && !ends_a_command(0x1b)
+            && !ends_a_command(b' ')
+    );
+
+    // 42. The serviced loop hands the namespace out once before the first prompt and once per
+    //     completed line — never mid-line. This is what lets a GUI panel show the namespace
+    //     without ever holding the filesystem itself.
+    let mut phases: Vec<ServicePhase> = Vec::new();
+    let mut typed = b"ls\rhalt\r".iter().copied();
+    let mut sink = |_: &str| {};
+    run_loop_serviced(
+        host,
+        &mut fs,
+        dev,
+        &mut || typed.next(),
+        &mut sink,
+        &mut |phase, _, _, _| {
+            phases.push(phase);
+            false
+        },
+    );
+    check!(
+        "console: the serviced loop settles once before the prompt and once per command line",
+        // Before the first prompt, then after `ls`. The halt line does NOT settle: a machine
+        // that is stopping has nothing to show a panel that is about to go dark with it.
+        phases == [ServicePhase::Settled, ServicePhase::Settled]
     );
 
     Ok(n)

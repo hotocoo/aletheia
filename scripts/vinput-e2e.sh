@@ -358,7 +358,7 @@ expect = (300 + map_axis(DROP[0], SCAN_W) - map_axis(PRESS[0], SCAN_W),
 check(win2 is not None and (int(win2.group(1)), int(win2.group(2))) == expect and facts7[4] == 'surface 2',
       'window: a drag by the title band moved it by the mapped pointer delta (%r, expected %r)' % ((win2.group(1), win2.group(2)) if win2 else None, expect))
 
-# 5d - THE SECOND WINDOW (ADR-084): the desktop came up with three managed windows, and a click
+# 5d - THE SECOND WINDOW (ADR-084): the desktop came up with four managed windows, and a click
 #      on the monitor window takes focus away from the terminal. Focus is a routing decision:
 #      from here a keystroke lands in the monitor's queue and the console never sees it.
 def axis_for(px, span):
@@ -374,8 +374,8 @@ def goto(px, py):
 
 chunk, _f = run_input()
 w0 = WINDOWS_RE.search(chunk)
-check(w0 is not None and int(w0.group(1)) == 3 and int(w0.group(2)) == 0,
-      'windows: the desktop came up with three managed windows (%r)' % ((w0.groups() if w0 else None),))
+check(w0 is not None and int(w0.group(1)) == 4 and int(w0.group(2)) == 0,
+      'windows: the desktop came up with four managed windows (%r)' % ((w0.groups() if w0 else None),))
 check('managed windows' in log_text(),
       'windows: the boot log names how many windows the manager holds')
 goto(100, 170)                                   # the monitor window's client area
@@ -397,7 +397,7 @@ goto(254, 144)                                   # the monitor's close box (top-
 click()
 chunk, (_pa, _da, _ra, _ca, focusa, _qa) = run_input()
 wa = WINDOWS_RE.search(chunk)
-check(wa is not None and int(wa.group(1)) == 2 and int(wa.group(2)) == 1,
+check(wa is not None and int(wa.group(1)) == 3 and int(wa.group(2)) == 1,
       'windows: the close box closed the window (%r)' % ((wa.groups() if wa else None),))
 check(focusa == 'surface 2',
       'windows: focus fell to the surviving window, not to nobody (%r)' % (focusa,))
@@ -412,6 +412,42 @@ press(['backspace'])
 time.sleep(0.3)
 check('c' in between,
       'windows: after the close, the keyboard types at the surviving terminal again (%r)' % (between[:40],))
+
+# 5g - THE FILE PANEL (ADR-137): the desktop's view of the namespace, end to end on a live
+#      machine. The console owns the filesystem; the panel owns the view. So a write typed on the
+#      serial wire must appear in the panel on the next settle, and a row opened with the virtio
+#      KEYBOARD must print that object back through the console. Neither half is a unit test:
+#      this is the real compositor, the real device and the real journal.
+FILES_RE = re.compile(r'files: (\d+) rows, (\d+) listings, (\d+) dropped')
+chunk, _fa = run_input()
+before = FILES_RE.search(chunk)
+check(before is not None and int(before.group(2)) > 0,
+      'files: the console is feeding the panel at all (%r)' % ((before.groups() if before else None),))
+
+mark = len(log_text())
+ser.sendall(b'write panelproof hello-from-the-panel\r')
+wait_for('wrote', timeout=30)
+chunk, _fb = run_input()
+after = FILES_RE.search(chunk)
+check(after is not None and int(after.group(1)) >= 1
+      and int(after.group(2)) > int(before.group(2)) and int(after.group(3)) == 0,
+      'files: a console write reaches the panel on the next settle (%r -> %r)' %
+      (before.groups() if before else None, after.groups() if after else None))
+
+# Focus the panel by its title band (a press there is a drag, never a row selection), then open
+# the selected row from the keyboard. The name is latched by the desktop and performed by the
+# console, which is the whole point of the crossing.
+goto(150, 44)
+click()
+chunk, (_pf, _df, _rf, _cf, focusf, _qf) = run_input()
+check(focusf == 'surface 8', 'files: a press on the panel window focuses it (%r)' % (focusf,))
+
+mark = len(log_text())
+press(['ret'])
+opened = wait_for('hello-from-the-panel', timeout=30)
+printed = log_text()[mark:]
+check(opened and 'files: panelproof' in printed,
+      'files: opening the selected row printed that object through the console (%r)' % (printed[:120],))
 
 # 6 — quiet: with nothing happening, the ledger holds still.
 chunk, (posted6, dropped6, refused6, cursor6, _f6, queued6) = run_input()

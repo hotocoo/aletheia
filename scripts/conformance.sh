@@ -327,6 +327,25 @@ CONTRACT=(
   "persona: only the macOS convention puts the window controls on the leading edge"
   "persona: a scanout too narrow for a convention degrades to packed order"
 
+
+  # The desktop's file panel, and the namespace crossing it is fed by (ADR-137): the same
+  # bounded view, the same refusals, and the same console-owned listing on every CPU.
+  "filepanel: an empty listing has no selection and refuses every action by name"
+  "filepanel: the selection stays inside the listing however far it is stepped"
+  "filepanel: the visible window always contains the selection"
+  "filepanel: a listing longer than capacity is truncated and counted"
+  "filepanel: a name longer than the row is truncated and says so"
+  "filepanel: refreshing the listing reuses its storage and never reallocates"
+  "filepanel: a refresh keeps the selection on the same name when it survives"
+  "filepanel: a press below the last row is refused by name and selects nothing"
+  "filepanel: the same listing renders byte-identically and refuses nothing"
+  "filepanel: the rendered rows are exactly the visible window, in order"
+  "filepanel: an idle turn with nothing activated neither reads the disk nor prints"
+  "filepanel: a settle publishes every live name with the device's own free space"
+  "filepanel: opening a row prints its bytes safely and a vanished name is refused"
+  "console: a command line ends on return and on no other byte"
+  "console: the serviced loop settles once before the prompt and once per command line"
+
   # Windows are a managed set (ADR-084): the same routing decision on every CPU.
   "wm: the close box, the drag band and the client area are exactly the painted chrome"
   "wm: a press in the overlap routes to the topmost window and raises it, alone"
