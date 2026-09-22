@@ -1220,6 +1220,25 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // LETHE'S POLICY CONTRACT (REQ-WEB-005, ADR-159; Lethe stage N6): HTTPS-first with plaintext
+    // refused rather than rewritten, blocked hosts refused before lookup, no third-party requests
+    // from the renderer, one fixed user agent, no site data kept, `forget` and an empty start.
+    kprintln!("");
+    kprintln!("--- policy selftests (Lethe's contract as invariants: refuse, never downgrade, remember nothing) ---");
+    match kernel_core::policy::policy_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[policy] ALL {} POLICY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[policy] FAILED at policy invariant {}: {}", idx, name);
+            semihosting::exit(1050 + idx as i32);
+        }
+    }
+
     // THE BROWSER'S NAVIGATION MODEL (REQ-WEB-002, ADR-156; Lethe stage N4): URLs, the hosts a
     // person has chosen to trust, history, and the page a window shows. Nothing here touches a
     // wire; plaintext is refused rather than downgraded to, and an unpinned host is refused before

@@ -383,6 +383,7 @@ CONTRACT=(
   "console: https refuses a path it would never send by usage and a missing network by name"
   "console: go refuses plaintext and an unpinned host by name before anything is dialed"
   "console: follow refuses a link the page never offered before anything is dialed"
+  "console: block refuses go by name before lookup, and forget leaves back nowhere to go"
 
 
 
@@ -500,6 +501,16 @@ CONTRACT=(
   "content: a document longer than the renderer reads is cut at the bound and said so"
   "content: an unknown tag is invisible, its attributes are never text, an unterminated tag ends the page"
   "content: comments and declarations are skipped whole, and bytes that could drive a terminal show as ?"
+
+  # Lethe's policy contract (ADR-159): the same refusals on every CPU, nothing remembered.
+  "policy: plaintext is refused as plaintext, never rewritten to https, and leaves no history"
+  "policy: a blocked host is refused before lookup, pinned or not, forward or back; the ninth block is refused, not evicted"
+  "policy: the renderer makes no requests - img, script, iframe and stylesheet sources become neither links nor text"
+  "policy: a link to another host is third-party by name and dials only a host the operator pinned and did not block"
+  "policy: the user agent is one fixed string - requests to different hosts differ only in host and path"
+  "policy: no site data is kept - a Set-Cookie in the answer changes nothing about the next request"
+  "policy: forget empties history, page and links and keeps the operator's trust and block lists"
+  "policy: a fresh navigator holds nothing - no hosts, no blocks, no history, no page; every host is unknown"
 
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.

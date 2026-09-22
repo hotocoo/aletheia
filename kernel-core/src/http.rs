@@ -111,6 +111,10 @@ pub fn path_is_sendable(path: &[u8]) -> bool {
 
 /// Build `GET path HTTP/1.1` for `host` into `out`, returning its length. `Connection: close` is
 /// not optional: it is what makes the answer end.
+/// The one user agent this client ever sends (ADR-159): no platform, no language, no build, so
+/// no two machines running this kernel can be told apart by it.
+pub const USER_AGENT: &[u8] = b"aletheia/0.1";
+
 pub fn request(host: &[u8], path: &[u8], out: &mut [u8]) -> Result<usize, HttpRefusal> {
     if !path_is_sendable(path) {
         return Err(HttpRefusal::BadPath);
@@ -118,13 +122,14 @@ pub fn request(host: &[u8], path: &[u8], out: &mut [u8]) -> Result<usize, HttpRe
     if host.is_empty() || host.len() > 255 || !host.iter().all(|&b| (0x21..0x7f).contains(&b)) {
         return Err(HttpRefusal::BadPath);
     }
-    let parts: [&[u8]; 7] = [
+    let parts: [&[u8]; 8] = [
         b"GET ",
         path,
         b" HTTP/1.1\r\nHost: ",
         host,
-        b"\r\nUser-Agent: aletheia/0.1\r\nAccept: */*\r\n",
-        b"Connection: close\r\n",
+        b"\r\nUser-Agent: ",
+        USER_AGENT,
+        b"\r\nAccept: */*\r\nConnection: close\r\n",
         b"\r\n",
     ];
     let total: usize = parts.iter().map(|p| p.len()).sum();

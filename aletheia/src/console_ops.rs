@@ -310,6 +310,8 @@ mod tests {
                     | "go"
                     | "back"
                     | "follow"
+                    | "block"
+                    | "forget"
                     | "help"
                     | "ver"
                     | "arch"

@@ -901,6 +901,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("back", "navigate the browser to the previous page"),
     ("follow N", "navigate to link [N] of the current page"),
     (
+        "block HOST",
+        "refuse every navigation to HOST, pinned or not",
+    ),
+    (
+        "forget",
+        "drop browser history, page and links; keep trust and blocks",
+    ),
+    (
         "mlstat",
         "the resident risk advisor: what it is, and what it has done since boot",
     ),
@@ -1591,16 +1599,49 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 outf!(out, "follow: the page offers no link [{}]", n);
                 return Outcome::Continue;
             };
+            let third_party = nav.is_third_party(n) == Some(true);
             match nav.navigate(&target[..len]) {
-                Ok(resolved) => browse(host, nav, resolved, out),
+                Ok(resolved) => {
+                    if third_party {
+                        out("follow: third-party link - leaving this page's host for one you pinned");
+                    }
+                    browse(host, nav, resolved, out)
+                }
                 Err(NavRefusal::Url(UrlRefusal::Plaintext)) => {
                     out("follow: that link is plaintext; this browser speaks https only, and does not downgrade")
+                }
+                Err(NavRefusal::Blocked) => {
+                    out("follow: that link's host is blocked; nothing was dialed")
                 }
                 Err(NavRefusal::Url(why)) => outf!(out, "follow: that link is not a URL this browser reads ({:?})", why),
                 Err(NavRefusal::UnknownHost) => {
                     out("follow: no root pinned for that link's host (trust NAME IP PIN first); nothing was dialed")
                 }
             }
+        }
+        "block" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let name = rest.trim();
+            if name.is_empty() {
+                out("usage: block HOST (refuse every navigation to HOST, pinned or not)");
+                return Outcome::Continue;
+            }
+            match nav.blocked.block(name.as_bytes()) {
+                Ok(()) => outf!(out, "blocked {}: nothing will be dialed there, pinned or not", name),
+                Err(TrustRefusal::BadName) => {
+                    out("block: a host is lowercase letters, digits, dots and dashes, at most 64 of them")
+                }
+                Err(TrustRefusal::Full) => out("block: the block list holds its eight; nothing was evicted"),
+            }
+        }
+        "forget" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            nav.forget();
+            out("forgotten: history, page and links; trust and block lists kept");
         }
         "go" | "back" => {
             if !authorize(host, ShellAction::Write, out) {
@@ -1633,6 +1674,10 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 }
                 Err(NavRefusal::UnknownHost) => {
                     out("go: no root pinned for that host (trust NAME IP PIN first); nothing was dialed");
+                    return Outcome::Continue;
+                }
+                Err(NavRefusal::Blocked) => {
+                    out("go: that host is blocked (block NAME); nothing was dialed");
                     return Outcome::Continue;
                 }
             };
@@ -2330,6 +2375,7 @@ pub fn navigate_for_window<H: ShellHost>(
         Err(NavRefusal::UnknownHost) => {
             Some(b"refused: no root pinned for that host (trust NAME IP PIN at the console)")
         }
+        Err(NavRefusal::Blocked) => Some(b"refused: that host is blocked"),
     };
     match refused {
         Some(why) => grid.write(why),
@@ -3030,7 +3076,24 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
         nolink.contains("follow: the page offers no link [3]") && badnum.contains("usage: follow")
     );
 
-    // 47. A command line ends on return, and on nothing else. The desktop's file panel is
+    // 47. `block` refuses `go` by name BEFORE lookup - the host need not be pinned to be blocked -
+    //     and `forget` leaves `back` nowhere to go, while nothing is dialed by any of it.
+    //     One session: the block list lives in the session's navigator, as the trust table does.
+    let (policy, _) = transcript(
+        "block tracker.example\rgo https://tracker.example/\rforget\rback\r",
+        host,
+        &mut fs,
+        dev,
+    );
+    check!(
+        "console: block refuses go by name before lookup, and forget leaves back nowhere to go",
+        policy.contains("blocked tracker.example")
+            && policy.contains("go: that host is blocked")
+            && policy.contains("forgotten: history, page and links")
+            && policy.contains("back: no previous page")
+    );
+
+    // 48. A command line ends on return, and on nothing else. The desktop's file panel is
     //     refreshed off this predicate (ADR-137), so a byte that wrongly counted as a line end
     //     would read the directory on every keystroke a human types.
     check!(
@@ -3043,7 +3106,7 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && !ends_a_command(b' ')
     );
 
-    // 48. The serviced loop hands the namespace out once before the first prompt and once per
+    // 49. The serviced loop hands the namespace out once before the first prompt and once per
     //     completed line — never mid-line. This is what lets a GUI panel show the namespace
     //     without ever holding the filesystem itself.
     let mut phases: Vec<ServicePhase> = Vec::new();

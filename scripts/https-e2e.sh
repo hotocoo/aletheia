@@ -204,6 +204,15 @@ check_transcript() {
   grep -q "alert(" <<<"$log" && { echo "  FAIL [$label] script content reached the page"; bad=1; }
   grep -q "peer request: /plain.txt" "$PEER_LOG" || { echo "  FAIL [$label] following the link never fetched the plain page"; bad=1; }
   grep -q "follow: the page offers no link \[7\]" <<<"$log" || { echo "  FAIL [$label] a link the page never offered was not refused"; bad=1; }
+  # Lethe's policy contract (ADR-159), live: a host the person blocks is refused by name even though
+  # it is pinned and was just fetched from, and nothing is dialed after the block; `forget` leaves
+  # `back` nowhere to go.
+  grep -q "^blocked $SERVER_NAME" <<<"$log" || { echo "  FAIL [$label] block did not take the host"; bad=1; }
+  grep -q "go: that host is blocked" <<<"$log" || { echo "  FAIL [$label] a blocked pinned host was not refused by name"; bad=1; }
+  local after_block; after_block="$(sed -n '/^aletheia> block /,$p' <<<"$log")"
+  grep -q "^HTTP " <<<"$after_block" && { echo "  FAIL [$label] something was fetched after the block"; bad=1; }
+  grep -q "forgotten: history, page and links" <<<"$log" || { echo "  FAIL [$label] forget did not answer"; bad=1; }
+  grep -q "back: no previous page" <<<"$log" || { echo "  FAIL [$label] back after forget still had somewhere to go"; bad=1; }
   grep -q "peer request: /plain.txt host: $SERVER_NAME" "$PEER_LOG" || { echo "  FAIL [$label] the peer never saw the plain GET with its Host"; bad=1; }
   grep -q "peer request: /chunked.txt" "$PEER_LOG" || { echo "  FAIL [$label] the peer never saw the chunked GET"; bad=1; }
   grep -q "peer handshake: TLSv1.3" "$PEER_LOG" || { echo "  FAIL [$label] the peer never completed a TLS 1.3 handshake"; bad=1; }
@@ -250,6 +259,10 @@ mmio_leg() {
     "go https://$SERVER_NAME:$PEER_PORT/index.html" \
     "follow 1" \
     "follow 7" \
+    "block $SERVER_NAME" \
+    "go https://$SERVER_NAME:$PEER_PORT/plain.txt" \
+    "forget" \
+    "back" \
     "halt"
   sed -n '/interactive console/,$p' "$log"
   check_transcript "$label" "$(cat "$log")"

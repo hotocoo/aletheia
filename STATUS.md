@@ -33,7 +33,14 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (THE CONTENT RENDERER — ADR-158, Lethe stage N5 delivered. `kernel-core/src/content.rs`
+**As of:** 2026-09-23, latest (LETHE'S POLICY CONTRACT — ADR-159, Lethe stage N6 delivered; Track 2 of
+`docs/LETHE-INTEGRATION.md` is complete. `kernel-core/src/policy.rs` proves eight invariants against the browser as
+built: plaintext refused as plaintext and never rewritten; an operator-filled block list (`block HOST`) checked before
+the trust table and on `back`; the renderer makes no requests; third-party links named and dialed only to a pinned,
+unblocked host; one fixed user agent; a `Set-Cookie` kept nowhere; `forget` emptying history, page and links while
+trust and blocks stay; a fresh navigator holding nothing. `policy=8` on all three CPUs, `console=51`, conformance
+374 -> 383, `block`/`forget` proved live in `scripts/https-e2e.sh`. Before it: THE CONTENT RENDERER — ADR-158,
+Lethe stage N5 delivered. `kernel-core/src/content.rs`
 renders a bounded, fail-closed subset of HTML into lines: headings, paragraphs, breaks, lists, `pre`, links and the
 title; script and style CONTENT dropped whole and counted; every other tag invisible, its attributes never text;
 input 8 KiB, output the grid, links sixteen, nothing executed, nothing grown. `go` renders `text/html` through it,
@@ -1229,6 +1236,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — Lethe's policy contract, adopted natively (ADR-159)
+
+- **Lethe stage N6, the last rung of Track 2.** Lethe's README specifies BEHAVIOURS, not an engine; `kernel-core/src/policy.rs` proves them at boot against the browser this tree built in N1..N5. Nothing here is engine code: every invariant says what the browser CANNOT do.
+- **Two additions to the model make the contract complete.** A block list (`Navigator::blocked`, eight names, `block HOST`) checked BEFORE the trust table - a pin never overrides a block - and on `back` as well as on a typed URL; the ninth is refused, not evicted. `forget` empties history, the page and its links; the trust and block lists stay, because they are what the person typed, not what a site left. `follow` names a third-party link when the target host is not the page's. `http::USER_AGENT` is the one constant the client sends.
+- **The eight invariants:** plaintext refused as plaintext, typed or followed, never rewritten, no history; a blocked host refused before lookup, pinned or not, forward or back; the renderer makes no requests (img/script/iframe/stylesheet sources become neither links nor text); a third-party link dials only a pinned, unblocked host, to THAT host's pin; requests to different hosts differ only in host and path and name no platform, language or build; a `Set-Cookie` is a header and nothing more, the next request byte-identical; `forget` keeps trust and blocks; a fresh navigator holds nothing.
+- **Proof:** `policy=8` on all three CPUs; `console=51`; LIVE in `scripts/https-e2e.sh` - the real server's host, pinned and just fetched from, is blocked by name, the next `go` is refused with nothing dialed, `forget` then `back` has nowhere to go. Conformance contract **374 -> 383**.
+- **No shipped tracker list**, for the reason this kernel ships no root store and no DNS: a list nobody here typed is trust nobody here gave. The mechanism is the contract; the names are the operator's.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (383 on all three), quality-gate PASS, doc gates PASS, https-e2e PASS, console-e2e PASS, vinput-e2e PASS, desktop-e2e-dt PASS**.
 
 ### 2026-09-23 — the content renderer (ADR-158)
 

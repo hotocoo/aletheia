@@ -18,6 +18,8 @@ use crate::textgrid::TextGrid;
 
 /// The most hosts an operator can pin.
 pub const MAX_HOSTS: usize = 8;
+/// The most hosts a person can block (ADR-159); the ninth is refused, not evicted.
+pub const MAX_BLOCKED: usize = 8;
 /// The longest URL the model will read.
 pub const MAX_URL: usize = 256;
 /// The longest host name.
@@ -52,6 +54,56 @@ pub enum NavRefusal {
     Url(UrlRefusal),
     /// No pinned root for this host: nothing is dialed.
     UnknownHost,
+    /// The person blocked this host (ADR-159): refused before lookup, pinned or not.
+    Blocked,
+}
+
+/// The hosts a person refused (Lethe's tracker rule, ADR-159): operator-filled, bounded, checked
+/// before the trust table so a pin does not override a block.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockList {
+    names: [([u8; MAX_HOST], usize); MAX_BLOCKED],
+    len: usize,
+}
+
+impl Default for BlockList {
+    fn default() -> Self {
+        BlockList {
+            names: [([0u8; MAX_HOST], 0); MAX_BLOCKED],
+            len: 0,
+        }
+    }
+}
+
+impl BlockList {
+    pub fn block(&mut self, name: &[u8]) -> Result<(), TrustRefusal> {
+        if name.is_empty() || name.len() > MAX_HOST || !name.iter().all(|&b| host_byte_ok(b)) {
+            return Err(TrustRefusal::BadName);
+        }
+        if self.contains(name) {
+            return Ok(());
+        }
+        if self.len == MAX_BLOCKED {
+            return Err(TrustRefusal::Full);
+        }
+        let (buf, len) = &mut self.names[self.len];
+        buf[..name.len()].copy_from_slice(name);
+        *len = name.len();
+        self.len += 1;
+        Ok(())
+    }
+
+    pub fn contains(&self, name: &[u8]) -> bool {
+        self.names[..self.len].iter().any(|(b, l)| &b[..*l] == name)
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 /// Why a host was not pinned.
@@ -270,6 +322,7 @@ impl Page {
 #[derive(Clone, Copy, Debug)]
 pub struct Navigator {
     pub hosts: HostTable,
+    pub blocked: BlockList,
     /// The links the current page offered (ADR-158), numbered as the renderer printed them.
     links: [([u8; crate::content::HREF_CAP], usize); crate::content::MAX_LINKS],
     link_count: usize,
@@ -291,6 +344,7 @@ impl Navigator {
     pub fn new() -> Self {
         Navigator {
             hosts: HostTable::default(),
+            blocked: BlockList::default(),
             links: [([0u8; crate::content::HREF_CAP], 0); crate::content::MAX_LINKS],
             link_count: 0,
             history: [None; HISTORY],
@@ -304,6 +358,9 @@ impl Navigator {
     /// hand back what the platform must dial. Nothing is dialed here.
     pub fn navigate(&mut self, text: &[u8]) -> Result<Resolved, NavRefusal> {
         let url = parse_url(text).map_err(NavRefusal::Url)?;
+        if self.blocked.contains(url.host()) {
+            return Err(NavRefusal::Blocked);
+        }
         let entry = self
             .hosts
             .lookup(url.host())
@@ -363,6 +420,9 @@ impl Navigator {
 
     /// Resolve a URL already in history (after `back`/`forward`) without re-recording it.
     pub fn resolve(&self, url: &Url) -> Result<Resolved, NavRefusal> {
+        if self.blocked.contains(url.host()) {
+            return Err(NavRefusal::Blocked);
+        }
         let entry = self
             .hosts
             .lookup(url.host())
@@ -409,6 +469,32 @@ impl Navigator {
 
     pub fn page(&self) -> Option<&Page> {
         self.page.as_ref()
+    }
+
+    /// Forget every page: history, the page shown and its links (ADR-159). The trust and block
+    /// lists stay - they are what the person typed, not what a site left.
+    pub fn forget(&mut self) {
+        self.history = [None; HISTORY];
+        self.len = 0;
+        self.cursor = 0;
+        self.page = None;
+        self.link_count = 0;
+    }
+
+    /// Whether link `n` (1-based) points at a host other than the page's: a path is first-party,
+    /// an absolute URL on another host is third-party, and a URL this browser cannot read is
+    /// nobody's. `None` when there is no such link or no page.
+    pub fn is_third_party(&self, n: usize) -> Option<bool> {
+        if n == 0 || n > self.link_count {
+            return None;
+        }
+        let page = self.page.as_ref()?;
+        let (buf, len) = &self.links[n - 1];
+        let href = &buf[..*len];
+        if href.first() == Some(&b'/') {
+            return Some(false);
+        }
+        Some(parse_url(href).map_or(true, |u| u.host() != page.url.host()))
     }
 
     /// Keep the links a rendered page offered, in the renderer's numbering. Replaces the last
