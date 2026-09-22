@@ -96,6 +96,7 @@ pub extern "C" fn kmain() -> ! {
         ActiveHal::ticks_to_ns(t1 - t0)
     );
     kprintln!("[boot] heap: {} B used after init", heap::used_bytes());
+    kernel_core::boottime::start::<ActiveHal>();
 
     // Physical memory: bring up the frame allocator over the RAM above the static kernel region.
     if !frames::init() {
@@ -118,7 +119,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[selftest] ALL {} INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[selftest] ALL {} INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] selftest suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("selftest")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[selftest] FAILED at invariant {}: {}", idx, name);
             ActiveHal::exit(10 + idx as i32);
@@ -138,7 +145,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[keys] ALL {} KEYBOARD-DECODE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[keys] ALL {} KEYBOARD-DECODE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] keys suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("keys")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[keys] FAILED at keyboard-decode invariant {}: {}",
@@ -162,7 +175,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[cap] ALL {} CAPABILITY-LIFETIME INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[cap] ALL {} CAPABILITY-LIFETIME INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] cap suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("cap")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[cap] FAILED at capability-lifetime invariant {}: {}",
@@ -191,7 +210,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[iommu] ALL {} IOMMU-CONTRACT INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[iommu] ALL {} IOMMU-CONTRACT INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] iommu suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("iommu")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[iommu] FAILED at iommu-contract invariant {}: {}",
@@ -218,7 +243,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[pm] ALL {} POWER-PERFORMANCE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[pm] ALL {} POWER-PERFORMANCE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] pm suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("pm")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[pm] FAILED at power-performance invariant {}: {}",
@@ -243,10 +274,12 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!(
-            "[compositor] ALL {} COMPOSITION-CONTRACT INVARIANTS HOLD",
-            n
-        ),
+        Ok(n) => {
+            kprintln!(
+                "[compositor] ALL {} COMPOSITION-CONTRACT INVARIANTS HOLD",
+                n
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[compositor] FAILED at composition-contract invariant {}: {}",
@@ -269,7 +302,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[input] ALL {} INPUT-ROUTING INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[input] ALL {} INPUT-ROUTING INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] input suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("input")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[input] FAILED at input-routing invariant {}: {}",
@@ -302,7 +341,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[mlrisk] ALL {} RISK-ADVISOR INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[mlrisk] ALL {} RISK-ADVISOR INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] mlrisk suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("mlrisk")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[mlrisk] FAILED at risk-advisor invariant {}: {}",
@@ -383,6 +428,10 @@ pub extern "C" fn kmain() -> ! {
                         r.quiet.divergences
                     );
                     kprintln!("[mlrisk-stress] ALL {} STRESS INVARIANTS HOLD", n);
+                    kprintln!(
+                        "[boot] mlrisk-stress suite: {} ms",
+                        kernel_core::boottime::lap::<ActiveHal>("mlrisk-stress")
+                    );
                 }
                 Err((idx, name)) => {
                     kprintln!(
@@ -455,7 +504,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[mlsched] ALL {} LIVE-ADVISORY INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[mlsched] ALL {} LIVE-ADVISORY INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] mlsched suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("mlsched")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[mlsched] FAILED at live-advisory invariant {}: {}",
@@ -545,7 +600,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[reclaim] ALL {} RECLAIM INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[reclaim] ALL {} RECLAIM INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] reclaim suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("reclaim")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[reclaim] FAILED at reclaim invariant {}: {}", idx, name);
             ActiveHal::exit(700 + idx as i32);
@@ -573,7 +634,13 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("");
     kprintln!("--- memory-management selftests (physical frames) ---");
     match frames::selftest() {
-        Ok(n) => kprintln!("[mm] ALL {} MEMORY INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[mm] ALL {} MEMORY INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] mm suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("mm")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[mm] FAILED at memory invariant {}: {}", idx, name);
             ActiveHal::exit(40 + idx as i32);
@@ -594,7 +661,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[dma] ALL {} DMA-BOUNDARY INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[dma] ALL {} DMA-BOUNDARY INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] dma suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("dma")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[dma] FAILED at DMA invariant {}: {}", idx, name);
             ActiveHal::exit(240 + idx as i32);
@@ -605,7 +678,13 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("");
     kprintln!("--- virtual-memory selftests (Sv39 MMU: identity map + dynamic map/unmap) ---");
     match vm::selftest() {
-        Ok(n) => kprintln!("[vm] ALL {} VIRTUAL-MEMORY INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[vm] ALL {} VIRTUAL-MEMORY INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] vm suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("vm")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[vm] FAILED at vm invariant {}: {}", idx, name);
             ActiveHal::exit(60 + idx as i32);
@@ -618,7 +697,13 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("");
     kprintln!("--- user-mode selftests (U-mode boundary: cap-gated ecall + isolation + preemption + IPC) ---");
     match usermode::selftest() {
-        Ok(n) => kprintln!("[usermode] ALL {} USER-MODE BOUNDARY INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[usermode] ALL {} USER-MODE BOUNDARY INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] usermode suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("usermode")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[usermode] FAILED at user-mode invariant {}: {}", idx, name);
             ActiveHal::exit(80 + idx as i32);
@@ -634,7 +719,13 @@ pub extern "C" fn kmain() -> ! {
     );
     match smp::selftest() {
         Ok(0) => {} // single-hart machine — graceful skip, already logged
-        Ok(n) => kprintln!("[smp] ALL {} SMP INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[smp] ALL {} SMP INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] smp suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("smp")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[smp] FAILED at SMP invariant {}: {}", idx, name);
             ActiveHal::exit(140 + idx as i32);
@@ -652,7 +743,13 @@ pub extern "C" fn kmain() -> ! {
     );
     match virtio::selftest() {
         Ok(0) => {} // no device attached — graceful skip, already logged
-        Ok(n) => kprintln!("[virtio] ALL {} VIRTIO-BLK INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[virtio] ALL {} VIRTIO-BLK INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] virtio suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("virtio")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[virtio] FAILED at virtio invariant {}: {}", idx, name);
             ActiveHal::exit(180 + idx as i32);
@@ -674,7 +771,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[fs] ALL {} FILESYSTEM INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[fs] ALL {} FILESYSTEM INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] fs suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("fs")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[fs] FAILED at filesystem invariant {}: {}", idx, name);
             ActiveHal::exit(160 + idx as i32);
@@ -698,7 +801,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[persist] ALL {} DURABLE-STORE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[persist] ALL {} DURABLE-STORE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] persist suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("persist")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[persist] FAILED at durable-store invariant {}: {}",
@@ -768,6 +877,10 @@ pub extern "C" fn kmain() -> ! {
                     heap_meter().saturating_sub(before)
                 );
                 kprintln!("[soak] ALL {} SOAK INVARIANTS HOLD", n);
+                kprintln!(
+                    "[boot] soak suite: {} ms",
+                    kernel_core::boottime::lap::<ActiveHal>("soak")
+                );
             }
             Err((idx, name)) => {
                 kprintln!("[soak] FAILED at soak invariant {}: {}", idx, name);
@@ -810,6 +923,10 @@ pub extern "C" fn kmain() -> ! {
         ) {
             Ok((_report, n)) => {
                 kprintln!("[bench] ALL {} BENCHMARK INVARIANTS HOLD", n);
+                kprintln!(
+                    "[boot] bench suite: {} ms",
+                    kernel_core::boottime::lap::<ActiveHal>("bench")
+                );
                 kprintln!("[bench] GUI half: the same numbers were proved ON THE FRAMEBUFFER");
             }
             Err((idx, name)) => {
@@ -868,7 +985,13 @@ pub extern "C" fn kmain() -> ! {
                         }
                     },
                 ) {
-                    Ok(n) => kprintln!("[vault] ALL {} CUSTODY-DELIVERY INVARIANTS HOLD", n),
+                    Ok(n) => {
+                        kprintln!("[vault] ALL {} CUSTODY-DELIVERY INVARIANTS HOLD", n);
+                        kprintln!(
+                            "[boot] vault suite: {} ms",
+                            kernel_core::boottime::lap::<ActiveHal>("vault")
+                        );
+                    }
                     Err((idx, name)) => {
                         kprintln!(
                             "[vault] FAILED at custody-delivery invariant {}: {}",
@@ -904,6 +1027,10 @@ pub extern "C" fn kmain() -> ! {
         }) {
             Ok((n, dev)) => {
                 kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n);
+                kprintln!(
+                    "[boot] net suite: {} ms",
+                    kernel_core::boottime::lap::<ActiveHal>("net")
+                );
                 // Keep the device the suite just proved (ADR-140): a kernel that proves
                 // its network and then drops it has no network.
                 // SAFETY: boot path, single-threaded, before any other context can reach
@@ -933,7 +1060,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[tcp] ALL {} TCP-WIRE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[tcp] ALL {} TCP-WIRE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] tcp suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("tcp")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[tcp] FAILED at tcp-wire invariant {}: {}", idx, name);
             ActiveHal::exit(720 + idx as i32);
@@ -952,7 +1085,13 @@ pub extern "C" fn kmain() -> ! {
             }
         },
     ) {
-        Ok(n) => kprintln!("[tcpconn] ALL {} TCP-CONNECTION INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[tcpconn] ALL {} TCP-CONNECTION INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] tcpconn suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("tcpconn")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[tcpconn] FAILED at tcp-connection invariant {}: {}",
@@ -974,7 +1113,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[tcpnet] ALL {} TCP-PUMP INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[tcpnet] ALL {} TCP-PUMP INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] tcpnet suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("tcpnet")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[tcpnet] FAILED at tcp-pump invariant {}: {}", idx, name);
             ActiveHal::exit(760 + idx as i32);
@@ -994,7 +1139,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[hkdf] ALL {} KEY-DERIVATION INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[hkdf] ALL {} KEY-DERIVATION INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] hkdf suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("hkdf")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[hkdf] FAILED at key-derivation invariant {}: {}",
@@ -1019,7 +1170,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[x25519] ALL {} KEY-EXCHANGE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[x25519] ALL {} KEY-EXCHANGE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] x25519 suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("x25519")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[x25519] FAILED at key-exchange invariant {}: {}",
@@ -1043,7 +1200,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[tlsrecord] ALL {} RECORD-LAYER INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[tlsrecord] ALL {} RECORD-LAYER INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] tlsrecord suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("tlsrecord")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[tlsrecord] FAILED at record-layer invariant {}: {}",
@@ -1068,7 +1231,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[tlshandshake] ALL {} HANDSHAKE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[tlshandshake] ALL {} HANDSHAKE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] tlshandshake suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("tlshandshake")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[tlshandshake] FAILED at handshake invariant {}: {}",
@@ -1091,7 +1260,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[sha512] ALL {} DIGEST INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[sha512] ALL {} DIGEST INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] sha512 suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("sha512")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[sha512] FAILED at digest invariant {}: {}", idx, name);
             ActiveHal::exit(860 + idx as i32);
@@ -1107,7 +1282,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[ed25519] ALL {} SIGNATURE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[ed25519] ALL {} SIGNATURE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] ed25519 suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("ed25519")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[ed25519] FAILED at signature invariant {}: {}", idx, name);
             ActiveHal::exit(880 + idx as i32);
@@ -1129,7 +1310,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[x509] ALL {} CERTIFICATE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[x509] ALL {} CERTIFICATE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] x509 suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("x509")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[x509] FAILED at certificate invariant {}: {}", idx, name);
             ActiveHal::exit(900 + idx as i32);
@@ -1149,7 +1336,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[trust] ALL {} TRUST INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[trust] ALL {} TRUST INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] trust suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("trust")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[trust] FAILED at trust invariant {}: {}", idx, name);
             ActiveHal::exit(920 + idx as i32);
@@ -1183,7 +1376,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[clock] ALL {} CLOCK INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[clock] ALL {} CLOCK INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] clock suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("clock")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[clock] FAILED at clock invariant {}: {}", idx, name);
             ActiveHal::exit(940 + idx as i32);
@@ -1211,7 +1410,10 @@ pub extern "C" fn kmain() -> ! {
                     kprintln!("  [FAIL {:>2}] {}", n, name);
                 }
             }) {
-                Ok(n) => kprintln!("[entropy] ALL {} ENTROPY INVARIANTS HOLD", n),
+                Ok(n) => {
+            kprintln!("[entropy] ALL {} ENTROPY INVARIANTS HOLD", n);
+            kprintln!("[boot] entropy suite: {} ms", kernel_core::boottime::lap::<ActiveHal>("entropy"));
+        }
                 Err((idx, name)) => {
                     kprintln!("[entropy] FAILED at entropy invariant {}: {}", idx, name);
                     ActiveHal::exit(980 + idx as i32);
@@ -1234,7 +1436,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[content] ALL {} CONTENT INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[content] ALL {} CONTENT INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] content suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("content")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[content] FAILED at content invariant {}: {}", idx, name);
             ActiveHal::exit(1040 + idx as i32);
@@ -1253,7 +1461,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[policy] ALL {} POLICY INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[policy] ALL {} POLICY INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] policy suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("policy")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[policy] FAILED at policy invariant {}: {}", idx, name);
             ActiveHal::exit(1050 + idx as i32);
@@ -1273,7 +1487,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[browser] ALL {} NAVIGATION INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[browser] ALL {} NAVIGATION INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] browser suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("browser")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[browser] FAILED at navigation invariant {}: {}", idx, name);
             ActiveHal::exit(1020 + idx as i32);
@@ -1293,7 +1513,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[http] ALL {} HTTP INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[http] ALL {} HTTP INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] http suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("http")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[http] FAILED at http invariant {}: {}", idx, name);
             ActiveHal::exit(1000 + idx as i32);
@@ -1314,7 +1540,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[tlsclient] ALL {} TLS-CLIENT INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[tlsclient] ALL {} TLS-CLIENT INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] tlsclient suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("tlsclient")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[tlsclient] FAILED at tls-client invariant {}: {}",
@@ -1356,7 +1588,13 @@ pub extern "C" fn kmain() -> ! {
                     kprintln!("  [FAIL {:>2}] {}", n, name);
                 }
             }) {
-                Ok(n) => kprintln!("[gpu] ALL {} VIRTIO-GPU INVARIANTS HOLD", n),
+                Ok(n) => {
+                    kprintln!("[gpu] ALL {} VIRTIO-GPU INVARIANTS HOLD", n);
+                    kprintln!(
+                        "[boot] gpu suite: {} ms",
+                        kernel_core::boottime::lap::<ActiveHal>("gpu")
+                    );
+                }
                 Err((idx, name)) => {
                     kprintln!("[gpu] FAILED at gpu invariant {}: {}", idx, name);
                     ActiveHal::exit(301 + idx as i32);
@@ -1371,7 +1609,13 @@ pub extern "C" fn kmain() -> ! {
                     kprintln!("  [FAIL {:>2}] {}", n, name);
                 }
             }) {
-                Ok(n) => kprintln!("[fbcon] ALL {} FRAMEBUFFER-CONSOLE INVARIANTS HOLD", n),
+                Ok(n) => {
+                    kprintln!("[fbcon] ALL {} FRAMEBUFFER-CONSOLE INVARIANTS HOLD", n);
+                    kprintln!(
+                        "[boot] fbcon suite: {} ms",
+                        kernel_core::boottime::lap::<ActiveHal>("fbcon")
+                    );
+                }
                 Err((idx, name)) => {
                     kprintln!("[fbcon] FAILED at fbconsole invariant {}: {}", idx, name);
                     ActiveHal::exit(341 + idx as i32);
@@ -1388,7 +1632,13 @@ pub extern "C" fn kmain() -> ! {
                     kprintln!("  [FAIL {:>2}] {}", n, name);
                 }
             }) {
-                Ok(n) => kprintln!("[compose] ALL {} REAL-PIXEL COMPOSITION INVARIANTS HOLD", n),
+                Ok(n) => {
+                    kprintln!("[compose] ALL {} REAL-PIXEL COMPOSITION INVARIANTS HOLD", n);
+                    kprintln!(
+                        "[boot] compose suite: {} ms",
+                        kernel_core::boottime::lap::<ActiveHal>("compose")
+                    );
+                }
                 Err((idx, name)) => {
                     kprintln!(
                         "[compose] FAILED at real-pixel composition invariant {}: {}",
@@ -1420,7 +1670,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[textgrid] ALL {} TEXT-GRID INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[textgrid] ALL {} TEXT-GRID INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] textgrid suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("textgrid")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[textgrid] FAILED at text-grid invariant {}: {}", idx, name);
             ActiveHal::exit(700 + idx as i32);
@@ -1442,7 +1698,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[persona] ALL {} SHELL-PERSONA INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[persona] ALL {} SHELL-PERSONA INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] persona suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("persona")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[persona] FAILED at shell-persona invariant {}: {}",
@@ -1467,7 +1729,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[filepanel] ALL {} FILE-PANEL INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[filepanel] ALL {} FILE-PANEL INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] filepanel suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("filepanel")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[filepanel] FAILED at file-panel invariant {}: {}",
@@ -1493,7 +1761,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[wm] ALL {} WINDOW-MANAGER INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[wm] ALL {} WINDOW-MANAGER INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] wm suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("wm")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[wm] FAILED at window-manager invariant {}: {}", idx, name);
             ActiveHal::exit(720 + idx as i32);
@@ -1522,7 +1796,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[wmstorm] ALL {} WINDOW-STORM INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[wmstorm] ALL {} WINDOW-STORM INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] wmstorm suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("wmstorm")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[wmstorm] FAILED at window-storm invariant {}: {}",
@@ -1548,7 +1828,13 @@ pub extern "C" fn kmain() -> ! {
             }
         },
     ) {
-        Ok(n) => kprintln!("[schedstorm] ALL {} SCHEDULER-STORM INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[schedstorm] ALL {} SCHEDULER-STORM INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] schedstorm suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("schedstorm")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[schedstorm] FAILED at scheduler-storm invariant {}: {}",
@@ -1571,7 +1857,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[fsstorm] ALL {} FILESYSTEM-STORM INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[fsstorm] ALL {} FILESYSTEM-STORM INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] fsstorm suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("fsstorm")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[fsstorm] FAILED at filesystem-storm invariant {}: {}",
@@ -1594,7 +1886,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => kprintln!("[linebuf] ALL {} LINE-BUFFER INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[linebuf] ALL {} LINE-BUFFER INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] linebuf suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("linebuf")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[linebuf] FAILED at line-buffer invariant {}: {}",
@@ -1608,7 +1906,13 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("");
     kprintln!("--- console-storm selftests (the dispatcher at command volume, on this machine's own heap) ---");
     match shellio::storm() {
-        Ok(n) => kprintln!("[shellstorm] ALL {} CONSOLE-STORM INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[shellstorm] ALL {} CONSOLE-STORM INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] shellstorm suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("shellstorm")
+            );
+        }
         Err((idx, name)) => {
             kprintln!(
                 "[shellstorm] FAILED at console-storm invariant {}: {}",
@@ -1647,7 +1951,13 @@ pub extern "C" fn kmain() -> ! {
                     kprintln!("  [FAIL {:>2}] {}", n, name);
                 }
             }) {
-                Ok(n) => kprintln!("[vinput] ALL {} INPUT-HARDWARE INVARIANTS HOLD", n),
+                Ok(n) => {
+                    kprintln!("[vinput] ALL {} INPUT-HARDWARE INVARIANTS HOLD", n);
+                    kprintln!(
+                        "[boot] vinput suite: {} ms",
+                        kernel_core::boottime::lap::<ActiveHal>("vinput")
+                    );
+                }
                 Err((idx, name)) => {
                     kprintln!(
                         "[vinput] FAILED at input-hardware invariant {}: {}",
@@ -1687,7 +1997,13 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("");
     kprintln!("--- input-ring selftests (what an interrupt hands the shell) ---");
     match shellio::ring_selftest() {
-        Ok(n) => kprintln!("[conring] ALL {} INPUT-RING INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[conring] ALL {} INPUT-RING INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] conring suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("conring")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[conring] FAILED at input-ring invariant {}: {}", idx, name);
             ActiveHal::exit(230 + idx as i32);
@@ -1696,7 +2012,13 @@ pub extern "C" fn kmain() -> ! {
 
     kprintln!("--- console selftests (line editing + command dispatch over the namespace) ---");
     match shellio::selftest() {
-        Ok(n) => kprintln!("[console] ALL {} CONSOLE INVARIANTS HOLD", n),
+        Ok(n) => {
+            kprintln!("[console] ALL {} CONSOLE INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] console suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("console")
+            );
+        }
         Err((idx, name)) => {
             kprintln!("[console] FAILED at console invariant {}: {}", idx, name);
             ActiveHal::exit(250 + idx as i32);
@@ -1706,6 +2028,14 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("");
     // The heap every suite left behind, so a gate log shows the margin the console and the
     // desktop start with (ADR-154).
+    let suites = kernel_core::boottime::summary::<ActiveHal>();
+    kprintln!(
+        "[boot] suites: {} timed, {} ms total, slowest {} at {} ms",
+        suites.laps,
+        suites.total_ms,
+        suites.slowest,
+        suites.slowest_ms
+    );
     kprintln!(
         "[boot] heap: {} B used, {} B free after every suite",
         heap::used_bytes(),

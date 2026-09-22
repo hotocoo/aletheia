@@ -33,7 +33,12 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (THE HOSTILE PAGE — ADR-161. `kernel-core/tests/hostile_page.rs` is a seeded,
+**As of:** 2026-09-23, latest (BOOT COST, MEASURED — ADR-162. A stopwatch over the Hal clock
+(`kernel-core/src/boottime.rs`) prints `[boot] FAMILY suite: N ms` under every suite marker and one `[boot] suites: N
+timed, T ms total, slowest F at S ms` line before the console, on all three CPUs, without touching a marker line.
+`docs/BOOT-COST.md` is the harvest: aarch64 3800 ms, riscv64 2286 ms, x86-64 4514 ms of suites-to-console; the storms
+and the bench are the cost on every CPU, the contract suites cost tens of milliseconds each, and on x86-64 under a
+second is inside suite laps - the rest is between them and is the next thing to lap. Before it: THE HOSTILE PAGE — ADR-161. `kernel-core/tests/hostile_page.rs` is a seeded,
 dependency-free property campaign over the browser stack, run under `scripts/property-campaign.sh` on every push:
 generated adversarial HTML (unterminated tags, script bodies, control bytes, deep nesting, past the input bound) into
 guarded buffers - nothing panics, nothing written past a buffer, every shown byte printable, script content never
@@ -1250,6 +1255,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — boot cost, measured (ADR-162)
+
+- **"Fastest" is an adjective until it is a number with a name next to it.** `kernel-core/src/boottime.rs` is a stopwatch with one hand - a handful of atomics over the platform's monotonic counter through `Hal` - `start` when the suites begin, `lap(family)` as each reports, `summary` before the console. Every target prints one `[boot] FAMILY suite: N ms` line under each marker and one summary line; the marker lines every gate greps are untouched.
+- **The harvest, `docs/BOOT-COST.md`** (QEMU TCG, uncontended, one boot each): aarch64 56 suites, 3800 ms total (laps 2440, between laps 1360), slowest `bench` 346 ms; riscv64 55 suites, 2286 ms (laps 2256, between laps 30), slowest `bench` 410 ms; x86-64 56 suites, 4514 ms (laps 983, between laps 3531), slowest `mlrisk-stress` 150 ms. On every CPU the heavy laps are the STORMS and the bench (`bench`, `fsstorm`, `mlrisk-stress`, `reclaim`, `schedstorm`, `conring`, `compose`); the contract suites (TLS, HTTP, renderer, policy) cost tens of milliseconds each.
+- **The x86-64 gap:** 3.5 of its 4.5 seconds are between the laps - device bring-up, the desktop's installation, un-marked storms - and must be lapped before anything is moved; aarch64 has 1.4 s there too, riscv64 almost none. Also corrected: ADR-154's "heap after every suite" print on x86-64 sat fourteen suites in; it now says what it is, and a true after-every-suite heap line prints with the summary.
+- **Not decided here:** what to do about it (defer the storms to an opt-in `selftest` command, keep the contracts at boot) is its own ADR with this page as evidence.
+- Full local chain: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, quality-gate PASS, doc gates PASS**.
 
 ### 2026-09-23 — the hostile page (ADR-161)
 
