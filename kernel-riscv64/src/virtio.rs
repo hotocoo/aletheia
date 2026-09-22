@@ -15,6 +15,7 @@
 //! **Graceful probe.** With no `-drive` attached, `probe` returns `None`, the kernel logs
 //! `[virtio] no device (skipped)` and boots green; `scripts/vm-e2e-riscv.sh` attaches a 1 MiB disk and
 //! requires the invariant marker.
+use kernel_core::entropy::{EntropyRefusal, VirtioRng, VIRTIO_ID_RNG};
 use kernel_core::virtioblk::{self, InitReport, MmioLayout, MmioTransport, VirtioHal};
 use kernel_core::virtiogpu::{self, VirtioGpu, VIRTIO_ID_GPU};
 use kernel_core::virtionet::{self, VirtioNet, VIRTIO_ID_NET};
@@ -275,5 +276,29 @@ pub fn input_pair() -> Option<Result<(Input, Input), virtioinput::InputError>> {
         _ => Some(Err(virtioinput::InputError::Unsupported(
             "an input device this rung cannot classify",
         ))),
+    }
+}
+
+/// This target's concrete entropy device (REQ-SEC-TLS-011, ADR-153): the shared driver, same
+/// transport seam.
+pub type Rng = VirtioRng<RiscvVirtio, MmioTransport>;
+
+/// Bring up a virtio-rng device if one is attached. `None` = no entropy device (the graceful-skip
+/// path: the kernel says so, and its console opens no TLS conversation); the VM gates attach one
+/// and require the marker.
+pub fn entropy_device() -> Option<Result<Rng, EntropyRefusal>> {
+    // SAFETY: the slot addresses are mapped device memory; `new_for` refuses anything that is not
+    // a modern entropy device, and the frame handed to the device is identity-mapped and ours.
+    unsafe {
+        let base = virtioblk::probe_nth_kind(&LAYOUT, VIRTIO_ID_RNG, 0)?;
+        let transport = match MmioTransport::new_for(base, VIRTIO_ID_RNG) {
+            Ok(t) => t,
+            Err(e) => {
+                kprintln!("[entropy] transport setup failed: {}", e);
+                return Some(Err(EntropyRefusal::Device("transport")));
+            }
+        };
+        kprintln!("[entropy] virtio-rng @ {:#x}", base);
+        Some(VirtioRng::init(transport))
     }
 }

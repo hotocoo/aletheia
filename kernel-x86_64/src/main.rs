@@ -891,6 +891,13 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     kprintln!("--- user-mode selftests (ring-3 privilege boundary: cap-gated syscall + isolation + preemption) ---");
     match usermode::selftest() {
         Ok(n) => {
+            // The heap every suite left behind, so a gate log shows the margin the console and the
+            // desktop start with (ADR-154).
+            kprintln!(
+                "[boot] heap: {} B used, {} B free after every suite",
+                heap::used_bytes(),
+                heap::free_bytes()
+            );
             kprintln!("[usermode] ALL {} RING-3 BOUNDARY INVARIANTS HOLD", n);
             // Keep IF=0 through the halt/exit (as aarch64/RISC-V do). Re-enabling here would let a
             // PIT IRQ latched during the ring-3 suite fire between "[e2e] PASS" and exit(0) and, with
@@ -1496,6 +1503,38 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         Err((idx, name)) => {
             kprintln!("[clock] FAILED at clock invariant {}: {}", idx, name);
             ActiveHal::exit(940 + idx as i32);
+        }
+    }
+
+    // AN ENTROPY SOURCE (REQ-SEC-TLS-011, ADR-153): the bytes a key must be made of. virtio-rng,
+    // behind a contract that fills a buffer entirely or refuses by name; every draw checked for the
+    // failure modes a broken device actually has (all one value, the same answer twice, no answer).
+    // The device is KEPT for the console's TLS keys; a machine without one says so and opens no
+    // conversation.
+    kprintln!("");
+    kprintln!("--- entropy selftests (virtio-rng: fills, differs, not degenerate, DMA-gated) ---");
+    match virtio::entropy_device() {
+        None => kprintln!("[entropy] no entropy device attached (skipped; this console will open no TLS conversation)"),
+        Some(Err(e)) => {
+            kprintln!("[entropy] device init FAILED: {:?}", e);
+            ActiveHal::exit(980);
+        }
+        Some(Ok(mut rng)) => {
+            match kernel_core::entropy::entropy_suite(&mut rng, |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[entropy] ALL {} ENTROPY INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!("[entropy] FAILED at entropy invariant {}: {}", idx, name);
+                    ActiveHal::exit(980 + idx as i32);
+                }
+            }
+            // SAFETY: the boot path, before the console exists; the device's queue is live.
+            unsafe { netstatic::keep_entropy(rng) };
         }
     }
 

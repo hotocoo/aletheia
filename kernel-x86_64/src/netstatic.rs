@@ -7,6 +7,7 @@
 //! The concurrency posture is the console's: only the main thread touches this, and it does so
 //! between keystrokes. Nothing here runs in an interrupt handler.
 
+use kernel_core::entropy;
 use kernel_core::tcpconn::Connection;
 use kernel_core::tcpnet::{self, LinkError, Plan};
 use kernel_core::tlsclient::{self, TlsPump, TlsReport};
@@ -16,9 +17,12 @@ use kernel_core::virtionet::{NetLink, GUEST_IP};
 use kernel_core::Hal;
 
 use crate::hal::ActiveHal;
-use crate::virtio::Net;
+use crate::virtio::{Net, Rng};
 
 static mut NET: Option<Net> = None;
+
+/// The entropy device the boot suite proved, kept for the console's keys (ADR-153).
+static mut RNG: Option<Rng> = None;
 
 /// The console's one TLS pump and handshake, built on the first `tls` command and REUSED by every
 /// later one: ninety kilobytes of workspace on a heap that never frees, allocated once (ADR-151).
@@ -35,6 +39,14 @@ static mut NEXT_PORT: u16 = FIRST_PORT;
 /// Called once, from the boot path, before any other context can reach the static.
 pub unsafe fn keep(dev: Net) {
     (*core::ptr::addr_of_mut!(NET)) = Some(dev);
+}
+
+/// Keep the entropy device the boot suite proved.
+///
+/// # Safety
+/// Called once, from the boot path, before any other context can reach the static.
+pub unsafe fn keep_entropy(dev: Rng) {
+    (*core::ptr::addr_of_mut!(RNG)) = Some(dev);
 }
 
 /// Open a TCP connection to `ip:port`, send `request`, and copy the peer's answer into `reply`.
@@ -91,10 +103,9 @@ pub fn fetch(
 /// `pin`, at the time this machine's own clock reads (ADR-148), and carry `request` and its
 /// answer protected (ADR-151).
 ///
-/// The ephemeral key and the client random are derived from the platform's timer readings mixed
-/// through SHA-256. This kernel has no entropy device yet (ADR-151 names it), so that seed is
-/// unpredictable to a casual observer and NOT to a determined one: adequate for the live gate on a
-/// private network, and the reason a real entropy source is the next rung.
+/// The ephemeral key and the client random are derived from sixty-four bytes of the entropy device
+/// the boot suite proved (ADR-153), checked before use; a machine without that device opens no
+/// conversation and says so. ADR-151 seeded from timer readings and named that as a gap.
 pub fn fetch_tls(
     ip: [u8; 4],
     port: u16,
@@ -126,13 +137,22 @@ pub fn fetch_tls(
     let mut conn = Connection::new(GUEST_IP, lport, ip, port, rto);
     let ticks = ActiveHal::timer_ticks();
     let iss = (ticks as u32) ^ ((lport as u32) << 16);
-    let mut seed = [0u8; 32];
-    seed[..8].copy_from_slice(&ticks.to_le_bytes());
-    seed[8..16].copy_from_slice(&hz.to_le_bytes());
-    seed[16..18].copy_from_slice(&lport.to_le_bytes());
-    seed[18..22].copy_from_slice(&ip);
-    seed[22..24].copy_from_slice(&port.to_le_bytes());
-    seed[24..32].copy_from_slice(&ActiveHal::timer_ticks().to_le_bytes());
+    // The key's material comes from the entropy device the boot suite proved, checked draw by
+    // draw (ADR-153); a machine without one opens no conversation, because a key made from a
+    // clock is a key a patient observer can make too.
+    // SAFETY: main thread only (the console's own thread); the device outlives the machine.
+    let seed =
+        match unsafe { (*core::ptr::addr_of_mut!(RNG)).as_mut() } {
+            Some(rng) => entropy::tls_seed(rng).map_err(|why| match why {
+                entropy::EntropyRefusal::Degenerate | entropy::EntropyRefusal::Repeated => {
+                    "the entropy device produced no entropy; refusing to make a key from it"
+                }
+                _ => "the entropy device did not answer; refusing to make a key without it",
+            })?,
+            None => return Err(
+                "this machine has no entropy device; a TLS key from a predictable seed is refused",
+            ),
+        };
     let (private, random) = tlsclient::ephemeral_material(&seed);
     // SAFETY: main thread only (the console's own thread); the pump and the handshake are built on
     // the first command and rebound, never rebuilt, on every later one.

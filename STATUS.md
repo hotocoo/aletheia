@@ -33,7 +33,19 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-22, latest (THE KERNEL SPEAKS TLS — ADR-151. `kernel-core/src/tlsclient.rs` joins
+**As of:** 2026-09-22, latest (AN ENTROPY SOURCE — ADR-153, and HEAP HEADROOM — ADR-154. ADR-151's
+one named gap is closed: `kernel-core/src/entropy.rs` is a virtio-rng driver on the shared virtqueue behind a
+one-sentence contract (fill the whole buffer or refuse by name), every draw checked for the failure modes a
+broken device actually has (all one value, the same answer twice, no answer), the DMA gate enforced; the boot
+suite proves it (`entropy=6` on all three CPUs) and KEEPS it, and the console's `tls` keys are made from it —
+a machine without the device opens no conversation and says so, no fallback to the clock. Every gate that
+boots a networked guest attaches the device; VirtualBox lists the family as skipped by name. Lethe stage N2 is
+delivered without a caveat. ADR-154, from two red runner gates the re-runs did not clear: the interactive
+aarch64 boot reached its console with the 12 MiB bump heap spent (`memory allocation of 536576 bytes
+failed` at the console's RAM disk). One handshake now serves the handshake suite's last three checks, all
+three heaps are 16 MiB, and every boot prints its margin (`[boot] heap: ... free after every suite`,
+`[console] heap: ... free`). Conformance 341 -> 347 core behaviours. Previously: THE KERNEL SPEAKS TLS —
+ADR-151. `kernel-core/src/tlsclient.rs` joins
 the handshake (ADR-144..149), the record layer (ADR-143) and the TCP client (ADR-139/140) in one bounded
 pump, and the console gained `tls ADDR PORT NAME PIN TEXT`: the OPERATOR states the DNS name the peer must
 speak for and the Ed25519 root they trust, as 64 hex digits — this console ships no root of its own. The
@@ -1186,6 +1198,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-22 — an entropy source (ADR-153) and heap headroom (ADR-154)
+
+- **The bytes a key must be made of.** `kernel-core/src/entropy.rs`: a virtio-rng driver on the shared virtqueue substrate behind a contract one sentence long — `fill` fills the whole buffer with bytes the device produced, or refuses by name. Every draw is checked before it is believed: all one value is `Degenerate`, the previous answer again is `Repeated`, no answer is `Device(..)`; none reaches a key. The absence has a type (`NoEntropy`, `Absent`): a console without the device opens no TLS conversation and says so — no fallback to the clock, because a fallback is how ADR-151's caveat would have quietly become permanent.
+- **Kept, like the network device.** The boot suite proves the device and `netstatic::keep_entropy` keeps it; `fetch_tls` draws sixty-four fresh bytes per conversation through `tls_seed`. Every gate that boots a networked guest now attaches `virtio-rng`; the VirtualBox gate lists `ENTROPY INVARIANTS HOLD` as skipped by name; the VMware package boots without one and its console says so.
+- **Proof (`entropy=6`, all three CPUs, mmio and PCI):** a 64-byte request filled completely; two draws differ, neither refused; a page-sized draw shows at least 200 of 256 byte values; the DMA gate refuses an unregistered address; no device seeds no key; two seeds derive two different scalars, neither zero. Conformance contract **341 -> 347**. **Lethe stage N2 is delivered without a caveat.**
+- **ADR-154, from the runner's red gates.** The live-desktop and comparative-bench jobs stayed red through re-runs with a console that never printed its prompt. Locally the same gate showed the panic: `memory allocation of 536576 bytes failed` — the console's RAM disk found the 12 MiB bump heap (ADR-063: never frees) already spent after every suite plus the desktop; the handshake suite's three 18 KB handshakes (now one, restarted) tipped it. All three heaps are now 16 MiB (`HEAP_SIZE` in the two linker scripts, the static region on x86-64), and the margin is printed on every boot: `[boot] heap: N B used, M B free after every suite` and `[console] heap: N B used, M B free`. aarch64 reports ~4.3 MB free after every suite and ~4.5 MB at the console; RISC-V ~5.4 MB.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, desktop-e2e-dt PASS (both targets), conformance PASS (347 on all three), quality-gate PASS, doc gates PASS, tls-e2e PASS with the device attached**.
 
 ### 2026-09-22 — the kernel speaks TLS (ADR-151) and a VMDK normalizer that keeps its length (ADR-152)
 

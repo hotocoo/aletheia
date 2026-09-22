@@ -1169,6 +1169,38 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // AN ENTROPY SOURCE (REQ-SEC-TLS-011, ADR-153): the bytes a key must be made of. virtio-rng,
+    // behind a contract that fills a buffer entirely or refuses by name; every draw checked for the
+    // failure modes a broken device actually has (all one value, the same answer twice, no answer).
+    // The device is KEPT for the console's TLS keys; a machine without one says so and opens no
+    // conversation.
+    kprintln!("");
+    kprintln!("--- entropy selftests (virtio-rng: fills, differs, not degenerate, DMA-gated) ---");
+    match virtio::entropy_device() {
+        None => kprintln!("[entropy] no entropy device attached (skipped; this console will open no TLS conversation)"),
+        Some(Err(e)) => {
+            kprintln!("[entropy] device init FAILED: {:?}", e);
+            semihosting::exit(980);
+        }
+        Some(Ok(mut rng)) => {
+            match kernel_core::entropy::entropy_suite(&mut rng, |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[entropy] ALL {} ENTROPY INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!("[entropy] FAILED at entropy invariant {}: {}", idx, name);
+                    semihosting::exit(980 + idx as i32);
+                }
+            }
+            // SAFETY: the boot path, before the console exists; the device's queue is live.
+            unsafe { netstatic::keep_entropy(rng) };
+        }
+    }
+
     // THE JOIN (REQ-SEC-TLS-010, ADR-151): the handshake, the record layer and the TCP client
     // meet in one bounded pump, proved here over a link that is a test double with a stand-in
     // TLS server behind it. The request goes out protected only after the peer is verified, and
@@ -1598,6 +1630,13 @@ pub extern "C" fn kmain() -> ! {
     bench::run();
 
     kprintln!("");
+    // The heap every suite left behind, so a gate log shows the margin the console and the
+    // desktop start with (ADR-154).
+    kprintln!(
+        "[boot] heap: {} B used, {} B free after every suite",
+        heap::used_bytes(),
+        heap::free_bytes()
+    );
     kprintln!(
         "[e2e] PASS — boot + spine + {} invariants + capability-lifetime + memory-management + virtual-memory + user-mode + filesystem + console + benchmark complete",
         13

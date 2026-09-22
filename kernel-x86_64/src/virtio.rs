@@ -16,6 +16,7 @@
 //! **Graceful probe.** With no virtio-blk device attached, `probe` finds no function, the kernel logs
 //! `[virtio] no device (skipped)` and boots green; `kernel-x86_64/scripts/smoke-test.sh` attaches a
 //! scratch disk and requires the invariant marker.
+use kernel_core::entropy::{EntropyRefusal, VirtioRng};
 use kernel_core::virtioblk::{self, InitReport, VirtioHal};
 use kernel_core::virtiogpu::{self, VirtioGpu};
 use kernel_core::virtionet::{self, VirtioNet};
@@ -275,5 +276,33 @@ pub fn input_pair() -> Option<Result<(InputDev, InputDev), virtioinput::InputErr
         _ => Some(Err(virtioinput::InputError::Unsupported(
             "an input device this rung cannot classify",
         ))),
+    }
+}
+
+/// This target's concrete entropy device (REQ-SEC-TLS-011, ADR-153): the shared driver, over PCI.
+pub type Rng = VirtioRng<X86Virtio, PciTransport>;
+
+/// Bring up a virtio-rng function if one is attached. `None` = no entropy device (the graceful-skip
+/// path: the kernel says so, and its console opens no TLS conversation); the VM gate attaches one
+/// and requires the marker.
+pub fn entropy_device() -> Option<Result<Rng, EntropyRefusal>> {
+    // SAFETY: the BDF names a virtio entropy function; `PciTransport::new` resolves and MAPS its
+    // register regions (refusing RAM), and the frame handed to the device is identity-mapped and ours.
+    unsafe {
+        let bdf = pci::find_virtio_rng_nth(0)?;
+        let transport = match pci::transport_new(bdf) {
+            Ok(t) => t,
+            Err(e) => {
+                kprintln!("[entropy] transport setup failed: {}", e);
+                return Some(Err(EntropyRefusal::Device("transport")));
+            }
+        };
+        kprintln!(
+            "[entropy] virtio-rng @ PCI {:02x}:{:02x}.{}",
+            bdf.bus,
+            bdf.device,
+            bdf.function
+        );
+        Some(VirtioRng::init(transport))
     }
 }

@@ -133,6 +133,7 @@ SKIPPED=(
   'INPUT-HARDWARE INVARIANTS HOLD   (VirtualBox emulates no virtio-input device)'
   'CUSTODY-DELIVERY INVARIANTS HOLD   (needs a persistent virtio-blk disk AND the QEMU fw_cfg channel)'
   'VT-D INVARIANTS HOLD   (VirtualBox declares no DMAR table - the kernel skips the suite green and says why)'
+  'ENTROPY INVARIANTS HOLD   (VirtualBox emulates no virtio-rng device - the kernel says so and opens no TLS conversation)'
 )
 
 # --- build ------------------------------------------------------------------------------------

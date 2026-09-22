@@ -87,6 +87,7 @@ boot_once() {
     -drive if=none,format=raw,file="$PERSIST",id=blk1 \
     -device virtio-blk-pci,drive=blk1,disable-legacy=on,iommu_platform=on \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on \
+    -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
     -device virtio-gpu-pci,disable-legacy=on,iommu_platform=on \
     -device virtio-keyboard-pci,iommu_platform=on \
     -device virtio-tablet-pci,iommu_platform=on \
@@ -176,7 +177,7 @@ if [ "$RC" -eq 33 ] \
   # the boot, or a count changing without the gate being told. Extra families fail too.
   # shellcheck disable=SC1091
   source "$HERE/../scripts/lib-markers.sh"
-  X86_EXPECTED="bench=12 cap=14 clock=7 compose=8 compositor=14 conring=9 console=47 dma=9 ${DMAP} ed25519=8 fbcon=6 fs=15 fsstorm=5 linebuf=4 shellstorm=4 gpu=13 hkdf=9 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=22 net=9 persist=10 persona=8 filepanel=13 pm=14 ps2=5 reclaim=9 selftest=13 sha512=5 smp=23 soak=12 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=39 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=72"
+  X86_EXPECTED="bench=12 cap=14 clock=7 compose=8 compositor=14 conring=9 console=47 dma=9 ${DMAP} ed25519=8 entropy=6 fbcon=6 fs=15 fsstorm=5 linebuf=4 shellstorm=4 gpu=13 hkdf=9 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=22 net=9 persist=10 persona=8 filepanel=13 pm=14 ps2=5 reclaim=9 selftest=13 sha512=5 smp=23 soak=12 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=39 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=72"
   if ! markers_assert "$X86_EXPECTED" < "$LOG"; then
     echo "SMOKE TEST: FAIL (structured marker map)"
     exit 1

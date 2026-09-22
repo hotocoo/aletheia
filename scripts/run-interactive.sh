@@ -45,7 +45,8 @@ case "$TARGET" in
       -device virtio-blk-device,drive=blk0 \
       -drive "if=none,format=raw,file=$DIR/target/interactive-persistent.img,id=blk1" \
       -device virtio-blk-device,drive=blk1 \
-      -netdev user,id=n0 -device virtio-net-device,netdev=n0
+      -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+      -device virtio-rng-device
     ;;
   riscv64)
     DIR="$ROOT/kernel-riscv64"; TRIPLE="riscv64gc-unknown-none-elf"; BIN="aletheia-kernel-riscv64"
@@ -59,7 +60,8 @@ case "$TARGET" in
       -device virtio-blk-device,drive=blk0 \
       -drive "if=none,format=raw,file=$DIR/target/interactive-persistent.img,id=blk1" \
       -device virtio-blk-device,drive=blk1 \
-      -netdev user,id=n0 -device virtio-net-device,netdev=n0
+      -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+      -device virtio-rng-device
     ;;
   x86_64|x86-64|amd64)
     DIR="$ROOT/kernel-x86_64"
@@ -91,6 +93,7 @@ case "$TARGET" in
       -drive "if=none,format=raw,file=$DIR/build/interactive-persistent.img,id=blk1" \
       -device virtio-blk-pci,drive=blk1 \
       -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+      -device virtio-rng-pci,disable-legacy=on \
       -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot
     ;;
   *)

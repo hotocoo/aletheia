@@ -66,6 +66,9 @@ pub const DEVICE_NET_TRANSITIONAL: u16 = 0x1000;
 pub const DEVICE_BLK_MODERN: u16 = 0x1042;
 pub const DEVICE_BLK_TRANSITIONAL: u16 = 0x1001;
 pub const DEVICE_GPU_MODERN: u16 = 0x1050;
+/// virtio-rng: modern id 0x1040 + 4, and the transitional id.
+pub const DEVICE_RNG_MODERN: u16 = 0x1044;
+pub const DEVICE_RNG_TRANSITIONAL: u16 = 0x1005;
 /// virtio-input (18) over PCI — the input-hardware rung (ADR-080).
 pub const DEVICE_INPUT_MODERN: u16 = 0x1052;
 

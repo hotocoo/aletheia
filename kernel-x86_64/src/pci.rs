@@ -157,6 +157,23 @@ pub unsafe fn find_virtio_gpu_nth(nth: usize) -> Option<Bdf> {
     unsafe { virtiopci::find_virtio_nth(&Ports, &[virtiopci::DEVICE_GPU_MODERN], nth) }
 }
 
+/// Scan bus 0 for the nth virtio ENTROPY function (REQ-SEC-TLS-011, ADR-153).
+///
+/// # Safety
+/// Touches the PCI configuration ports.
+pub unsafe fn find_virtio_rng_nth(nth: usize) -> Option<Bdf> {
+    unsafe {
+        virtiopci::find_virtio_nth(
+            &Ports,
+            &[
+                virtiopci::DEVICE_RNG_MODERN,
+                virtiopci::DEVICE_RNG_TRANSITIONAL,
+            ],
+            nth,
+        )
+    }
+}
+
 /// Scan bus 0 for the nth virtio INPUT function (ALET-P2-021 hardware rung, ADR-080).
 ///
 /// # Safety

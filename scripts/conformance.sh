@@ -460,6 +460,14 @@ CONTRACT=(
   "tlsclient: the compatibility ChangeCipherSpec is skipped whether or not the peer sends it"
   "tlsclient: an answer larger than the caller's buffer is truncated, said so, never overflowed"
 
+  # An entropy source (ADR-153): the same contract over virtio-rng on every CPU.
+  "entropy: the device fills a 64-byte request completely"
+  "entropy: two consecutive draws differ, and neither was refused"
+  "entropy: a page-sized draw shows at least 200 of the 256 byte values"
+  "entropy: the DMA gate refuses an address the driver never registered"
+  "entropy: no device is a named refusal, and a refusal seeds no TLS key"
+  "entropy: two TLS seeds derive two different ephemeral keys, neither zero"
+
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.
   "tlsrecord: a sealed record opens to the same bytes and the same inner content type"

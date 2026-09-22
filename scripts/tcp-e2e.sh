@@ -178,7 +178,8 @@ mmio_leg() {
   SESSION_ARGV=("${QEMU[@]}" -kernel "$elf"
     -global virtio-mmio.force-legacy=false
     -drive "if=none,format=raw,file=$img,id=blk0" -device virtio-blk-device,drive=blk0
-    -netdev user,id=n0 -device virtio-net-device,netdev=n0)
+    -netdev user,id=n0 -device virtio-net-device,netdev=n0
+    -device virtio-rng-device)
   local log; log="$(mktemp)"
 
   # A dead port first (the refusal must be named), then the live peer.

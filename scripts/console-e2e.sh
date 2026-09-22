@@ -182,7 +182,8 @@ mmio_leg() {
     -drive "if=none,format=raw,file=$pimg,id=blk1" -device virtio-blk-device,drive=blk1
     -device virtio-gpu-device
     -device virtio-keyboard-device -device virtio-tablet-device
-    -netdev user,id=n0 -device virtio-net-device,netdev=n0)
+    -netdev user,id=n0 -device virtio-net-device,netdev=n0
+    -device virtio-rng-device)
   local log; log="$(mktemp)"
 
   echo "--> session 1: an operator writes an object through the console"
@@ -259,6 +260,7 @@ x86_leg() {
     -drive "if=none,format=raw,file=$scratch,id=blk0" -device virtio-blk-pci,drive=blk0
     -drive "if=none,format=raw,file=$persist,id=blk1" -device virtio-blk-pci,drive=blk1
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+    -device virtio-rng-pci,disable-legacy=on
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot)
   local log; log="$work/serial.log"
 
