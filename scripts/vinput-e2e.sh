@@ -358,7 +358,8 @@ expect = (300 + map_axis(DROP[0], SCAN_W) - map_axis(PRESS[0], SCAN_W),
 check(win2 is not None and (int(win2.group(1)), int(win2.group(2))) == expect and facts7[4] == 'surface 2',
       'window: a drag by the title band moved it by the mapped pointer delta (%r, expected %r)' % ((win2.group(1), win2.group(2)) if win2 else None, expect))
 
-# 5d - THE SECOND WINDOW (ADR-084): the desktop came up with four managed windows, and a click
+# 5d - THE SECOND WINDOW (ADR-084): the desktop came up with five managed windows (ADR-157 added
+#      the browser, placed where none of these clicks land), and a click
 #      on the monitor window takes focus away from the terminal. Focus is a routing decision:
 #      from here a keystroke lands in the monitor's queue and the console never sees it.
 def axis_for(px, span):
@@ -374,8 +375,8 @@ def goto(px, py):
 
 chunk, _f = run_input()
 w0 = WINDOWS_RE.search(chunk)
-check(w0 is not None and int(w0.group(1)) == 4 and int(w0.group(2)) == 0,
-      'windows: the desktop came up with four managed windows (%r)' % ((w0.groups() if w0 else None),))
+check(w0 is not None and int(w0.group(1)) == 5 and int(w0.group(2)) == 0,
+      'windows: the desktop came up with five managed windows (%r)' % ((w0.groups() if w0 else None),))
 check('managed windows' in log_text(),
       'windows: the boot log names how many windows the manager holds')
 goto(100, 170)                                   # the monitor window's client area
@@ -397,7 +398,7 @@ goto(254, 144)                                   # the monitor's close box (top-
 click()
 chunk, (_pa, _da, _ra, _ca, focusa, _qa) = run_input()
 wa = WINDOWS_RE.search(chunk)
-check(wa is not None and int(wa.group(1)) == 3 and int(wa.group(2)) == 1,
+check(wa is not None and int(wa.group(1)) == 4 and int(wa.group(2)) == 1,
       'windows: the close box closed the window (%r)' % ((wa.groups() if wa else None),))
 check(focusa == 'surface 2',
       'windows: focus fell to the surviving window, not to nobody (%r)' % (focusa,))

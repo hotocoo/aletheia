@@ -148,10 +148,14 @@ const BROWSER: u32 = 9;
 const BROWSER_COLS: u32 = 32;
 const BROWSER_ROWS: u32 = 10;
 const BROWSER_TITLE: &[u8] = b"browser";
-/// Placed left of the terminal so the desktop gate's centre click (320, 120) still lands on the
-/// terminal: a new window must not move an existing test's focus.
+/// Placed below the monitor (which ends at y 198) and left of the terminal, so no click a live
+/// gate already makes lands on it: the desktop gate's centre click (320, 120) still lands on the
+/// terminal, the input gate's (100, 170) on the monitor's client area, its (254, 144) on the
+/// monitor's close box and its (150, 44) on the file panel's title band. A new window must not
+/// move an existing test's focus - the first placement, (20, 100), covered the monitor and went
+/// red on the runner.
 const BROWSER_X: i32 = 20;
-const BROWSER_Y: i32 = 100;
+const BROWSER_Y: i32 = 210;
 /// The longest URL the window's line holds.
 pub const URL_LINE_CAP: usize = 128;
 /// The most page text the window keeps.
