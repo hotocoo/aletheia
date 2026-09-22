@@ -252,6 +252,10 @@ pub extern "C" fn kmain() -> ! {
                 "[compositor] ALL {} COMPOSITION-CONTRACT INVARIANTS HOLD",
                 n
             );
+            kprintln!(
+                "[boot] compositor suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("compositor")
+            );
         }
         Err((idx, name)) => {
             kprintln!(
@@ -2032,6 +2036,10 @@ pub extern "C" fn kmain() -> ! {
     }
 
     bench::run();
+    kprintln!(
+        "[boot] perf-report phase: {} ms",
+        kernel_core::boottime::lap::<ActiveHal>("perf-report")
+    );
 
     kprintln!("");
     // The heap every suite left behind, so a gate log shows the margin the console and the

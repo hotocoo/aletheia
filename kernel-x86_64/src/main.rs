@@ -593,6 +593,10 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                 "[compositor] ALL {} COMPOSITION-CONTRACT INVARIANTS HOLD",
                 n
             );
+            kprintln!(
+                "[boot] compositor suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("compositor")
+            );
         }
         Err((idx, name)) => {
             kprintln!(
@@ -2448,7 +2452,10 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         dma_grants.push(vtd::DeviceGrant::new(b, g.dma_grants()));
     }
     match vtd::dmar_suite(&dma_grants, blk_scratch.as_mut(), blk_persist.as_mut()) {
-        Ok(_) => {}
+        Ok(_) => kprintln!(
+            "[boot] dmar suite: {} ms",
+            kernel_core::boottime::lap::<ActiveHal>("dmar")
+        ),
         Err((idx, _name)) => {
             // The suite already printed "[dmar] FAILED at vt-d invariant N: <detail>" - the NAME
             // is the diagnosis; this window is only the coarse index.

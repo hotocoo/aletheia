@@ -279,6 +279,10 @@ pub extern "C" fn kmain() -> ! {
                 "[compositor] ALL {} COMPOSITION-CONTRACT INVARIANTS HOLD",
                 n
             );
+            kprintln!(
+                "[boot] compositor suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("compositor")
+            );
         }
         Err((idx, name)) => {
             kprintln!(
