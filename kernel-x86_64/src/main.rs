@@ -1538,6 +1538,26 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // THE HTTP/1.1 CLIENT (REQ-WEB-001, ADR-155; Lethe stage N3): a GET that asks the peer to close,
+    // and a response reader bounded by construction - every length the peer names is checked
+    // against the bytes that arrived, two body boundaries are refused as ambiguous, and a body
+    // longer than the caller's buffer is truncated and said to be, never grown into.
+    kprintln!("");
+    kprintln!("--- http selftests (GET builder + bounded response reader, no network) ---");
+    match kernel_core::http::http_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[http] ALL {} HTTP INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[http] FAILED at http invariant {}: {}", idx, name);
+            ActiveHal::exit(1000 + idx as i32);
+        }
+    }
+
     // THE JOIN (REQ-SEC-TLS-010, ADR-151): the handshake, the record layer and the TCP client
     // meet in one bounded pump, proved here over a link that is a test double with a stand-in
     // TLS server behind it. The request goes out protected only after the peer is verified, and

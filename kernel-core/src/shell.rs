@@ -886,6 +886,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "open a TLS 1.3 connection as NAME, trusting the Ed25519 root PIN (64 hex), send TEXT",
     ),
     (
+        "https ADDR PORT NAME PIN PATH",
+        "GET PATH from NAME over TLS 1.3 under the root PIN; print the status, headers and body",
+    ),
+    (
         "mlstat",
         "the resident risk advisor: what it is, and what it has done since boot",
     ),
@@ -1345,6 +1349,94 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     }
                 }
                 Err(why) => outf!(out, "tls: {}", why),
+            }
+        }
+        "https" => {
+            // An HTTP request is a protected conversation with a peer: a WRITE to the world, like
+            // `tls`. Authorized as such.
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let (addr, tail) = split_first(rest);
+            let (port_text, tail) = split_first(tail);
+            let (name, tail) = split_first(tail);
+            let (pin_text, path) = split_first(tail);
+            let Some(ip) = parse_ipv4_address(addr) else {
+                out("usage: https ADDR PORT NAME PIN PATH (ADDR is dotted quad, e.g. 10.0.2.2)");
+                return Outcome::Continue;
+            };
+            let Ok(port) = port_text.parse::<u16>() else {
+                out("usage: https ADDR PORT NAME PIN PATH (PORT is 1..65535)");
+                return Outcome::Continue;
+            };
+            if port == 0 || name.is_empty() || name.len() > 255 || !name.is_ascii() {
+                out("usage: https ADDR PORT NAME PIN PATH (NAME is the DNS name the peer must speak for)");
+                return Outcome::Continue;
+            }
+            let Some(pin) = parse_hex_key(pin_text) else {
+                out("usage: https ADDR PORT NAME PIN PATH (PIN is the root's Ed25519 public key, 64 hex digits)");
+                return Outcome::Continue;
+            };
+            // The path is checked HERE, by the same rule the request builder applies, so a path
+            // that would never be sent is refused by usage rather than by a refusal after a
+            // connection was opened for it.
+            if !crate::http::path_is_sendable(path.as_bytes()) {
+                out("usage: https ADDR PORT NAME PIN PATH (PATH is absolute, e.g. /index.txt, with no spaces)");
+                return Outcome::Continue;
+            }
+            let mut request = [0u8; 1024];
+            let Ok(request_len) =
+                crate::http::request(name.as_bytes(), path.as_bytes(), &mut request)
+            else {
+                out("usage: https ADDR PORT NAME PIN PATH (the request does not fit)");
+                return Outcome::Continue;
+            };
+            // Bounded here as well as inside the stack: four kilobytes of answer is what a
+            // terminal can show; a longer body is truncated and said to be.
+            let mut reply = [0u8; 4096];
+            match host.tls_fetch(
+                ip,
+                port,
+                name.as_bytes(),
+                pin,
+                &request[..request_len],
+                &mut reply,
+            ) {
+                Ok(report) => {
+                    let raw = &reply[..report.received];
+                    let mut body = [0u8; 2048];
+                    match crate::http::parse(raw, &mut body, report.truncated) {
+                        Ok(response) => {
+                            let k = &report.peer_key;
+                            outf!(
+                                out,
+                                "https {}: peer verified as {} under the pin (key {:02x}{:02x}{:02x}{:02x}..); HTTP {} {}; {} header(s); {} byte(s) of body{}{}",
+                                port,
+                                name,
+                                k[0],
+                                k[1],
+                                k[2],
+                                k[3],
+                                response.status,
+                                core::str::from_utf8(response.reason.of(raw)).unwrap_or("?"),
+                                response.headers().len(),
+                                response.body_len,
+                                if response.chunked { " (chunked)" } else { "" },
+                                if response.truncated { " (truncated)" } else { "" }
+                            );
+                            match core::str::from_utf8(&body[..response.body_len]) {
+                                Ok(text) => out(text),
+                                Err(_) => out("(the body is not text)"),
+                            }
+                        }
+                        Err(why) => outf!(
+                            out,
+                            "https: the answer is not HTTP this client reads: {:?}",
+                            why
+                        ),
+                    }
+                }
+                Err(why) => outf!(out, "https: {}", why),
             }
         }
         "lsblk" => {
@@ -2597,7 +2689,35 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && (none.contains("tls: ") || none.contains("peer verified"))
     );
 
-    // 44. A command line ends on return, and on nothing else. The desktop's file panel is
+    // 44. The `https` command refuses a path it would never send - relative, with a space, with
+    //     a control byte - by usage, before a connection is opened for it; and a machine with no
+    //     network says so by name.
+    let (relative, _) = transcript(
+        &alloc::format!("https 10.0.2.2 443 aletheia.test {good_pin} index.txt\r"),
+        host,
+        &mut fs,
+        dev,
+    );
+    let (spaced, _) = transcript(
+        &alloc::format!("https 10.0.2.2 443 aletheia.test {good_pin} /a b\r"),
+        host,
+        &mut fs,
+        dev,
+    );
+    let (none_https, _) = transcript(
+        &alloc::format!("https 10.0.2.2 443 aletheia.test {good_pin} /index.txt\r"),
+        host,
+        &mut fs,
+        dev,
+    );
+    check!(
+        "console: https refuses a path it would never send by usage and a missing network by name",
+        relative.contains("usage: https")
+            && spaced.contains("usage: https")
+            && (none_https.contains("https: ") || none_https.contains("peer verified"))
+    );
+
+    // 45. A command line ends on return, and on nothing else. The desktop's file panel is
     //     refreshed off this predicate (ADR-137), so a byte that wrongly counted as a line end
     //     would read the directory on every keystroke a human types.
     check!(
@@ -2610,7 +2730,7 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && !ends_a_command(b' ')
     );
 
-    // 45. The serviced loop hands the namespace out once before the first prompt and once per
+    // 46. The serviced loop hands the namespace out once before the first prompt and once per
     //     completed line — never mid-line. This is what lets a GUI panel show the namespace
     //     without ever holding the filesystem itself.
     let mut phases: Vec<ServicePhase> = Vec::new();

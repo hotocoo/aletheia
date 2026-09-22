@@ -380,6 +380,7 @@ CONTRACT=(
   "console: an address that is not a dotted quad is refused rather than guessed at"
   "console: tcp refuses a bad port by usage and a missing network by name"
   "console: tls refuses a pin that is not a 32-byte key by usage and a missing network by name"
+  "console: https refuses a path it would never send by usage and a missing network by name"
 
 
 
@@ -467,6 +468,16 @@ CONTRACT=(
   "entropy: the DMA gate refuses an address the driver never registered"
   "entropy: no device is a named refusal, and a refusal seeds no TLS key"
   "entropy: two TLS seeds derive two different ephemeral keys, neither zero"
+
+  # The HTTP/1.1 client (ADR-155): the same bounded reader on every CPU.
+  "http: a GET carries the host, asks the peer to close, and ends with the blank line"
+  "http: a path that is not absolute, or carries whitespace or control bytes, is refused before it is sent"
+  "http: a Content-Length response reads to its status, headers and exact body"
+  "http: a chunked body is reassembled exactly and the zero chunk ends it"
+  "http: a body larger than the caller's buffer is truncated, said so, never overflowed"
+  "http: a bad status line, version, header, fold, unfinished head, or too many or too long headers is refused by name"
+  "http: a chunk whose size is not hex, carries an extension, or does not end where it says is refused"
+  "http: two body boundaries are refused as ambiguous, and a short Content-Length body is incomplete"
 
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.

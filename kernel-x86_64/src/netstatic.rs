@@ -189,6 +189,21 @@ pub fn fetch_tls(
         &mut || ActiveHal::timer_ticks(),
     ) {
         Ok(done) => Ok(TlsReport::from(done)),
-        Err(why) => Err(why.describe()),
+        Err(why) => {
+            // The reason goes to the operator; the counters go to the boot log, where a person
+            // reading a gate transcript can see how far the conversation got before it ended.
+            let (last, stage) = pump.last();
+            crate::kprintln!(
+                "[tls] ended: {:?} at stage {:?}; {} record(s) in, {} out; {} segment(s) in, {} out; {} turn(s)",
+                why,
+                stage,
+                last.records_in,
+                last.records_out,
+                last.recv_segments,
+                last.sent_segments,
+                last.turns
+            );
+            Err(why.describe())
+        }
     }
 }

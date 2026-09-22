@@ -33,7 +33,17 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-22, latest (AN ENTROPY SOURCE — ADR-153, and HEAP HEADROOM — ADR-154. ADR-151's
+**As of:** 2026-09-22, latest (THE HTTP/1.1 CLIENT — ADR-155, Lethe stage N3 delivered. `kernel-core/src/http.rs`
+builds a `GET` with `Connection: close` and reads the answer with every length the peer names checked against the
+bytes that arrived: status line and version, each header's colon and bound, the header count, each chunk's hex size
+and CRLF, a Content-Length the body must honour. Two body boundaries (Content-Length with chunked, or two
+Content-Lengths) are refused as AMBIGUOUS rather than resolved — two parsers disagreeing about a body's end is the
+whole of a request-smuggling bug. A body larger than the caller's buffer is truncated and said so. The console's
+`https ADDR PORT NAME PIN PATH` runs the request over ADR-151's conversation under the operator's pin. `http=8` on
+all three CPUs; LIVE in `scripts/https-e2e.sh` (a CI gate) against Python's `http.server` behind OpenSSL: a
+Content-Length body, a chunked body reassembled, a 4000-byte body truncated to 2048 and said so, a 404, a wrong
+pin refused by name. `console=48`. Conformance 347 -> 356 core behaviours. Previously: AN ENTROPY SOURCE —
+ADR-153, and HEAP HEADROOM — ADR-154. ADR-151's
 one named gap is closed: `kernel-core/src/entropy.rs` is a virtio-rng driver on the shared virtqueue behind a
 one-sentence contract (fill the whole buffer or refuse by name), every draw checked for the failure modes a
 broken device actually has (all one value, the same answer twice, no answer), the DMA gate enforced; the boot
@@ -1198,6 +1208,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-22 — the HTTP/1.1 client, bounded by construction (ADR-155)
+
+- **Lethe stage N3.** `kernel-core/src/http.rs`: a `GET` that asks the peer to close, and a response reader in which every length the peer names is checked against the bytes that arrived before anything is read past them. Nothing allocates.
+- **Refused by name:** a status line that is not `HTTP/1.x NNN reason`; a header without a colon, with a leading space (obsolete folding), or over 1024 bytes; more than 32 headers; a chunk size that is not hex, carries an extension, or does not end where it says; a body shorter than its `Content-Length` (`Incomplete`, not a shorter body); and **two body boundaries** — `Content-Length` with `Transfer-Encoding: chunked`, or two different `Content-Length`s — refused as `Ambiguous` rather than resolved, because two parsers disagreeing about where a body ends is the whole of a request-smuggling bug.
+- **A body larger than the caller's buffer is truncated and said to be**, never overflowed and never grown into (ADR-063).
+- **`https ADDR PORT NAME PIN PATH`** at the console: the path is checked by the request builder's own rule before a connection is opened; the answer prints as `HTTP status reason; N header(s); N byte(s) of body` with `(chunked)` and `(truncated)` when true, then the body if it is text.
+- **Proof, boot (`http=8`):** exact request bytes; refused paths; a Content-Length response read exactly; a chunked body reassembled with its trailer skipped; truncation with guard bytes untouched; every malformed head by name; every malformed chunk; ambiguity and short bodies. **Live (`scripts/https-e2e.sh`, a CI gate):** against Python's `http.server` behind OpenSSL on the runner — `/plain.txt` (Content-Length), `/chunked.txt` (three chunks, reassembled), `/big.txt` (4000 bytes, `2048 byte(s) of body (truncated)`), `/missing.txt` (`HTTP 404`), a wrong pin refused by name, a dead port refused by name; the peer logs each GET with its `Host`. `console=48`. Conformance contract **347 -> 356**.
+- **What the live gate found:** a refused conversation returned without an alert or a FIN, and a server that handshakes on its accept thread then answered nobody. The client now sends a fatal alert naming the refusal (RFC 8446 §6) and closes, pumped for a bounded number of turns; the boot suite proves the stand-in receives alert 51 and sees the FIN. The gate's server handshakes per connection thread.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (356 on all three), quality-gate PASS, doc gates PASS, https-e2e PASS**.
 
 ### 2026-09-22 — an entropy source (ADR-153) and heap headroom (ADR-154)
 

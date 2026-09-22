@@ -118,6 +118,25 @@ jobs:
       - name: Open a real TLS 1.3 connection from the guest to OpenSSL on the runner
         run: ./scripts/tls-e2e.sh
 
+  https-e2e:
+    name: A real HTTPS GET (console -> TLS 1.3 -> a real HTTP server on the runner, both body framings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU (aarch64 + riscv64) and the certificate tooling for the peer
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc python3-cryptography && (sudo apt-get install -y qemu-system-riscv || true)
+      - name: Install Rust nightly + rust-src (for build-std)
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup component add rust-src --toolchain nightly-2026-08-09
+      # HTTP over TLS, end to end: a scripted operator types `https` with the name, the pin and a
+      # path; the kernel GETs it from Python's http.server behind OpenSSL on THIS runner, and the
+      # bounded reader's status, headers and body come back on the serial line - a Content-Length
+      # body, a chunked body, a body too big for the console (truncated and said so), a 404, a
+      # wrong pin refused by name (ADR-155).
+      - name: GET two pages from a real HTTPS server on the runner
+        run: ./scripts/https-e2e.sh
+
   keyboard-e2e:
     name: A person at the machine's own keyboard (i8042 -> IRQ1 -> decoder -> line editor)
     runs-on: ubuntu-latest

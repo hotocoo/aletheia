@@ -147,6 +147,8 @@ pub struct TlsOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct TlsReport {
     pub received: usize,
+    /// The peer sent more than the caller's buffer holds; what follows `received` was dropped.
+    pub truncated: bool,
     pub peer_key: [u8; 32],
     pub records_in: u64,
     pub records_out: u64,
@@ -156,6 +158,7 @@ impl From<TlsOutcome> for TlsReport {
     fn from(o: TlsOutcome) -> Self {
         TlsReport {
             received: o.received,
+            truncated: o.truncated,
             peer_key: o.peer_key,
             records_in: o.records_in,
             records_out: o.records_out,
@@ -203,12 +206,21 @@ struct Workspace {
 pub struct TlsPump {
     records: Option<RecordLayer>,
     work: Box<Workspace>,
+    /// What the last conversation achieved before it ended, whichever way it ended: the counters a
+    /// refusal does not carry, for a console to print beside the reason.
+    last: TlsOutcome,
+    last_stage: HandshakeStage,
+    /// Whether the record layer currently holds this conversation's keys.
+    keyed: bool,
 }
 
 impl TlsPump {
     pub fn new() -> Self {
         TlsPump {
             records: None,
+            last: TlsOutcome::default(),
+            last_stage: HandshakeStage::Start,
+            keyed: false,
             work: Box::new(Workspace {
                 stream: [0u8; MAX_RECORD],
                 stream_len: 0,
@@ -227,11 +239,17 @@ impl TlsPump {
     /// Forget the previous conversation. The record layer, if any, keeps its allocation and is
     /// re-keyed when the next handshake produces keys; until then it is not consulted.
     fn begin(&mut self) {
+        self.keyed = false;
         let w = &mut *self.work;
         w.stream_len = 0;
         w.messages_len = 0;
         w.pending_len = 0;
         w.pending_sent = 0;
+    }
+
+    /// The counters of the last conversation, and the handshake stage it ended at.
+    pub fn last(&self) -> (TlsOutcome, HandshakeStage) {
+        (self.last, self.last_stage)
     }
 
     /// Install handshake keys: re-key the existing layer or build the one this pump will keep.
@@ -240,6 +258,7 @@ impl TlsPump {
             Some(r) => r.reset(write, read),
             None => self.records = Some(RecordLayer::new(write, read)),
         }
+        self.keyed = true;
     }
 }
 
@@ -553,6 +572,97 @@ impl<'a, V: PeerVerifier> Session<'a, V> {
     }
 }
 
+/// The alert description (RFC 8446 §6) this client sends the peer for a refusal, so the peer
+/// learns the conversation is over and why, rather than waiting on a socket nobody will write to.
+pub fn alert_for(why: &TlsRefusal) -> u8 {
+    match why {
+        TlsRefusal::Handshake(HandshakeRefusal::PeerUnverified) => 42, // bad_certificate
+        TlsRefusal::Handshake(HandshakeRefusal::BadSignature)
+        | TlsRefusal::Handshake(HandshakeRefusal::BadFinished) => 51, // decrypt_error
+        TlsRefusal::Handshake(HandshakeRefusal::Downgrade)
+        | TlsRefusal::Handshake(HandshakeRefusal::NotTls13)
+        | TlsRefusal::Handshake(HandshakeRefusal::UnsupportedChoice) => 40, // handshake_failure
+        TlsRefusal::Handshake(_) => 50,                                // decode_error
+        TlsRefusal::Record(RecordRefusal::Fatal) => 20,                // bad_record_mac
+        TlsRefusal::Record(_) => 50,                                   // decode_error
+        TlsRefusal::DataBeforeFinished
+        | TlsRefusal::UnexpectedRecord(_)
+        | TlsRefusal::UnexpectedMessage(_) => 10, // unexpected_message
+        TlsRefusal::Alert(_) | TlsRefusal::Link(_) => 0, // close_notify: nothing to accuse
+        TlsRefusal::StreamFull | TlsRefusal::NoRoom => 80, // internal_error
+    }
+}
+
+/// How many turns the wind-down may take. Best effort: a peer that does not acknowledge the FIN
+/// is left to its own timers, as RFC 8446 §6.1 allows once the alert is sent.
+const WIND_DOWN_TURNS: u64 = 64;
+
+/// A refused conversation still tells the peer: a fatal alert (protected when there are keys,
+/// plain when there are not) and a FIN, pumped for a bounded number of turns. Without this the
+/// peer's handshake blocks until its own timeout - and a server that handshakes on its accept
+/// thread then answers nobody. Found live (ADR-155).
+fn wind_down<L: Ipv4Link>(
+    link: &L,
+    conn: &mut Connection,
+    pump: &mut TlsPump,
+    why: &TlsRefusal,
+    now: &mut dyn FnMut() -> u64,
+) {
+    if matches!(conn.state(), TcpState::Closed | TcpState::TimeWait) {
+        return;
+    }
+    let description = alert_for(why);
+    let level = if description == 0 { 1 } else { 2 };
+    let mut record = [0u8; 64];
+    let len = if pump.keyed {
+        match pump.records.as_mut() {
+            Some(r) => r
+                .seal(ContentType::Alert, &[level, description], 0, &mut record)
+                .unwrap_or(0),
+            None => 0,
+        }
+    } else {
+        record[..7].copy_from_slice(&[
+            RECORD_ALERT,
+            LEGACY_VERSION[0],
+            LEGACY_VERSION[1],
+            0,
+            2,
+            level,
+            description,
+        ]);
+        7
+    };
+    if len > 0 && matches!(conn.state(), TcpState::Established | TcpState::CloseWait) {
+        let _ = conn.send(&record[..len]);
+    }
+    let _ = conn.close();
+    let w = &mut *pump.work;
+    for _ in 0..WIND_DOWN_TURNS {
+        while let Some(n) = conn.poll_transmit(now(), &mut w.tx) {
+            if link.send_ipv4(&w.tx[..n]).is_err() {
+                return;
+            }
+        }
+        if matches!(conn.state(), TcpState::Closed | TcpState::TimeWait) {
+            return;
+        }
+        if let Ok(n) = link.recv_ipv4(1, PROTOCOL_TCP, &mut w.rx) {
+            if n > 0 {
+                if let Ok(ip) = parse_ipv4(&w.rx[..n]) {
+                    if ip.dst == link.local_ip() {
+                        if let Ok(view) = parse_tcp(&ip) {
+                            let _ = conn.on_segment(&view, now());
+                            let mut sink = [0u8; 64];
+                            while conn.recv(&mut sink) > 0 {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Run one TLS 1.3 conversation to completion over `link`: open `conn`, hand-shake with the
 /// peer `hs` was built for, send `request` protected, collect the protected answer into `reply`
 /// until the peer closes or the budget is spent.
@@ -575,6 +685,38 @@ pub fn exchange<L: Ipv4Link, V: PeerVerifier>(
     now: &mut dyn FnMut() -> u64,
 ) -> Result<TlsOutcome, TlsRefusal> {
     pump.begin();
+    let mut recorded = TlsOutcome::default();
+    let result = run(
+        link,
+        conn,
+        plan,
+        pump,
+        hs,
+        request,
+        reply,
+        now,
+        &mut recorded,
+    );
+    if let Err(why) = &result {
+        wind_down(link, conn, pump, why, now);
+    }
+    pump.last = recorded;
+    pump.last_stage = hs.stage();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run<L: Ipv4Link, V: PeerVerifier>(
+    link: &L,
+    conn: &mut Connection,
+    plan: Plan,
+    pump: &mut TlsPump,
+    hs: &mut Handshake<V>,
+    request: &[u8],
+    reply: &mut [u8],
+    now: &mut dyn FnMut() -> u64,
+    recorded: &mut TlsOutcome,
+) -> Result<TlsOutcome, TlsRefusal> {
     let mut s = Session {
         hs,
         pump,
@@ -594,6 +736,7 @@ pub fn exchange<L: Ipv4Link, V: PeerVerifier>(
 
     for turn in 0..plan.budget {
         s.out.turns = turn + 1;
+        *recorded = s.out;
 
         if !s.hello_sent && conn.state() == TcpState::Established {
             let mut message = [0u8; 512];
@@ -651,6 +794,7 @@ pub fn exchange<L: Ipv4Link, V: PeerVerifier>(
             }
         }
     }
+    *recorded = s.out;
     if s.done && s.out.received > 0 {
         return Ok(s.out);
     }
@@ -754,6 +898,8 @@ pub fn tlsclient_suite(
         client_records_before_finished: u32,
         request_seen: [u8; 64],
         request_len: usize,
+        /// The description byte of the first alert the client sent, if any.
+        alert_from_client: Option<u8>,
     }
 
     struct Peer {
@@ -862,6 +1008,12 @@ pub fn tlsclient_suite(
                             }
                             Some(Ok((ContentType::ApplicationData, _, _))) => {
                                 st.client_records_before_finished += 1;
+                            }
+                            Some(Ok((ContentType::Alert, m, _))) => {
+                                if m >= 2 && st.alert_from_client.is_none() {
+                                    st.alert_from_client = Some(plain[1]);
+                                }
+                                st.phase = Phase::Over;
                             }
                             _ => st.phase = Phase::Over,
                         }
@@ -1134,6 +1286,7 @@ pub fn tlsclient_suite(
                 client_records_before_finished: 0,
                 request_seen: [0; 64],
                 request_len: 0,
+                alert_from_client: None,
             }),
             behaviour,
         }
@@ -1149,20 +1302,33 @@ pub fn tlsclient_suite(
         peer_records: Option<RecordLayer>,
     }
 
+    /// What one conversation left behind: the client's result, whether the peer accepted the
+    /// client's Finished, how many protected records the client sent before Finished, the request
+    /// the peer saw, the alert the client sent on refusing, and whether the client closed.
+    type Conversation = (
+        Result<TlsOutcome, TlsRefusal>,
+        bool,
+        u32,
+        [u8; 64],
+        usize,
+        Option<u8>,
+        bool,
+    );
+
     /// One conversation against a stand-in of the given behaviour.
     fn converse(
         f: &mut Fixtures,
         behaviour: Behaviour,
         budget: u64,
         reply: &mut [u8],
-    ) -> (Result<TlsOutcome, TlsRefusal>, bool, u32, [u8; 64], usize) {
+    ) -> Conversation {
         let l = peer(behaviour, f.peer_records.take());
         let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, 4);
         if f.hs
             .restart(FIXTURE_CLIENT_PRIVATE, FIXTURE_CLIENT_RANDOM)
             .is_err()
         {
-            return (Err(TlsRefusal::NoRoom), false, 0, [0; 64], 0);
+            return (Err(TlsRefusal::NoRoom), false, 0, [0; 64], 0, None, false);
         }
         let mut tick = 0u64;
         let plan = Plan {
@@ -1191,6 +1357,8 @@ pub fn tlsclient_suite(
             st.client_records_before_finished,
             st.request_seen,
             st.request_len,
+            st.alert_from_client,
+            st.client_closed,
         )
     }
 
@@ -1223,7 +1391,7 @@ pub fn tlsclient_suite(
     //     protected, and the protected answer decrypted into the caller's buffer.
     {
         let mut reply = [0u8; 64];
-        let (got, fin_ok, early, seen, seen_len) =
+        let (got, fin_ok, early, seen, seen_len, _, _) =
             converse(&mut f, Behaviour::Honest, 96, &mut reply);
         let ok = match got {
             Ok(o) => {
@@ -1247,13 +1415,15 @@ pub fn tlsclient_suite(
     //     party holding the pinned certificate could not prove it held its key.
     {
         let mut reply = [0u8; 64];
-        let (got, fin_ok, early, _, seen_len) =
+        let (got, fin_ok, early, _, seen_len, alert, closed) =
             converse(&mut f, Behaviour::WrongSignature, 96, &mut reply);
         check!(
             got == Err(TlsRefusal::Handshake(HandshakeRefusal::BadSignature))
                 && !fin_ok
                 && early == 0
-                && seen_len == 0,
+                && seen_len == 0
+                && alert == Some(51)
+                && closed,
             "tlsclient: a peer that cannot prove its key ends the conversation by name and receives nothing protected"
         );
     }
@@ -1262,7 +1432,8 @@ pub fn tlsclient_suite(
     //     tag is fatal: the conversation ends, and the request is never sent.
     {
         let mut reply = [0u8; 64];
-        let (got, _, _, _, seen_len) = converse(&mut f, Behaviour::CorruptFinished, 96, &mut reply);
+        let (got, _, _, _, seen_len, _, _) =
+            converse(&mut f, Behaviour::CorruptFinished, 96, &mut reply);
         check!(
             got == Err(TlsRefusal::Record(RecordRefusal::Fatal)) && seen_len == 0,
             "tlsclient: a record that fails authentication ends the conversation and nothing is sent after it"
@@ -1273,7 +1444,7 @@ pub fn tlsclient_suite(
     //     before it is verified is not one this client listens to.
     {
         let mut reply = [0u8; 64];
-        let (got, _, _, _, seen_len) =
+        let (got, _, _, _, seen_len, _, _) =
             converse(&mut f, Behaviour::DataBeforeFinished, 96, &mut reply);
         check!(
             got == Err(TlsRefusal::DataBeforeFinished) && seen_len == 0 && reply.iter().all(|&b| b == 0),
@@ -1284,7 +1455,7 @@ pub fn tlsclient_suite(
     // 5 — a peer that never answers costs the budget and is refused by name.
     {
         let mut reply = [0u8; 16];
-        let (got, _, _, _, _) = converse(&mut f, Behaviour::Deaf, 12, &mut reply);
+        let (got, _, _, _, _, _, _) = converse(&mut f, Behaviour::Deaf, 12, &mut reply);
         check!(
             matches!(
                 got,
@@ -1299,7 +1470,7 @@ pub fn tlsclient_suite(
     //     alert, and nothing protected is ever produced.
     {
         let mut reply = [0u8; 16];
-        let (got, _, _, _, _) = converse(&mut f, Behaviour::PlaintextAlert, 96, &mut reply);
+        let (got, _, _, _, _, _, _) = converse(&mut f, Behaviour::PlaintextAlert, 96, &mut reply);
         check!(
             got == Err(TlsRefusal::Alert(40)),
             "tlsclient: a fatal alert from the peer ends the conversation naming the alert"
@@ -1310,7 +1481,7 @@ pub fn tlsclient_suite(
     //     honest server without it completes exactly as one with it.
     {
         let mut reply = [0u8; 64];
-        let (got, fin_ok, _, _, _) =
+        let (got, fin_ok, _, _, _, _, _) =
             converse(&mut f, Behaviour::NoChangeCipherSpec, 96, &mut reply);
         check!(
             got.is_ok_and(|o| o.received == 23) && fin_ok,
@@ -1322,7 +1493,7 @@ pub fn tlsclient_suite(
     //     past the buffer.
     {
         let mut guarded = [0xAAu8; 16];
-        let (got, _, _, _, _) = converse(&mut f, Behaviour::Honest, 96, &mut guarded[..8]);
+        let (got, _, _, _, _, _, _) = converse(&mut f, Behaviour::Honest, 96, &mut guarded[..8]);
         check!(
             got.is_ok_and(|o| o.received == 8 && o.truncated)
                 && &guarded[..8] == b"peer-saw"
