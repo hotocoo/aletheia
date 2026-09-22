@@ -1114,6 +1114,26 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // The PINNED VERIFIER (REQ-SEC-TLS-007, ADR-147): the first PeerVerifier that can say yes,
+    // and it says yes to exactly one shape - a leaf signed DIRECTLY by one pinned Ed25519 root,
+    // speaking for the expected name, inside its window at a time the caller supplies. The
+    // signature is checked FIRST: nothing in an unsigned document is read as a fact.
+    kprintln!("");
+    kprintln!("--- trust selftests (pinned root: signature first, then window, then name) ---");
+    match kernel_core::trust::trust_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[trust] ALL {} TRUST INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[trust] FAILED at trust invariant {}: {}", idx, name);
+            semihosting::exit(920 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu device, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the

@@ -809,6 +809,49 @@ pub fn tlshandshake_suite(
         );
     }
 
+    // 10 — with a PINNED ROOT and a chain it signed (ADR-147), the handshake passes the server's
+    //      Certificate and reaches CertificateVerify, where it still stops by name: a signature
+    //      over the transcript this client does not yet check is a signature it must not accept.
+    //      No application traffic keys exist. This is the one place the rung can be seen moving.
+    {
+        use crate::trust::{
+            certificate_message, PinnedRoot, FIXTURE_NAME, FIXTURE_TIME, LEAF_FIXTURE,
+            ROOT_KEY_FIXTURE,
+        };
+        let verdict = match PinnedRoot::new(ROOT_KEY_FIXTURE, FIXTURE_TIME)
+            .ok()
+            .and_then(|v| Handshake::new(v, FIXTURE_NAME, client_private, [7u8; 32]).ok())
+        {
+            Some(mut pinned) => {
+                let mut ch = [0u8; 512];
+                pinned.client_hello(&mut ch).ok();
+                let mut sh = [0u8; 256];
+                let len = server_hello_for(&[0u8; 32], &server_private, &mut sh);
+                pinned.server_hello(&sh[..len]).ok();
+                let ee = [ENCRYPTED_EXTENSIONS, 0, 0, 2, 0, 0];
+                let after_ee = pinned.server_flight(&ee);
+                let mut cert = [0u8; 512];
+                let body_len = certificate_message(&[&LEAF_FIXTURE], &mut cert[4..]).unwrap_or(0);
+                cert[0] = CERTIFICATE;
+                cert[1..4].copy_from_slice(&(body_len as u32).to_be_bytes()[1..]);
+                let after_cert = pinned.server_flight(&cert[..4 + body_len]);
+                // A CertificateVerify naming Ed25519 (0x0807) with an empty signature.
+                let cv = [CERTIFICATE_VERIFY, 0, 0, 4, 0x08, 0x07, 0, 0];
+                let after_cv = pinned.server_flight(&cv);
+                after_ee == Ok(HandshakeStage::WaitCertificate)
+                    && after_cert == Ok(HandshakeStage::WaitCertificateVerify)
+                    && after_cv == Err(HandshakeRefusal::PeerUnverified)
+                    && pinned.application_keys().is_none()
+                    && pinned.stage() == HandshakeStage::Failed
+            }
+            None => false,
+        };
+        check!(
+            verdict,
+            "tlshandshake: a pinned root and a chain it signed reach CertificateVerify, where this client still stops by name"
+        );
+    }
+
     Ok(n)
 }
 
@@ -824,8 +867,8 @@ mod tests {
             seen += 1;
         })
         .expect("the handshake suite should hold");
-        assert_eq!(n, 9);
-        assert_eq!(seen, 9);
+        assert_eq!(n, 10);
+        assert_eq!(seen, 10);
     }
 
     /// The property that keeps this rung honest: there is no path, with the verifier this kernel

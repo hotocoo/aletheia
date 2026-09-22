@@ -33,7 +33,19 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-18, latest (THE CERTIFICATE READER — ADR-146. Certificate parsers are where TLS
+**As of:** 2026-09-22, latest (THE PINNED VERIFIER — ADR-147. `kernel-core/src/trust.rs` is the
+first `PeerVerifier` that can say yes, and it says yes to exactly one shape: a leaf signed DIRECTLY by
+one pinned Ed25519 root, speaking for the expected name, inside its window at a time the caller
+supplies. A pin rather than a store: no chain to walk, so no path building, no intermediates, no
+chain-walking bug — certificates after the leaf are framed and never read. The clock is a constructor
+argument and a time of zero or less is refused by name (`NoClock`): read as the epoch it would find
+every certificate not yet valid, read as "skip" it would accept every expired one. The signature is
+checked FIRST, so nothing in an unsigned document is read as a fact. 9 new boot invariants (`trust=9`)
+on all three CPUs against a real OpenSSL root-issued leaf, plus `tlshandshake=10`: with a pinned root
+and a chain it signed the handshake now passes the server's Certificate and stops at
+CertificateVerify by name. Conformance 313 -> 323 core behaviours. **This kernel still cannot speak
+TLS:** CertificateVerify is not yet checked and the platform has no clock. Previously: THE
+CERTIFICATE READER — ADR-146. Certificate parsers are where TLS
 clients get compromised, and the historical failures share one shape: a parser that reads what a
 length CLAIMS instead of refusing what the buffer cannot hold. `kernel-core/src/x509.rs` is
 therefore a DER reader with a bounded nesting depth, DER's minimal definite length encoding
@@ -1127,6 +1139,18 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-22 — the pinned verifier (ADR-147)
+
+- ADR-145 and ADR-146 built the two mechanisms a verifier needs — checking a signature and reading a certificate — but not the decision: whom to trust, when, and for which name. This wave takes the decision.
+- `kernel-core/src/trust.rs` — `PinnedRoot`, the first `PeerVerifier` that can say yes. It says yes to exactly one shape: a leaf signed **directly** by one pinned Ed25519 root, speaking for the expected name, inside its validity window at a time the caller supplies.
+- **A pin, not a store.** One party allowed to speak for the names this client will dial, rather than a list of parties allowed to speak for every name. There is no chain to walk, so there is no path building, no name constraints, no intermediate handling and no chain-walking bug. Certificates after the leaf are framed (a lying length is refused) and never read.
+- **The clock is an argument, and zero is a refusal.** `PinnedRoot::new(root, now)` refuses a time of zero or less by name. Read as the epoch it would find every certificate not yet valid; read as "skip the check" it would accept every expired one. When the platform grows a clock it hands a real time here rather than changing this code.
+- **The signature is checked first.** The validity window and the names are consulted only once the pinned root has been shown to have signed them; a forged leaf is `NotSignedByRoot`, never `WrongName`.
+- The TLS 1.3 `Certificate` message is framed to its last byte: a request context this client never sent, a list length that lies in either direction, a zero-length certificate, an extensions length past the end, more than four entries — each a named refusal.
+- New boot family `trust=9` on all three CPUs, against a **real root-issued Ed25519 leaf** produced by OpenSSL. `tlshandshake=10`: with a pinned root and a chain it signed, the handshake now passes the server's Certificate and reaches CertificateVerify, where it **still stops by name** with no application keys — the rung seen moving, the ADR-144 negative kept where it now belongs. Host suite (`kernel-core/tests/trust.rs`) flips every bit of the leaf, one at a time, and every one is refused. Conformance contract **313 -> 323** core behaviours.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (323 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** checking CertificateVerify over the transcript with the key this verifier returns, and a platform clock. Until both land, this kernel cannot speak TLS.
 
 ### 2026-09-18 — the certificate reader (ADR-146)
 

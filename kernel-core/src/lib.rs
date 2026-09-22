@@ -92,6 +92,7 @@ pub mod teardown;
 pub mod textgrid;
 pub mod tlshandshake;
 pub mod tlsrecord;
+pub mod trust;
 pub mod udpv4;
 pub mod usermem;
 pub mod vinput;

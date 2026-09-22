@@ -398,6 +398,17 @@ CONTRACT=(
   "x509: a certificate that is not Ed25519 is refused by name rather than half-read"
   "x509: nesting deeper than this reader follows is refused rather than recursed"
 
+  # The pinned verifier (ADR-147): the same trust decision, in the same order, on every CPU.
+  "trust: a leaf the pinned root signed, for the expected name, in its window, is accepted"
+  "trust: the same leaf under a different pin is refused as unsigned"
+  "trust: a certificate that vouches for itself is refused rather than believed"
+  "trust: a leaf for another name is refused by name even though the root signed it"
+  "trust: before notBefore is not yet valid, after notAfter is expired, both edges inclusive"
+  "trust: a verifier cannot be built without a clock; zero is not the epoch"
+  "trust: one changed byte in the tbs or the signature is refused as unsigned"
+  "trust: the chain message's framing is checked to its end; a length that lies is refused"
+  "trust: certificates after the leaf are framed and never read; too many is refused"
+
   # The signature half of a certificate verifier (ADR-145): the same digests and the same
   # refusals - malleable scalars, off-curve points, short inputs - on every CPU.
   "sha512: the empty message hashes to FIPS 180-4's published digest"
@@ -425,6 +436,7 @@ CONTRACT=(
   "tlshandshake: a length field that lies about the buffer is refused by name"
   "tlshandshake: the transcript binds the keys to every byte of what was said"
   "tlshandshake: the Finished value is deterministic over the transcript and compared in constant time"
+  "tlshandshake: a pinned root and a chain it signed reach CertificateVerify, where this client still stops by name"
 
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.
