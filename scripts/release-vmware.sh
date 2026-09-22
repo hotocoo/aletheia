@@ -86,6 +86,15 @@ qemu-img convert -f raw -O vmdk "$BUILD/release-interactive.img" "$STAGE/alethei
   --seed "$BUILD/release-selftest.img" || fail "normalize selftest vmdk"
 "$PY" "$ROOT/scripts/normalize-vmdk.py" --vmdk "$STAGE/aletheia-x86_64.vmdk" \
   --seed "$BUILD/release-interactive.img" || fail "normalize interactive vmdk"
+# The normalizer must not have moved a grain: each VMDK must still read back as EXACTLY the raw
+# image it was converted from. A VMDK that fails this is a disk OVMF finds nothing on (ADR-152).
+"$PY" "$ROOT/scripts/normalize-vmdk.py" --self-test "$STAGE/aletheia-x86_64-selftest.vmdk" \
+  || fail "the VMDK normalizer's own self-test"
+qemu-img compare -q -f raw -F vmdk "$BUILD/release-selftest.img" "$STAGE/aletheia-x86_64-selftest.vmdk" \
+  || fail "the normalized selftest VMDK no longer holds its image"
+qemu-img compare -q -f raw -F vmdk "$BUILD/release-interactive.img" "$STAGE/aletheia-x86_64.vmdk" \
+  || fail "the normalized interactive VMDK no longer holds its image"
+echo "  PASS: both VMDKs read back as the raw images they were converted from"
 
 hr; echo "==> [4/6] VMware configs, README, checksums"; hr
 vmx() { # $1 = vmdk file name, $2 = display name, $3 = serial log name, $4 = out file
