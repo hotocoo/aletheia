@@ -9,6 +9,9 @@
 
 use kernel_core::tcpconn::Connection;
 use kernel_core::tcpnet::{self, LinkError, Plan};
+use kernel_core::tlsclient::{self, TlsPump, TlsReport};
+use kernel_core::tlshandshake::Handshake;
+use kernel_core::trust::PinnedRoot;
 use kernel_core::virtionet::{NetLink, GUEST_IP};
 use kernel_core::Hal;
 
@@ -16,6 +19,10 @@ use crate::hal::ActiveHal;
 use crate::virtio::Net;
 
 static mut NET: Option<Net> = None;
+
+/// The console's one TLS pump and handshake, built on the first `tls` command and REUSED by every
+/// later one: ninety kilobytes of workspace on a heap that never frees, allocated once (ADR-151).
+static mut TLS: Option<(TlsPump, Handshake<PinnedRoot>)> = None;
 
 /// The first ephemeral port this machine offers. Walked upward per connection so two conversations
 /// in one session cannot collide in the peer's table.
@@ -77,5 +84,91 @@ pub fn fetch(
         Err(LinkError::ConnectionEnded) => Err("the peer refused or reset the connection"),
         Err(LinkError::TooLong) => Err("the answer did not fit this console's buffer"),
         Err(LinkError::Device) => Err("the network device refused the frame"),
+    }
+}
+
+/// Open a TLS 1.3 conversation with `ip:port` as `server_name`, trusting exactly the Ed25519 root
+/// `pin`, at the time this machine's own clock reads (ADR-148), and carry `request` and its
+/// answer protected (ADR-151).
+///
+/// The ephemeral key and the client random are derived from the platform's timer readings mixed
+/// through SHA-256. This kernel has no entropy device yet (ADR-151 names it), so that seed is
+/// unpredictable to a casual observer and NOT to a determined one: adequate for the live gate on a
+/// private network, and the reason a real entropy source is the next rung.
+pub fn fetch_tls(
+    ip: [u8; 4],
+    port: u16,
+    server_name: &[u8],
+    pin: [u8; 32],
+    request: &[u8],
+    reply: &mut [u8],
+) -> Result<TlsReport, &'static str> {
+    // SAFETY: main thread only (the console's own thread), and the device outlives the machine.
+    let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
+        return Err("this machine has no network device");
+    };
+    // SAFETY: the device was brought up by the boot and its queues are live.
+    let link = unsafe { NetLink::resolve(dev, ip) }
+        .map_err(|_| "no answer to the address resolution for that peer")?;
+    // SAFETY: as above; this is the sole writer of the port counter.
+    let lport = unsafe {
+        let p = NEXT_PORT;
+        NEXT_PORT = if p == u16::MAX { FIRST_PORT } else { p + 1 };
+        p
+    };
+
+    let clock = crate::rtc::Pl031::new();
+    let verifier = kernel_core::clock::verifier_at(&clock, pin)
+        .map_err(|_| "this machine's clock gave no time to judge a certificate by")?;
+
+    let hz = ActiveHal::timer_freq_hz().max(1);
+    let rto = (hz / 5).max(1);
+    let mut conn = Connection::new(GUEST_IP, lport, ip, port, rto);
+    let ticks = ActiveHal::timer_ticks();
+    let iss = (ticks as u32) ^ ((lport as u32) << 16);
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&ticks.to_le_bytes());
+    seed[8..16].copy_from_slice(&hz.to_le_bytes());
+    seed[16..18].copy_from_slice(&lport.to_le_bytes());
+    seed[18..22].copy_from_slice(&ip);
+    seed[22..24].copy_from_slice(&port.to_le_bytes());
+    seed[24..32].copy_from_slice(&ActiveHal::timer_ticks().to_le_bytes());
+    let (private, random) = tlsclient::ephemeral_material(&seed);
+    // SAFETY: main thread only (the console's own thread); the pump and the handshake are built on
+    // the first command and rebound, never rebuilt, on every later one.
+    let slot = unsafe { &mut *core::ptr::addr_of_mut!(TLS) };
+    let (pump, hs) = match slot {
+        Some(pair) => {
+            pair.1
+                .rebind(verifier, server_name, private, random)
+                .map_err(|_| "that server name does not fit a ClientHello")?;
+            pair
+        }
+        None => {
+            let hs = Handshake::new(verifier, server_name, private, random)
+                .map_err(|_| "that server name does not fit a ClientHello")?;
+            *slot = Some((TlsPump::new(), hs));
+            slot.as_mut().ok_or("the TLS workspace could not be kept")?
+        }
+    };
+    // A protected conversation is several round trips, so the budget is three times the plain
+    // TCP command's; every turn is still bounded on the device.
+    let plan = Plan {
+        iss,
+        budget: 12_000,
+        spins_per_turn: 20_000,
+    };
+    match tlsclient::exchange(
+        &link,
+        &mut conn,
+        plan,
+        pump,
+        hs,
+        request,
+        reply,
+        &mut || ActiveHal::timer_ticks(),
+    ) {
+        Ok(done) => Ok(TlsReport::from(done)),
+        Err(why) => Err(why.describe()),
     }
 }

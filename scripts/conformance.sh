@@ -379,6 +379,7 @@ CONTRACT=(
   # The console can open a real connection (ADR-140): the same refusals on every CPU.
   "console: an address that is not a dotted quad is refused rather than guessed at"
   "console: tcp refuses a bad port by usage and a missing network by name"
+  "console: tls refuses a pin that is not a 32-byte key by usage and a missing network by name"
 
 
 
@@ -448,6 +449,16 @@ CONTRACT=(
   "tlshandshake: past a pinned Certificate, a wrong scheme or a bad signature in CertificateVerify is refused by name"
   "tlshandshake: under a pinned root the server's CertificateVerify and Finished verify, application keys exist, and the client's Finished is the transcript's"
   "tlshandshake: a CertificateVerify over a different transcript is refused as a bad signature"
+
+  # The join (ADR-151): handshake, records and TCP in one pump, the same refusals on every CPU.
+  "tlsclient: over a link and a stand-in server the handshake completes, the request goes out protected and the answer comes back decrypted"
+  "tlsclient: a peer that cannot prove its key ends the conversation by name and receives nothing protected"
+  "tlsclient: a record that fails authentication ends the conversation and nothing is sent after it"
+  "tlsclient: application data before the handshake finished is refused and never copied out"
+  "tlsclient: a deaf peer costs the budget and is refused by name, never waited on forever"
+  "tlsclient: a fatal alert from the peer ends the conversation naming the alert"
+  "tlsclient: the compatibility ChangeCipherSpec is skipped whether or not the peer sends it"
+  "tlsclient: an answer larger than the caller's buffer is truncated, said so, never overflowed"
 
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.

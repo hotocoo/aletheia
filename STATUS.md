@@ -33,7 +33,25 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-22, latest (A COMPLETION BUDGET IN TIME — ADR-150. The aarch64 boot gate on the
+**As of:** 2026-09-22, latest (THE KERNEL SPEAKS TLS — ADR-151. `kernel-core/src/tlsclient.rs` joins
+the handshake (ADR-144..149), the record layer (ADR-143) and the TCP client (ADR-139/140) in one bounded
+pump, and the console gained `tls ADDR PORT NAME PIN TEXT`: the OPERATOR states the DNS name the peer must
+speak for and the Ed25519 root they trust, as 64 hex digits — this console ships no root of its own. The
+time is the platform's own clock (ADR-148). `tlsclient=8` on all three CPUs over a stand-in server whose
+CertificateVerify is the independently signed fixture; and LIVE, in `scripts/tls-e2e.sh` (a CI gate): the
+aarch64 and RISC-V guests dial Python's `ssl` (OpenSSL) on the runner through virtio-net, report `peer
+verified as aletheia.test under the pin`, the peer logs `TLSv1.3` and the request it received in the clear
+only on its side, and the protected answer comes back on the serial line; the same server under a pin one
+digit off is refused BY NAME before a byte of the request leaves the guest. Everything allocates ONCE
+(`TlsPump`, `Handshake::rebind`): the first draft built per conversation and the desktop that boots after
+the suite found the heap gone. **Named gap:** the ephemeral key is seeded from timer readings; this kernel
+has no entropy device, so `tls` is a demonstration on a private network until one lands (next rung).
+Lethe stage N2 is delivered with that caveat. Also ADR-152: the VMDK CID normalizer spliced the whole
+file and, one time in sixteen (a 7-digit CID), grew it by one byte — every grain moved, OVMF found no
+disk, the packaged boot hung to its watchdog and two builds disagreed about a digest; it now rewrites
+inside the descriptor region, self-tests both shapes, and the packager verifies every VMDK against its raw
+image with `qemu-img compare`. Conformance 332 -> 341 core behaviours. Previously: A COMPLETION BUDGET IN
+TIME — ADR-150. The aarch64 boot gate on the
 GitHub runner failed twice in two runs at two different storage invariants and passed on re-run both
 times: `virtioblk::submit` bounded its wait for a completion in POLLS (fifty million), and a spin count
 measures how fast this CPU looks, not how long the device has had — on a starved runner a healthy disk
@@ -1168,6 +1186,18 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-22 — the kernel speaks TLS (ADR-151) and a VMDK normalizer that keeps its length (ADR-152)
+
+- **The join.** `kernel-core/src/tlsclient.rs`: one bounded pump opens the connection, sends the ClientHello as a plaintext record, routes every record to the layer it belongs to, splits coalesced handshake messages and reassembles split ones, completes the handshake, sends the client's Finished under the handshake keys, switches to the application keys, and only then sends the request. It refuses by name: an encrypted record before keys, application data before Finished, a fatal alert (by description), a post-handshake message it does not process, an oversized record. The compatibility ChangeCipherSpec is dropped unread.
+- **Allocation, once.** `TlsPump` (workspace + record layer) and `Handshake::rebind` let one set of buffers serve every conversation. The suite's first draft built them per conversation and the desktop booting after it hit `memory allocation of 2600 bytes failed` — the ADR-063 trap, met again and closed.
+- **The operator states whom to trust.** `tls ADDR PORT NAME PIN TEXT`: the DNS name and the root's Ed25519 public key as 64 hex digits, typed by the person; a pin that is not exactly a 32-byte key is refused by usage before a byte reaches a wire. The time is the platform's clock (ADR-148). Each target's console keeps ONE pump and handshake in `netstatic.rs`, built on the first command and rebound after.
+- **Proof, boot (`tlsclient=8`):** over a link double with a stand-in TLS server whose CertificateVerify is the independently signed fixture: the whole conversation completes and decrypts; a peer that cannot prove its key gets nothing protected; a failed tag is fatal; data before Finished is refused; a deaf peer costs the budget; an alert names itself; CCS is skipped; an oversized answer is truncated and said so.
+- **Proof, live (`scripts/tls-e2e.sh`, a CI gate):** the aarch64 and RISC-V guests dial Python's `ssl` (OpenSSL) serving the fixture leaf on the runner's loopback. Right pin: `peer verified as aletheia.test under the pin`, the peer logs `TLSv1.3` and the request received in the clear only on its side, the protected answer returns on the serial line. Wrong pin (one digit off): refused by name before a byte of the request leaves the guest, and the peer logs a handshake the client refused. Dead port: refused by name. `console=47`. Conformance contract **332 -> 341**.
+- **Named gap: entropy.** The ephemeral X25519 key and client random are SHA-256 of timer readings; this kernel has no entropy device. Adequate for a gate on a private network, for nothing else; the next rung is virtio-rng / `RNDR` / `RDRAND`. Lethe stage N2 is delivered with this caveat stated in `docs/LETHE-INTEGRATION.md`.
+- **ADR-152, from the runner's own logs:** the VMDK CID normalizer spliced the whole file around the match; when qemu-img's random CID had seven digits (one time in sixteen) the file grew by one byte, every grain moved, QEMU read garbage, OVMF fell through to PXE and the packaged selftest boot hung to its watchdog — and two builds of one commit disagreed about a VMDK digest at the same rate. It now rewrites inside the descriptor region the sparse header declares (length unchanged), `--self-test` proves a 7- and an 8-digit CID normalize to identical bytes, and the packager runs `qemu-img compare` against each raw image and verifies its manifest before zipping.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (341 on all three), quality-gate PASS, doc gates PASS, tls-e2e PASS, release-vmware PASS, reproducible-release PASS**.
+- **Still open on the runner:** the live-desktop gate once did not reach its prompt inside 240 s; not explained by ADR-150 or ADR-152, watched.
 
 ### 2026-09-22 — a completion budget in time, not in looks (ADR-150)
 

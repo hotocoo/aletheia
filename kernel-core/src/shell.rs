@@ -37,6 +37,7 @@
 //! **What this is not.** The dispatcher runs in kernel space and drives the kernel's own objects
 //! directly; it is not a user-mode shell process over a syscall ABI, and it is not claimed as one.
 use crate::outf;
+use crate::tlsclient::TlsReport;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -793,6 +794,22 @@ pub trait ShellHost {
         Err("this machine has no network device")
     }
 
+    /// Open a TLS 1.3 conversation with `ip:port` as `server_name`, trusting exactly the Ed25519
+    /// root whose public key is `pin`, send `request` protected, and copy the protected answer
+    /// into `reply` (ADR-151). The operator states whom to trust on the command line; this console
+    /// ships no root of its own. Defaulted to a named refusal for the same reason as `tcp_fetch`.
+    fn tls_fetch(
+        &self,
+        _ip: [u8; 4],
+        _port: u16,
+        _server_name: &[u8],
+        _pin: [u8; 32],
+        _request: &[u8],
+        _reply: &mut [u8],
+    ) -> Result<TlsReport, &'static str> {
+        Err("this machine has no network device")
+    }
+
     /// The machine's live input session, if the target installed one (ALET-P2-021's hardware
     /// rung, ADR-080). Default `None` — a target with no desktop says so instead of reporting
     /// zeros that would look like a session nobody can steer.
@@ -863,6 +880,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "tcp ADDR PORT TEXT",
         "open a TCP connection, send TEXT, print what comes back",
+    ),
+    (
+        "tls ADDR PORT NAME PIN TEXT",
+        "open a TLS 1.3 connection as NAME, trusting the Ed25519 root PIN (64 hex), send TEXT",
     ),
     (
         "mlstat",
@@ -1267,6 +1288,63 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     }
                 }
                 Err(why) => outf!(out, "tcp: {}", why),
+            }
+        }
+        "tls" => {
+            // A protected conversation is still a WRITE to the world: it announces this host to
+            // a peer and sends it bytes. Authorized as such.
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let (addr, tail) = split_first(rest);
+            let (port_text, tail) = split_first(tail);
+            let (name, tail) = split_first(tail);
+            let (pin_text, text) = split_first(tail);
+            let Some(ip) = parse_ipv4_address(addr) else {
+                out("usage: tls ADDR PORT NAME PIN TEXT (ADDR is dotted quad, e.g. 10.0.2.2)");
+                return Outcome::Continue;
+            };
+            let Ok(port) = port_text.parse::<u16>() else {
+                out("usage: tls ADDR PORT NAME PIN TEXT (PORT is 1..65535)");
+                return Outcome::Continue;
+            };
+            if port == 0 || name.is_empty() || name.len() > 255 || !name.is_ascii() {
+                out("usage: tls ADDR PORT NAME PIN TEXT (NAME is the DNS name the peer must speak for)");
+                return Outcome::Continue;
+            }
+            // The pin is the whole of the trust decision, so it is refused unless it is exactly a
+            // 32-byte key: a short or odd pin is not "close enough" to a root.
+            let Some(pin) = parse_hex_key(pin_text) else {
+                out("usage: tls ADDR PORT NAME PIN TEXT (PIN is the root's Ed25519 public key, 64 hex digits)");
+                return Outcome::Continue;
+            };
+            if text.is_empty() {
+                out("usage: tls ADDR PORT NAME PIN TEXT (TEXT is what to send, protected)");
+                return Outcome::Continue;
+            }
+            let mut reply = [0u8; 512];
+            match host.tls_fetch(ip, port, name.as_bytes(), pin, text.as_bytes(), &mut reply) {
+                Ok(report) => {
+                    let k = &report.peer_key;
+                    outf!(
+                        out,
+                        "tls {}: peer verified as {} under the pin (key {:02x}{:02x}{:02x}{:02x}..), {} record(s) in, {} out, {} byte(s) back",
+                        port,
+                        name,
+                        k[0],
+                        k[1],
+                        k[2],
+                        k[3],
+                        report.records_in,
+                        report.records_out,
+                        report.received
+                    );
+                    match core::str::from_utf8(&reply[..report.received]) {
+                        Ok(answer) => out(answer),
+                        Err(_) => out("(the answer is not text)"),
+                    }
+                }
+                Err(why) => outf!(out, "tls: {}", why),
             }
         }
         "lsblk" => {
@@ -1823,6 +1901,28 @@ impl Session {
 /// Deliberately strict: four parts, each a decimal number that fits a byte, nothing else. A
 /// console that accepts `10.0.2` and guesses is a console that connects somewhere the operator did
 /// not name.
+/// Exactly 64 hexadecimal digits, as 32 bytes; anything else is `None`. A key is not a number, so
+/// no leading `0x`, no whitespace, no shorter form.
+pub fn parse_hex_key(text: &str) -> Option<[u8; 32]> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let nibble = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+    let mut key = [0u8; 32];
+    for (i, pair) in bytes.chunks(2).enumerate() {
+        key[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(key)
+}
+
 pub fn parse_ipv4_address(text: &str) -> Option<[u8; 4]> {
     let mut out = [0u8; 4];
     let mut seen = 0usize;
@@ -2463,7 +2563,41 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
         usage.contains("usage: tcp") && (log.contains("tcp: ") || log.contains("byte(s) back"))
     );
 
-    // 43. A command line ends on return, and on nothing else. The desktop's file panel is
+    // 43. The `tls` command refuses a pin that is not exactly a 32-byte key by usage, before it
+    //     touches a wire, and a machine with no network says so by name. The pin is the whole of
+    //     the trust decision, and "close enough" is not a root.
+    let good_pin = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    let short_pin = "00112233445566778899aabbccddeeff";
+    let odd_pin = "0g112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    let (short, _) = transcript(
+        &alloc::format!("tls 10.0.2.2 443 aletheia.test {short_pin} hello\r"),
+        host,
+        &mut fs,
+        dev,
+    );
+    let (odd, _) = transcript(
+        &alloc::format!("tls 10.0.2.2 443 aletheia.test {odd_pin} hello\r"),
+        host,
+        &mut fs,
+        dev,
+    );
+    let (none, _) = transcript(
+        &alloc::format!("tls 10.0.2.2 443 aletheia.test {good_pin} hello\r"),
+        host,
+        &mut fs,
+        dev,
+    );
+    check!(
+        "console: tls refuses a pin that is not a 32-byte key by usage and a missing network by name",
+        parse_hex_key(good_pin).is_some()
+            && parse_hex_key(short_pin).is_none()
+            && parse_hex_key(odd_pin).is_none()
+            && short.contains("usage: tls")
+            && odd.contains("usage: tls")
+            && (none.contains("tls: ") || none.contains("peer verified"))
+    );
+
+    // 44. A command line ends on return, and on nothing else. The desktop's file panel is
     //     refreshed off this predicate (ADR-137), so a byte that wrongly counted as a line end
     //     would read the directory on every keystroke a human types.
     check!(
@@ -2476,7 +2610,7 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && !ends_a_command(b' ')
     );
 
-    // 44. The serviced loop hands the namespace out once before the first prompt and once per
+    // 45. The serviced loop hands the namespace out once before the first prompt and once per
     //     completed line — never mid-line. This is what lets a GUI panel show the namespace
     //     without ever holding the filesystem itself.
     let mut phases: Vec<ServicePhase> = Vec::new();

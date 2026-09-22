@@ -1169,6 +1169,31 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // THE JOIN (REQ-SEC-TLS-010, ADR-151): the handshake, the record layer and the TCP client
+    // meet in one bounded pump, proved here over a link that is a test double with a stand-in
+    // TLS server behind it. The request goes out protected only after the peer is verified, and
+    // every deviation - a bad signature, a failed tag, data before Finished, a deaf peer, an
+    // alert - is a refusal with a name.
+    kprintln!("");
+    kprintln!("--- tls client selftests (handshake + records + tcp, over a stand-in server) ---");
+    match kernel_core::tlsclient::tlsclient_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[tlsclient] ALL {} TLS-CLIENT INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!(
+                "[tlsclient] FAILED at tls-client invariant {}: {}",
+                idx,
+                name
+            );
+            semihosting::exit(960 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu device, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the

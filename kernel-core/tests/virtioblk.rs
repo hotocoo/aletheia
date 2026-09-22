@@ -89,18 +89,28 @@ const PAGE: usize = 4096;
 /// DMA-able identity-mapped frame inside a hosted process (VA == PA trivially).
 struct HostHal;
 
-/// The host stand-in's clock: a counter that advances by `HOST_CLOCK_STEP_NS` every time the driver
-/// looks at it, so a test can decide how much "time" one poll costs - and prove the completion
-/// wait is bounded by the clock and not by how many times the driver looked (ADR-150).
-static HOST_CLOCK_NS: AtomicU64 = AtomicU64::new(0);
-static HOST_CLOCK_STEP_NS: AtomicU64 = AtomicU64::new(1_000);
+// The host stand-in's clock: a counter that advances by `HOST_CLOCK_STEP_NS` every time the driver
+// looks at it, so a test can decide how much "time" one poll costs - and prove the completion
+// wait is bounded by the clock and not by how many times the driver looked (ADR-150). Thread-local
+// on purpose: the harness runs tests in parallel, and a clock shared between them would be
+// advanced by every other test's polls.
+thread_local! {
+    static HOST_CLOCK_NS: AtomicU64 = const { AtomicU64::new(0) };
+    static HOST_CLOCK_STEP_NS: AtomicU64 = const { AtomicU64::new(1_000) };
+}
+
+fn host_clock_step(step_ns: u64) {
+    HOST_CLOCK_STEP_NS.with(|s| s.store(step_ns, Ordering::Relaxed));
+}
+
+fn host_clock_now() -> u64 {
+    HOST_CLOCK_NS.with(|c| c.load(Ordering::Relaxed))
+}
 
 impl VirtioHal for HostHal {
     fn now_ns() -> u64 {
-        HOST_CLOCK_NS.fetch_add(
-            HOST_CLOCK_STEP_NS.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        )
+        let step = HOST_CLOCK_STEP_NS.with(|s| s.load(Ordering::Relaxed));
+        HOST_CLOCK_NS.with(|c| c.fetch_add(step, Ordering::Relaxed))
     }
     fn alloc_frame() -> Option<usize> {
         unsafe {
@@ -458,7 +468,7 @@ fn a_silent_device_hits_the_time_bound_and_still_returns() {
     );
     // A millisecond of budget at a microsecond per look: about a thousand looks, then a refusal.
     blk.set_completion_budget_ns(1_000_000);
-    HOST_CLOCK_STEP_NS.store(1_000, Ordering::Relaxed);
+    host_clock_step(1_000);
     let mut buf = [0u8; BLOCK_SIZE];
     assert!(matches!(
         blk.read_block(0, &mut buf),
@@ -477,19 +487,19 @@ fn the_completion_bound_is_measured_on_the_clock_not_in_looks() {
     }));
     let (mut blk, _r, _f) = mk_driver(CAP, faults);
     blk.set_completion_budget_ns(1_000_000_000);
-    HOST_CLOCK_STEP_NS.store(2_000_000_000, Ordering::Relaxed);
-    let before = HOST_CLOCK_NS.load(Ordering::Relaxed);
+    host_clock_step(2_000_000_000);
+    let before = host_clock_now();
     let mut buf = [0u8; BLOCK_SIZE];
     assert!(matches!(
         blk.read_block(0, &mut buf),
         Err(StorageError::Device)
     ));
-    let looks = (HOST_CLOCK_NS.load(Ordering::Relaxed) - before) / 2_000_000_000;
+    let looks = (host_clock_now() - before) / 2_000_000_000;
     assert!(
         looks <= 3,
         "a clock past its budget must end the wait at once, not after {looks} looks"
     );
-    HOST_CLOCK_STEP_NS.store(1_000, Ordering::Relaxed);
+    host_clock_step(1_000);
 }
 #[test]
 fn a_fuzzed_completion_surface_never_yields_data_without_an_exact_match() {

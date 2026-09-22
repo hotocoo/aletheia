@@ -126,6 +126,20 @@ impl ShellHost for Host {
     ) -> Result<usize, &'static str> {
         crate::netstatic::fetch(ip, port, request, reply)
     }
+
+    /// A protected conversation with a peer, over the same device, judged at this machine's own
+    /// clock, trusting exactly the root the operator named (ADR-151).
+    fn tls_fetch(
+        &self,
+        ip: [u8; 4],
+        port: u16,
+        server_name: &[u8],
+        pin: [u8; 32],
+        request: &[u8],
+        reply: &mut [u8],
+    ) -> Result<kernel_core::tlsclient::TlsReport, &'static str> {
+        crate::netstatic::fetch_tls(ip, port, server_name, pin, request, reply)
+    }
 }
 
 /// Blocks for the console's scratch namespace when no disk is attached. Small: this is a RAM disk

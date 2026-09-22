@@ -110,3 +110,29 @@ fn the_fixture_transcript_hash_is_the_one_the_signature_covers() {
         hex(&hash)
     );
 }
+
+/// The Finished MAC against a vector computed OUTSIDE this tree (Python `hmac`/`hashlib`, by the
+/// letter of RFC 8446 §4.4.4 and §7.1): secret = 0x31 x 32, transcript hash = 0x42 x 32. The second
+/// constant is what the formula this tree used before ADR-151 produced - `Derive-Secret` with the
+/// hash of an empty transcript as the context - and it must never come back.
+#[test]
+fn the_finished_mac_matches_an_independent_vector_and_not_the_old_formula() {
+    use kernel_core::tlshandshake::finished_mac;
+    let secret = [0x31u8; 32];
+    let transcript_hash = [0x42u8; 32];
+    let expected = unhex("0eb1cb4204e35642c388ce95245a136ebec79a1a055c714baed73b6e625213f3");
+    let old_formula = unhex("334e955c951859c6e9a49a02f04567795b547031e40afa94f48413cf2e2b7698");
+    let got = finished_mac(&secret, &transcript_hash);
+    assert_eq!(
+        &got[..],
+        &expected[..],
+        "Finished must use an EMPTY context for its key"
+    );
+    assert_ne!(&got[..], &old_formula[..]);
+}
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len() / 2)
+        .map(|i| u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).expect("hex"))
+        .collect()
+}

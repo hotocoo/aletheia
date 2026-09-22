@@ -30,7 +30,7 @@
 use alloc::boxed::Box;
 
 use crate::crypto::{hmac_sha256, sha256};
-use crate::hkdf::{derive_secret, traffic_keys, KeySchedule, TrafficKeys, HASH_LEN};
+use crate::hkdf::{traffic_keys, KeySchedule, TrafficKeys, HASH_LEN};
 use crate::x25519::{public_key, x25519};
 
 /// Handshake message types this client writes or reads (RFC 8446 §4).
@@ -242,6 +242,26 @@ impl<V: PeerVerifier> Handshake<V> {
     /// with no real verifier installed, `None` forever, by construction.
     pub fn application_keys(&self) -> Option<(TrafficKeys, TrafficKeys)> {
         self.application
+    }
+
+    /// Rebind this handshake to another verifier and server name, then restart it. One workspace
+    /// serves every conversation a console opens: a client that built a new handshake per
+    /// connection would spend eighteen kilobytes each time on a heap that never frees.
+    pub fn rebind(
+        &mut self,
+        verifier: V,
+        server_name: &[u8],
+        private: [u8; 32],
+        client_random: [u8; 32],
+    ) -> Result<(), HandshakeRefusal> {
+        if server_name.len() > 255 {
+            return Err(HandshakeRefusal::BadLength);
+        }
+        self.verifier = verifier;
+        self.server_name = [0u8; 255];
+        self.server_name[..server_name.len()].copy_from_slice(server_name);
+        self.server_name_len = server_name.len();
+        self.restart(private, client_random)
     }
 
     /// The handshake traffic keys, once the ServerHello has been processed. These protect the
@@ -575,9 +595,23 @@ impl<V: PeerVerifier> Handshake<V> {
 
     /// The Finished value for a traffic secret over the transcript so far (RFC 8446 §4.4.4).
     pub fn finished_value(&self, secret: &[u8; HASH_LEN]) -> [u8; HASH_LEN] {
-        let key = derive_secret(secret, b"finished", &sha256(&[])).unwrap_or([0u8; HASH_LEN]);
-        hmac_sha256(&key, &self.transcript_hash())
+        finished_mac(secret, &self.transcript_hash())
     }
+}
+
+/// The Finished MAC over a transcript hash (RFC 8446 §4.4.4):
+/// `HMAC(HKDF-Expand-Label(BaseKey, "finished", "", Hash.length), transcript_hash)`.
+///
+/// The finished key's context is EMPTY — not `Transcript-Hash("")`, which is what `Derive-Secret`
+/// with no messages would supply. Until ADR-151 this function used the latter; every suite in this
+/// tree agreed with itself about it, and the first live OpenSSL server did not (its Finished was
+/// refused as not matching the conversation). One published vector now pins the right formula.
+pub fn finished_mac(secret: &[u8; HASH_LEN], transcript_hash: &[u8; HASH_LEN]) -> [u8; HASH_LEN] {
+    let mut key = [0u8; HASH_LEN];
+    if crate::hkdf::hkdf_expand_label(secret, b"finished", &[], &mut key).is_err() {
+        return [0u8; HASH_LEN];
+    }
+    hmac_sha256(&key, transcript_hash)
 }
 
 /// Constant-time comparison of a Finished value: a byte-by-byte early exit would let a peer learn

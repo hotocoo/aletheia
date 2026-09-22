@@ -9,6 +9,11 @@ kernel that agrees with them agrees with something it did not write.
       Print the root-issued leaf, the root's key, the leaf's key and the root certificate as Rust
       constants (the ones in kernel-core/src/trust.rs).
 
+  python3 scripts/tls-fixtures.py pem <dir>
+      Write the leaf certificate and its private key as PEM files into <dir> (for a test server on
+      the host, e.g. scripts/tls-e2e.sh) and print the root's public key as 64 hex digits - the pin
+      an operator types at the console.
+
   python3 scripts/tls-fixtures.py certificate-verify <transcript-hash-hex>
       Print the server CertificateVerify signature over that transcript hash, made with the leaf's
       private key (kernel-core/src/trust.rs::FIXTURE_CERTIFICATE_VERIFY). The hash is the one the
@@ -38,7 +43,8 @@ def rust_array(name, data, doc=""):
     return f"{doc}pub const {name}: [u8; {len(data)}] = [\n{body}\n];\n"
 
 
-def chain():
+def build_chain():
+    """The root and the leaf as certificate objects."""
     root_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Aletheia Test Root")])
     root = (
         x509.CertificateBuilder()
@@ -64,11 +70,34 @@ def chain():
         .sign(ROOT_KEY, None)
     )
     ROOT_KEY.public_key().verify(leaf.signature, leaf.tbs_certificate_bytes)
+    return root, leaf
+
+
+def chain():
+    root, leaf = build_chain()
     raw = serialization.Encoding.Raw, serialization.PublicFormat.Raw
     print(rust_array("LEAF_FIXTURE", leaf.public_bytes(serialization.Encoding.DER)))
     print(rust_array("ROOT_KEY_FIXTURE", ROOT_KEY.public_key().public_bytes(*raw)))
     print(rust_array("LEAF_KEY_FIXTURE", LEAF_KEY.public_key().public_bytes(*raw)))
     print(rust_array("ROOT_CERTIFICATE_FIXTURE", root.public_bytes(serialization.Encoding.DER)))
+
+
+def pem(directory):
+    import pathlib
+    root, leaf = build_chain()
+    out = pathlib.Path(directory)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "leaf.pem").write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+    (out / "leaf-key.pem").write_bytes(
+        LEAF_KEY.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    (out / "root.pem").write_bytes(root.public_bytes(serialization.Encoding.PEM))
+    raw = serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    print(ROOT_KEY.public_key().public_bytes(*raw).hex())
 
 
 def certificate_verify(transcript_hash_hex):
@@ -86,6 +115,8 @@ def certificate_verify(transcript_hash_hex):
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "chain":
         chain()
+    elif len(sys.argv) == 3 and sys.argv[1] == "pem":
+        pem(sys.argv[2])
     elif len(sys.argv) == 3 and sys.argv[1] == "certificate-verify":
         certificate_verify(sys.argv[2])
     else:
