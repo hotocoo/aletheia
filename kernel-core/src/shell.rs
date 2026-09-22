@@ -977,11 +977,16 @@ fn browse<H: ShellHost>(
     resolved: Resolved,
     out: &mut dyn FnMut(&str),
 ) {
+    fetch_into(host, nav, resolved);
+    print_page(nav, out);
+}
+
+/// Fetch a resolved page over the TLS client and hand the answer to the navigator.
+fn fetch_into<H: ShellHost>(host: &H, nav: &mut Navigator, resolved: Resolved) {
     let url = resolved.url;
     let mut request = [0u8; 1024];
     let Ok(request_len) = crate::http::request(url.host(), url.path(), &mut request) else {
         nav.set_failure(url, "the request does not fit");
-        print_page(nav, out);
         return;
     };
     let mut reply = [0u8; 4096];
@@ -1009,7 +1014,6 @@ fn browse<H: ShellHost>(
         }
         Err(why) => nav.set_failure(url, why),
     }
-    print_page(nav, out);
 }
 
 fn print_page(nav: &Navigator, out: &mut dyn FnMut(&str)) {
@@ -2204,7 +2208,18 @@ pub fn run_loop<H: ShellHost, D: BlockDevice>(
     getc: &mut dyn FnMut() -> Option<u8>,
     out: &mut dyn FnMut(&str),
 ) {
-    run_loop_serviced(host, fs, dev, getc, out, &mut |_, _, _, _| false)
+    run_loop_serviced(
+        host,
+        fs,
+        dev,
+        getc,
+        out,
+        &mut |_, _, _, _| false,
+        &mut BrowserHooks {
+            take_navigation: &mut || None,
+            show_page: &mut |_| {},
+        },
+    )
 }
 
 /// Why the loop is handing the namespace to a service hook. The phase is stated rather than
@@ -2236,6 +2251,62 @@ pub type ServiceHook<'a, D> =
 ///
 /// The hook returns whether it printed through `out`; the loop re-issues the prompt when it did,
 /// so output that arrives from outside the typist's line never eats the prompt.
+/// What the desktop's browser window needs from the console session (ADR-157): the URL the
+/// person entered, and a place to put the page. Both are the platform's closures over its desktop
+/// door; a machine without a desktop passes hooks that return nothing and show nowhere.
+pub struct BrowserHooks<'a> {
+    pub take_navigation: &'a mut dyn FnMut() -> Option<([u8; crate::desktop::URL_LINE_CAP], usize)>,
+    pub show_page: &'a mut dyn FnMut(&[u8]),
+}
+
+/// Navigate for the desktop's browser window: the same model and the same fetch the console's
+/// `go` uses, rendered into the window's grid shape and handed to `show_page`.
+pub fn navigate_for_window<H: ShellHost>(
+    host: &H,
+    nav: &mut Navigator,
+    url: &[u8],
+    show_page: &mut dyn FnMut(&[u8]),
+) {
+    let mut text = [0u8; 1024];
+    let mut len = 0usize;
+    let mut grid = crate::textgrid::TextGrid::new(30, 8);
+    let refused: Option<&[u8]> = match nav.navigate(url) {
+        Ok(resolved) => {
+            fetch_into(host, nav, resolved);
+            None
+        }
+        Err(NavRefusal::Url(UrlRefusal::Plaintext)) => {
+            Some(b"refused: plaintext - this browser speaks https only")
+        }
+        Err(NavRefusal::Url(_)) => Some(b"refused: that is not a URL this browser reads"),
+        Err(NavRefusal::UnknownHost) => {
+            Some(b"refused: no root pinned for that host (trust NAME IP PIN at the console)")
+        }
+    };
+    match refused {
+        Some(why) => grid.write(why),
+        None => nav.render(&mut grid),
+    }
+    for row in 0..grid.rows() {
+        let line = grid.line(row);
+        let end = line
+            .iter()
+            .rposition(|&b| b != b' ' && b != 0)
+            .map_or(0, |i| i + 1);
+        for &b in &line[..end] {
+            if len < text.len() {
+                text[len] = b;
+                len += 1;
+            }
+        }
+        if len < text.len() {
+            text[len] = b'\n';
+            len += 1;
+        }
+    }
+    show_page(&text[..len]);
+}
+
 pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
     host: &H,
     fs: &mut Filesystem,
@@ -2243,6 +2314,7 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
     getc: &mut dyn FnMut() -> Option<u8>,
     out: &mut dyn FnMut(&str),
     service: &mut ServiceHook<'_, D>,
+    browser: &mut BrowserHooks<'_>,
 ) {
     let mut session = Session::new();
     // The first settle happens BEFORE the banner's prompt: a panel that opens with the desktop
@@ -2251,6 +2323,9 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
     session.prompt(out);
     loop {
         let Some(byte) = getc() else {
+            if let Some((url, len)) = (browser.take_navigation)() {
+                navigate_for_window(host, &mut session.navigator, &url[..len], browser.show_page);
+            }
             if service(ServicePhase::Idle, fs, dev, &mut *out) {
                 session.prompt(out);
             }
@@ -2926,6 +3001,10 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
         &mut |phase, _, _, _| {
             phases.push(phase);
             false
+        },
+        &mut BrowserHooks {
+            take_navigation: &mut || None,
+            show_page: &mut |_| {},
         },
     );
     check!(

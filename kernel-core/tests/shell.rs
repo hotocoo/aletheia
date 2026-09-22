@@ -537,6 +537,10 @@ fn the_serviced_loop_offers_idle_turns_and_reprompts_after_the_hook_printed() {
             }
             false
         },
+        &mut shell::BrowserHooks {
+            take_navigation: &mut || None,
+            show_page: &mut |_| {},
+        },
     );
 
     assert_eq!(idles, 2, "every idle turn must offer the hook a chance");

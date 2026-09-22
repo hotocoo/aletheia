@@ -33,7 +33,14 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (THE BROWSER NAVIGATES — ADR-156, Lethe stage N4 started. `kernel-core/src/browser.rs`
+**As of:** 2026-09-23, latest (THE BROWSER WINDOW — ADR-157, Lethe stage N4 delivered. The desktop has a fifth
+managed window, `browser`: a URL line the person types into and the page the model rendered, on the same contract as
+the terminal, monitor, files and shortcuts windows (a `TextGrid`, a window-manager slot, a taskbar button, `Alt+5`).
+The desktop owns no network and no trust: Enter LATCHES the URL, and the console session collects it on its idle
+turn, navigates through its own `Navigator` (the same host table `trust` fills, the same fetch `go` uses) and pushes
+the page back. Nine-cell taskbar buttons make five fit the 640-pixel panel with the launcher and four workspace
+buttons, proved by the persona layout suite. The live desktop gates require `5 managed windows`. Previously: THE
+BROWSER NAVIGATES — ADR-156, Lethe stage N4 started. `kernel-core/src/browser.rs`
 is the navigation model, touching no wire: `https://` only (`http://` refused as PLAINTEXT, never downgraded to), a
 table of eight hosts a person pinned with `trust NAME IP PIN` (no DNS, no root store, nothing pre-installed; an
 unpinned host is refused before any address is dialed; the ninth is refused, not evicted), a history ring of eight
@@ -1216,6 +1223,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — the browser window (ADR-157)
+
+- **Lethe stage N4, second rung: the window.** `kernel-core/src/desktop.rs` gains a fifth managed window, `browser`, on the contract the four before it keep: a `TextGrid`, a window-manager slot, a taskbar button (`web`), `Alt+5`, a line in the shortcuts window.
+- **The desktop owns no network and no trust.** The window shows a URL line (`url> …`) and the page text the platform pushed. Keys reach it through the compositor's per-window queue like the terminal's; Enter latches the URL (`take_navigation`). The console session collects the latch on its idle turn (`BrowserHooks` on `run_loop_serviced`), navigates through its own `Navigator` — the host table `trust` fills, the fetch `go` uses — renders the page into the window's shape and pushes it back (`set_browser_page`). One navigator, one history, one trust table for the console and the window.
+- **Five buttons fit the panel by arithmetic:** nine cells per button; launcher + five buttons + four workspace buttons = 616 of 640 pixels; the persona layout suite and chrome-parity test hold for every persona.
+- **Proof:** the live desktop comes up with **5 managed windows** on both device-tree targets (the gates require the marker); desktop, console and storm unit tests hold with the hooks; boot gates, conformance (365) and the live HTTPS gate unchanged and green. Typing a URL into the window travels the path `scripts/https-e2e.sh` proves live through `go`.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, desktop-e2e-dt PASS, conformance PASS (365), quality-gate PASS, doc gates PASS**.
 
 ### 2026-09-23 — the browser navigates: URLs, trusted hosts, history, the page (ADR-156)
 

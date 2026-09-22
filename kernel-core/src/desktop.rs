@@ -141,6 +141,21 @@ const FILES_VISIBLE: usize = 8;
 const FILES_X: i32 = 40;
 const FILES_Y: i32 = 40;
 const FILES_TITLE: &[u8] = b"files";
+/// The browser window (ADR-157): a URL line the person types into, and the page the platform
+/// fetched for it, rendered by the navigation model (ADR-156). The desktop owns no network and no
+/// trust: it latches what was typed and shows what came back.
+const BROWSER: u32 = 9;
+const BROWSER_COLS: u32 = 32;
+const BROWSER_ROWS: u32 = 10;
+const BROWSER_TITLE: &[u8] = b"browser";
+/// Placed left of the terminal so the desktop gate's centre click (320, 120) still lands on the
+/// terminal: a new window must not move an existing test's focus.
+const BROWSER_X: i32 = 20;
+const BROWSER_Y: i32 = 100;
+/// The longest URL the window's line holds.
+pub const URL_LINE_CAP: usize = 128;
+/// The most page text the window keeps.
+const PAGE_CAP: usize = 1024;
 const HELP_COLS: u32 = 54;
 const HELP_ROWS: u32 = 19;
 const HELP_X: i32 = 95;
@@ -157,7 +172,9 @@ const TASKBAR_X: i32 = 0;
 /// application buttons and all four workspace buttons still END inside the 640px scanout. At the
 /// previous eighteen cells the strip needed 720px, so workspaces 3 and 4 were painted past the
 /// right edge and could not be reached with the pointer at all.
-const TASKBAR_BUTTON_W: u32 = 12 * crate::textgrid::CELL;
+/// Nine cells per button: five managed windows, the launcher and four workspace buttons must
+/// share a 640-pixel panel (ADR-157 added the browser; twelve cells fit four buttons).
+const TASKBAR_BUTTON_W: u32 = 9 * crate::textgrid::CELL;
 /// The first taskbar button is the desktop launcher. It deliberately occupies the same fixed
 /// cell band used by the keyboard launcher layout, so pointer and keyboard navigation describe
 /// one stable affordance instead of two subtly different hit maps.
@@ -171,7 +188,7 @@ const TASKBAR_H: u32 = TASKBAR_ROWS * crate::textgrid::CELL + crate::textgrid::T
 /// How many managed application buttons the panel carries: terminal, monitor, files, shortcuts.
 /// Four twelve-cell buttons, a 64px launcher and four six-cell workspace buttons come to exactly
 /// 640px — the full scanout, with every affordance reachable (ADR-136's invariant 2).
-const TASKBAR_BUTTONS: u32 = 4;
+const TASKBAR_BUTTONS: u32 = 5;
 /// The chrome's fixed measurements, handed to the persona policy. These are the SAME numbers the
 /// pre-persona constants encode, so `ShellPersona::Aletheia` reproduces the historic layout and
 /// every GUI proof recorded before personas existed keeps its meaning.
@@ -231,6 +248,7 @@ fn alt_window_launcher(code: u16, value: u32, alt: bool) -> Option<u32> {
         KEY_2 => Some(MONITOR),
         KEY_3 => Some(FILES),
         KEY_4 => Some(HELP),
+        KEY_5 => Some(BROWSER),
         _ => None,
     }
 }
@@ -316,6 +334,18 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     files: TextGrid,
     files_packed: Vec<u8>,
     files_token: u64,
+    browser: TextGrid,
+    browser_packed: Vec<u8>,
+    browser_token: u64,
+    /// Set when the URL line or the page changed and the browser window owes a repaint.
+    browser_dirty: bool,
+    /// The URL line as typed, and the last URL entered, latched until the platform collects it.
+    url_line: [u8; URL_LINE_CAP],
+    url_len: usize,
+    navigation: Option<([u8; URL_LINE_CAP], usize)>,
+    /// The page text the platform pushed (the navigation model's rendering), bounded.
+    page: [u8; PAGE_CAP],
+    page_len: usize,
     /// The namespace view. It holds no device: the platform pushes listings into it.
     panel: FilePanel,
     /// Set when the panel's model changed and its window owes a repaint.
@@ -509,7 +539,7 @@ fn is_persona_shortcut(ty: u16, code: u16, value: u32, alt: bool, ctrl: bool) ->
 /// The managed application each panel button launches, in panel order. The persona decides WHERE
 /// the cluster sits; this array decides what the cluster contains, so a convention change can
 /// never silently reorder the applications.
-const TASKBAR_APPS: [u32; TASKBAR_BUTTONS as usize] = [WINDOW, MONITOR, FILES, HELP];
+const TASKBAR_APPS: [u32; TASKBAR_BUTTONS as usize] = [WINDOW, MONITOR, FILES, HELP, BROWSER];
 
 /// Resolve a taskbar x-coordinate to either the desktop launcher or one managed application under
 /// the active persona's chrome layout. Keeping the hit map pure makes the launcher boundary
@@ -731,7 +761,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             b"Alt+F4    close focused window",
             b"Alt+F9    minimize focused window",
             b"Alt+F10   maximize/restore focused",
-            b"Alt+1/2/3/4 terminal/monitor/files/help",
+            b"Alt+1..5 term/monitor/files/help/browser",
             b"Ctrl+Tab  cycle focus",
             b"Ctrl+Alt+Arrows  snap focused window",
             b"Ctrl+Alt+Shift+Arrows  nudge window",
@@ -754,6 +784,16 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         help.render_packed(HELP_TITLE, &mut help_packed);
         comp.fill_packed(HELP, tok_help, &help_packed)
             .map_err(|_| "the shortcuts window's first paint was refused")?;
+        let mut browser = TextGrid::new(BROWSER_COLS, BROWSER_ROWS);
+        let (bw, bh) = browser.pixel_size();
+        let tok_browser = wm
+            .open(&mut comp, BROWSER, bw, bh, BROWSER_X, BROWSER_Y)
+            .map_err(|_| "the browser window was refused")?;
+        browser.write(b"url> \n(type an https:// URL and press Enter; trust hosts at the console)");
+        let mut browser_packed = Vec::new();
+        browser.render_packed(BROWSER_TITLE, &mut browser_packed);
+        comp.fill_packed(BROWSER, tok_browser, &browser_packed)
+            .map_err(|_| "the browser window's first paint was refused")?;
         let mut files = TextGrid::new(FILES_COLS, FILES_ROWS);
         let (fw, fh) = files.pixel_size();
         let tok_files = wm
@@ -851,6 +891,15 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             files,
             files_packed,
             files_token: tok_files,
+            browser,
+            browser_packed,
+            browser_token: tok_browser,
+            browser_dirty: false,
+            url_line: [0u8; URL_LINE_CAP],
+            url_len: 0,
+            navigation: None,
+            page: [0u8; PAGE_CAP],
+            page_len: 0,
             panel,
             files_dirty: false,
             last_panel_click: None,
@@ -954,6 +1003,17 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             let _ = self
                 .comp
                 .fill_packed(FILES, self.files_token, &self.files_packed);
+        }
+        if self.browser_dirty {
+            self.browser_dirty = false;
+            self.render_browser();
+        }
+        if self.browser.take_dirty() {
+            self.browser
+                .render_packed(BROWSER_TITLE, &mut self.browser_packed);
+            let _ = self
+                .comp
+                .fill_packed(BROWSER, self.browser_token, &self.browser_packed);
         }
         self.refresh_taskbar();
         if self.comp.has_pending_damage() {
@@ -1085,6 +1145,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                 WINDOW => "term",
                 MONITOR => "mon",
                 FILES => "files",
+                BROWSER => "web",
                 _ => "help",
             };
             let _ = write!(
@@ -1915,6 +1976,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
     /// Drain the terminal window's queue into the console's input line (owner token only).
     pub fn drain_window(&mut self) {
+        self.drain_browser();
         if self.term_input.len() >= TERM_INPUT_CAP {
             return;
         }
@@ -2409,6 +2471,71 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
     /// The console's output reaches the terminal window (ADR-083). A window a user closed is
     /// not a place the console still writes.
+    /// Draw the browser window: the URL line as typed, then the page the platform pushed.
+    fn render_browser(&mut self) {
+        self.browser.clear();
+        self.browser.write(b"url> ");
+        let n = self.url_len;
+        self.browser.write(&self.url_line[..n]);
+        self.browser.put(b'\n');
+        let m = self.page_len;
+        let rows = self.browser.rows();
+        for i in 0..m {
+            let (_, row) = self.browser.cursor();
+            if row + 1 >= rows && self.page[i] == b'\n' {
+                break;
+            }
+            self.browser.put(self.page[i]);
+        }
+    }
+
+    /// Drain the browser window's queue into its URL line (owner token only): printable bytes
+    /// extend it, Backspace shortens it, Enter latches it for the platform to navigate to. The
+    /// desktop never dials: it hands the person's text to whoever holds the network and the
+    /// trust table (ADR-156), which is the console session.
+    pub fn drain_browser(&mut self) {
+        let Some(tok) = self.wm.token(BROWSER) else {
+            return;
+        };
+        while let Ok(Some(e)) = self.comp.pop_input(BROWSER, tok) {
+            let EventKind::Key(b) = e.kind else {
+                continue;
+            };
+            match b {
+                b'\r' | b'\n' if self.url_len > 0 => {
+                    self.navigation = Some((self.url_line, self.url_len));
+                    let note = b"(fetching...)";
+                    self.page[..note.len()].copy_from_slice(note);
+                    self.page_len = note.len();
+                }
+                0x08 | 0x7f => {
+                    self.url_len = self.url_len.saturating_sub(1);
+                }
+                0x20..=0x7e if self.url_len < URL_LINE_CAP => {
+                    self.url_line[self.url_len] = b;
+                    self.url_len += 1;
+                }
+                _ => {}
+            }
+            self.browser_dirty = true;
+        }
+    }
+
+    /// The URL the person last entered in the browser window, if any, and clear it. Reported,
+    /// not performed: the platform navigates (ADR-156) and pushes the page back.
+    pub fn take_navigation(&mut self) -> Option<([u8; URL_LINE_CAP], usize)> {
+        self.navigation.take()
+    }
+
+    /// The page the platform fetched, as the navigation model rendered it, bounded to what the
+    /// window keeps.
+    pub fn set_browser_page(&mut self, text: &[u8]) {
+        let n = text.len().min(PAGE_CAP);
+        self.page[..n].copy_from_slice(&text[..n]);
+        self.page_len = n;
+        self.browser_dirty = true;
+    }
+
     pub fn term_write(&mut self, bytes: &[u8]) {
         if !self.wm.is_open(WINDOW) {
             return;
@@ -2496,7 +2623,7 @@ mod tests {
             b"Alt+F4    close focused window",
             b"Alt+F9    minimize focused window",
             b"Alt+F10   maximize/restore focused",
-            b"Alt+1/2/3/4 terminal/monitor/files/help",
+            b"Alt+1..5 term/monitor/files/help/browser",
             b"Ctrl+Tab  cycle focus",
             b"Ctrl+Alt+Arrows  snap focused window",
             b"Ctrl+Alt+Shift+Arrows  nudge window",
@@ -2527,9 +2654,10 @@ mod tests {
         assert_eq!(alt_window_launcher(3, 1, true), Some(super::MONITOR));
         assert_eq!(alt_window_launcher(4, 1, true), Some(super::FILES));
         assert_eq!(alt_window_launcher(5, 1, true), Some(super::HELP));
+        assert_eq!(alt_window_launcher(6, 1, true), Some(super::BROWSER));
         assert_eq!(alt_window_launcher(2, 0, true), None);
         assert_eq!(alt_window_launcher(2, 1, false), None);
-        assert_eq!(alt_window_launcher(6, 1, true), None);
+        assert_eq!(alt_window_launcher(7, 1, true), None);
     }
 
     #[test]

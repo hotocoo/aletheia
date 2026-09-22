@@ -238,6 +238,10 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
         &mut getc,
         &mut emit,
         &mut serve_file_panel,
+        &mut shell::BrowserHooks {
+            take_navigation: &mut crate::desktop::take_navigation,
+            show_page: &mut crate::desktop::set_browser_page,
+        },
     );
     ActiveHal::exit(0)
 }

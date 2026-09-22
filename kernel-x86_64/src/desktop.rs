@@ -167,3 +167,16 @@ pub fn set_file_listing<I: Iterator<Item = kernel_core::filepanel::FileRow>>(
 pub fn take_file_activation() -> Option<[u8; kernel_core::filepanel::NAME_CAP]> {
     with_desktop(|d| d.take_file_activation()).flatten()
 }
+
+/// The URL the person entered in the desktop's browser window, if any (ADR-157). Cheap enough to
+/// ask on every idle turn of the console loop: it takes a latched value and allocates nothing.
+#[cfg(feature = "interactive")]
+pub fn take_navigation() -> Option<([u8; kernel_core::desktop::URL_LINE_CAP], usize)> {
+    with_desktop(|d| d.take_navigation()).flatten()
+}
+
+/// Show a fetched page in the desktop's browser window (ADR-157).
+#[cfg(feature = "interactive")]
+pub fn set_browser_page(text: &[u8]) {
+    let _ = with_desktop(|d| d.set_browser_page(text));
+}
