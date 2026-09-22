@@ -6,13 +6,13 @@ embedded text descriptor - so one time in sixteen the CID is seven digits long i
 The CID is replaced here with eight digits derived from the payload, so a rebuild of the same
 kernel yields the same bytes.
 
-The replacement is done INSIDE the descriptor region the sparse header declares, and the file
-length never changes: the descriptor is text followed by zero padding, so growing the text by one
-byte just consumes one byte of padding. An earlier version of this script spliced the whole file
-instead, and when the CID happened to be seven digits the file grew by one byte, every grain moved
-one byte past where the header said it was, and the disk read as garbage - the packaged selftest
-disk then failed to boot on the runner (OVMF fell through to PXE) and two builds of one commit
-disagreed about a VMDK's digest (ADR-152).
+The replacement is done INSIDE the descriptor's own bytes, and the file length never changes: the
+descriptor is text followed by zero padding, so growing the text by one byte just consumes one byte
+of padding. An earlier version of this script spliced the whole file instead, and when the CID
+happened to be seven digits the file grew by one byte, every grain moved one byte past where the
+header said it was, and the disk read as garbage - the packaged selftest disk then failed to boot
+on the runner (OVMF fell through to PXE) and two builds of one commit disagreed about a VMDK's
+digest (ADR-152).
 
     normalize-vmdk.py --vmdk FILE --seed RAWIMAGE      rewrite FILE's CID in place
     normalize-vmdk.py --self-test FILE                 prove a 7-digit and an 8-digit CID normalize
@@ -34,16 +34,42 @@ CID = re.compile(rb"(?m)^CID=([0-9a-fA-F]{7,8})$")
 
 
 def descriptor_region(data: bytes) -> tuple[int, int]:
-    """The byte range of the embedded descriptor, from the VMDK4 sparse header."""
+    """The byte range holding the embedded descriptor TEXT and its zero padding.
+
+    First by the VMDK4 sparse header (`descriptorOffset`, `descriptorSize`, in sectors). If the
+    region the header names does not hold exactly one CID line - one qemu-img on one runner
+    produced a file where it did not, and this script must not guess why - fall back to finding the
+    CID in the first 64 KiB and taking the text around it: from the byte after the previous NUL (or
+    the file start) to the first NUL after the match, plus the run of NULs that pads it. Either way
+    the caller rewrites only inside that range and never changes the file's length.
+    """
     if data[:4] != MAGIC:
         raise SystemExit("error: not a VMDK sparse extent (bad magic)")
-    # VMDK4 sparse header: magic(4) version(4) flags(4) capacity(8) grainSize(8)
-    # descriptorOffset(8) descriptorSize(8), offsets and sizes in sectors.
     desc_off, desc_size = struct.unpack_from("<QQ", data, 28)
     start, end = desc_off * SECTOR, (desc_off + desc_size) * SECTOR
-    if desc_size == 0 or end > len(data):
-        raise SystemExit("error: the descriptor region lies outside the file")
-    return start, end
+    if desc_size and end <= len(data):
+        text = data[start:end].split(b"\x00", 1)[0]
+        found = len(CID.findall(text))
+        if found == 1:
+            return start, end
+        print(
+            f"normalize-vmdk: the header names descriptor sectors {desc_off}+{desc_size} but that "
+            f"region holds {found} CID lines (first bytes {data[start:start + 24]!r}); "
+            "locating the descriptor by its CID line instead"
+        )
+    head = data[: 64 * 1024]
+    matches = list(CID.finditer(head))
+    if len(matches) != 1:
+        raise SystemExit(f"error: expected exactly one VMDK descriptor CID, found {len(matches)}")
+    m = matches[0]
+    text_start = head.rfind(b"\x00", 0, m.start()) + 1
+    text_end = head.find(b"\x00", m.end())
+    if text_end < 0:
+        raise SystemExit("error: the descriptor has no zero padding to absorb a longer CID")
+    pad_end = text_end
+    while pad_end < len(data) and data[pad_end] == 0:
+        pad_end += 1
+    return text_start, pad_end
 
 
 def normalized(data: bytes, digest: bytes) -> bytes:
@@ -72,14 +98,13 @@ def payload_digest(seed: Path) -> bytes:
 
 def self_test(vmdk: Path) -> int:
     """Take a real VMDK, forge the 7-digit shape qemu-img emits one time in sixteen, and prove both
-    shapes normalize to identical bytes of identical length."""
+    shapes normalize to identical bytes of identical length - by the header route and, with the
+    header's descriptor fields deliberately broken, by the CID-locating route."""
     data = vmdk.read_bytes()
     digest = b"0123abcd"
-    eight = normalized(data, digest)
     start, end = descriptor_region(data)
     region = data[start:end]
-    text_end = region.find(b"\x00")
-    text = region[:text_end]
+    text = region[: region.find(b"\x00")]
     m = CID.search(text)
     if m is None:
         raise SystemExit("error: self-test needs a descriptor with a CID")
@@ -88,10 +113,21 @@ def self_test(vmdk: Path) -> int:
     seven_region = seven_text + b"\x00" * (len(region) - len(seven_text))
     seven = data[:start] + seven_region + data[end:]
     assert len(seven) == len(data)
+    eight = normalized(data, digest)
     seven_norm = normalized(seven, digest)
     if seven_norm != eight or len(seven_norm) != len(data):
         raise SystemExit("error: a 7-digit and an 8-digit CID did not normalize to the same bytes")
-    print(f"normalize-vmdk self-test: PASS (7- and 8-digit CIDs normalize to identical {len(data)}-byte files)")
+    # The fallback route must agree byte for byte with the header route.
+    broken = bytearray(data)
+    struct.pack_into("<QQ", broken, 28, 0, 0)
+    via_fallback = normalized(bytes(broken), digest)
+    struct.pack_into("<QQ", broken, 28, *struct.unpack_from("<QQ", data, 28))
+    if via_fallback[SECTOR:] != eight[SECTOR:]:
+        raise SystemExit("error: the CID-locating route did not agree with the header route")
+    print(
+        f"normalize-vmdk self-test: PASS (7- and 8-digit CIDs normalize to identical "
+        f"{len(data)}-byte files, by the header and by the CID line)"
+    )
     return 0
 
 
