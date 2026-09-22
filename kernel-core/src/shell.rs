@@ -36,6 +36,7 @@
 //!
 //! **What this is not.** The dispatcher runs in kernel space and drives the kernel's own objects
 //! directly; it is not a user-mode shell process over a syscall ABI, and it is not claimed as one.
+use crate::browser::{NavRefusal, Navigator, Resolved, TrustRefusal, UrlRefusal};
 use crate::outf;
 use crate::tlsclient::TlsReport;
 use alloc::format;
@@ -890,6 +891,15 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "GET PATH from NAME over TLS 1.3 under the root PIN; print the status, headers and body",
     ),
     (
+        "trust NAME IP PIN",
+        "pin the Ed25519 root PIN (64 hex) for host NAME at IP: the only hosts `go` will dial",
+    ),
+    (
+        "go URL",
+        "navigate the browser to an https:// URL on a trusted host; print the page",
+    ),
+    ("back", "navigate the browser to the previous page"),
+    (
         "mlstat",
         "the resident risk advisor: what it is, and what it has done since boot",
     ),
@@ -958,6 +968,69 @@ fn authorize<H: ShellHost>(host: &H, action: ShellAction, out: &mut dyn FnMut(&s
 
 /// Split a command line into the verb and the untouched remainder. The remainder keeps its interior
 /// spacing, so `write greeting  hello  world` stores exactly the text after the name.
+/// Fetch a resolved page over the TLS client, hand the answer to the navigator, and print the
+/// page the browser window would show (ADR-156). The whole conversation is bounded by the
+/// console's buffers; the page is bounded by the navigator's.
+fn browse<H: ShellHost>(
+    host: &H,
+    nav: &mut Navigator,
+    resolved: Resolved,
+    out: &mut dyn FnMut(&str),
+) {
+    let url = resolved.url;
+    let mut request = [0u8; 1024];
+    let Ok(request_len) = crate::http::request(url.host(), url.path(), &mut request) else {
+        nav.set_failure(url, "the request does not fit");
+        print_page(nav, out);
+        return;
+    };
+    let mut reply = [0u8; 4096];
+    match host.tls_fetch(
+        resolved.ip,
+        url.port,
+        url.host(),
+        resolved.pin,
+        &request[..request_len],
+        &mut reply,
+    ) {
+        Ok(report) => {
+            let raw = &reply[..report.received];
+            let mut body = [0u8; crate::browser::BODY_CAP];
+            match crate::http::parse(raw, &mut body, report.truncated) {
+                Ok(response) => nav.set_page(
+                    url,
+                    response.status,
+                    response.reason.of(raw),
+                    &body[..response.body_len],
+                    response.truncated,
+                ),
+                Err(_) => nav.set_failure(url, "the answer is not HTTP this browser reads"),
+            }
+        }
+        Err(why) => nav.set_failure(url, why),
+    }
+    print_page(nav, out);
+}
+
+fn print_page(nav: &Navigator, out: &mut dyn FnMut(&str)) {
+    let mut grid = crate::textgrid::TextGrid::new(64, 16);
+    nav.render(&mut grid);
+    for row in 0..grid.rows() {
+        let line = grid.line(row);
+        let end = line
+            .iter()
+            .rposition(|&b| b != b' ' && b != 0)
+            .map_or(0, |i| i + 1);
+        if end == 0 {
+            continue;
+        }
+        match core::str::from_utf8(&line[..end]) {
+            Ok(text) => out(text),
+            Err(_) => out("(a line of this page is not text)"),
+        }
+    }
+}
+
 fn split_first(line: &str) -> (&str, &str) {
     let t = line.trim();
     match t.find(char::is_whitespace) {
@@ -1062,6 +1135,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
     fs: &mut Filesystem,
     dev: &mut D,
     history: &[String],
+    nav: &mut Navigator,
     out: &mut dyn FnMut(&str),
 ) -> Outcome {
     // The resident advisor ages with the machine, not with the boot (REQ-ML-003, ADR-056). Every
@@ -1438,6 +1512,79 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 }
                 Err(why) => outf!(out, "https: {}", why),
             }
+        }
+        "trust" => {
+            // Choosing whom to trust changes what this machine will speak to: a WRITE, approved
+            // like one.
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let (name, tail) = split_first(rest);
+            let (ip_text, pin_text) = split_first(tail);
+            let Some(ip) = parse_ipv4_address(ip_text) else {
+                out("usage: trust NAME IP PIN (IP is dotted quad, e.g. 10.0.2.2)");
+                return Outcome::Continue;
+            };
+            let Some(pin) = parse_hex_key(pin_text) else {
+                out("usage: trust NAME IP PIN (PIN is the root's Ed25519 public key, 64 hex digits)");
+                return Outcome::Continue;
+            };
+            match nav.hosts.trust(name.as_bytes(), ip, pin) {
+                Ok(()) => outf!(
+                    out,
+                    "trust: {} at {}.{}.{}.{} under pin {:02x}{:02x}{:02x}{:02x}.. ({} host(s) pinned)",
+                    name,
+                    ip[0],
+                    ip[1],
+                    ip[2],
+                    ip[3],
+                    pin[0],
+                    pin[1],
+                    pin[2],
+                    pin[3],
+                    nav.hosts.len()
+                ),
+                Err(TrustRefusal::BadName) => {
+                    out("usage: trust NAME IP PIN (NAME is a lower-case DNS name)")
+                }
+                Err(TrustRefusal::Full) => out("trust: the host table is full; nothing is evicted"),
+            }
+        }
+        "go" | "back" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let resolved = if verb == "back" {
+                match nav.back() {
+                    None => {
+                        out("back: no previous page");
+                        return Outcome::Continue;
+                    }
+                    Some(url) => nav.resolve(&url),
+                }
+            } else {
+                if rest.is_empty() {
+                    out("usage: go URL (an https:// URL on a host you have trusted)");
+                    return Outcome::Continue;
+                }
+                nav.navigate(rest.as_bytes())
+            };
+            let resolved = match resolved {
+                Ok(r) => r,
+                Err(NavRefusal::Url(UrlRefusal::Plaintext)) => {
+                    out("go: plaintext refused - this browser speaks https only, and does not downgrade");
+                    return Outcome::Continue;
+                }
+                Err(NavRefusal::Url(why)) => {
+                    outf!(out, "go: that is not a URL this browser reads ({:?})", why);
+                    return Outcome::Continue;
+                }
+                Err(NavRefusal::UnknownHost) => {
+                    out("go: no root pinned for that host (trust NAME IP PIN first); nothing was dialed");
+                    return Outcome::Continue;
+                }
+            };
+            browse(host, nav, resolved, out);
         }
         "lsblk" => {
             if !authorize(host, ShellAction::Inspect, out) {
@@ -1856,6 +2003,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
 pub struct Session {
     editor: LineEditor,
     started: bool,
+    /// The browser's navigation state (ADR-156): the hosts this person trusts, the history, the
+    /// page. One per console session, like the line editor.
+    navigator: Navigator,
 }
 
 impl Default for Session {
@@ -1869,6 +2019,7 @@ impl Session {
         Session {
             editor: LineEditor::new(),
             started: false,
+            navigator: Navigator::new(),
         }
     }
 
@@ -1969,10 +2120,18 @@ impl Session {
                 // The history the `history` command prints is the SAME list the up arrow walks:
                 // one list, so what the operator is shown and what they can recall cannot diverge.
                 let history = self.editor.history().to_vec();
-                let outcome = execute(&line, host, fs, dev, &history, &mut |s| {
-                    out(s);
-                    out("\r\n");
-                });
+                let outcome = execute(
+                    &line,
+                    host,
+                    fs,
+                    dev,
+                    &history,
+                    &mut self.navigator,
+                    &mut |s| {
+                        out(s);
+                        out("\r\n");
+                    },
+                );
                 if outcome == Outcome::Continue {
                     out(PROMPT);
                 }
@@ -2717,7 +2876,29 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && (none_https.contains("https: ") || none_https.contains("peer verified"))
     );
 
-    // 45. A command line ends on return, and on nothing else. The desktop's file panel is
+    // 45. The browser's navigation refuses plaintext and an unpinned host BY NAME before anything
+    //     is dialed, `trust` refuses a pin that is not a key, and a trusted host navigates (to the
+    //     default seam's named refusal, on a machine with no network).
+    let (plain, _) = transcript("go http://aletheia.test/\r", host, &mut fs, dev);
+    let (unpinned, _) = transcript("go https://nobody.test/\r", host, &mut fs, dev);
+    let (badpin, _) = transcript("trust aletheia.test 10.0.2.2 abc\r", host, &mut fs, dev);
+    let (trusted, _) = transcript(
+        &alloc::format!("trust aletheia.test 10.0.2.2 {good_pin}\rgo https://aletheia.test/\r"),
+        host,
+        &mut fs,
+        dev,
+    );
+    check!(
+        "console: go refuses plaintext and an unpinned host by name before anything is dialed",
+        plain.contains("go: plaintext refused")
+            && unpinned.contains("go: no root pinned")
+            && badpin.contains("usage: trust")
+            && trusted.contains("trust: aletheia.test at 10.0.2.2")
+            && trusted.contains("https://aletheia.test/")
+            && (trusted.contains("refused: ") || trusted.contains("HTTP "))
+    );
+
+    // 46. A command line ends on return, and on nothing else. The desktop's file panel is
     //     refreshed off this predicate (ADR-137), so a byte that wrongly counted as a line end
     //     would read the directory on every keystroke a human types.
     check!(
@@ -2730,7 +2911,7 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && !ends_a_command(b' ')
     );
 
-    // 46. The serviced loop hands the namespace out once before the first prompt and once per
+    // 47. The serviced loop hands the namespace out once before the first prompt and once per
     //     completed line — never mid-line. This is what lets a GUI panel show the namespace
     //     without ever holding the filesystem itself.
     let mut phases: Vec<ServicePhase> = Vec::new();

@@ -55,6 +55,9 @@ pub fn storm_suite<H: ShellHost>(
     let mut fs = Filesystem::mount(&mut dev).map_err(|_| (0u32, "shellstorm: mount"))?;
     fs.create(&mut dev, "note", b"hello from the console")
         .map_err(|_| (0u32, "shellstorm: seed"))?;
+    // The browser's navigation state a session carries (ADR-156): one for the storm, as a console
+    // has one; a Copy value on the stack, so it costs the heap nothing per command.
+    let mut nav = crate::browser::Navigator::new();
 
     // 1 — A COMMAND THAT ONLY REPORTS COSTS NOTHING.
     {
@@ -62,7 +65,7 @@ pub fn storm_suite<H: ShellHost>(
         let mut round = |fs: &mut Filesystem, dev: &mut MemBlockDevice| {
             for i in 0..COMMANDS {
                 let cmd = REPORTING[(i as usize) % REPORTING.len()];
-                let _ = shell::execute(cmd, host, fs, dev, &[], &mut sink);
+                let _ = shell::execute(cmd, host, fs, dev, &[], &mut nav, &mut sink);
             }
         };
         round(&mut fs, &mut dev); // warm-up: first-touch growth is paid once per boot
@@ -111,10 +114,26 @@ pub fn storm_suite<H: ShellHost>(
     //     the caller an object's bytes; the claim is that the cost is the bytes, named.
     {
         let mut sink = |_: &str| {};
-        let _ = shell::execute("cat note", host, &mut fs, &mut dev, &[], &mut sink); // warm-up
+        let _ = shell::execute(
+            "cat note",
+            host,
+            &mut fs,
+            &mut dev,
+            &[],
+            &mut nav,
+            &mut sink,
+        ); // warm-up
         let before = used_bytes();
         for _ in 0..64 {
-            let _ = shell::execute("cat note", host, &mut fs, &mut dev, &[], &mut sink);
+            let _ = shell::execute(
+                "cat note",
+                host,
+                &mut fs,
+                &mut dev,
+                &[],
+                &mut nav,
+                &mut sink,
+            );
         }
         let after = used_bytes();
         let per = (after - before) / 64;
@@ -135,14 +154,14 @@ pub fn storm_suite<H: ShellHost>(
             "wc note",
             "history",
         ];
-        let transcript = |fs: &mut Filesystem, dev: &mut MemBlockDevice| -> String {
+        let mut transcript = |fs: &mut Filesystem, dev: &mut MemBlockDevice| -> String {
             let mut log = String::new();
             for c in script {
                 let mut sink = |s: &str| {
                     log.push_str(s);
                     log.push('\n');
                 };
-                let out = shell::execute(c, host, fs, dev, &[], &mut sink);
+                let out = shell::execute(c, host, fs, dev, &[], &mut nav, &mut sink);
                 if out == Outcome::Halt {
                     break;
                 }

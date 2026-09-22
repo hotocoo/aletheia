@@ -381,6 +381,7 @@ CONTRACT=(
   "console: tcp refuses a bad port by usage and a missing network by name"
   "console: tls refuses a pin that is not a 32-byte key by usage and a missing network by name"
   "console: https refuses a path it would never send by usage and a missing network by name"
+  "console: go refuses plaintext and an unpinned host by name before anything is dialed"
 
 
 
@@ -478,6 +479,16 @@ CONTRACT=(
   "http: a bad status line, version, header, fold, unfinished head, or too many or too long headers is refused by name"
   "http: a chunk whose size is not hex, carries an extension, or does not end where it says is refused"
   "http: two body boundaries are refused as ambiguous, and a short Content-Length body is incomplete"
+
+  # The browser's navigation model (ADR-156): the same refusals on every CPU, no network.
+  "browser: a URL parses to host, port and path with 443 and / as the defaults"
+  "browser: http:// is refused as plaintext, never downgraded to"
+  "browser: a bad host, port or path is refused for the part that is bad"
+  "browser: an unknown host is refused before anything is dialed; a trusted one resolves to its pin and address"
+  "browser: the host table is bounded, and trusting a name again replaces its pin"
+  "browser: history walks back and forward, a new page drops the forward pages, and the ring is bounded"
+  "browser: a page renders as URL, status and a body cut at the grid's last row"
+  "browser: a failed page names its reason and its URL, and an over-long body is cut and said to be"
 
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.

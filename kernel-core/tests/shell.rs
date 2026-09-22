@@ -221,6 +221,7 @@ fn denied_write_is_refused_before_filesystem_io() {
             &mut fs,
             &mut dev,
             &[],
+            &mut kernel_core::browser::Navigator::new(),
             &mut |s| log.push_str(s),
         ),
         Outcome::Continue
@@ -236,9 +237,15 @@ fn denied_halt_cannot_stop_session() {
     Filesystem::format(&mut dev).unwrap();
     let mut fs = Filesystem::mount(&mut dev).unwrap();
     let mut log = String::new();
-    let outcome = shell::execute("halt", &host, &mut fs, &mut dev, &[], &mut |s| {
-        log.push_str(s)
-    });
+    let outcome = shell::execute(
+        "halt",
+        &host,
+        &mut fs,
+        &mut dev,
+        &[],
+        &mut kernel_core::browser::Navigator::new(),
+        &mut |s| log.push_str(s),
+    );
     assert_eq!(outcome, Outcome::Continue);
     assert!(log.contains("permission denied: system.halt"));
     assert!(!log.contains("halting."));
@@ -433,6 +440,7 @@ fn an_object_too_large_for_one_transaction_is_refused_not_truncated() {
         &mut fs,
         &mut dev,
         &[],
+        &mut kernel_core::browser::Navigator::new(),
         &mut |s| log.push_str(s),
     );
     assert!(
@@ -464,7 +472,15 @@ fn halt_is_the_only_command_that_ends_the_session() {
     let mut fs = Filesystem::mount(&mut dev).unwrap();
     for (name, _) in COMMANDS {
         let verb = name.split_whitespace().next().unwrap();
-        let outcome = shell::execute(verb, &host, &mut fs, &mut dev, &[], &mut |_| {});
+        let outcome = shell::execute(
+            verb,
+            &host,
+            &mut fs,
+            &mut dev,
+            &[],
+            &mut kernel_core::browser::Navigator::new(),
+            &mut |_| {},
+        );
         let expected = if verb == "halt" {
             Outcome::Halt
         } else {

@@ -27,6 +27,7 @@ extern crate alloc;
 pub mod arpcache;
 pub mod bench;
 pub mod bootroot;
+pub mod browser;
 pub mod capalg;
 pub mod capstore;
 pub mod capvault;

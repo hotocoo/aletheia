@@ -1538,6 +1538,26 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // THE BROWSER'S NAVIGATION MODEL (REQ-WEB-002, ADR-156; Lethe stage N4): URLs, the hosts a
+    // person has chosen to trust, history, and the page a window shows. Nothing here touches a
+    // wire; plaintext is refused rather than downgraded to, and an unpinned host is refused before
+    // any address is dialed.
+    kprintln!("");
+    kprintln!("--- browser selftests (URL, host table, history, page render; no network) ---");
+    match kernel_core::browser::browser_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[browser] ALL {} NAVIGATION INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[browser] FAILED at navigation invariant {}: {}", idx, name);
+            ActiveHal::exit(1020 + idx as i32);
+        }
+    }
+
     // THE HTTP/1.1 CLIENT (REQ-WEB-001, ADR-155; Lethe stage N3): a GET that asks the peer to close,
     // and a response reader bounded by construction - every length the peer names is checked
     // against the bytes that arrived, two body boundaries are refused as ambiguous, and a body

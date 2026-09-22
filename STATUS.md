@@ -33,7 +33,15 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-22, latest (THE HTTP/1.1 CLIENT — ADR-155, Lethe stage N3 delivered. `kernel-core/src/http.rs`
+**As of:** 2026-09-23, latest (THE BROWSER NAVIGATES — ADR-156, Lethe stage N4 started. `kernel-core/src/browser.rs`
+is the navigation model, touching no wire: `https://` only (`http://` refused as PLAINTEXT, never downgraded to), a
+table of eight hosts a person pinned with `trust NAME IP PIN` (no DNS, no root store, nothing pre-installed; an
+unpinned host is refused before any address is dialed; the ninth is refused, not evicted), a history ring of eight
+walked by `back`, and a bounded page rendered into a `TextGrid` and cut at its last row. From the console, `go URL`
+prints the page the window will show. `browser=8` on all three CPUs; `console=49`; LIVE in `scripts/https-e2e.sh`:
+an unpinned host refused, plaintext refused, `trust`, two pages from the real server, `back`. Conformance 356 -> 365
+core behaviours. The managed window is the next rung. Previously: THE HTTP/1.1 CLIENT — ADR-155, Lethe stage N3
+delivered. `kernel-core/src/http.rs`
 builds a `GET` with `Connection: close` and reads the answer with every length the peer names checked against the
 bytes that arrived: status line and version, each header's colon and bound, the header count, each chunk's hex size
 and CRLF, a Content-Length the body must honour. Two body boundaries (Content-Length with chunked, or two
@@ -1208,6 +1216,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — the browser navigates: URLs, trusted hosts, history, the page (ADR-156)
+
+- **Lethe stage N4, first rung.** `kernel-core/src/browser.rs` parses URLs, keeps the hosts a person chose to trust, keeps history, holds the page; the platform dials (ADR-151) and requests (ADR-155). Proved alone before a fifth window is cut into the desktop.
+- **`https://` only.** `http://` is refused as `Plaintext`, its own refusal; nothing is downgraded to or upgraded from (Lethe's HTTPS-first rule, adopted in the model).
+- **`trust NAME IP PIN`:** a table of eight hosts with their address and the Ed25519 root that vouches for them, operator-filled, nothing pre-installed — this kernel has no DNS and no root store, and the table is both. An unpinned host is refused before any address is resolved; the ninth is refused, not evicted; re-trusting a name replaces its pin.
+- **History** is a bounded ring of eight; `back` walks it and a new page drops the forward pages. **The page** is two kilobytes of body plus status and reason, or the named refusal with its URL; `render` draws it into a `TextGrid` and cuts at the last row.
+- **Proof:** `browser=8` on all three CPUs (no network); `console=49` (`go` refuses plaintext and an unpinned host by name before anything is dialed); LIVE in `scripts/https-e2e.sh` — an unpinned host refused, `trust`, plaintext refused, `/plain.txt` and `/chunked.txt` rendered from the real server, `back`. Conformance contract **356 -> 365**.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (365 on all three), quality-gate PASS, doc gates PASS, https-e2e PASS**.
 
 ### 2026-09-22 — the HTTP/1.1 client, bounded by construction (ADR-155)
 

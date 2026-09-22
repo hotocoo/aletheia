@@ -180,6 +180,13 @@ check_transcript() {
   grep -q "HTTP 404" <<<"$log" || { echo "  FAIL [$label] a missing path did not report 404"; bad=1; }
   grep -q "https: the peer's certificate is not one the pinned root signed" <<<"$log" || { echo "  FAIL [$label] a wrong pin did not refuse by name"; bad=1; }
   grep -q "https: the peer refused or reset" <<<"$log" || { echo "  FAIL [$label] dialing a dead port did not refuse by name"; bad=1; }
+  # The browser's navigation (ADR-156): an unpinned host and plaintext refused before a dial, then a
+  # trusted host's pages, then back to the first.
+  grep -q "go: no root pinned" <<<"$log" || { echo "  FAIL [$label] an unpinned host was not refused before dialing"; bad=1; }
+  grep -q "go: plaintext refused" <<<"$log" || { echo "  FAIL [$label] a plaintext URL was not refused"; bad=1; }
+  grep -q "trust: $SERVER_NAME at 10.0.2.2" <<<"$log" || { echo "  FAIL [$label] trust did not pin the host"; bad=1; }
+  [ "$(grep -c "^HTTP 200 OK" <<<"$log")" -ge 3 ] || { echo "  FAIL [$label] the browser pages did not render their status lines (go, go, back)"; bad=1; }
+  grep -q "^https://$SERVER_NAME:$PEER_PORT/chunked.txt" <<<"$log" || { echo "  FAIL [$label] the chunked page's URL line never rendered"; bad=1; }
   grep -q "peer request: /plain.txt host: $SERVER_NAME" "$PEER_LOG" || { echo "  FAIL [$label] the peer never saw the plain GET with its Host"; bad=1; }
   grep -q "peer request: /chunked.txt" "$PEER_LOG" || { echo "  FAIL [$label] the peer never saw the chunked GET"; bad=1; }
   grep -q "peer handshake: TLSv1.3" "$PEER_LOG" || { echo "  FAIL [$label] the peer never completed a TLS 1.3 handshake"; bad=1; }
@@ -217,6 +224,12 @@ mmio_leg() {
     "https 10.0.2.2 $PEER_PORT $SERVER_NAME $PIN /chunked.txt" \
     "https 10.0.2.2 $PEER_PORT $SERVER_NAME $PIN /big.txt" \
     "https 10.0.2.2 $PEER_PORT $SERVER_NAME $PIN /missing.txt" \
+    "go https://$SERVER_NAME:$PEER_PORT/plain.txt" \
+    "trust $SERVER_NAME 10.0.2.2 $PIN" \
+    "go http://$SERVER_NAME:$PEER_PORT/plain.txt" \
+    "go https://$SERVER_NAME:$PEER_PORT/plain.txt" \
+    "go https://$SERVER_NAME:$PEER_PORT/chunked.txt" \
+    "back" \
     "halt"
   sed -n '/interactive console/,$p' "$log"
   check_transcript "$label" "$(cat "$log")"
