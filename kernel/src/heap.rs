@@ -74,3 +74,10 @@ pub fn used_bytes() -> usize {
         cur - heap_start
     }
 }
+
+/// Bytes still available - the margin every later allocation lives in (ADR-154).
+pub fn free_bytes() -> usize {
+    let heap_start = unsafe { &__heap_start as *const u8 as usize };
+    let heap_end = unsafe { &__heap_end as *const u8 as usize };
+    (heap_end - heap_start).saturating_sub(used_bytes())
+}

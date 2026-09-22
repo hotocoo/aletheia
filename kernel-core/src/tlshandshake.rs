@@ -971,19 +971,33 @@ pub fn tlshandshake_suite(
         );
     }
 
+    // ONE pinned handshake for checks 10-12, restarted between them: each is eighteen kilobytes of
+    // workspace on a heap that never frees, and three of them tipped the aarch64 desktop boot into
+    // "memory allocation failed" at its console (ADR-154).
+    let mut pinned = {
+        use crate::trust::{PinnedRoot, FIXTURE_NAME, FIXTURE_TIME, ROOT_KEY_FIXTURE};
+        match PinnedRoot::new(ROOT_KEY_FIXTURE, FIXTURE_TIME)
+            .ok()
+            .and_then(|v| Handshake::new(v, FIXTURE_NAME, client_private, [7u8; 32]).ok())
+        {
+            Some(h) => h,
+            None => {
+                return Err((
+                    10,
+                    "tlshandshake: a pinned handshake could not be constructed",
+                ))
+            }
+        }
+    };
+
     // 10 — with a PINNED ROOT and a chain it signed (ADR-147), the handshake passes the server's
     //      Certificate; then a CertificateVerify under a scheme this client did not offer is
     //      refused by name, and one carrying a signature of zeros is refused as a bad signature.
     //      Neither leaves application keys behind.
     {
-        use crate::trust::{
-            PinnedRoot, FIXTURE_NAME, FIXTURE_TIME, LEAF_KEY_FIXTURE, ROOT_KEY_FIXTURE,
-        };
-        let verdict = match PinnedRoot::new(ROOT_KEY_FIXTURE, FIXTURE_TIME)
-            .ok()
-            .and_then(|v| Handshake::new(v, FIXTURE_NAME, client_private, [7u8; 32]).ok())
-        {
-            Some(mut pinned) => {
+        use crate::trust::LEAF_KEY_FIXTURE;
+        let verdict = {
+            {
                 let reached = drive_fixture_flight(&mut pinned);
                 let mut wrong_scheme = certificate_verify_message(&[0u8; 64]);
                 wrong_scheme[4..6].copy_from_slice(&0x0403u16.to_be_bytes());
@@ -1001,7 +1015,6 @@ pub fn tlshandshake_suite(
                     && pinned.application_keys().is_none()
                     && pinned.stage() == HandshakeStage::Failed
             }
-            None => false,
         };
         check!(
             verdict,
@@ -1015,15 +1028,9 @@ pub fn tlshandshake_suite(
     //      verifies; application traffic keys exist; and this client's Finished is the
     //      transcript's, refused as out of order one message earlier.
     {
-        use crate::trust::{
-            PinnedRoot, FIXTURE_CERTIFICATE_VERIFY, FIXTURE_NAME, FIXTURE_TIME,
-            FIXTURE_TRANSCRIPT_HASH, LEAF_KEY_FIXTURE, ROOT_KEY_FIXTURE,
-        };
-        let verdict = match PinnedRoot::new(ROOT_KEY_FIXTURE, FIXTURE_TIME)
-            .ok()
-            .and_then(|v| Handshake::new(v, FIXTURE_NAME, client_private, [7u8; 32]).ok())
-        {
-            Some(mut pinned) => {
+        use crate::trust::{FIXTURE_CERTIFICATE_VERIFY, FIXTURE_TRANSCRIPT_HASH, LEAF_KEY_FIXTURE};
+        let verdict = {
+            {
                 let hash = drive_fixture_flight(&mut pinned);
                 let cv = certificate_verify_message(&FIXTURE_CERTIFICATE_VERIFY);
                 let after_cv = pinned.server_flight(&cv);
@@ -1049,7 +1056,6 @@ pub fn tlshandshake_suite(
                     && out[4..4 + HASH_LEN] == expected
                     && expected != server_finished_value
             }
-            None => false,
         };
         check!(
             verdict,
@@ -1061,14 +1067,9 @@ pub fn tlshandshake_suite(
     //      random changes the hash, and a signature that does not cover what was said is a
     //      signature over some other conversation.
     {
-        use crate::trust::{
-            PinnedRoot, FIXTURE_CERTIFICATE_VERIFY, FIXTURE_NAME, FIXTURE_TIME, ROOT_KEY_FIXTURE,
-        };
-        let verdict = match PinnedRoot::new(ROOT_KEY_FIXTURE, FIXTURE_TIME)
-            .ok()
-            .and_then(|v| Handshake::new(v, FIXTURE_NAME, client_private, [7u8; 32]).ok())
-        {
-            Some(mut pinned) => {
+        use crate::trust::FIXTURE_CERTIFICATE_VERIFY;
+        let verdict = {
+            {
                 let mut other_random = FIXTURE_CLIENT_RANDOM;
                 other_random[0] ^= 0x01;
                 let reached = drive_fixture_flight_with(&mut pinned, other_random);
@@ -1078,7 +1079,6 @@ pub fn tlshandshake_suite(
                     && after_cv == Err(HandshakeRefusal::BadSignature)
                     && pinned.application_keys().is_none()
             }
-            None => false,
         };
         check!(
             verdict,

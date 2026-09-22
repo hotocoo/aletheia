@@ -269,6 +269,14 @@ pub fn interactive() -> ! {
     kprintln!("");
     kprintln!("========================================");
     kprintln!(" Aletheia interactive console — type `help`");
+    // The heap this console starts with, so a boot log shows the margin the desktop and every
+    // suite left behind. The aarch64 interactive boot once reached this line with too little left
+    // for the console's own RAM disk (ADR-154); a number here is how that is seen before it fails.
+    kprintln!(
+        "[console] heap: {} B used, {} B free",
+        crate::heap::used_bytes(),
+        crate::heap::free_bytes()
+    );
     kprintln!("========================================");
     match crate::virtio::persistent_device() {
         Some(mut disk) => {

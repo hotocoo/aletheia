@@ -1,4 +1,4 @@
-//! Kernel heap: a bump allocator over a fixed 12 MiB static region.
+//! Kernel heap: a bump allocator over a fixed 16 MiB static region (12 until ADR-154).
 //!
 //! Deliberately a STATIC array, not a region carved from the UEFI memory map: the `.efi` image
 //! (including this BSS array) is loaded into conventional RAM and identity-mapped by firmware, so
@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// resident window's pixels stay resident for the life of the boot. The window-manager suite
 /// mints its own desktops and the live desktop now holds two windows and their render
 /// buffers; at 8 MiB the vt-d gate's page tables were the allocation that found the ceiling.
-const HEAP_SIZE: usize = 12 * 1024 * 1024;
+const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 static HEAP_AREA: Racy<[u8; HEAP_SIZE]> = Racy::new([0u8; HEAP_SIZE]);
 
@@ -69,4 +69,9 @@ pub fn used_bytes() -> usize {
     } else {
         cur - base
     }
+}
+
+/// Bytes still available - the margin every later allocation lives in (ADR-154).
+pub fn free_bytes() -> usize {
+    HEAP_SIZE.saturating_sub(used_bytes())
 }

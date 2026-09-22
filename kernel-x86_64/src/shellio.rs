@@ -280,6 +280,14 @@ pub fn interactive(disk_opt: Option<crate::virtio::VirtioBlk>) -> ! {
     kprintln!("");
     kprintln!("========================================");
     kprintln!(" Aletheia interactive console — type `help`");
+    // The heap this console starts with, so a boot log shows the margin the desktop and every
+    // suite left behind. The aarch64 interactive boot once reached this line with too little left
+    // for the console's own RAM disk (ADR-154); a number here is how that is seen before it fails.
+    kprintln!(
+        "[console] heap: {} B used, {} B free",
+        crate::heap::used_bytes(),
+        crate::heap::free_bytes()
+    );
     kprintln!("========================================");
     // The persistent device arrives ALREADY BROUGHT UP by the boot (before the VT-d gate turned
     // enforcement on) - constructing a new instance here would publish queues under an active
