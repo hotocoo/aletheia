@@ -35,6 +35,7 @@ mod hal;
 mod heap;
 mod netstatic;
 mod pci;
+mod rtc;
 mod semihosting;
 mod shellio;
 mod smmu;
@@ -1131,6 +1132,40 @@ pub extern "C" fn kmain() -> ! {
         Err((idx, name)) => {
             kprintln!("[trust] FAILED at trust invariant {}: {}", idx, name);
             semihosting::exit(920 + idx as i32);
+        }
+    }
+
+    // THE WALL CLOCK (REQ-SEC-TLS-008, ADR-148): the platform reads a time for itself. ADR-147's
+    // verifier refuses a time of zero because this kernel had no clock; now the PL031 real-time clock
+    // is read, checked for plausibility (a clock that says 1970 is the absence of a clock wearing
+    // a number), and its reading builds the verifier that judges the pinned fixture - the first
+    // certificate this kernel judges at a time it read itself.
+    kprintln!("");
+    kprintln!(
+        "--- clock selftests (PL031 real-time clock: plausible, monotonic, verifier-ready) ---"
+    );
+    let wall_clock = rtc::Pl031::new();
+    match kernel_core::clock::WallClock::read_utc(&wall_clock) {
+        Ok(t) => {
+            let (y, mo, d, h, mi, s) = kernel_core::clock::civil_from_unix(t);
+            kprintln!(
+                "[clock] platform time: {:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z ({} s since the epoch)",
+                y, mo, d, h, mi, s, t
+            );
+        }
+        Err(e) => kprintln!("[clock] platform clock: {:?}", e),
+    }
+    match kernel_core::clock::clock_suite(&wall_clock, |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[clock] ALL {} CLOCK INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[clock] FAILED at clock invariant {}: {}", idx, name);
+            semihosting::exit(940 + idx as i32);
         }
     }
 

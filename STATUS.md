@@ -33,7 +33,17 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-22, latest (THE PINNED VERIFIER — ADR-147. `kernel-core/src/trust.rs` is the
+**As of:** 2026-09-22, latest (THE WALL CLOCK — ADR-148. ADR-147's verifier refused a time of zero
+because this kernel had no clock. Now every target reads its own real-time clock (PL031 on aarch64 with
+its PrimeCell identity checked first, the goldfish RTC on RISC-V, the CMOS RTC on x86-64 read twice
+until two snapshots agree), and `kernel-core/src/clock.rs` is the contract: a reading is PLAUSIBLE
+(2026 to 2100) or it is a named refusal — a clock that says 1970 is the absence of a clock wearing a
+number. One shared civil-date conversion now serves the certificate reader and every clock driver.
+`clock=7` on all three CPUs, including: **the platform's own time builds a verifier that accepts the
+pinned fixture** — the first certificate this kernel judges at a time it read itself. Each kernel prints
+its reading at boot for a person to check against their watch. Conformance 323 -> 330 core behaviours.
+**This kernel still cannot speak TLS:** CertificateVerify is not yet checked. Previously: THE PINNED
+VERIFIER — ADR-147. `kernel-core/src/trust.rs` is the
 first `PeerVerifier` that can say yes, and it says yes to exactly one shape: a leaf signed DIRECTLY by
 one pinned Ed25519 root, speaking for the expected name, inside its window at a time the caller
 supplies. A pin rather than a store: no chain to walk, so no path building, no intermediates, no
@@ -1139,6 +1149,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-22 — the wall clock (ADR-148)
+
+- ADR-147's `PinnedRoot` takes the time as an argument and refuses zero, because this kernel had no clock. A TLS client that cannot tell what day it is cannot judge a validity window; this wave gives every target one.
+- `kernel-core/src/clock.rs` is the contract: `WallClock::read_utc` returns seconds since the epoch or a named refusal (`Absent`, `Unsettled`, `Implausible`). **A reading is plausible or it is a refusal**: only `[2026-01-01, 2100-01-01)` is a time; a clock that says 1970 is the absence of a clock reporting itself as the epoch.
+- **The device is checked before it is believed.** aarch64 (`kernel/src/rtc.rs`) reads the PL031's PrimeCell identification registers and trusts the data register only once the page has answered as a PL031. x86-64 (`kernel-x86_64/src/rtc.rs`) waits for the CMOS update flag, takes every field twice and accepts only two identical snapshots, decodes BCD/binary and 12/24-hour form as Status B declares, and range-checks the civil fields so a month of 13 is refused rather than wrapped. RISC-V (`kernel-riscv64/src/rtc.rs`) reads the goldfish count LOW-then-HIGH, the order that latches a consistent value.
+- **One conversion, shared.** ADR-146's days-from-civil algorithm moves into `clock.rs`, gains its inverse, and is the only date arithmetic in the tree. `verifier_at(clock, root)` is the one door from a clock to a `PinnedRoot`; a clock that refuses builds no verifier.
+- New boot family `clock=7` on all three CPUs, each against its own device, including **the platform's own time builds a verifier that accepts the pinned fixture** — the first certificate this kernel judges at a time it read itself. Each kernel prints its reading (`[clock] platform time: 2026-09-22T09:54:06Z ...`). Host suite runs the same contract against the host's clock and round-trips every day of the 2000–2100 century. Conformance contract **323 -> 330** core behaviours. Unsafe inventory +1 per target (one register seam each).
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (330 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** the CertificateVerify check over the transcript and the client's own Finished. Until they land, this kernel cannot speak TLS.
 
 ### 2026-09-22 — the pinned verifier (ADR-147)
 

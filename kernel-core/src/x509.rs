@@ -21,6 +21,8 @@
 //!
 //! Nothing here allocates: every accessor returns a slice of the caller's buffer.
 
+use crate::clock::unix_seconds;
+
 /// DER tags this reader CONSULTS. Deliberately only these: a constant for a tag the reader never
 /// checks would suggest support it does not have. A distinguished name's string types, for
 /// instance, are stepped over as opaque elements rather than decoded, because nothing here needs
@@ -369,19 +371,6 @@ fn parse_time(e: &Element<'_>) -> Result<i64, DerRefusal> {
         return Err(DerRefusal::BadLength);
     }
     Ok(unix_seconds(year, month, day, hour, minute, second))
-}
-
-/// Days from the civil epoch, by Howard Hinnant's algorithm: no tables, no leap-year special
-/// cases written out, and correct for every date a certificate can carry.
-fn unix_seconds(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    days * 86_400 + hour * 3_600 + minute * 60 + second
 }
 
 /// A real self-signed Ed25519 certificate for `aletheia.test`, produced by OpenSSL through Python's

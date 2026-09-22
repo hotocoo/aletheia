@@ -409,6 +409,15 @@ CONTRACT=(
   "trust: the chain message's framing is checked to its end; a length that lies is refused"
   "trust: certificates after the leaf are framed and never read; too many is refused"
 
+  # The wall clock (ADR-148): a different device on every CPU, the same contract on all three.
+  "clock: the platform clock is present and reads a plausible time, never zero"
+  "clock: two reads never run backwards and agree to within a few seconds"
+  "clock: an absent clock is a named refusal, and a refusal builds no verifier"
+  "clock: the platform's own time builds a verifier that accepts the pinned fixture"
+  "clock: the epoch, the year 2000 and the year 2100 are refused as no time at all"
+  "clock: civil dates convert to the seconds they mean and back, leap days included"
+  "clock: a civil reading with a field out of range is refused rather than wrapped"
+
   # The signature half of a certificate verifier (ADR-145): the same digests and the same
   # refusals - malleable scalars, off-curve points, short inputs - on every CPU.
   "sha512: the empty message hashes to FIPS 180-4's published digest"
