@@ -13,7 +13,6 @@ const FR_TXFF: u32 = 1 << 5; // transmit FIFO full
 ///
 /// Non-blocking on purpose: the interactive loop owns the waiting, so a target can interleave other
 /// work with reading, and a gate can never wedge on an input that will not arrive.
-
 /// Interrupt-mask register: which UART conditions raise an interrupt.
 #[cfg(feature = "interactive")]
 const UART_IMSC: usize = 0x38;

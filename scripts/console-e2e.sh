@@ -112,6 +112,15 @@ check_session() {
   grep -q "aletheia> "                   <<<"$log" || { echo "  FAIL [$label/$phase] no prompt was printed"; bad=1; }
   grep -q "halting."                     <<<"$log" || { echo "  FAIL [$label/$phase] halt did not run"; bad=1; }
   grep -q "persistent virtio-blk device" <<<"$log" || { echo "  FAIL [$label/$phase] the console did not choose the persistent disk"; bad=1; }
+  # An interactive boot pays for contracts, not storms (ADR-163): the image SAYS which proofs it
+  # deferred, and none of the deferred families' markers appear - the gate image proves those.
+  grep -q "\[boot\] deferred in this interactive image (ADR-163): bench, soak, mlrisk-stress, wmstorm, schedstorm, fsstorm, shellstorm" <<<"$log" \
+    || { echo "  FAIL [$label/$phase] the interactive boot did not say which proofs it deferred"; bad=1; }
+  for fam in bench soak mlrisk-stress wmstorm schedstorm fsstorm shellstorm; do
+    grep -q "^\[$fam\] ALL " <<<"$log" && { echo "  FAIL [$label/$phase] the interactive boot ran the deferred $fam suite"; bad=1; }
+  done
+  grep -q "\[cap\] ALL .* CAPABILITY-LIFETIME INVARIANTS HOLD" <<<"$log" || { echo "  FAIL [$label/$phase] the interactive boot skipped a contract suite"; bad=1; }
+  grep -q "\[policy\] ALL 8 POLICY INVARIANTS HOLD" <<<"$log" || { echo "  FAIL [$label/$phase] the interactive boot skipped the policy contract"; bad=1; }
   if [ "$phase" = "first" ]; then
     grep -q "commands:" <<<"$log" || { echo "  FAIL [$label/first] help did not answer"; bad=1; }
     grep -q "$WROTE"    <<<"$log" || { echo "  FAIL [$label/first] the write was not accepted"; bad=1; }

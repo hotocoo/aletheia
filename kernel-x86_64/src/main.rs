@@ -194,6 +194,12 @@ fn summarize_memory(map: &MemoryMapOwned) -> (usize, u64) {
 fn kmain(memory_map: &MemoryMapOwned) -> ! {
     use hal::{ActiveHal, Hal};
 
+    // What an INTERACTIVE boot pays for (ADR-163): every contract, none of the storms. The storms,
+    // the soak, the bench and the performance pass prove bounds under load and are the bulk of
+    // the boot's cost (docs/BOOT-COST.md); the gate image - built without the feature - proves
+    // them on every push, so a person waiting for a prompt does not pay for them twice.
+    const STORMS_AT_BOOT: bool = !cfg!(feature = "interactive");
+
     kprintln!("");
     kprintln!("========================================");
     kprintln!(
@@ -681,52 +687,53 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // The forest under LOAD, on this machine, with this machine's own clock: what an advice costs,
     // and what the advice actually changes about a schedule. Timings are REPORTED; only the
     // scale-invariant properties gate the boot (REQ-ML-002, ADR-056).
-    match kernel_core::mlrisk::RiskAdvisor::load(kernel_core::mlrisk::BUNDLED_MODEL) {
-        Ok(model) => {
-            let advices = kernel_core::mlrisk_stress::BOOT_ADVICES;
-            let tasks = kernel_core::mlrisk_stress::BOOT_TASKS;
-            match kernel_core::mlrisk_stress::stress_suite(
-                advices,
-                tasks,
-                |a, t| kernel_core::mlrisk_stress::measure::<ActiveHal>(&model, a, t),
-                |a| {
-                    kernel_core::mlrisk_stress::advice_stress::<ActiveHal>(
-                        &model,
-                        a,
-                        0,
-                        kernel_core::mlrisk_stress::HOT_SEED,
-                    )
-                },
-                |n, passed, name| {
-                    if passed {
-                        kprintln!("  [pass {:>2}] {}", n, name);
-                    } else {
-                        kprintln!("  [FAIL {:>2}] {}", n, name);
-                    }
-                },
-            ) {
-                Ok((r, n)) => {
-                    kprintln!(
-                        "[mlrisk-stress] {} advices in {} ns => {} ps/advice, {} advices/s",
-                        r.hot.advices,
-                        r.hot.ns_total,
-                        r.hot.ps_per_advice,
-                        r.hot.per_second()
-                    );
-                    kprintln!(
+    if STORMS_AT_BOOT {
+        match kernel_core::mlrisk::RiskAdvisor::load(kernel_core::mlrisk::BUNDLED_MODEL) {
+            Ok(model) => {
+                let advices = kernel_core::mlrisk_stress::BOOT_ADVICES;
+                let tasks = kernel_core::mlrisk_stress::BOOT_TASKS;
+                match kernel_core::mlrisk_stress::stress_suite(
+                    advices,
+                    tasks,
+                    |a, t| kernel_core::mlrisk_stress::measure::<ActiveHal>(&model, a, t),
+                    |a| {
+                        kernel_core::mlrisk_stress::advice_stress::<ActiveHal>(
+                            &model,
+                            a,
+                            0,
+                            kernel_core::mlrisk_stress::HOT_SEED,
+                        )
+                    },
+                    |n, passed, name| {
+                        if passed {
+                            kprintln!("  [pass {:>2}] {}", n, name);
+                        } else {
+                            kprintln!("  [FAIL {:>2}] {}", n, name);
+                        }
+                    },
+                ) {
+                    Ok((r, n)) => {
+                        kprintln!(
+                            "[mlrisk-stress] {} advices in {} ns => {} ps/advice, {} advices/s",
+                            r.hot.advices,
+                            r.hot.ns_total,
+                            r.hot.ps_per_advice,
+                            r.hot.per_second()
+                        );
+                        kprintln!(
                         "[mlrisk-stress] in-box census: {} low / {} elevated / {} abstain ({} from the conformal band)",
                         r.hot.low,
                         r.hot.elevated,
                         r.hot.abstain,
                         r.hot.band_abstain
                     );
-                    kprintln!(
-                        "[mlrisk-stress] out-of-box arrivals: {} of {} => {} abstain",
-                        r.mixed.out_of_range,
-                        r.mixed.advices,
-                        r.mixed.abstain
-                    );
-                    kprintln!(
+                        kprintln!(
+                            "[mlrisk-stress] out-of-box arrivals: {} of {} => {} abstain",
+                            r.mixed.out_of_range,
+                            r.mixed.advices,
+                            r.mixed.abstain
+                        );
+                        kprintln!(
                         "[mlrisk-stress] schedule all-tied: {} tasks, {} decisive, {} positions move, plain {} ns vs advised {} ns",
                         r.tied.tasks,
                         r.tied.decisive,
@@ -734,7 +741,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                         r.tied.plain_ns,
                         r.tied.advised_ns
                     );
-                    kprintln!(
+                        kprintln!(
                         "[mlrisk-stress] schedule 8 bands: {} tasks, {} decisive, {} positions move, plain {} ns vs advised {} ns",
                         r.banded.tasks,
                         r.banded.decisive,
@@ -742,30 +749,31 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                         r.banded.plain_ns,
                         r.banded.advised_ns
                     );
-                    kprintln!(
+                        kprintln!(
                         "[mlrisk-stress] abstaining workload: {} tasks, {} positions move (must be 0)",
                         r.quiet.tasks,
                         r.quiet.divergences
                     );
-                    kprintln!("[mlrisk-stress] ALL {} STRESS INVARIANTS HOLD", n);
-                    kprintln!(
-                        "[boot] mlrisk-stress suite: {} ms",
-                        kernel_core::boottime::lap::<ActiveHal>("mlrisk-stress")
-                    );
-                }
-                Err((idx, name)) => {
-                    kprintln!(
-                        "[mlrisk-stress] FAILED at stress invariant {}: {}",
-                        idx,
-                        name
-                    );
-                    ActiveHal::exit(170 + idx as i32);
+                        kprintln!("[mlrisk-stress] ALL {} STRESS INVARIANTS HOLD", n);
+                        kprintln!(
+                            "[boot] mlrisk-stress suite: {} ms",
+                            kernel_core::boottime::lap::<ActiveHal>("mlrisk-stress")
+                        );
+                    }
+                    Err((idx, name)) => {
+                        kprintln!(
+                            "[mlrisk-stress] FAILED at stress invariant {}: {}",
+                            idx,
+                            name
+                        );
+                        ActiveHal::exit(170 + idx as i32);
+                    }
                 }
             }
+            // The load-time refusal above already said which check refused the blob; a kernel with no
+            // model has nothing to stress, and that is not a failure of this gate.
+            Err(_) => kprintln!("[mlrisk-stress] SKIPPED: no verified model to stress"),
         }
-        // The load-time refusal above already said which check refused the blob; a kernel with no
-        // model has nothing to stress, and that is not a failure of this gate.
-        Err(_) => kprintln!("[mlrisk-stress] SKIPPED: no verified model to stress"),
     }
 
     // The advisor takes up residence (REQ-ML-003, ADR-056). Everything above proved the *model*;
@@ -1118,28 +1126,32 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // throughput numbers are reported, never gated (QEMU-TCG nanoseconds are an emulator's), and
     // the heap line keeps the suite's own cost on this never-freeing heap a measured fact. The
     // journal phase's allocation-free claim is gated exactly where the meter can see it.
-    kprintln!("");
-    kprintln!("--- soak selftests (lifecycles under repetition: storage, grants, tasks) ---");
-    {
-        fn heap_meter() -> u64 {
-            crate::heap::used_bytes() as u64
-        }
-        let before = heap_meter();
-        match kernel_core::soak::soak_suite(
-            kernel_core::soak::BOOT_LOAD,
-            |load| {
-                kernel_core::soak::campaign::<ActiveHal>(load, Some(&(heap_meter as fn() -> u64)))
-            },
-            |n, passed, name| {
-                if passed {
-                    kprintln!("  [pass {:>2}] {}", n, name);
-                } else {
-                    kprintln!("  [FAIL {:>2}] {}", n, name);
-                }
-            },
-        ) {
-            Ok((r, n)) => {
-                kprintln!(
+    if STORMS_AT_BOOT {
+        kprintln!("");
+        kprintln!("--- soak selftests (lifecycles under repetition: storage, grants, tasks) ---");
+        {
+            fn heap_meter() -> u64 {
+                crate::heap::used_bytes() as u64
+            }
+            let before = heap_meter();
+            match kernel_core::soak::soak_suite(
+                kernel_core::soak::BOOT_LOAD,
+                |load| {
+                    kernel_core::soak::campaign::<ActiveHal>(
+                        load,
+                        Some(&(heap_meter as fn() -> u64)),
+                    )
+                },
+                |n, passed, name| {
+                    if passed {
+                        kprintln!("  [pass {:>2}] {}", n, name);
+                    } else {
+                        kprintln!("  [FAIL {:>2}] {}", n, name);
+                    }
+                },
+            ) {
+                Ok((r, n)) => {
+                    kprintln!(
                     "[soak] journal: {} txs ({} verifies, {} recovers replayed) in {} ms => {} tx/s",
                     r.journal.txs,
                     r.journal.verifies,
@@ -1147,13 +1159,13 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                     r.journal.ns_total / 1_000_000,
                     r.journal.txs_per_second()
                 );
-                kprintln!(
+                    kprintln!(
                     "[soak] namespace: {} ops, every one audited => {} ops/s, {} survivors re-mounted",
                     r.fs.ops,
                     r.fs.ops_per_second(),
                     r.fs.final_survivors
                 );
-                kprintln!(
+                    kprintln!(
                     "[soak] grants: {} cycles, {}/{} unauthorized refused, {}/{} revoked accesses refused",
                     r.grants.cycles,
                     r.grants.unauthorized_refused,
@@ -1161,24 +1173,25 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                     r.grants.revoked_refused,
                     r.grants.revoked_attempted
                 );
-                kprintln!(
-                    "[soak] tasks: {} generations, {} priority dispatches, each exactly-once",
-                    r.tasks.generations,
-                    r.tasks.priority_dispatched
-                );
-                kprintln!(
-                    "[soak] heap: {} B used by the whole campaign (bump allocator never frees)",
-                    heap_meter().saturating_sub(before)
-                );
-                kprintln!("[soak] ALL {} SOAK INVARIANTS HOLD", n);
-                kprintln!(
-                    "[boot] soak suite: {} ms",
-                    kernel_core::boottime::lap::<ActiveHal>("soak")
-                );
-            }
-            Err((idx, name)) => {
-                kprintln!("[soak] FAILED at soak invariant {}: {}", idx, name);
-                ActiveHal::exit(400 + idx as i32);
+                    kprintln!(
+                        "[soak] tasks: {} generations, {} priority dispatches, each exactly-once",
+                        r.tasks.generations,
+                        r.tasks.priority_dispatched
+                    );
+                    kprintln!(
+                        "[soak] heap: {} B used by the whole campaign (bump allocator never frees)",
+                        heap_meter().saturating_sub(before)
+                    );
+                    kprintln!("[soak] ALL {} SOAK INVARIANTS HOLD", n);
+                    kprintln!(
+                        "[boot] soak suite: {} ms",
+                        kernel_core::boottime::lap::<ActiveHal>("soak")
+                    );
+                }
+                Err((idx, name)) => {
+                    kprintln!("[soak] FAILED at soak invariant {}: {}", idx, name);
+                    ActiveHal::exit(400 + idx as i32);
+                }
             }
         }
     }
@@ -1192,40 +1205,42 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // a rerun performing IDENTICAL work, and — the GUI half — the summary rendered GLYPH-EXACT
     // onto real framebuffer pages, wrap and scroll contracts included. The serial log above is
     // the TUI half of that claim.
-    kprintln!("");
-    kprintln!("--- benchmark selftests (this machine measures itself) ---");
-    {
-        let mut bench_pages: alloc::vec::Vec<usize> =
-            alloc::vec::Vec::with_capacity(kernel_core::bench::FB_PAGES);
-        for _ in 0..kernel_core::bench::FB_PAGES {
-            match crate::frames::alloc_zeroed() {
-                Some(f) => bench_pages.push(f.addr()),
-                None => break,
-            }
-        }
-        match kernel_core::bench::bench_suite::<ActiveHal>(
-            kernel_core::bench::BOOT_LOAD,
-            &bench_pages,
-            |line| kprintln!("{}", line),
-            |n, passed, name| {
-                if passed {
-                    kprintln!("  [pass {:>2}] {}", n, name);
-                } else {
-                    kprintln!("  [FAIL {:>2}] {}", n, name);
+    if STORMS_AT_BOOT {
+        kprintln!("");
+        kprintln!("--- benchmark selftests (this machine measures itself) ---");
+        {
+            let mut bench_pages: alloc::vec::Vec<usize> =
+                alloc::vec::Vec::with_capacity(kernel_core::bench::FB_PAGES);
+            for _ in 0..kernel_core::bench::FB_PAGES {
+                match crate::frames::alloc_zeroed() {
+                    Some(f) => bench_pages.push(f.addr()),
+                    None => break,
                 }
-            },
-        ) {
-            Ok((_report, n)) => {
-                kprintln!("[bench] ALL {} BENCHMARK INVARIANTS HOLD", n);
-                kprintln!(
-                    "[boot] bench suite: {} ms",
-                    kernel_core::boottime::lap::<ActiveHal>("bench")
-                );
-                kprintln!("[bench] GUI half: the same numbers were proved ON THE FRAMEBUFFER");
             }
-            Err((idx, name)) => {
-                kprintln!("[bench] FAILED at benchmark invariant {}: {}", idx, name);
-                ActiveHal::exit(420 + idx as i32);
+            match kernel_core::bench::bench_suite::<ActiveHal>(
+                kernel_core::bench::BOOT_LOAD,
+                &bench_pages,
+                |line| kprintln!("{}", line),
+                |n, passed, name| {
+                    if passed {
+                        kprintln!("  [pass {:>2}] {}", n, name);
+                    } else {
+                        kprintln!("  [FAIL {:>2}] {}", n, name);
+                    }
+                },
+            ) {
+                Ok((_report, n)) => {
+                    kprintln!("[bench] ALL {} BENCHMARK INVARIANTS HOLD", n);
+                    kprintln!(
+                        "[boot] bench suite: {} ms",
+                        kernel_core::boottime::lap::<ActiveHal>("bench")
+                    );
+                    kprintln!("[bench] GUI half: the same numbers were proved ON THE FRAMEBUFFER");
+                }
+                Err((idx, name)) => {
+                    kprintln!("[bench] FAILED at benchmark invariant {}: {}", idx, name);
+                    ActiveHal::exit(420 + idx as i32);
+                }
             }
         }
     }
@@ -2105,99 +2120,111 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // events against the window stack, held to what an OS must actually do at volume - closed
     // lifecycles, an honest bounded backlog, a steady state that allocates NOTHING on a heap
     // that never frees, a settled desktop that goes quiet, and the same storm twice.
-    kprintln!("");
-    kprintln!("--- window-storm selftests (the desktop at event volume, measured on this machine's own heap) ---");
-    kernel_core::STORM_REPORT.set(|family, before, after| {
-        kprintln!(
-            "[{}] heap watermark across the storm: {} -> {} bytes ({} moved)",
-            family,
-            before,
-            after,
-            after.saturating_sub(before)
-        )
-    });
-    match kernel_core::wmstorm::storm_suite(&mut || crate::heap::used_bytes(), |n, passed, name| {
-        if passed {
-            kprintln!("  [pass {:>2}] {}", n, name);
-        } else {
-            kprintln!("  [FAIL {:>2}] {}", n, name);
-        }
-    }) {
-        Ok(n) => {
-            kprintln!("[wmstorm] ALL {} WINDOW-STORM INVARIANTS HOLD", n);
+    if STORMS_AT_BOOT {
+        kprintln!("");
+        kprintln!("--- window-storm selftests (the desktop at event volume, measured on this machine's own heap) ---");
+        kernel_core::STORM_REPORT.set(|family, before, after| {
             kprintln!(
-                "[boot] wmstorm suite: {} ms",
-                kernel_core::boottime::lap::<ActiveHal>("wmstorm")
-            );
-        }
-        Err((idx, name)) => {
-            kprintln!(
-                "[wmstorm] FAILED at window-storm invariant {}: {}",
-                idx,
-                name
-            );
-            ActiveHal::exit(740 + idx as i32);
+                "[{}] heap watermark across the storm: {} -> {} bytes ({} moved)",
+                family,
+                before,
+                after,
+                after.saturating_sub(before)
+            )
+        });
+        match kernel_core::wmstorm::storm_suite(
+            &mut || crate::heap::used_bytes(),
+            |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            },
+        ) {
+            Ok(n) => {
+                kprintln!("[wmstorm] ALL {} WINDOW-STORM INVARIANTS HOLD", n);
+                kprintln!(
+                    "[boot] wmstorm suite: {} ms",
+                    kernel_core::boottime::lap::<ActiveHal>("wmstorm")
+                );
+            }
+            Err((idx, name)) => {
+                kprintln!(
+                    "[wmstorm] FAILED at window-storm invariant {}: {}",
+                    idx,
+                    name
+                );
+                ActiveHal::exit(740 + idx as i32);
+            }
         }
     }
 
     // The SCHEDULER under the same merciless storm (REQ-QUAL-007 / REQ-ML-002, ADR-087): strict
     // priority at volume, FIFO fairness inside a band, the advisor reordering without ever
     // changing membership, a workload lifecycle that allocates NOTHING, and the same storm twice.
-    kprintln!("");
-    kprintln!("--- scheduler-storm selftests (dispatch at volume, measured on this machine's own heap) ---");
-    match kernel_core::schedstorm::storm_suite(
-        &mut || crate::heap::used_bytes(),
-        |n, passed, name| {
-            if passed {
-                kprintln!("  [pass {:>2}] {}", n, name);
-            } else {
-                kprintln!("  [FAIL {:>2}] {}", n, name);
+    if STORMS_AT_BOOT {
+        kprintln!("");
+        kprintln!("--- scheduler-storm selftests (dispatch at volume, measured on this machine's own heap) ---");
+        match kernel_core::schedstorm::storm_suite(
+            &mut || crate::heap::used_bytes(),
+            |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            },
+        ) {
+            Ok(n) => {
+                kprintln!("[schedstorm] ALL {} SCHEDULER-STORM INVARIANTS HOLD", n);
+                kprintln!(
+                    "[boot] schedstorm suite: {} ms",
+                    kernel_core::boottime::lap::<ActiveHal>("schedstorm")
+                );
             }
-        },
-    ) {
-        Ok(n) => {
-            kprintln!("[schedstorm] ALL {} SCHEDULER-STORM INVARIANTS HOLD", n);
-            kprintln!(
-                "[boot] schedstorm suite: {} ms",
-                kernel_core::boottime::lap::<ActiveHal>("schedstorm")
-            );
-        }
-        Err((idx, name)) => {
-            kprintln!(
-                "[schedstorm] FAILED at scheduler-storm invariant {}: {}",
-                idx,
-                name
-            );
-            ActiveHal::exit(760 + idx as i32);
+            Err((idx, name)) => {
+                kprintln!(
+                    "[schedstorm] FAILED at scheduler-storm invariant {}: {}",
+                    idx,
+                    name
+                );
+                ActiveHal::exit(760 + idx as i32);
+            }
         }
     }
 
     // The FILESYSTEM under the same merciless storm (REQ-QUAL-007 / REQ-FS-001, ADR-088): a write
     // that costs no memory, a namespace that closes, erase-on-delete at volume, a crash landing on
     // one side wherever it falls, and the same storm leaving the same device.
-    kprintln!("");
-    kprintln!("--- filesystem-storm selftests (the namespace at write volume, measured on this machine's own heap) ---");
-    match kernel_core::fsstorm::storm_suite(&mut || crate::heap::used_bytes(), |n, passed, name| {
-        if passed {
-            kprintln!("  [pass {:>2}] {}", n, name);
-        } else {
-            kprintln!("  [FAIL {:>2}] {}", n, name);
-        }
-    }) {
-        Ok(n) => {
-            kprintln!("[fsstorm] ALL {} FILESYSTEM-STORM INVARIANTS HOLD", n);
-            kprintln!(
-                "[boot] fsstorm suite: {} ms",
-                kernel_core::boottime::lap::<ActiveHal>("fsstorm")
-            );
-        }
-        Err((idx, name)) => {
-            kprintln!(
-                "[fsstorm] FAILED at filesystem-storm invariant {}: {}",
-                idx,
-                name
-            );
-            ActiveHal::exit(780 + idx as i32);
+    if STORMS_AT_BOOT {
+        kprintln!("");
+        kprintln!("--- filesystem-storm selftests (the namespace at write volume, measured on this machine's own heap) ---");
+        match kernel_core::fsstorm::storm_suite(
+            &mut || crate::heap::used_bytes(),
+            |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            },
+        ) {
+            Ok(n) => {
+                kprintln!("[fsstorm] ALL {} FILESYSTEM-STORM INVARIANTS HOLD", n);
+                kprintln!(
+                    "[boot] fsstorm suite: {} ms",
+                    kernel_core::boottime::lap::<ActiveHal>("fsstorm")
+                );
+            }
+            Err((idx, name)) => {
+                kprintln!(
+                    "[fsstorm] FAILED at filesystem-storm invariant {}: {}",
+                    idx,
+                    name
+                );
+                ActiveHal::exit(780 + idx as i32);
+            }
         }
     }
 
@@ -2230,23 +2257,25 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
-    kprintln!("");
-    kprintln!("--- console-storm selftests (the dispatcher at command volume, on this machine's own heap) ---");
-    match shellio::storm() {
-        Ok(n) => {
-            kprintln!("[shellstorm] ALL {} CONSOLE-STORM INVARIANTS HOLD", n);
-            kprintln!(
-                "[boot] shellstorm suite: {} ms",
-                kernel_core::boottime::lap::<ActiveHal>("shellstorm")
-            );
-        }
-        Err((idx, name)) => {
-            kprintln!(
-                "[shellstorm] FAILED at console-storm invariant {}: {}",
-                idx,
-                name
-            );
-            ActiveHal::exit(820 + idx as i32);
+    if STORMS_AT_BOOT {
+        kprintln!("");
+        kprintln!("--- console-storm selftests (the dispatcher at command volume, on this machine's own heap) ---");
+        match shellio::storm() {
+            Ok(n) => {
+                kprintln!("[shellstorm] ALL {} CONSOLE-STORM INVARIANTS HOLD", n);
+                kprintln!(
+                    "[boot] shellstorm suite: {} ms",
+                    kernel_core::boottime::lap::<ActiveHal>("shellstorm")
+                );
+            }
+            Err((idx, name)) => {
+                kprintln!(
+                    "[shellstorm] FAILED at console-storm invariant {}: {}",
+                    idx,
+                    name
+                );
+                ActiveHal::exit(820 + idx as i32);
+            }
         }
     }
 
@@ -2471,6 +2500,11 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     // exiting. The gate builds without the feature, so its exit-code contract is untouched.
     // Every suite has reported (ADR-154's margin, ADR-162's cost): the heap the console and the
     // desktop start with, and where the boot's time went, on the boot log of every gate.
+    if !STORMS_AT_BOOT {
+        kprintln!(
+            "[boot] deferred in this interactive image (ADR-163): bench, soak, mlrisk-stress, wmstorm, schedstorm, fsstorm, shellstorm - the gate image proves them on every push"
+        );
+    }
     let suites = kernel_core::boottime::summary::<ActiveHal>();
     kprintln!(
         "[boot] suites: {} timed, {} ms total, slowest {} at {} ms",
