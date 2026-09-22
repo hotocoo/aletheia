@@ -445,7 +445,9 @@ CONTRACT=(
   "tlshandshake: a length field that lies about the buffer is refused by name"
   "tlshandshake: the transcript binds the keys to every byte of what was said"
   "tlshandshake: the Finished value is deterministic over the transcript and compared in constant time"
-  "tlshandshake: a pinned root and a chain it signed reach CertificateVerify, where this client still stops by name"
+  "tlshandshake: past a pinned Certificate, a wrong scheme or a bad signature in CertificateVerify is refused by name"
+  "tlshandshake: under a pinned root the server's CertificateVerify and Finished verify, application keys exist, and the client's Finished is the transcript's"
+  "tlshandshake: a CertificateVerify over a different transcript is refused as a bad signature"
 
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.

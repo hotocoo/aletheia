@@ -108,6 +108,9 @@ pub enum HandshakeRefusal {
     /// The peer's certificate was not verified. With no verifier installed this is the ONLY way
     /// this handshake can end, which is the point.
     PeerUnverified,
+    /// The server's CertificateVerify signature does not verify, under the key the verifier
+    /// returned, over the transcript this client saw.
+    BadSignature,
     /// The server's Finished did not match the transcript.
     BadFinished,
     /// The handshake already failed; it does not restart.
@@ -117,25 +120,27 @@ pub enum HandshakeRefusal {
 /// What a caller must provide before this client will accept a peer.
 ///
 /// Implementing this is the whole of "do I trust the other end". It is a trait rather than a
-/// function because a real implementation needs a trust root, a clock and a name to check against,
-/// and this kernel has none of those yet.
+/// function because a real implementation needs a trust root, a clock and a name to check against;
+/// [`crate::trust::PinnedRoot`] is the one this kernel ships, built from the platform's own clock.
 pub trait PeerVerifier {
-    /// Decide whether this certificate chain speaks for the expected name. `certificates` is the
-    /// raw `Certificate` message body, exactly as the server sent it.
-    fn verify(&self, expected_name: &[u8], certificates: &[u8]) -> bool;
+    /// Decide whether this certificate chain speaks for the expected name, and if it does, hand
+    /// back the peer's Ed25519 public key: the key the server's CertificateVerify must be checked
+    /// against. `certificates` is the raw `Certificate` message body, exactly as the server sent it.
+    /// `None` is the refusal; a verifier that cannot name the key has not verified anything.
+    fn verify(&self, expected_name: &[u8], certificates: &[u8]) -> Option<[u8; 32]>;
 }
 
-/// The only verifier this kernel ships: it refuses everything.
+/// The verifier that refuses everything.
 ///
-/// Not a placeholder to be quietly replaced later — a fail-closed default. Until a real verifier
-/// exists, every handshake ends at the server's Certificate with
-/// [`HandshakeRefusal::PeerUnverified`], and no application traffic keys are ever derived. A
-/// client that completed without verification would look encrypted and protect nothing.
+/// Not a placeholder — a fail-closed default. Under it every handshake ends at the server's
+/// Certificate with [`HandshakeRefusal::PeerUnverified`], and no application traffic keys are ever
+/// derived. A client that completed without verification would look encrypted and protect nothing.
+/// The suites keep it to prove that negative stays true.
 pub struct RefuseAllPeers;
 
 impl PeerVerifier for RefuseAllPeers {
-    fn verify(&self, _expected_name: &[u8], _certificates: &[u8]) -> bool {
-        false
+    fn verify(&self, _expected_name: &[u8], _certificates: &[u8]) -> Option<[u8; 32]> {
+        None
     }
 }
 
@@ -158,6 +163,8 @@ pub struct Handshake<V: PeerVerifier> {
     server_name_len: usize,
     client_hs_secret: [u8; HASH_LEN],
     server_hs_secret: [u8; HASH_LEN],
+    /// The peer's public key, once the verifier has named it.
+    peer_key: Option<[u8; 32]>,
     application: Option<(TrafficKeys, TrafficKeys)>,
     work: Box<Workspace>,
     /// Refusals, counted like every other refusal in this tree.
@@ -193,6 +200,7 @@ impl<V: PeerVerifier> Handshake<V> {
             server_name_len: server_name.len(),
             client_hs_secret: [0; HASH_LEN],
             server_hs_secret: [0; HASH_LEN],
+            peer_key: None,
             application: None,
             work: Box::new(Workspace {
                 transcript: [0u8; MAX_TRANSCRIPT],
@@ -224,6 +232,7 @@ impl<V: PeerVerifier> Handshake<V> {
         self.schedule = KeySchedule::new(None);
         self.client_hs_secret = [0; HASH_LEN];
         self.server_hs_secret = [0; HASH_LEN];
+        self.peer_key = None;
         self.application = None;
         self.work.transcript_len = 0;
         Ok(())
@@ -479,17 +488,42 @@ impl<V: PeerVerifier> Handshake<V> {
                 let name_len = self.server_name_len;
                 let mut name = [0u8; 255];
                 name[..name_len].copy_from_slice(&self.server_name[..name_len]);
-                if !self.verifier.verify(&name[..name_len], body) {
-                    return Err(self.fail(HandshakeRefusal::PeerUnverified));
+                match self.verifier.verify(&name[..name_len], body) {
+                    Some(key) => self.peer_key = Some(key),
+                    None => return Err(self.fail(HandshakeRefusal::PeerUnverified)),
                 }
                 self.absorb(message).map_err(|e| self.fail(e))?;
                 self.stage = HandshakeStage::WaitCertificateVerify;
                 Ok(self.stage)
             }
             (HandshakeStage::WaitCertificateVerify, CERTIFICATE_VERIFY) => {
-                message_body(message, CERTIFICATE_VERIFY).map_err(|e| self.fail(e))?;
-                // A signature this kernel cannot check is a signature this kernel must not accept.
-                Err(self.fail(HandshakeRefusal::PeerUnverified))
+                let body = message_body(message, CERTIFICATE_VERIFY).map_err(|e| self.fail(e))?;
+                // RFC 8446 §4.4.3: SignatureScheme(2) then signature<0..2^16-1>. This client
+                // offered exactly one scheme; a server signing with another has chosen something
+                // it was not offered.
+                if body.len() < 4 {
+                    return Err(self.fail(HandshakeRefusal::BadLength));
+                }
+                if u16::from_be_bytes([body[0], body[1]]) != SIG_ED25519 {
+                    return Err(self.fail(HandshakeRefusal::UnsupportedChoice));
+                }
+                let sig_len = u16::from_be_bytes([body[2], body[3]]) as usize;
+                if sig_len != 64 || body.len() != 4 + sig_len {
+                    return Err(self.fail(HandshakeRefusal::BadLength));
+                }
+                let Some(key) = self.peer_key else {
+                    return Err(self.fail(HandshakeRefusal::PeerUnverified));
+                };
+                // The signature covers the transcript through the Certificate — everything this
+                // client has seen so far, so a server that signed a different conversation fails
+                // here. Checked under the key the VERIFIER named, never one the message carries.
+                let content = certificate_verify_content(&self.transcript_hash());
+                if crate::ed25519::verify(&key, &content, &body[4..]).is_err() {
+                    return Err(self.fail(HandshakeRefusal::BadSignature));
+                }
+                self.absorb(message).map_err(|e| self.fail(e))?;
+                self.stage = HandshakeStage::WaitFinished;
+                Ok(self.stage)
             }
             (HandshakeStage::WaitFinished, FINISHED) => {
                 let body = message_body(message, FINISHED).map_err(|e| self.fail(e))?;
@@ -514,6 +548,29 @@ impl<V: PeerVerifier> Handshake<V> {
             }
             _ => Err(self.fail(HandshakeRefusal::OutOfOrder)),
         }
+    }
+
+    /// Write this client's Finished handshake message into `out`, returning its length. Only once
+    /// the server's Finished has verified: a client Finished sent earlier would authenticate a
+    /// transcript the server has not yet vouched for. It is sent under the HANDSHAKE keys; the
+    /// application keys this handshake derived are for what comes after it.
+    pub fn client_finished(&self, out: &mut [u8]) -> Result<usize, HandshakeRefusal> {
+        if self.stage != HandshakeStage::Done {
+            return Err(HandshakeRefusal::OutOfOrder);
+        }
+        if out.len() < 4 + HASH_LEN {
+            return Err(HandshakeRefusal::BadLength);
+        }
+        let value = self.finished_value(&self.client_hs_secret);
+        out[0] = FINISHED;
+        out[1..4].copy_from_slice(&(HASH_LEN as u32).to_be_bytes()[1..]);
+        out[4..4 + HASH_LEN].copy_from_slice(&value);
+        Ok(4 + HASH_LEN)
+    }
+
+    /// The peer's public key, once the verifier has named it.
+    pub fn peer_key(&self) -> Option<[u8; 32]> {
+        self.peer_key
     }
 
     /// The Finished value for a traffic secret over the transcript so far (RFC 8446 §4.4.4).
@@ -561,6 +618,22 @@ fn find_ext(extensions: &[u8], want: u16) -> Option<&[u8]> {
     None
 }
 
+/// The context string RFC 8446 §4.4.3 puts under a server's CertificateVerify signature.
+pub const CERTIFICATE_VERIFY_CONTEXT: &[u8] = b"TLS 1.3, server CertificateVerify";
+/// The length of the signed content: 64 spaces, the context, one zero byte, the transcript hash.
+pub const CERTIFICATE_VERIFY_CONTENT_LEN: usize = 64 + 33 + 1 + HASH_LEN;
+
+/// The bytes a server signs in CertificateVerify, for a transcript hash (RFC 8446 §4.4.3).
+pub fn certificate_verify_content(
+    transcript_hash: &[u8; HASH_LEN],
+) -> [u8; CERTIFICATE_VERIFY_CONTENT_LEN] {
+    let mut content = [0x20u8; CERTIFICATE_VERIFY_CONTENT_LEN];
+    content[64..64 + 33].copy_from_slice(CERTIFICATE_VERIFY_CONTEXT);
+    content[64 + 33] = 0;
+    content[64 + 34..].copy_from_slice(transcript_hash);
+    content
+}
+
 /// Check a handshake message's header and hand back its body. A length that lies about the buffer
 /// is refused before anything reads past it.
 fn message_body(message: &[u8], want_type: u8) -> Result<&[u8], HandshakeRefusal> {
@@ -577,6 +650,99 @@ fn message_body(message: &[u8], want_type: u8) -> Result<&[u8], HandshakeRefusal
     Ok(&message[4..])
 }
 
+/// A stand-in server: it answers a ClientHello with a well-formed ServerHello under a key it
+/// chose, so the client's own parsing and key derivation can be exercised without a network.
+pub(crate) fn fixture_server_hello(
+    client_share: &[u8; 32],
+    server_private: &[u8; 32],
+    out: &mut [u8],
+) -> usize {
+    let _ = client_share;
+    let public = public_key(server_private).unwrap_or([0u8; 32]);
+    let mut body = [0u8; 128];
+    let mut n = 0;
+    body[n..n + 2].copy_from_slice(&[0x03, 0x03]);
+    n += 2;
+    body[n..n + 32].copy_from_slice(&[0x5au8; 32]);
+    n += 32;
+    body[n] = 0; // empty session id
+    n += 1;
+    body[n..n + 2].copy_from_slice(&CIPHER_SUITE.to_be_bytes());
+    n += 2;
+    body[n] = 0; // compression
+    n += 1;
+    let ext_at = n + 2;
+    let mut e = ext_at;
+    e = put_ext(&mut body, e, 43, &[0x03, 0x04]);
+    let mut ks = [0u8; 36];
+    ks[0..2].copy_from_slice(&GROUP_X25519.to_be_bytes());
+    ks[2..4].copy_from_slice(&32u16.to_be_bytes());
+    ks[4..36].copy_from_slice(&public);
+    e = put_ext(&mut body, e, 51, &ks);
+    let ext_len = e - ext_at;
+    body[n..n + 2].copy_from_slice(&(ext_len as u16).to_be_bytes());
+    let total = 4 + e;
+    out[0] = SERVER_HELLO;
+    out[1..4].copy_from_slice(&(e as u32).to_be_bytes()[1..]);
+    out[4..total].copy_from_slice(&body[..e]);
+    total
+}
+
+/// The deterministic inputs of the suites' one flight. Fixed so the transcript — and therefore the
+/// server's CertificateVerify over it — is a constant an independent signer can produce offline.
+pub const FIXTURE_CLIENT_PRIVATE: [u8; 32] = [0x42u8; 32];
+pub const FIXTURE_CLIENT_RANDOM: [u8; 32] = [7u8; 32];
+pub const FIXTURE_SERVER_PRIVATE: [u8; 32] = [0x24u8; 32];
+
+/// Drive a pinned handshake through the deterministic flight — ClientHello, the stand-in
+/// ServerHello, an empty EncryptedExtensions, the pinned fixture leaf as the Certificate — and
+/// return the transcript hash at `WaitCertificateVerify`: the hash the server's CertificateVerify
+/// must cover. Restarts the handshake first, so the result depends on nothing that came before.
+pub fn drive_fixture_flight(
+    hs: &mut Handshake<crate::trust::PinnedRoot>,
+) -> Result<[u8; HASH_LEN], HandshakeRefusal> {
+    drive_fixture_flight_with(hs, FIXTURE_CLIENT_RANDOM)
+}
+
+/// [`drive_fixture_flight`] with a chosen client random, so a suite can change one byte of the
+/// transcript and prove the fixture signature no longer covers it.
+pub fn drive_fixture_flight_with(
+    hs: &mut Handshake<crate::trust::PinnedRoot>,
+    client_random: [u8; 32],
+) -> Result<[u8; HASH_LEN], HandshakeRefusal> {
+    use crate::trust::{certificate_message, LEAF_FIXTURE};
+    hs.restart(FIXTURE_CLIENT_PRIVATE, client_random)?;
+    let mut ch = [0u8; 512];
+    hs.client_hello(&mut ch)?;
+    let mut sh = [0u8; 256];
+    let len = fixture_server_hello(&[0u8; 32], &FIXTURE_SERVER_PRIVATE, &mut sh);
+    hs.server_hello(&sh[..len])?;
+    let ee = [ENCRYPTED_EXTENSIONS, 0, 0, 2, 0, 0];
+    if hs.server_flight(&ee)? != HandshakeStage::WaitCertificate {
+        return Err(HandshakeRefusal::OutOfOrder);
+    }
+    let mut cert = [0u8; 512];
+    let body_len = certificate_message(&[&LEAF_FIXTURE], &mut cert[4..])
+        .map_err(|_| HandshakeRefusal::BadLength)?;
+    cert[0] = CERTIFICATE;
+    cert[1..4].copy_from_slice(&(body_len as u32).to_be_bytes()[1..]);
+    if hs.server_flight(&cert[..4 + body_len])? != HandshakeStage::WaitCertificateVerify {
+        return Err(HandshakeRefusal::OutOfOrder);
+    }
+    Ok(hs.transcript_hash())
+}
+
+/// A CertificateVerify handshake message carrying `signature` under the Ed25519 scheme.
+pub fn certificate_verify_message(signature: &[u8; 64]) -> [u8; 4 + 4 + 64] {
+    let mut m = [0u8; 72];
+    m[0] = CERTIFICATE_VERIFY;
+    m[1..4].copy_from_slice(&(68u32).to_be_bytes()[1..]);
+    m[4..6].copy_from_slice(&SIG_ED25519.to_be_bytes());
+    m[6..8].copy_from_slice(&64u16.to_be_bytes());
+    m[8..].copy_from_slice(signature);
+    m
+}
+
 /// The handshake's contract, proved on every CPU at boot.
 pub fn tlshandshake_suite(
     mut report: impl FnMut(u32, bool, &'static str),
@@ -591,44 +757,6 @@ pub fn tlshandshake_suite(
                 return Err((n, $name));
             }
         }};
-    }
-
-    /// A stand-in server: it answers a ClientHello with a well-formed ServerHello under a key it
-    /// chose, so the client's own parsing and key derivation can be exercised without a network.
-    fn server_hello_for(
-        client_share: &[u8; 32],
-        server_private: &[u8; 32],
-        out: &mut [u8],
-    ) -> usize {
-        let _ = client_share;
-        let public = public_key(server_private).unwrap_or([0u8; 32]);
-        let mut body = [0u8; 128];
-        let mut n = 0;
-        body[n..n + 2].copy_from_slice(&[0x03, 0x03]);
-        n += 2;
-        body[n..n + 32].copy_from_slice(&[0x5au8; 32]);
-        n += 32;
-        body[n] = 0; // empty session id
-        n += 1;
-        body[n..n + 2].copy_from_slice(&CIPHER_SUITE.to_be_bytes());
-        n += 2;
-        body[n] = 0; // compression
-        n += 1;
-        let ext_at = n + 2;
-        let mut e = ext_at;
-        e = put_ext(&mut body, e, 43, &[0x03, 0x04]);
-        let mut ks = [0u8; 36];
-        ks[0..2].copy_from_slice(&GROUP_X25519.to_be_bytes());
-        ks[2..4].copy_from_slice(&32u16.to_be_bytes());
-        ks[4..36].copy_from_slice(&public);
-        e = put_ext(&mut body, e, 51, &ks);
-        let ext_len = e - ext_at;
-        body[n..n + 2].copy_from_slice(&(ext_len as u16).to_be_bytes());
-        let total = 4 + e;
-        out[0] = SERVER_HELLO;
-        out[1..4].copy_from_slice(&(e as u32).to_be_bytes()[1..]);
-        out[4..total].copy_from_slice(&body[..e]);
-        total
     }
 
     let client_private = [0x42u8; 32];
@@ -671,7 +799,7 @@ pub fn tlshandshake_suite(
         hs.client_hello(&mut ch).ok();
         let before = hs.handshake_keys().is_some();
         let mut sh = [0u8; 256];
-        let len = server_hello_for(&[0u8; 32], &server_private, &mut sh);
+        let len = fixture_server_hello(&[0u8; 32], &server_private, &mut sh);
         let accepted = hs.server_hello(&sh[..len]).is_ok();
         let after = hs.handshake_keys();
         check!(
@@ -690,7 +818,7 @@ pub fn tlshandshake_suite(
         let mut ch = [0u8; 512];
         hs.client_hello(&mut ch).ok();
         let mut sh = [0u8; 256];
-        let len = server_hello_for(&[0u8; 32], &server_private, &mut sh);
+        let len = fixture_server_hello(&[0u8; 32], &server_private, &mut sh);
         sh[4 + 2 + 24..4 + 2 + 32].copy_from_slice(&DOWNGRADE_12);
         check!(
             hs.server_hello(&sh[..len]) == Err(HandshakeRefusal::Downgrade)
@@ -706,7 +834,7 @@ pub fn tlshandshake_suite(
         let mut ch = [0u8; 512];
         hs.client_hello(&mut ch).ok();
         let mut sh = [0u8; 256];
-        let len = server_hello_for(&[0u8; 32], &server_private, &mut sh);
+        let len = fixture_server_hello(&[0u8; 32], &server_private, &mut sh);
         // AES-128-GCM instead of ChaCha20-Poly1305.
         sh[4 + 35..4 + 37].copy_from_slice(&0x1301u16.to_be_bytes());
         check!(
@@ -722,7 +850,7 @@ pub fn tlshandshake_suite(
         let mut ch = [0u8; 512];
         hs.client_hello(&mut ch).ok();
         let mut sh = [0u8; 256];
-        let len = server_hello_for(&[0u8; 32], &server_private, &mut sh);
+        let len = fixture_server_hello(&[0u8; 32], &server_private, &mut sh);
         hs.server_hello(&sh[..len]).ok();
         let ee = [ENCRYPTED_EXTENSIONS, 0, 0, 2, 0, 0];
         let after_ee = hs.server_flight(&ee);
@@ -775,7 +903,7 @@ pub fn tlshandshake_suite(
             let mut ch = [0u8; 512];
             hs.client_hello(&mut ch).ok();
             let mut sh = [0u8; 256];
-            let len = server_hello_for(&[0u8; 32], &server_private, &mut sh);
+            let len = fixture_server_hello(&[0u8; 32], &server_private, &mut sh);
             hs.server_hello(&sh[..len]).ok();
             hs.handshake_keys().map(|(c, _)| c.key)
         };
@@ -797,7 +925,7 @@ pub fn tlshandshake_suite(
         let mut ch = [0u8; 512];
         hs.client_hello(&mut ch).ok();
         let mut sh = [0u8; 256];
-        let len = server_hello_for(&[0u8; 32], &server_private, &mut sh);
+        let len = fixture_server_hello(&[0u8; 32], &server_private, &mut sh);
         hs.server_hello(&sh[..len]).ok();
         let secret = [0x31u8; HASH_LEN];
         let one = hs.finished_value(&secret);
@@ -810,37 +938,32 @@ pub fn tlshandshake_suite(
     }
 
     // 10 — with a PINNED ROOT and a chain it signed (ADR-147), the handshake passes the server's
-    //      Certificate and reaches CertificateVerify, where it still stops by name: a signature
-    //      over the transcript this client does not yet check is a signature it must not accept.
-    //      No application traffic keys exist. This is the one place the rung can be seen moving.
+    //      Certificate; then a CertificateVerify under a scheme this client did not offer is
+    //      refused by name, and one carrying a signature of zeros is refused as a bad signature.
+    //      Neither leaves application keys behind.
     {
         use crate::trust::{
-            certificate_message, PinnedRoot, FIXTURE_NAME, FIXTURE_TIME, LEAF_FIXTURE,
-            ROOT_KEY_FIXTURE,
+            PinnedRoot, FIXTURE_NAME, FIXTURE_TIME, LEAF_KEY_FIXTURE, ROOT_KEY_FIXTURE,
         };
         let verdict = match PinnedRoot::new(ROOT_KEY_FIXTURE, FIXTURE_TIME)
             .ok()
             .and_then(|v| Handshake::new(v, FIXTURE_NAME, client_private, [7u8; 32]).ok())
         {
             Some(mut pinned) => {
-                let mut ch = [0u8; 512];
-                pinned.client_hello(&mut ch).ok();
-                let mut sh = [0u8; 256];
-                let len = server_hello_for(&[0u8; 32], &server_private, &mut sh);
-                pinned.server_hello(&sh[..len]).ok();
-                let ee = [ENCRYPTED_EXTENSIONS, 0, 0, 2, 0, 0];
-                let after_ee = pinned.server_flight(&ee);
-                let mut cert = [0u8; 512];
-                let body_len = certificate_message(&[&LEAF_FIXTURE], &mut cert[4..]).unwrap_or(0);
-                cert[0] = CERTIFICATE;
-                cert[1..4].copy_from_slice(&(body_len as u32).to_be_bytes()[1..]);
-                let after_cert = pinned.server_flight(&cert[..4 + body_len]);
-                // A CertificateVerify naming Ed25519 (0x0807) with an empty signature.
-                let cv = [CERTIFICATE_VERIFY, 0, 0, 4, 0x08, 0x07, 0, 0];
-                let after_cv = pinned.server_flight(&cv);
-                after_ee == Ok(HandshakeStage::WaitCertificate)
-                    && after_cert == Ok(HandshakeStage::WaitCertificateVerify)
-                    && after_cv == Err(HandshakeRefusal::PeerUnverified)
+                let reached = drive_fixture_flight(&mut pinned);
+                let mut wrong_scheme = certificate_verify_message(&[0u8; 64]);
+                wrong_scheme[4..6].copy_from_slice(&0x0403u16.to_be_bytes());
+                let scheme_verdict = pinned.server_flight(&wrong_scheme);
+                let no_keys_after_scheme = pinned.application_keys().is_none();
+                let reached_again = drive_fixture_flight(&mut pinned);
+                let zeros = certificate_verify_message(&[0u8; 64]);
+                let zeros_verdict = pinned.server_flight(&zeros);
+                reached.is_ok()
+                    && pinned.peer_key() == Some(LEAF_KEY_FIXTURE)
+                    && scheme_verdict == Err(HandshakeRefusal::UnsupportedChoice)
+                    && no_keys_after_scheme
+                    && reached_again.is_ok()
+                    && zeros_verdict == Err(HandshakeRefusal::BadSignature)
                     && pinned.application_keys().is_none()
                     && pinned.stage() == HandshakeStage::Failed
             }
@@ -848,7 +971,84 @@ pub fn tlshandshake_suite(
         };
         check!(
             verdict,
-            "tlshandshake: a pinned root and a chain it signed reach CertificateVerify, where this client still stops by name"
+            "tlshandshake: past a pinned Certificate, a wrong scheme or a bad signature in CertificateVerify is refused by name"
+        );
+    }
+
+    // 11 — THE HANDSHAKE COMPLETES. The server's CertificateVerify over this very transcript,
+    //      signed by an independent implementation with the leaf's private key (a key this kernel
+    //      does not have), verifies under the key the VERIFIER named; the server's Finished then
+    //      verifies; application traffic keys exist; and this client's Finished is the
+    //      transcript's, refused as out of order one message earlier.
+    {
+        use crate::trust::{
+            PinnedRoot, FIXTURE_CERTIFICATE_VERIFY, FIXTURE_NAME, FIXTURE_TIME,
+            FIXTURE_TRANSCRIPT_HASH, LEAF_KEY_FIXTURE, ROOT_KEY_FIXTURE,
+        };
+        let verdict = match PinnedRoot::new(ROOT_KEY_FIXTURE, FIXTURE_TIME)
+            .ok()
+            .and_then(|v| Handshake::new(v, FIXTURE_NAME, client_private, [7u8; 32]).ok())
+        {
+            Some(mut pinned) => {
+                let hash = drive_fixture_flight(&mut pinned);
+                let cv = certificate_verify_message(&FIXTURE_CERTIFICATE_VERIFY);
+                let after_cv = pinned.server_flight(&cv);
+                let mut early = [0u8; 64];
+                let early_finished = pinned.client_finished(&mut early);
+                let server_finished_value = pinned.finished_value(&pinned.server_hs_secret);
+                let mut fin = [0u8; 4 + HASH_LEN];
+                fin[0] = FINISHED;
+                fin[1..4].copy_from_slice(&(HASH_LEN as u32).to_be_bytes()[1..]);
+                fin[4..].copy_from_slice(&server_finished_value);
+                let after_fin = pinned.server_flight(&fin);
+                let mut out = [0u8; 64];
+                let client_finished = pinned.client_finished(&mut out);
+                let expected = pinned.finished_value(&pinned.client_hs_secret);
+                hash == Ok(FIXTURE_TRANSCRIPT_HASH)
+                    && pinned.peer_key() == Some(LEAF_KEY_FIXTURE)
+                    && after_cv == Ok(HandshakeStage::WaitFinished)
+                    && early_finished == Err(HandshakeRefusal::OutOfOrder)
+                    && after_fin == Ok(HandshakeStage::Done)
+                    && pinned.application_keys().is_some()
+                    && client_finished == Ok(4 + HASH_LEN)
+                    && out[0] == FINISHED
+                    && out[4..4 + HASH_LEN] == expected
+                    && expected != server_finished_value
+            }
+            None => false,
+        };
+        check!(
+            verdict,
+            "tlshandshake: under a pinned root the server's CertificateVerify and Finished verify, application keys exist, and the client's Finished is the transcript's"
+        );
+    }
+
+    // 12 — the same valid signature over a DIFFERENT transcript is refused: one byte of client
+    //      random changes the hash, and a signature that does not cover what was said is a
+    //      signature over some other conversation.
+    {
+        use crate::trust::{
+            PinnedRoot, FIXTURE_CERTIFICATE_VERIFY, FIXTURE_NAME, FIXTURE_TIME, ROOT_KEY_FIXTURE,
+        };
+        let verdict = match PinnedRoot::new(ROOT_KEY_FIXTURE, FIXTURE_TIME)
+            .ok()
+            .and_then(|v| Handshake::new(v, FIXTURE_NAME, client_private, [7u8; 32]).ok())
+        {
+            Some(mut pinned) => {
+                let mut other_random = FIXTURE_CLIENT_RANDOM;
+                other_random[0] ^= 0x01;
+                let reached = drive_fixture_flight_with(&mut pinned, other_random);
+                let cv = certificate_verify_message(&FIXTURE_CERTIFICATE_VERIFY);
+                let after_cv = pinned.server_flight(&cv);
+                reached.is_ok()
+                    && after_cv == Err(HandshakeRefusal::BadSignature)
+                    && pinned.application_keys().is_none()
+            }
+            None => false,
+        };
+        check!(
+            verdict,
+            "tlshandshake: a CertificateVerify over a different transcript is refused as a bad signature"
         );
     }
 
@@ -867,8 +1067,8 @@ mod tests {
             seen += 1;
         })
         .expect("the handshake suite should hold");
-        assert_eq!(n, 10);
-        assert_eq!(seen, 10);
+        assert_eq!(n, 12);
+        assert_eq!(seen, 12);
     }
 
     /// The property that keeps this rung honest: there is no path, with the verifier this kernel

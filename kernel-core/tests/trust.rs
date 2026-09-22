@@ -37,9 +37,12 @@ fn the_live_suite_passes_on_the_host_too() {
 fn the_fixture_chain_is_accepted_and_hands_back_the_leaf_key() {
     let chain = chain_of(&[&LEAF_FIXTURE]);
     assert_eq!(pinned().check(FIXTURE_NAME, &chain), Ok(LEAF_KEY_FIXTURE));
-    assert!(pinned().verify(FIXTURE_NAME, &chain));
+    assert_eq!(
+        pinned().verify(FIXTURE_NAME, &chain),
+        Some(LEAF_KEY_FIXTURE)
+    );
     assert!(
-        !RefuseAllPeers.verify(FIXTURE_NAME, &chain),
+        RefuseAllPeers.verify(FIXTURE_NAME, &chain).is_none(),
         "the default stays fail-closed"
     );
 }

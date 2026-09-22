@@ -33,7 +33,17 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-22, latest (THE WALL CLOCK — ADR-148. ADR-147's verifier refused a time of zero
+**As of:** 2026-09-22, latest (THE HANDSHAKE COMPLETES — ADR-149. ADR-144's handshake stopped at
+the server's CertificateVerify because it could not check it. Now `PeerVerifier::verify` returns the
+peer's KEY, and CertificateVerify is checked under that key — never one the message carries — over the
+transcript this client saw (RFC 8446 §4.4.3); a wrong scheme, a wrong length, a bad signature or a
+signature over a different transcript each end the handshake by name. The client's own Finished exists
+and is refused as out of order until the server's Finished verifies. The fixture CertificateVerify was
+signed by `scripts/tls-fixtures.py` (OpenSSL, via Python) with the leaf's private key, a key this
+kernel does not have. `tlshandshake=12` on all three CPUs: **under a pinned root the handshake reaches
+Done and application traffic keys exist.** Conformance 330 -> 332 core behaviours. **This kernel still
+does not speak TLS to a live peer:** the handshake, the record layer and the TCP client are three proved
+pieces not yet joined over a socket. Previously: THE WALL CLOCK — ADR-148. ADR-147's verifier refused a time of zero
 because this kernel had no clock. Now every target reads its own real-time clock (PL031 on aarch64 with
 its PrimeCell identity checked first, the goldfish RTC on RISC-V, the CMOS RTC on x86-64 read twice
 until two snapshots agree), and `kernel-core/src/clock.rs` is the contract: a reading is PLAUSIBLE
@@ -1149,6 +1159,17 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-22 — the handshake completes (ADR-149)
+
+- ADR-144's handshake stopped at the server's CertificateVerify by name. ADR-145 gave it the signature check, ADR-146 the reader, ADR-147 the decision, ADR-148 the time. This wave adds the last binding: the party whose certificate was accepted is the party speaking in THIS conversation.
+- **The verifier names the key.** `PeerVerifier::verify` returns `Option<[u8; 32]>`; `RefuseAllPeers` returns `None` and stays the fail-closed default the suites keep.
+- **CertificateVerify is checked under that key, over this transcript** (RFC 8446 §4.4.3: 64 spaces, the context string, a zero byte, the transcript hash through the Certificate). Wrong scheme -> `UnsupportedChoice`; wrong length -> `BadLength`; a signature that does not verify, or verifies over a different transcript -> `BadSignature`. Never a key the message carries.
+- **The client's Finished exists** (`client_finished`), written only once the server's Finished has verified, and refused as out of order before.
+- **Signed by someone else.** The suites' deterministic flight has a constant transcript hash; its CertificateVerify was produced by `scripts/tls-fixtures.py` (Python `cryptography` over OpenSSL) with the leaf's private key — a key this kernel does not have. The host test pins the hash and names the regeneration command if the ClientHello ever changes.
+- `tlshandshake=12` on all three CPUs: a wrong scheme or a zero signature refused by name with no keys left behind; **under a pinned root the server's CertificateVerify and Finished verify, application keys exist, and the client's Finished is the transcript's**; the same valid signature over a transcript one byte different is refused. Host suite flips every bit of the signature and of the transcript hash. Conformance contract **330 -> 332** core behaviours.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (332 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** carrying this handshake over ADR-143's records and ADR-140's TCP to a LIVE TLS 1.3 server on the runner. Until that gate exists, this kernel does not speak TLS.
 
 ### 2026-09-22 — the wall clock (ADR-148)
 

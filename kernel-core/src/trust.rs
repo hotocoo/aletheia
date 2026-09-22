@@ -111,8 +111,8 @@ impl PinnedRoot {
 }
 
 impl PeerVerifier for PinnedRoot {
-    fn verify(&self, expected_name: &[u8], certificates: &[u8]) -> bool {
-        self.check(expected_name, certificates).is_ok()
+    fn verify(&self, expected_name: &[u8], certificates: &[u8]) -> Option<[u8; 32]> {
+        self.check(expected_name, certificates).ok()
     }
 }
 
@@ -213,6 +213,20 @@ pub const FIXTURE_NOT_AFTER: i64 = 2_082_758_400;
 /// The name the fixture leaf speaks for.
 pub const FIXTURE_NAME: &[u8] = b"aletheia.test";
 
+/// The transcript hash at `WaitCertificateVerify` of the suites' deterministic flight
+/// (`tlshandshake::drive_fixture_flight`), and the server CertificateVerify over it signed by
+/// `scripts/tls-fixtures.py` with the leaf's private key — a key this kernel does not have.
+pub const FIXTURE_TRANSCRIPT_HASH: [u8; 32] = [
+    0x58, 0xc9, 0x88, 0xc9, 0x75, 0x12, 0x25, 0xb4, 0xdf, 0x79, 0xf9, 0xe2, 0x81, 0x22, 0x02, 0xbb,
+    0xda, 0x8a, 0x71, 0x67, 0x1e, 0x29, 0xa4, 0xcb, 0x35, 0xff, 0x2a, 0xac, 0x33, 0x69, 0xd6, 0xc5,
+];
+pub const FIXTURE_CERTIFICATE_VERIFY: [u8; 64] = [
+    0xe9, 0xde, 0x2a, 0x01, 0xc5, 0x85, 0x5a, 0x44, 0xce, 0x21, 0x53, 0x51, 0x87, 0xbd, 0x4c, 0x50,
+    0x64, 0x66, 0x44, 0x4e, 0x3e, 0xb3, 0xfd, 0x2c, 0x68, 0xa5, 0xc5, 0x88, 0xc6, 0x2f, 0x74, 0xa5,
+    0xf4, 0x9d, 0x00, 0x36, 0xf0, 0x0a, 0x9f, 0x13, 0xbb, 0xff, 0x6f, 0xfe, 0x70, 0x5d, 0xe7, 0xd4,
+    0x9d, 0xbd, 0xe9, 0x79, 0x41, 0x3f, 0xf7, 0x89, 0x75, 0x08, 0xd5, 0x27, 0xc0, 0x12, 0x15, 0x0f,
+];
+
 /// A real Ed25519 leaf for `aletheia.test`, issued by a separate root through OpenSSL (Python's
 /// `cryptography`), valid 2026-01-01 to 2036-01-01. Parsing and checking something this kernel
 /// generated would prove only that it agrees with itself.
@@ -298,8 +312,10 @@ pub fn trust_suite(
         let ok = match pinned {
             Ok(p) => {
                 p.check(FIXTURE_NAME, chain) == Ok(LEAF_KEY_FIXTURE)
-                    && p.verify(FIXTURE_NAME, chain)
-                    && !crate::tlshandshake::RefuseAllPeers.verify(FIXTURE_NAME, chain)
+                    && p.verify(FIXTURE_NAME, chain) == Some(LEAF_KEY_FIXTURE)
+                    && crate::tlshandshake::RefuseAllPeers
+                        .verify(FIXTURE_NAME, chain)
+                        .is_none()
             }
             Err(_) => false,
         };
