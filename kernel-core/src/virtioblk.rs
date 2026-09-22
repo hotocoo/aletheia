@@ -245,6 +245,10 @@ pub trait VirtioHal {
     /// Full system barrier: orders Normal-memory ring writes before the Device-memory notify, and the
     /// used-ring read after `used.idx` is observed to advance.
     fn barrier();
+    /// A monotonic clock in nanoseconds. Bounds a completion wait in TIME (ADR-150): a spin count
+    /// measures how fast this CPU polls, not how long the device has had, and a starved host made
+    /// a healthy device look dead under a count that was generous on an idle one.
+    fn now_ns() -> u64;
 }
 
 /// Where a target's virtio-mmio transports live.
@@ -460,16 +464,20 @@ pub struct VirtioBlk<H: VirtioHal, T: Transport> {
     /// own fixed ring, so it carries its own registry — otherwise its descriptors would be the one path in
     /// the kernel that still names addresses nobody registered.
     dma: DmaRegistry,
-    /// Completion-poll budget for [`Self::submit`], in spin iterations. Defaults to
-    /// [`SUBMIT_SPINS`]; a caller driving PROBE kicks (the VT-d suite pays one timeout per kick
-    /// when the platform loses completions) may tighten it without touching every other user.
-    completion_spins: u64,
+    /// Completion-wait budget for [`Self::submit`], in nanoseconds of [`VirtioHal::now_ns`].
+    /// Defaults to [`SUBMIT_BUDGET_NS`]; a caller driving PROBE kicks (the VT-d suite pays one
+    /// timeout per kick when the platform loses completions) may tighten it without touching every
+    /// other user.
+    completion_budget_ns: u64,
     _hal: PhantomData<H>,
 }
 
-/// The default bounded-wait budget for one request completion: millions of iterations, so a
-/// healthy device always finishes well within it and only a broken ring layout exhausts it.
-pub const SUBMIT_SPINS: u64 = 50_000_000;
+/// The default bounded wait for one request completion: twenty seconds of the platform's clock.
+/// A healthy device finishes in microseconds and a starved emulator in well under a second, so
+/// only a device that will never answer exhausts it - and the bound is on the DEVICE's time, not
+/// on how many times this CPU managed to look (ADR-150: on a loaded CI runner an iteration count
+/// that was generous on an idle machine declared a healthy disk dead, twice).
+pub const SUBMIT_BUDGET_NS: u64 = 20_000_000_000;
 
 impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
     /// Bring the device up: reset → feature negotiation → queue 0 setup → DRIVER_OK. Returns the
@@ -571,7 +579,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 capacity_sectors,
                 flush_ok,
                 dma,
-                completion_spins: SUBMIT_SPINS,
+                completion_budget_ns: SUBMIT_BUDGET_NS,
                 _hal: PhantomData,
             },
             InitReport {
@@ -587,11 +595,17 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         ))
     }
 
-    /// Tighten (or restore) the completion-poll budget for SUBSEQUENT requests. Probe callers -
-    /// the VT-d suite pays one full timeout per kick when the platform loses completions - set a
-    /// smaller bound here instead of paying the default millions per stimulus.
-    pub fn set_completion_spins(&mut self, spins: u64) {
-        self.completion_spins = spins;
+    /// Tighten (or restore) the completion-wait budget for SUBSEQUENT requests, in nanoseconds.
+    /// Probe callers - the VT-d suite pays one full timeout per kick when the platform loses
+    /// completions - set a smaller bound here instead of paying the default twenty seconds per
+    /// stimulus.
+    pub fn set_completion_budget_ns(&mut self, budget_ns: u64) {
+        self.completion_budget_ns = budget_ns;
+    }
+
+    /// The completion-wait budget in force, in nanoseconds.
+    pub fn completion_budget_ns(&self) -> u64 {
+        self.completion_budget_ns
     }
 
     /// The LIVE grants this driver holds for ITS device, named by owner (ring, data). The VT-d
@@ -695,9 +709,10 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
 
     /// Post the head descriptor to the avail ring, notify the device, and poll the used ring to
     /// completion. Returns `(device status byte, bytes the device reported writing)`. The poll is
-    /// BOUNDED: a device that never completes returns `Err` rather than spinning forever (the VM
-    /// watchdog is only the backstop). The used-ring entry's `id` is VALIDATED — a device that
-    /// names another descriptor's completion is lying about whose request finished.
+    /// BOUNDED IN TIME: a device that has not answered within the budget returns `Err` rather than
+    /// spinning forever (the VM watchdog is only the backstop), and a device that answers late but
+    /// within it is a slow device, not a dead one. The used-ring entry's `id` is VALIDATED — a
+    /// device that names another descriptor's completion is lying about whose request finished.
     unsafe fn submit(&self, head: u16) -> Result<(u8, u32), StorageError> {
         // avail ring layout: [flags:u16][idx:u16][ring:u16 * qsize][used_event:u16]
         let avail_idx_ptr = (self.avail + 2) as *mut u16;
@@ -714,12 +729,11 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
 
         self.transport.notify(0);
 
-        // The bound is generous (millions of iterations), so a healthy device always finishes well
-        // within it; only a broken ring layout exhausts it.
-        let mut spins: u64 = 0;
+        // The bound is on the clock, not on a count: how many times this CPU can look in a second
+        // depends on the emulator and the host's load, and neither says anything about the device.
+        let started = H::now_ns();
         while read_volatile(used_idx_ptr) == old_used {
-            spins += 1;
-            if spins > self.completion_spins {
+            if H::now_ns().wrapping_sub(started) > self.completion_budget_ns {
                 return Err(StorageError::Device);
             }
             core::hint::spin_loop();

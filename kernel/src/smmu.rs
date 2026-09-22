@@ -37,6 +37,12 @@ use kernel_core::iommu::{IommuFault, Perm, SoftIommu, PAGE};
 use kernel_core::smmu::{self, Controller, QueueGeom, Regs, TableMem};
 use kernel_core::virtiopci::Bdf;
 
+/// How long one PROBE kick may wait for a completion the platform is expected to LOSE (the kicks
+/// below deliberately provoke the IOMMU into dropping them). Half a second of the platform clock:
+/// long enough that a slow emulator never mistakes a delivered completion for a lost one, short
+/// enough that a suite paying one timeout per kick stays inside the boot watchdog (ADR-150).
+const PROBE_BUDGET_NS: u64 = 500_000_000;
+
 /// The discovery facts parsed before any frame churned. Leaked deliberately: the boot heap
 /// never frees (ADR-063), and one boxed struct is cheaper than re-walking a tree the pool may
 /// already have overwritten.
@@ -365,7 +371,7 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
     let Some(mut blk) = (unsafe { pci::open_block(&disc.pcie) }) else {
         bail!("no virtio-blk-pci attached behind the unit", NAME_8);
     };
-    blk.dev.set_completion_spins(4_000_000);
+    blk.dev.set_completion_budget_ns(PROBE_BUDGET_NS);
     pass!(NAME_8);
 
     // --- 9: model and machine agree ----------------------------------------------------------------------------

@@ -39,6 +39,12 @@ use kernel_core::iommu::{IommuFault, Perm, SoftIommu, PAGE};
 use kernel_core::storage::{BlockDevice, BLOCK_SIZE};
 use kernel_core::vtd::{self, decode_fault_record, fr, Agaw, Controller, RegLayout, TableMem};
 
+/// How long one PROBE kick may wait for a completion the platform is expected to LOSE (the kicks
+/// below deliberately provoke the IOMMU into dropping them). Half a second of the platform clock:
+/// long enough that a slow emulator never mistakes a delivered completion for a lost one, short
+/// enough that a suite paying one timeout per kick stays inside the boot watchdog (ADR-150).
+const PROBE_BUDGET_NS: u64 = 500_000_000;
+
 /// The register file at the DRHD base. Widths follow the spec: 32-bit registers as 32, 64-bit
 /// ones as 64, all volatile - the unit sits behind MMIO and must not see torn or merged accesses.
 struct MmioRegs {
@@ -583,9 +589,9 @@ pub fn dmar_suite(
     };
     // Probe kicks pay one timeout per attempt when the platform loses completions, so tighten the
     // poll budget on every kicking device BEFORE the first stimulus (ADR-073).
-    dev.set_completion_spins(4_000_000);
+    dev.set_completion_budget_ns(PROBE_BUDGET_NS);
     if let Some(p) = blk_persist.as_mut() {
-        p.set_completion_spins(4_000_000);
+        p.set_completion_budget_ns(PROBE_BUDGET_NS);
     }
     let last = dev.num_blocks() - 1;
     let mut pattern = [0u8; BLOCK_SIZE];

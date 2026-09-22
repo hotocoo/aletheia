@@ -33,7 +33,16 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-22, latest (THE HANDSHAKE COMPLETES — ADR-149. ADR-144's handshake stopped at
+**As of:** 2026-09-22, latest (A COMPLETION BUDGET IN TIME — ADR-150. The aarch64 boot gate on the
+GitHub runner failed twice in two runs at two different storage invariants and passed on re-run both
+times: `virtioblk::submit` bounded its wait for a completion in POLLS (fifty million), and a spin count
+measures how fast this CPU looks, not how long the device has had — on a starved runner a healthy disk
+was declared dead. `VirtioHal` now has `now_ns()` and the wait is bounded on the platform clock
+(twenty seconds; probe suites set half a second per kick). Host proof: with a clock that leaps past the
+budget on its first tick a silent device is refused after one look, so the bound is the time, not the
+count. Also: the reproducibility gate's drift report died under `set -o pipefail` at its first `cmp`
+and printed nothing; it now survives and uses `od`, and the packager verifies its own manifest before
+zipping. Previously: THE HANDSHAKE COMPLETES — ADR-149. ADR-144's handshake stopped at
 the server's CertificateVerify because it could not check it. Now `PeerVerifier::verify` returns the
 peer's KEY, and CertificateVerify is checked under that key — never one the message carries — over the
 transcript this client saw (RFC 8446 §4.4.3); a wrong scheme, a wrong length, a bad signature or a
@@ -1159,6 +1168,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-22 — a completion budget in time, not in looks (ADR-150)
+
+- Two consecutive aarch64 boot-gate failures on the GitHub runner — `[persist] PERSISTENT MEDIUM FAILED: Fs(Storage(Device))`, then `fs: two objects never share a data block` — each passing on re-run, each impossible to reproduce locally. One fault: `virtioblk::submit` waited for a completion by polling `used.idx` fifty million times. A spin count measures how fast THIS CPU looks, not how long the device has had; under TCG on a loaded runner a healthy disk was refused as dead.
+- **`VirtioHal::now_ns()`** — a monotonic clock from each target's existing counter — and **the wait is bounded on it**: `SUBMIT_BUDGET_NS` is twenty seconds, so only a device that will never answer exhausts it and a late answer is a slow device, not a dead one. The VT-d and SMMUv3 probe suites, which deliberately provoke lost completions, set `PROBE_BUDGET_NS` (half a second) per kick.
+- `virtq::poll_used_bounded` keeps its poll count on purpose: a caller waiting for a packet or a keypress is waiting for an event that may never come and chooses how many times to ask; a block request the driver issued is owed an answer.
+- Host proof (`kernel-core/tests/virtioblk.rs`): the stand-in's clock advances by a chosen step per look; a silent device is refused once the clock passes the budget, and with a clock that leaps past the budget on its first tick the refusal comes after a single look — a count of one could never be a budget.
+- **CI diagnostics fixed alongside:** `scripts/reproducible-release.sh`'s drift report ended under `set -o pipefail` at its first `cmp` (exit 1 in a pipeline) and printed nothing but "DIFFERS" — twice on 2026-09-22; it now survives, prints both manifests and uses `od` (always present) for byte context. `scripts/release-vmware.sh` now verifies its manifest against the staged files before zipping and names the file that moved. The intermittent manifest drift itself (a VMDK digest, files otherwise identical) is still open; the next occurrence will be diagnosable.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (332 on all three), quality-gate PASS, doc gates PASS, reproducible-release PASS**.
 
 ### 2026-09-22 — the handshake completes (ADR-149)
 

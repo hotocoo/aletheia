@@ -66,6 +66,11 @@ impl VirtioHal for RiscvVirtio {
         frames::alloc_zeroed().map(|f| f.addr())
     }
 
+    fn now_ns() -> u64 {
+        // The platform's own monotonic counter, in the units every latency figure on this target
+        // already uses (ADR-150: the completion wait is bounded in time, not in polls).
+        <crate::hal::Riscv64Hal as Hal>::ticks_to_ns(<crate::hal::Riscv64Hal as Hal>::timer_ticks())
+    }
     fn barrier() {
         // SAFETY: `fence iorw, iorw` has no operands and only enforces memory ordering — over both
         // normal memory (the rings) and I/O (the notify register), which is exactly the pairing here.

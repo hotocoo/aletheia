@@ -64,6 +64,11 @@ impl VirtioHal for Aarch64Virtio {
         frames::alloc_zeroed().map(|f| f.addr())
     }
 
+    fn now_ns() -> u64 {
+        // The platform's own monotonic counter, in the units every latency figure on this target
+        // already uses (ADR-150: the completion wait is bounded in time, not in polls).
+        <crate::hal::Aarch64Hal as Hal>::ticks_to_ns(<crate::hal::Aarch64Hal as Hal>::timer_ticks())
+    }
     fn barrier() {
         // SAFETY: `dsb sy` has no operands and only enforces memory ordering.
         unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };

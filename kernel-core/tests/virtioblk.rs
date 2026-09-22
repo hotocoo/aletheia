@@ -14,6 +14,7 @@ use kernel_core::virtioblk::{SECTORS_PER_BLOCK, SECTOR_SIZE};
 use std::cell::RefCell;
 extern crate alloc;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Capacity of the mock medium, in 512-byte sectors (a 1 MiB disk).
 const CAP: u64 = 2048;
@@ -87,7 +88,20 @@ const PAGE: usize = 4096;
 /// Host stand-in for the CPU seam: a leaked, zeroed, page-aligned buffer IS a
 /// DMA-able identity-mapped frame inside a hosted process (VA == PA trivially).
 struct HostHal;
+
+/// The host stand-in's clock: a counter that advances by `HOST_CLOCK_STEP_NS` every time the driver
+/// looks at it, so a test can decide how much "time" one poll costs - and prove the completion
+/// wait is bounded by the clock and not by how many times the driver looked (ADR-150).
+static HOST_CLOCK_NS: AtomicU64 = AtomicU64::new(0);
+static HOST_CLOCK_STEP_NS: AtomicU64 = AtomicU64::new(1_000);
+
 impl VirtioHal for HostHal {
+    fn now_ns() -> u64 {
+        HOST_CLOCK_NS.fetch_add(
+            HOST_CLOCK_STEP_NS.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        )
+    }
     fn alloc_frame() -> Option<usize> {
         unsafe {
             let layout = std::alloc::Layout::from_size_align(PAGE, PAGE).unwrap();
@@ -431,17 +445,51 @@ fn sub_sector_requests_are_refused_at_the_api_boundary() {
 }
 
 #[test]
-fn a_silent_device_hits_the_poll_bound_and_still_returns() {
+fn a_silent_device_hits_the_time_bound_and_still_returns() {
     let faults = Rc::new(RefCell::new(Faults {
         skip_completion: true,
         ..Default::default()
     }));
-    let (blk, _r, _f) = mk_driver(CAP, faults);
+    let (mut blk, _r, _f) = mk_driver(CAP, faults);
+    assert_eq!(
+        blk.completion_budget_ns(),
+        kernel_core::virtioblk::SUBMIT_BUDGET_NS,
+        "the default budget is the twenty seconds the contract names"
+    );
+    // A millisecond of budget at a microsecond per look: about a thousand looks, then a refusal.
+    blk.set_completion_budget_ns(1_000_000);
+    HOST_CLOCK_STEP_NS.store(1_000, Ordering::Relaxed);
     let mut buf = [0u8; BLOCK_SIZE];
     assert!(matches!(
         blk.read_block(0, &mut buf),
         Err(StorageError::Device)
     ));
+}
+
+/// The bound is the CLOCK. With a clock that leaps past the whole budget on its first tick, a
+/// silent device is refused after a single look; a spin count of one could never be a budget, so
+/// the refusal can only have come from the time.
+#[test]
+fn the_completion_bound_is_measured_on_the_clock_not_in_looks() {
+    let faults = Rc::new(RefCell::new(Faults {
+        skip_completion: true,
+        ..Default::default()
+    }));
+    let (mut blk, _r, _f) = mk_driver(CAP, faults);
+    blk.set_completion_budget_ns(1_000_000_000);
+    HOST_CLOCK_STEP_NS.store(2_000_000_000, Ordering::Relaxed);
+    let before = HOST_CLOCK_NS.load(Ordering::Relaxed);
+    let mut buf = [0u8; BLOCK_SIZE];
+    assert!(matches!(
+        blk.read_block(0, &mut buf),
+        Err(StorageError::Device)
+    ));
+    let looks = (HOST_CLOCK_NS.load(Ordering::Relaxed) - before) / 2_000_000_000;
+    assert!(
+        looks <= 3,
+        "a clock past its budget must end the wait at once, not after {looks} looks"
+    );
+    HOST_CLOCK_STEP_NS.store(1_000, Ordering::Relaxed);
 }
 #[test]
 fn a_fuzzed_completion_surface_never_yields_data_without_an_exact_match() {
