@@ -385,6 +385,19 @@ CONTRACT=(
 
 
 
+
+  # The certificate reader (ADR-146): the same DER refusals and the same name rules on every
+  # CPU.
+  "x509: a real Ed25519 certificate parses to its key, its tbs bytes and its signature"
+  "x509: the certificate's own signature verifies over the tbs bytes this reader returns"
+  "x509: the validity window is read as the seconds it means"
+  "x509: the certificate speaks for the name it carries, case-insensitively, and no other"
+  "x509: a wildcard covers exactly one label, never a subtree"
+  "x509: every truncation of a certificate is refused, never partially read"
+  "x509: indefinite, non-minimal and overlong lengths are refused by name"
+  "x509: a certificate that is not Ed25519 is refused by name rather than half-read"
+  "x509: nesting deeper than this reader follows is refused rather than recursed"
+
   # The signature half of a certificate verifier (ADR-145): the same digests and the same
   # refusals - malleable scalars, off-curve points, short inputs - on every CPU.
   "sha512: the empty message hashes to FIPS 180-4's published digest"

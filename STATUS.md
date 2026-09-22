@@ -33,7 +33,21 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-18, latest (SHA-512 AND ED25519 VERIFICATION — ADR-145 builds the signature
+**As of:** 2026-09-18, latest (THE CERTIFICATE READER — ADR-146. Certificate parsers are where TLS
+clients get compromised, and the historical failures share one shape: a parser that reads what a
+length CLAIMS instead of refusing what the buffer cannot hold. `kernel-core/src/x509.rs` is
+therefore a DER reader with a bounded nesting depth, DER's minimal definite length encoding
+enforced (indefinite and non-minimal forms are how two parsers are made to see different documents,
+which is the whole of a signature-bypass bug), and a named refusal for every malformed shape. It
+returns the `tbsCertificate` bytes AS THEY APPEARED — a re-encoded tbs is a different document, and
+verifying over it would verify nothing. A certificate that is not Ed25519 is refused by name rather
+than half-understood, a wildcard name covers exactly one label and never a subtree, and a time this
+reader cannot read is a refusal rather than a zero that would make a certificate valid from the
+epoch. 9 new boot invariants (`x509=9`) on all three CPUs against a real OpenSSL-issued
+certificate — including that its own signature verifies over the tbs bytes this reader returns, and
+that EVERY truncation of it is refused. Conformance 304 -> 313 core behaviours. **This kernel still
+cannot speak TLS:** no trust root, no clock for validity windows. Previously: SHA-512 AND ED25519
+VERIFICATION — ADR-145 builds the signature
 half of the certificate verifier ADR-144's handshake refuses to run without. Verification ONLY: a
 TLS client checks signatures and never makes them, so this kernel has no private-key path at all.
 The curve arithmetic reuses X25519's field rather than copying it, because two carry chains are two
@@ -1113,6 +1127,17 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-18 — the certificate reader (ADR-146)
+
+- A verifier needs three things: a way to check a signature (ADR-145), a way to read a certificate, and something to trust. This wave takes the reader — the part where TLS clients historically get compromised, always in the same shape: a parser that reads what a length claims instead of refusing what the buffer cannot hold.
+- `kernel-core/src/x509.rs` is a DER reader with a bounded nesting depth and a named refusal for every malformed shape. It returns the `tbsCertificate` bytes **as they appeared**: a re-encoded tbs is a different document, and verifying over it would verify nothing.
+- **DER's length encoding is enforced**, not tolerated: indefinite lengths (legal in BER) and non-minimal long forms are refused, because those are how two parsers are made to see different documents.
+- **A wildcard covers exactly one label.** `*.a.test` matches `b.a.test` and never `c.b.a.test` — the rule that keeps one compromised host from speaking for a subtree. **A time that cannot be read is a refusal**, never a zero that would make a certificate valid from the epoch.
+- Deliberately not read: RSA and ECDSA keys, the full distinguished-name grammar, path-length constraints, CRL and OCSP pointers, every extension but SAN. Each is attacker-reachable surface, and none answers "is this the key that signed, and is that name this host". A certificate carrying something else is refused by name rather than half-understood.
+- New boot family `x509=9` on all three CPUs, against a **real OpenSSL-issued certificate** (parsing something this kernel generated would prove only self-agreement): it parses to key, tbs and signature; its own signature verifies over the tbs bytes the reader returns; the validity window reads as the seconds it means; **every truncation** is refused, prefix by prefix. Conformance contract **304 -> 313** core behaviours.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (313 on all three), quality-gate PASS, doc gates PASS**.
+- **Named as still open:** a trust root and a clock for validity windows. Until both land, `RefuseAllPeers` stays and this kernel cannot speak TLS.
 
 ### 2026-09-18 — SHA-512 and Ed25519 verification (ADR-145)
 

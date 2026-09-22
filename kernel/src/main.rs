@@ -1092,6 +1092,28 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // The CERTIFICATE READER (REQ-SEC-TLS-006, ADR-146): a DER reader that refuses rather than
+    // reads. Certificate parsers are where TLS clients get compromised, and the historical
+    // failures are all one shape - a parser that reads what a length CLAIMS instead of refusing
+    // what the buffer cannot hold.
+    kprintln!("");
+    kprintln!(
+        "--- certificate selftests (DER: bounded depth, minimal lengths, named refusals) ---"
+    );
+    match kernel_core::x509::x509_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[x509] ALL {} CERTIFICATE INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[x509] FAILED at certificate invariant {}: {}", idx, name);
+            semihosting::exit(900 + idx as i32);
+        }
+    }
+
     // Graphics (REQ-GFX-001): the first real slice — a virtio-gpu device, the 2D resource
     // lifecycle, and a display-info round trip against hardware that ANSWERS. The suite ends by
     // asking the device to flush a resource it already destroyed, so the lifecycle proof is the
