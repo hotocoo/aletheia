@@ -1222,6 +1222,25 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // THE CONTENT RENDERER (REQ-WEB-004, ADR-158; Lethe stage N5): a bounded, fail-closed subset of
+    // HTML into lines - headings, paragraphs, lists, preformatted text, links and the title; every
+    // other tag invisible; script and style CONTENT dropped whole; nothing executed, nothing grown.
+    kprintln!("");
+    kprintln!("--- content selftests (HTML subset -> lines, bounded, nothing executed) ---");
+    match kernel_core::content::content_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[content] ALL {} CONTENT INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[content] FAILED at content invariant {}: {}", idx, name);
+            ActiveHal::exit(1040 + idx as i32);
+        }
+    }
+
     // THE BROWSER'S NAVIGATION MODEL (REQ-WEB-002, ADR-156; Lethe stage N4): URLs, the hosts a
     // person has chosen to trust, history, and the page a window shows. Nothing here touches a
     // wire; plaintext is refused rather than downgraded to, and an unpinned host is refused before

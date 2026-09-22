@@ -35,6 +35,7 @@ pub mod clock;
 pub mod compositor;
 pub mod compress;
 pub mod conring;
+pub mod content;
 pub mod crypto;
 pub mod deadva;
 pub mod desktop;

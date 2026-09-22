@@ -899,6 +899,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "navigate the browser to an https:// URL on a trusted host; print the page",
     ),
     ("back", "navigate the browser to the previous page"),
+    ("follow N", "navigate to link [N] of the current page"),
     (
         "mlstat",
         "the resident risk advisor: what it is, and what it has done since boot",
@@ -1002,13 +1003,36 @@ fn fetch_into<H: ShellHost>(host: &H, nav: &mut Navigator, resolved: Resolved) {
             let raw = &reply[..report.received];
             let mut body = [0u8; crate::browser::BODY_CAP];
             match crate::http::parse(raw, &mut body, report.truncated) {
-                Ok(response) => nav.set_page(
-                    url,
-                    response.status,
-                    response.reason.of(raw),
-                    &body[..response.body_len],
-                    response.truncated,
-                ),
+                Ok(response) => {
+                    let is_html = response
+                        .header(raw, b"content-type")
+                        .is_some_and(|v| v.len() >= 9 && v[..9].eq_ignore_ascii_case(b"text/html"));
+                    if is_html {
+                        // HTML is RENDERED (ADR-158): a bounded subset into lines, scripts and
+                        // styles dropped whole, links numbered. The page keeps the rendered text
+                        // and the links; the raw markup is never shown.
+                        let mut shown = [0u8; crate::browser::BODY_CAP];
+                        let rendered =
+                            crate::content::render(&body[..response.body_len], &mut shown, 30, 40);
+                        let cut = response.truncated || rendered.cut;
+                        nav.set_page(
+                            url,
+                            response.status,
+                            response.reason.of(raw),
+                            rendered.text,
+                            cut,
+                        );
+                        nav.set_links(&rendered);
+                    } else {
+                        nav.set_page(
+                            url,
+                            response.status,
+                            response.reason.of(raw),
+                            &body[..response.body_len],
+                            response.truncated,
+                        )
+                    }
+                }
                 Err(_) => nav.set_failure(url, "the answer is not HTTP this browser reads"),
             }
         }
@@ -1552,6 +1576,30 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     out("usage: trust NAME IP PIN (NAME is a lower-case DNS name)")
                 }
                 Err(TrustRefusal::Full) => out("trust: the host table is full; nothing is evicted"),
+            }
+        }
+        "follow" => {
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let Ok(n) = rest.trim().parse::<usize>() else {
+                out("usage: follow N (a link number the page printed as [N])");
+                return Outcome::Continue;
+            };
+            let mut target = [0u8; crate::browser::MAX_URL];
+            let Some(len) = nav.link_target(n, &mut target) else {
+                outf!(out, "follow: the page offers no link [{}]", n);
+                return Outcome::Continue;
+            };
+            match nav.navigate(&target[..len]) {
+                Ok(resolved) => browse(host, nav, resolved, out),
+                Err(NavRefusal::Url(UrlRefusal::Plaintext)) => {
+                    out("follow: that link is plaintext; this browser speaks https only, and does not downgrade")
+                }
+                Err(NavRefusal::Url(why)) => outf!(out, "follow: that link is not a URL this browser reads ({:?})", why),
+                Err(NavRefusal::UnknownHost) => {
+                    out("follow: no root pinned for that link's host (trust NAME IP PIN first); nothing was dialed")
+                }
             }
         }
         "go" | "back" => {
@@ -2973,7 +3021,16 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && (trusted.contains("refused: ") || trusted.contains("HTTP "))
     );
 
-    // 46. A command line ends on return, and on nothing else. The desktop's file panel is
+    // 46. `follow` refuses a number the page never printed, and a bad number by usage, before
+    //     anything is dialed.
+    let (nolink, _) = transcript("follow 3\r", host, &mut fs, dev);
+    let (badnum, _) = transcript("follow x\r", host, &mut fs, dev);
+    check!(
+        "console: follow refuses a link the page never offered before anything is dialed",
+        nolink.contains("follow: the page offers no link [3]") && badnum.contains("usage: follow")
+    );
+
+    // 47. A command line ends on return, and on nothing else. The desktop's file panel is
     //     refreshed off this predicate (ADR-137), so a byte that wrongly counted as a line end
     //     would read the directory on every keystroke a human types.
     check!(
@@ -2986,7 +3043,7 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && !ends_a_command(b' ')
     );
 
-    // 47. The serviced loop hands the namespace out once before the first prompt and once per
+    // 48. The serviced loop hands the namespace out once before the first prompt and once per
     //     completed line — never mid-line. This is what lets a GUI panel show the namespace
     //     without ever holding the filesystem itself.
     let mut phases: Vec<ServicePhase> = Vec::new();

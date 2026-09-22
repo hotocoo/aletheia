@@ -309,6 +309,7 @@ mod tests {
                     | "trust"
                     | "go"
                     | "back"
+                    | "follow"
                     | "help"
                     | "ver"
                     | "arch"

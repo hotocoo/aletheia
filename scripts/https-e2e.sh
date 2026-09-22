@@ -57,6 +57,14 @@ class Handler(BaseHTTPRequestHandler):
             for piece in (CHUNK[:10], CHUNK[10:31], CHUNK[31:]):
                 self.wfile.write(b"%x\r\n" % len(piece) + piece + b"\r\n")
             self.wfile.write(b"0\r\n\r\n")
+        elif self.path == "/index.html":
+            body = (b"<!DOCTYPE html><html><head><title>Aletheia  Test</title>"
+                    b"<script>alert('never shown')</script></head><body><h1>Welcome</h1>"
+                    b"<p>See <a href=\"/plain.txt\">the plain page</a> for &amp; more.</p>"
+                    b"<ul><li>one</li><li>two</li></ul></body></html>")
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "close")
+            self.end_headers(); self.wfile.write(body)
         elif self.path == "/big.txt":
             body = b"0123456789" * 400          # 4000 bytes: more than the console shows
             self.send_response(200); self.send_header("Content-Type", "text/plain")
@@ -187,6 +195,15 @@ check_transcript() {
   grep -q "trust: $SERVER_NAME at 10.0.2.2" <<<"$log" || { echo "  FAIL [$label] trust did not pin the host"; bad=1; }
   [ "$(grep -c "^HTTP 200 OK" <<<"$log")" -ge 3 ] || { echo "  FAIL [$label] the browser pages did not render their status lines (go, go, back)"; bad=1; }
   grep -q "^https://$SERVER_NAME:$PEER_PORT/chunked.txt" <<<"$log" || { echo "  FAIL [$label] the chunked page's URL line never rendered"; bad=1; }
+  # The content renderer (ADR-158): the HTML page shows its heading, its link numbered and its
+  # list, never its script; following the link fetches the plain page; a link that does not exist
+  # is refused by name.
+  grep -q "^Welcome" <<<"$log" || { echo "  FAIL [$label] the HTML page's heading never rendered"; bad=1; }
+  grep -q "the plain page\[1\] for & mo" <<<"$log" || { echo "  FAIL [$label] the HTML page's link was not numbered and its entity not decoded"; bad=1; }
+  grep -q "^\* one" <<<"$log" || { echo "  FAIL [$label] the HTML page's list did not render"; bad=1; }
+  grep -q "alert(" <<<"$log" && { echo "  FAIL [$label] script content reached the page"; bad=1; }
+  grep -q "peer request: /plain.txt" "$PEER_LOG" || { echo "  FAIL [$label] following the link never fetched the plain page"; bad=1; }
+  grep -q "follow: the page offers no link \[7\]" <<<"$log" || { echo "  FAIL [$label] a link the page never offered was not refused"; bad=1; }
   grep -q "peer request: /plain.txt host: $SERVER_NAME" "$PEER_LOG" || { echo "  FAIL [$label] the peer never saw the plain GET with its Host"; bad=1; }
   grep -q "peer request: /chunked.txt" "$PEER_LOG" || { echo "  FAIL [$label] the peer never saw the chunked GET"; bad=1; }
   grep -q "peer handshake: TLSv1.3" "$PEER_LOG" || { echo "  FAIL [$label] the peer never completed a TLS 1.3 handshake"; bad=1; }
@@ -230,6 +247,9 @@ mmio_leg() {
     "go https://$SERVER_NAME:$PEER_PORT/plain.txt" \
     "go https://$SERVER_NAME:$PEER_PORT/chunked.txt" \
     "back" \
+    "go https://$SERVER_NAME:$PEER_PORT/index.html" \
+    "follow 1" \
+    "follow 7" \
     "halt"
   sed -n '/interactive console/,$p' "$log"
   check_transcript "$label" "$(cat "$log")"

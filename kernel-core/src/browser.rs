@@ -270,6 +270,9 @@ impl Page {
 #[derive(Clone, Copy, Debug)]
 pub struct Navigator {
     pub hosts: HostTable,
+    /// The links the current page offered (ADR-158), numbered as the renderer printed them.
+    links: [([u8; crate::content::HREF_CAP], usize); crate::content::MAX_LINKS],
+    link_count: usize,
     history: [Option<Url>; HISTORY],
     /// Entries in use, oldest first; the newest is at `len - 1`.
     len: usize,
@@ -288,6 +291,8 @@ impl Navigator {
     pub fn new() -> Self {
         Navigator {
             hosts: HostTable::default(),
+            links: [([0u8; crate::content::HREF_CAP], 0); crate::content::MAX_LINKS],
+            link_count: 0,
             history: [None; HISTORY],
             len: 0,
             cursor: 0,
@@ -384,6 +389,7 @@ impl Navigator {
         page.reason[..page.reason_len].copy_from_slice(&reason[..page.reason_len]);
         page.body[..page.body_len].copy_from_slice(&body[..page.body_len]);
         self.page = Some(page);
+        self.link_count = 0;
     }
 
     /// Nothing came back; the page says why.
@@ -398,10 +404,62 @@ impl Navigator {
             truncated: false,
             failure: Some(why),
         });
+        self.link_count = 0;
     }
 
     pub fn page(&self) -> Option<&Page> {
         self.page.as_ref()
+    }
+
+    /// Keep the links a rendered page offered, in the renderer's numbering. Replaces the last
+    /// page's links: a link belongs to the page that offered it.
+    pub fn set_links(&mut self, rendered: &crate::content::Rendered<'_>) {
+        self.link_count = 0;
+        for n in 1..=rendered.links() {
+            if let Some(href) = rendered.link(n) {
+                let (buf, len) = &mut self.links[self.link_count];
+                let take = href.len().min(crate::content::HREF_CAP);
+                buf[..take].copy_from_slice(&href[..take]);
+                *len = take;
+                self.link_count += 1;
+            }
+        }
+    }
+
+    pub fn link_count(&self) -> usize {
+        self.link_count
+    }
+
+    /// The URL link `n` (1-based) points at, made absolute against the current page when it is a
+    /// path: `/x` on `https://h:8443/a` is `https://h:8443/x`. A link that is not https, or not a
+    /// path, comes back as written and is refused by `navigate` for what it is.
+    pub fn link_target(&self, n: usize, out: &mut [u8; MAX_URL]) -> Option<usize> {
+        if n == 0 || n > self.link_count {
+            return None;
+        }
+        let (buf, len) = &self.links[n - 1];
+        let href = &buf[..*len];
+        if href.first() == Some(&b'/') {
+            let page = self.page.as_ref()?;
+            let mut grid = TextGrid::new(MAX_URL as u32, 1);
+            grid.write(b"https://");
+            grid.write(page.url.host());
+            if page.url.port != 443 {
+                grid.write(b":");
+                write_decimal(&mut grid, page.url.port as usize);
+            }
+            grid.write(href);
+            let line = grid.line(0);
+            let end = line
+                .iter()
+                .rposition(|&b| b != b' ' && b != 0)
+                .map_or(0, |i| i + 1);
+            out[..end].copy_from_slice(&line[..end]);
+            return Some(end);
+        }
+        let take = href.len().min(MAX_URL);
+        out[..take].copy_from_slice(&href[..take]);
+        Some(take)
     }
 
     /// Draw the page into a grid: the URL, the status, then the body wrapped to the grid's width

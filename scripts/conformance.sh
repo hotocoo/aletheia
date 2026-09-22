@@ -382,6 +382,7 @@ CONTRACT=(
   "console: tls refuses a pin that is not a 32-byte key by usage and a missing network by name"
   "console: https refuses a path it would never send by usage and a missing network by name"
   "console: go refuses plaintext and an unpinned host by name before anything is dialed"
+  "console: follow refuses a link the page never offered before anything is dialed"
 
 
 
@@ -489,6 +490,16 @@ CONTRACT=(
   "browser: history walks back and forward, a new page drops the forward pages, and the ring is bounded"
   "browser: a page renders as URL, status and a body cut at the grid's last row"
   "browser: a failed page names its reason and its URL, and an over-long body is cut and said to be"
+
+  # The content renderer (ADR-158): the same bounded subset on every CPU, nothing executed.
+  "content: headings, paragraphs and breaks become lines, whitespace collapses, the title is kept"
+  "content: script and style content is dropped whole and counted, never shown, never run"
+  "content: links keep their text, are numbered, and their hrefs are kept to be chosen by number"
+  "content: lists and preformatted text keep their shape, known entities decode, unknown ones stay literal"
+  "content: output is cut at the grid's last row and said so, never written past the buffer"
+  "content: a document longer than the renderer reads is cut at the bound and said so"
+  "content: an unknown tag is invisible, its attributes are never text, an unterminated tag ends the page"
+  "content: comments and declarations are skipped whole, and bytes that could drive a terminal show as ?"
 
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.

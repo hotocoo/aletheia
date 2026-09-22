@@ -33,7 +33,13 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (THE BROWSER WINDOW — ADR-157, Lethe stage N4 delivered. The desktop has a fifth
+**As of:** 2026-09-23, latest (THE CONTENT RENDERER — ADR-158, Lethe stage N5 delivered. `kernel-core/src/content.rs`
+renders a bounded, fail-closed subset of HTML into lines: headings, paragraphs, breaks, lists, `pre`, links and the
+title; script and style CONTENT dropped whole and counted; every other tag invisible, its attributes never text;
+input 8 KiB, output the grid, links sixteen, nothing executed, nothing grown. `go` renders `text/html` through it,
+`follow N` opens link `[N]` through the same refusals as any URL. `content=8` on all three CPUs, `console=50`,
+conformance 365 -> 374, LIVE against the real server's HTML page in `scripts/https-e2e.sh`. Before it: THE BROWSER
+WINDOW — ADR-157, Lethe stage N4 delivered. The desktop has a fifth
 managed window, `browser`: a URL line the person types into and the page the model rendered, on the same contract as
 the terminal, monitor, files and shortcuts windows (a `TextGrid`, a window-manager slot, a taskbar button, `Alt+5`).
 The desktop owns no network and no trust: Enter LATCHES the URL, and the console session collects it on its idle
@@ -1223,6 +1229,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — the content renderer (ADR-158)
+
+- **Lethe stage N5: content.** `kernel-core/src/content.rs` makes sense of a LIST and nothing else: `h1`..`h6`, `p`, `br`, `ul`/`ol`/`li`, `pre`, `a`, `title`, `hr`. Each becomes lines in a `TextGrid`-shaped buffer; whitespace collapses; the title is kept aside.
+- **Dropped whole:** the content of `script`, `style`, `template`, `iframe`, `object`, `embed` - to the matching close tag or the end - and counted, so a page can say how much it refused. **Invisible:** every tag the renderer does not know; its text flows, its attributes never become text. Comments and declarations are skipped; a `<` never closed ends the document rather than leaking markup.
+- **Bounded by construction:** input at 8 KiB (cut and said so), output at the grid's rows (cut at the last row, guard bytes untouched), sixteen links, fixed-size hrefs and title. Five named entities and decimal references decode; the rest stay literal. Bytes outside printable ASCII show as `?`, so no page drives a terminal.
+- **Links** keep their text in the flow and are numbered `[n]`; the navigator keeps their hrefs, makes a path absolute against the current page, and `follow N` opens one through `navigate` - so a plaintext or unpinned link is refused for what it is, and a number the page never printed is refused by name. The console's `go` and the browser window render `text/html` answers through this; other content stays text, bounded as before.
+- **Proof:** `content=8` on all three CPUs; `console=50`; host proofs that every prefix of a page renders without panic; LIVE in `scripts/https-e2e.sh` - the real server's `/index.html` renders its heading, its numbered link and its list, never its script, `follow 1` fetches `/plain.txt`, `follow 7` is refused. Conformance contract **365 -> 374**.
+- Full local chain re-run: **build-all PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS (374 on all three), quality-gate PASS, doc gates PASS, https-e2e PASS, desktop-e2e-dt PASS**.
 
 ### 2026-09-23 — the browser window (ADR-157)
 
