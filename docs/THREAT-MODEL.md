@@ -31,6 +31,7 @@ content are untrusted. Emulator evidence is not hardware evidence.
 | B-11 | Compositor → framebuffer/GPU | surfaces, placement, pages | owner token + scanout bounds + DMA | cross-surface write | compose/frame exhaustion |
 | B-12 | Allocator → resident services | free-frame/pressure readings | allocator-owned admission boundary | advisor bypass of memory authority | memory exhaustion |
 | B-13 | Persistent bytes → state | store/capability images, journal | checksum/authentication + structural validation | forged/stale authority | oversized/corrupt-state processing |
+| B-14 | Remote page → browser stack | TLS peer's HTTP head and body, HTML markup, URLs a page offers | bounded HTTP reader (every peer-named length checked, ambiguity refused) + fail-closed renderer (list of known elements, script/style content dropped, nothing executed) + https-only navigator with operator-filled trust and block lists | markup or header confusion, script execution, a request to a host the operator did not pin, a request split by a smuggled line end | oversized page/header processing (bounded by construction: 8 KiB input, 32 headers, fixed buffers) |
 
 **Rule:** a boundary is not closed merely because an upstream layer validates the same input. The
 layer owning the effect must enforce its own authority invariant.
@@ -63,7 +64,8 @@ assert unauthorized effects and state preservation separately from exhaustion be
 * B-10: `kernel-core/src/vinput.rs`;
 * B-11: `kernel-core/src/compositor.rs`, `kernel-core/src/fbcon.rs`, `kernel-core/src/wm.rs`;
 * B-12: `kernel-core/src/mlsched.rs`, `kernel-core/src/reclaim.rs`;
-* B-13: `kernel-core/src/persist.rs`, `kernel-core/src/capstore.rs`, `kernel-core/src/compress.rs`.
+* B-13: `kernel-core/src/persist.rs`, `kernel-core/src/capstore.rs`, `kernel-core/src/compress.rs`;
+* B-14: `kernel-core/src/http.rs`, `kernel-core/src/content.rs`, `kernel-core/src/browser.rs`, `kernel-core/src/policy.rs`, `kernel-core/tests/hostile_page.rs` (the hostile-page property campaign, ADR-161), `scripts/https-e2e.sh`, `scripts/browser-e2e.sh`.
 
 `scripts/check-threat-model.sh` checks boundary-ID uniqueness, referenced source existence, and the
 required threat-class sections. It is a consistency gate, not a claim of production completeness.
@@ -73,3 +75,8 @@ required threat-class sections. It is a consistency gate, not a claim of product
 Interrupt-driven I/O, complete network protocols, live reclaim residency, hardware frequency control,
 secure boot/update milestones, and hardware-level DMA isolation remain governed by their open/deferred
 findings. They are not silently promoted to security-complete by this document.
+
+The browser stack (B-14) reads only what its list names: no DOM, CSS, images, forms or subresources,
+one connection at a time, no DNS. The property campaign proves bounds, printability, determinism and
+refusals over generated adversarial input; it is not a proof that the HTML subset is parsed the way any
+other browser parses it, and this document does not claim one.

@@ -19,7 +19,7 @@ jobs:
         run: cargo test --manifest-path aletheia/Cargo.toml --locked
 
   property-campaign:
-    name: Larger deterministic property campaign (64 cases)
+    name: Larger deterministic property campaign (64 cases) and the hostile page (browser stack under generated adversarial input)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

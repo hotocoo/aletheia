@@ -33,7 +33,15 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (THE BROWSER WINDOW, LIVE — ADR-160. The console's `input` readout reports the browser
+**As of:** 2026-09-23, latest (THE HOSTILE PAGE — ADR-161. `kernel-core/tests/hostile_page.rs` is a seeded,
+dependency-free property campaign over the browser stack, run under `scripts/property-campaign.sh` on every push:
+generated adversarial HTML (unterminated tags, script bodies, control bytes, deep nesting, past the input bound) into
+guarded buffers - nothing panics, nothing written past a buffer, every shown byte printable, script content never
+shown, every cut said, rendering deterministic; generated HTTP answers with lying lengths, both framings at once,
+chunk sizes past the digit bound, bad headers, flipped bytes and truncations - read exactly when honest, refused when
+not, never misread; URLs of every byte round-tripping through their text and never splitting a request line; a
+navigator under random trust/block/go/back/forward/forget never resolving a host the operator did not allow. Threat
+model boundary B-14 names the remote page. Before it: THE BROWSER WINDOW, LIVE — ADR-160. The console's `input` readout reports the browser
 window's own state (`browser: url "...", page N bytes, first "..."` / `fetching` / `no page`), and a new live gate,
 `scripts/browser-e2e.sh`, boots the desktop's devices and the network on one machine on both device-tree targets,
 pins the peer with `trust`, focuses the window with `Alt+5` through the real virtio keyboard, types a URL key by
@@ -1242,6 +1250,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — the hostile page (ADR-161)
+
+- **The inputs nobody named.** The boot suites prove named behaviours on named inputs; browsers are broken by the rest. `kernel-core/tests/hostile_page.rs` is a deterministic property campaign in the shape of `property_campaign.rs` (seeded generator, no dependency, `PROPERTY FAILURE seed=... case=...` line, shrinking before the panic is re-raised), run under `scripts/property-campaign.sh` with the same seed and case count - CI's 64 cases drive a few thousand adversarial inputs.
+- **Four campaigns.** The renderer over generated HTML into guarded buffers: no panic, guard bytes untouched, every shown byte printable or a newline, a marker inside script/style/iframe/object/embed content never shown, links/hrefs/title within their caps, no line wider than the grid, a document past the bound said to be cut, identical on a second render. The HTTP reader over lying lengths, both framings at once, chunk sizes past the digit bound, folded and colon-less headers, too many and too long headers, flipped bytes, truncations, leading garbage: no panic, nothing past the body buffer, honest complete answers read exactly with truncation said exactly when it happened, lies refused, identical twice. URLs of every byte: a parsed URL has a host in its alphabet and a sendable path, writes back to text that parses to itself, and a request from any host and path is refused or carries exactly six line ends - nothing smuggles a header. The navigator under random `trust`/`block`/go/`back`/`forward`/`forget`/pages: an unpinned or blocked host never resolves, a resolution carries the host's own pin, history never exceeds its ring, a new navigation drops the forward pages, following a link is refused exactly as typing it.
+- **Threat model:** boundary **B-14, remote page -> browser stack**, with the campaign, the live gates and the four modules as evidence; the residual section says what the campaign does not prove (parity with any other browser's parse).
+- **Found:** two wrong oracles in the campaign's own first draft (request line count; history after `back`), no fault in the stack. Conformance unchanged (383).
+- Local: **property-campaign PASS at 64 cases, kernel-core clippy/test PASS, doc gates PASS**.
 
 ### 2026-09-23 — the browser window, LIVE (ADR-160)
 
