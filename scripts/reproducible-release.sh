@@ -48,7 +48,10 @@ if ! cmp -s "$ONE" "$TWO"; then
         # Where, and what. The two builds are deleted when this script exits, so a byte offset
         # printed here is the only evidence anyone will have of a drift that does not reproduce
         # on the machine reading the log.
-        cmp "$TMP/one-x/$f" "$TMP/two-x/$f" 2>&1 | head -3 | sed 's/^/    /'
+        # `cmp` exits 1 when the files differ - which is the only reason we are here - and under
+        # `set -o pipefail` that status ends the script before a single line of diagnosis below is
+        # printed. It did exactly that on the runner twice on 2026-09-22: "DIFFERS" and nothing else.
+        cmp "$TMP/one-x/$f" "$TMP/two-x/$f" 2>&1 | head -3 | sed 's/^/    /' || true
         # A manifest is small and is the one file whose CONTENT names the others, so print both
         # sides of it: a drift there says which packaged file's digest moved even when the file
         # itself compares equal (which is the shape of a digest taken at the wrong moment).
@@ -58,12 +61,13 @@ if ! cmp -s "$ONE" "$TWO"; then
             echo "    --- build two:"; sed 's/^/      /' "$TMP/two-x/$f"
             ;;
         esac
-        off="$(cmp "$TMP/one-x/$f" "$TMP/two-x/$f" 2>/dev/null | sed -n 's/.*byte \([0-9]*\),.*/\1/p' | head -1)"
-        if [ -n "$off" ] && command -v xxd >/dev/null 2>&1; then
+        off="$(cmp "$TMP/one-x/$f" "$TMP/two-x/$f" 2>/dev/null | sed -n 's/.*byte \([0-9]*\),.*/\1/p' | head -1 || true)"
+        if [ -n "$off" ]; then
           start=$(( off > 64 ? off - 64 : 0 ))
           echo "    first difference at byte $off; 128 bytes of context from each build:"
-          xxd -s "$start" -l 128 "$TMP/one-x/$f" | sed 's/^/      one /'
-          xxd -s "$start" -l 128 "$TMP/two-x/$f" | sed 's/^/      two /'
+          # `od` is coreutils and therefore always present; `xxd` is not on a bare runner.
+          od -A d -t x1 -j "$start" -N 128 "$TMP/one-x/$f" | sed 's/^/      one /' || true
+          od -A d -t x1 -j "$start" -N 128 "$TMP/two-x/$f" | sed 's/^/      two /' || true
         fi
       fi
     done < "$TMP/one-list"

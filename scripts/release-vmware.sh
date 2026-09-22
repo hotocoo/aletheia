@@ -204,7 +204,16 @@ else
 fi
 
 hr; echo "==> [6/6] checksums (over EVERY shipped file, the boot log included), zip, digest, release notes"; hr
-( cd "$STAGE" && rm -f SHA256SUMS && SHA $(ls | grep -v '^SHA256SUMS$' | sort) > SHA256SUMS )
+( cd "$STAGE" && rm -f SHA256SUMS && sync && SHA $(ls | grep -v '^SHA256SUMS$' | sort) > SHA256SUMS )
+# The manifest must describe the files as they are about to be zipped. A digest taken while a
+# file was still changing would ship a package that fails its own integrity check, and the
+# reproducibility gate would see two manifests disagree about files that compare equal - so verify
+# the manifest against the files HERE, and if it does not hold, say which file moved and stop.
+SHA_CHECK() { if command -v sha256sum >/dev/null 2>&1; then sha256sum -c --quiet "$@"; else shasum -a 256 -c "$@" >/dev/null; fi; }
+( cd "$STAGE" && SHA_CHECK SHA256SUMS ) || {
+  ( cd "$STAGE" && ls -l --time-style=full-iso . 2>/dev/null || ls -lT . ) | sed 's/^/  /'
+  fail "the manifest does not match the staged files - a file changed between digest and zip"
+}
 ( cd "$OUT" && "$PY" "$ROOT/scripts/zip-reproducible.py" "$NAME" "$NAME.zip" )
 ( cd "$OUT" && SHA "$NAME.zip" > "$NAME.zip.sha256" )
 {
