@@ -171,9 +171,20 @@ else
   launch_vmdk "$STAGE/aletheia-x86_64-selftest.vmdk" "$SLOG"
   ( sleep 240; kill -9 "$QPID" 2>/dev/null ) & WPID=$!
   set +e; wait "$QPID" 2>/dev/null; RC=$?; set -e
-  kill "$WPID" 2>/dev/null; wait "$WPID" 2>/dev/null || true
-  echo "selftest disk: QEMU exit code $RC (expect 33)"
-  [ "$RC" -eq 33 ] || { tail -20 "$SLOG" 2>/dev/null; fail "the packaged selftest disk did not exit 33"; }
+  # The watchdog may already have fired (and so already be gone): a failed kill here must not end
+  # the script under `set -e` before the diagnosis below is printed - that silence is exactly how
+  # a 240-second hang on the runner once reported nothing but "exit code 1". The watchdog's own
+  # `sleep` child is killed too, so it cannot hold the caller's pipe open after we are done.
+  pkill -P "$WPID" 2>/dev/null || true
+  kill "$WPID" 2>/dev/null || true
+  wait "$WPID" 2>/dev/null || true
+  echo "selftest disk: QEMU exit code $RC (expect 33; 137 means the 240s watchdog killed a machine that never finished)"
+  if [ "$RC" -ne 33 ]; then
+    echo "--- last 60 lines of the packaged selftest serial log ---"
+    tail -60 "$SLOG" 2>/dev/null || echo "(no serial output was written)"
+    echo "--- end of serial log ---"
+    fail "the packaged selftest disk did not exit 33"
+  fi
   grep -q '\[e2e\] PASS' "$SLOG" || fail "the packaged selftest disk did not print [e2e] PASS"
   echo "  PASS: the packaged selftest VMDK boots and proves its suites ([e2e] PASS, exit 33)"
   ILOG="$BUILD/release-verify-interactive.log"
