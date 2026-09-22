@@ -33,7 +33,13 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (LETHE'S POLICY CONTRACT — ADR-159, Lethe stage N6 delivered; Track 2 of
+**As of:** 2026-09-23, latest (THE BROWSER WINDOW, LIVE — ADR-160. The console's `input` readout reports the browser
+window's own state (`browser: url "...", page N bytes, first "..."` / `fetching` / `no page`), and a new live gate,
+`scripts/browser-e2e.sh`, boots the desktop's devices and the network on one machine on both device-tree targets,
+pins the peer with `trust`, focuses the window with `Alt+5` through the real virtio keyboard, types a URL key by
+key, presses Enter, and reads the fetched page back FROM THE WINDOW while the peer logs the GET; then types a
+plaintext URL and reads `refused: plaintext` from the window with nothing dialed. In CI as its own job. Before it:
+LETHE'S POLICY CONTRACT — ADR-159, Lethe stage N6 delivered; Track 2 of
 `docs/LETHE-INTEGRATION.md` is complete. `kernel-core/src/policy.rs` proves eight invariants against the browser as
 built: plaintext refused as plaintext and never rewritten; an operator-filled block list (`block HOST`) checked before
 the trust table and on `back`; the renderer makes no requests; third-party links named and dialed only to a pinned,
@@ -1236,6 +1242,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — the browser window, LIVE (ADR-160)
+
+- **The proof gap ADR-157 named, closed.** The window path - compositor queue, URL line, Enter latch, the console session's idle turn, the page pushed back - had unit tests and a `5 managed windows` marker behind it; the live gates typed at the console. Now the GUI is driven and the GUI answers.
+- **The window answers for itself.** `input` gains a `browser:` line read from the window's own state: the URL line as typed, `fetching` while a latched navigation is in flight, else the page's byte count and first line. Host test renders all three shapes.
+- **`scripts/browser-e2e.sh`** (aarch64 + riscv64, its own CI job): desktop devices AND network on one machine; `trust` on the serial line; `Alt+5` through the real virtio keyboard -> `focus: surface 9`; the URL typed one key event at a time (shift for the colon) and shown in the URL line; Enter -> the readout shows the page with the URL as its first line, the peer logs the GET with `aletheia/0.1`; Backspace empties the line; a plaintext URL typed there -> `first "refused: plaintext`, and the peer saw exactly one request.
+- **No new boot invariants:** this rung proves the assembly, which only exists on a live machine. Conformance unchanged (383).
+- Full local chain re-run: **build-all PASS, browser-e2e PASS, vm-e2e (aarch64/riscv/x86) PASS, conformance PASS, quality-gate PASS, doc gates PASS, desktop-e2e-dt PASS, console-e2e PASS, https-e2e PASS**.
 
 ### 2026-09-23 — Lethe's policy contract, adopted natively (ADR-159)
 

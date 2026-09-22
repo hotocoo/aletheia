@@ -748,6 +748,15 @@ pub struct InputFacts {
     pub panel_listings: u64,
     /// Entries dropped across every truncated listing, counted rather than silent.
     pub panel_dropped: u64,
+    /// The browser window (ADR-157, ADR-160): the URL line as typed, whether the navigation it
+    /// latched is still in flight, how much page text the window holds, and its first line -
+    /// read from the window's own state, so a live gate can ask the machine what it shows.
+    pub browser_url: [u8; 64],
+    pub browser_url_len: u8,
+    pub browser_fetching: bool,
+    pub browser_page_len: usize,
+    pub browser_first: [u8; 48],
+    pub browser_first_len: u8,
 }
 
 /// The facts a command may ask of the running target. Everything here is already established by the
@@ -1355,6 +1364,27 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                         f.panel_listings,
                         f.panel_dropped
                     );
+                    // The browser window (ADR-160): what was typed into its URL line, whether
+                    // the platform is still fetching, and what the window shows - so the live
+                    // gate's question "did the page reach the window?" is answered by the
+                    // window, not inferred from the serial line.
+                    let un = (f.browser_url_len as usize).min(f.browser_url.len());
+                    let url = core::str::from_utf8(&f.browser_url[..un]).unwrap_or("?");
+                    if f.browser_fetching {
+                        outf!(out, "browser: url \"{}\", fetching", url);
+                    } else if f.browser_page_len == 0 {
+                        outf!(out, "browser: url \"{}\", no page", url);
+                    } else {
+                        let fnl = (f.browser_first_len as usize).min(f.browser_first.len());
+                        let first = core::str::from_utf8(&f.browser_first[..fnl]).unwrap_or("?");
+                        outf!(
+                            out,
+                            "browser: url \"{}\", page {} bytes, first \"{}\"",
+                            url,
+                            f.browser_page_len,
+                            first
+                        );
+                    }
                 }
                 None => out("input: no machine input session on this target"),
             }

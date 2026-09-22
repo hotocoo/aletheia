@@ -43,6 +43,116 @@ impl ShellHost for TestHost {
     }
 }
 
+/// A host with a live input session whose browser window shows a page (ADR-160).
+struct BrowserFactsHost {
+    fetching: bool,
+    page: &'static [u8],
+}
+
+impl ShellHost for BrowserFactsHost {
+    fn arch(&self) -> &str {
+        "test-host"
+    }
+    fn uptime_ns(&self) -> u64 {
+        1
+    }
+    fn free_frames(&self) -> usize {
+        1
+    }
+    fn total_frames(&self) -> usize {
+        1
+    }
+    fn privilege(&self) -> u64 {
+        1
+    }
+    fn authorize(&self, _action: ShellAction) -> bool {
+        true
+    }
+    fn input_facts(&self) -> Option<shell::InputFacts> {
+        let url = b"https://aletheia.test:8443/plain.txt";
+        let mut browser_url = [0u8; 64];
+        browser_url[..url.len()].copy_from_slice(url);
+        let first = self.page.split(|&b| b == b'\n').next().unwrap_or(&[]);
+        let mut browser_first = [0u8; 48];
+        let fl = first.len().min(48);
+        browser_first[..fl].copy_from_slice(&first[..fl]);
+        Some(shell::InputFacts {
+            events_posted: 0,
+            dropped: 0,
+            refusals: 0,
+            queued: 0,
+            cursor: None,
+            focus: Some(9),
+            kb_events: 0,
+            pt_events: 0,
+            kb_doorbells: 0,
+            pt_doorbells: 0,
+            window: None,
+            term_lines: 0,
+            term_last: [0; 48],
+            term_last_len: 0,
+            windows: 5,
+            closes: 0,
+            drags: 0,
+            panel_rows: 0,
+            panel_listings: 0,
+            panel_dropped: 0,
+            browser_url,
+            browser_url_len: url.len() as u8,
+            browser_fetching: self.fetching,
+            browser_page_len: self.page.len(),
+            browser_first,
+            browser_first_len: fl as u8,
+        })
+    }
+}
+
+#[test]
+fn the_input_readout_says_what_the_browser_window_shows() {
+    // The window's own state answers, in three shapes: a page (with its first line), a fetch
+    // in flight, and no page at all. This is the line the live gate reads (ADR-160).
+    let cases: [(BrowserFactsHost, &str); 3] = [
+        (
+            BrowserFactsHost {
+                fetching: false,
+                page: b"https://aletheia.test:8443/pl\nHTTP 200 OK\nhello",
+            },
+            "browser: url \"https://aletheia.test:8443/plain.txt\", page 47 bytes, first \"https://aletheia.test:8443/pl\"",
+        ),
+        (
+            BrowserFactsHost {
+                fetching: true,
+                page: b"(fetching...)",
+            },
+            "browser: url \"https://aletheia.test:8443/plain.txt\", fetching",
+        ),
+        (
+            BrowserFactsHost {
+                fetching: false,
+                page: b"",
+            },
+            "browser: url \"https://aletheia.test:8443/plain.txt\", no page",
+        ),
+    ];
+    for (host, want) in cases {
+        let mut dev = device();
+        Filesystem::format(&mut dev).unwrap();
+        let mut fs = Filesystem::mount(&mut dev).unwrap();
+        let mut log = String::new();
+        shell::execute(
+            "input",
+            &host,
+            &mut fs,
+            &mut dev,
+            &[],
+            &mut kernel_core::browser::Navigator::new(),
+            &mut |s| log.push_str(s),
+        );
+        assert!(log.contains(want), "readout lacked {want:?}:\n{log}");
+        assert!(log.contains("focus: surface 9"));
+    }
+}
+
 struct DenyWritesHost;
 
 impl ShellHost for DenyWritesHost {

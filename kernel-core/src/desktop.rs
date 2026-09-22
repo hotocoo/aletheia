@@ -347,6 +347,8 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     url_line: [u8; URL_LINE_CAP],
     url_len: usize,
     navigation: Option<([u8; URL_LINE_CAP], usize)>,
+    /// Enter was pressed and the platform has not pushed a page back yet (ADR-160).
+    browser_fetching: bool,
     /// The page text the platform pushed (the navigation model's rendering), bounded.
     page: [u8; PAGE_CAP],
     page_len: usize,
@@ -902,6 +904,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             url_line: [0u8; URL_LINE_CAP],
             url_len: 0,
             navigation: None,
+            browser_fetching: false,
             page: [0u8; PAGE_CAP],
             page_len: 0,
             panel,
@@ -2508,6 +2511,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             match b {
                 b'\r' | b'\n' if self.url_len > 0 => {
                     self.navigation = Some((self.url_line, self.url_len));
+                    self.browser_fetching = true;
                     let note = b"(fetching...)";
                     self.page[..note.len()].copy_from_slice(note);
                     self.page_len = note.len();
@@ -2537,6 +2541,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let n = text.len().min(PAGE_CAP);
         self.page[..n].copy_from_slice(&text[..n]);
         self.page_len = n;
+        self.browser_fetching = false;
         self.browser_dirty = true;
     }
 
@@ -2570,6 +2575,16 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let line = self.term.last_nonblank_line();
         let n = line.len().min(term_last.len());
         term_last[..n].copy_from_slice(&line[..n]);
+        let mut browser_url = [0u8; 64];
+        let un = self.url_len.min(browser_url.len());
+        browser_url[..un].copy_from_slice(&self.url_line[..un]);
+        let mut browser_first = [0u8; 48];
+        let first_line = self.page[..self.page_len]
+            .split(|&b| b == b'\n')
+            .next()
+            .unwrap_or(&[]);
+        let fl = first_line.len().min(browser_first.len());
+        browser_first[..fl].copy_from_slice(&first_line[..fl]);
         InputFacts {
             events_posted: self.posted,
             dropped,
@@ -2591,6 +2606,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             panel_rows: self.panel.len(),
             panel_listings: self.panel.listings,
             panel_dropped: self.panel.entries_dropped,
+            browser_url,
+            browser_url_len: un as u8,
+            browser_fetching: self.browser_fetching,
+            browser_page_len: self.page_len,
+            browser_first,
+            browser_first_len: fl as u8,
         }
     }
 }
