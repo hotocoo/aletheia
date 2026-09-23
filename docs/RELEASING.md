@@ -66,4 +66,5 @@ The images are deterministic, so a later re-run of the workflow replaces the ass
 system is production-ready — `docs/MATURITY.md` grades every subsystem and says plainly that
 nothing here is; the release notes repeat that sentence on purpose. `v0.1.0` is the first stable
 version: the composed desktop meets real input hardware (ADR-080) on a kernel that boots on three
-CPU targets and proves its invariants on every boot.
+CPU targets and proves its invariants on every boot. `v0.2.0` adds the TCP stack, TLS 1.3, the HTTPS client and
+the browser (ADR-138..164); the packaged VMs still carry no network device, so those run under QEMU.

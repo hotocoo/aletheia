@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aletheia-kernel-x86_64"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "font8x8",
  "kernel-core",
@@ -44,7 +44,7 @@ checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
 
 [[package]]
 name = "kernel-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "log"

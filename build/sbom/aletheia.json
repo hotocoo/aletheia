@@ -13,7 +13,7 @@
       "license": "",
       "name": "aletheia",
       "source": "local",
-      "version": "0.1.0"
+      "version": "0.2.0"
     },
     {
       "license": "Apache-2.0 OR MIT",
@@ -247,7 +247,7 @@
       "license": "",
       "name": "kernel-core",
       "source": "local",
-      "version": "0.1.0"
+      "version": "0.2.0"
     },
     {
       "license": "MIT OR Apache-2.0",

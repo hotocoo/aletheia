@@ -396,6 +396,52 @@ Every entity is authorized (`entity.read`) **before** it enters context; a subje
 gets no world context. Semantic/vector and document knowledge are optional interfaces — **no
 embedding server or vector database is required** for normal OS operation.
 
+## Download and run it (no toolchain)
+
+Every stable version is a tag `vX.Y.Z`, and every tag publishes a ready-to-boot x86-64 package on
+the [releases page](https://github.com/hotocoo/aletheia/releases/latest), built and **booted from
+its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.2.0**.
+
+1. Download `aletheia-v0.2.0-x86_64-vmware.zip` and its `.sha256`, then check the digest:
+   `shasum -a 256 -c aletheia-v0.2.0-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
+2. Unzip. It holds two UEFI disks, each with its `.vmx`:
+   - `aletheia-x86_64.vmx`: the OS you sit in front of. It boots, proves its invariants, then
+     opens the console (type `help`).
+   - `aletheia-x86_64-selftest.vmx`: the proof disk. It boots, prints `[e2e] PASS` and halts.
+3. **VMware Workstation / Player / Fusion (Intel Mac)**: File > Open the `.vmx`, power on.
+   Firmware must stay EFI.
+4. **QEMU** (any x86-64 or Apple Silicon host, with OVMF firmware): the same command CI uses to
+   verify the package:
+
+   ```bash
+   cp /path/to/OVMF_VARS.fd vars.fd
+   qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep \
+     -drive if=pflash,format=raw,unit=0,file=/path/to/OVMF_CODE.fd,readonly=on \
+     -drive if=pflash,format=raw,unit=1,file=vars.fd \
+     -drive format=vmdk,file=aletheia-x86_64.vmdk -serial stdio
+   ```
+
+   Homebrew ships the firmware as `/opt/homebrew/share/qemu/edk2-x86_64-code.fd` with vars
+   `edk2-i386-vars.fd` beside it; Debian/Ubuntu as `/usr/share/OVMF/OVMF_CODE_4M.fd` and
+   `OVMF_VARS_4M.fd` (package `ovmf`).
+
+**New in v0.2.0** (since v0.1.0):
+
+- **Networking:** a TCP stack over virtio-net, proved live against a real server (ADR-138..140).
+- **TLS 1.3 from scratch:** key schedule, X25519, record layer, handshake, SHA-512/Ed25519, an
+  X.509 reader and a pinned-root verifier, proved live against OpenSSL (ADR-141..149, ADR-151).
+- **HTTPS and a browser:** an HTTP/1.1 client, a navigation model with trusted hosts and history,
+  a bounded HTML-subset renderer, Lethe's policy contract, and a browser window in the desktop.
+  Type a URL, `Ctrl+1..9` follows a link, `Ctrl+B` / `Ctrl+F` go back / forward
+  (ADR-155..161, ADR-164).
+- **Faster interactive boot:** every suite is timed, and interactive images skip the load tests
+  that the gate image proves on every push (ADR-162, ADR-163).
+
+The packaged VMs carry no network device, so the network, TLS and browser run under QEMU with
+virtio-net (the build-from-source path below). x86-64 only: VMware Fusion on Apple Silicon runs arm64 guests and cannot boot these disks; use
+QEMU there. The package is a research OS, not production software (`docs/MATURITY.md`). To build
+from source, or to run the aarch64 / RISC-V kernels and the live desktop, read on.
+
 ## Boot it and use it
 
 ### 0. Which path works on your machine
