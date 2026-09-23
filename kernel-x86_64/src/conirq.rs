@@ -57,6 +57,10 @@ pub fn init() {
         crate::pic::unmask_timer();
     } else {
         crate::pic::mask_timer();
+        // Masking stops DELIVERY; the 8254 keeps counting and the emulator keeps modelling it, so a
+        // parked guest still costs the host a thousand wakeups a second. Stop the counter as well —
+        // the console is the state this machine waits in, and waiting should cost nothing (ADR-168).
+        crate::pit::quiesce();
     }
     serial::rx_interrupt_enable();
     crate::pic::unmask_serial();

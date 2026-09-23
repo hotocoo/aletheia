@@ -16,6 +16,24 @@ pub const FREQ_HZ: u32 = 1_000;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// Was the CPU halted when this tick arrived? Set by whatever puts the core to sleep, read by the
+/// handler, so the demand the governor measures is the machine's OWN busy/idle split rather than a
+/// number somebody declared (ADR-167).
+static IDLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Reported die temperature, in milli-degrees C.
+///
+/// A STAND-IN, and named as one: this machine exposes no thermal sensor to a guest, so the handler
+/// reports a fixed benign temperature rather than inventing a curve. The power contract still owns
+/// what a trip would mean; nothing here pretends to measure heat (the ADR-056 rule, and the same
+/// posture ADR-076 took for its thermal model).
+const THERMAL_STANDIN_MC: i32 = 40_000;
+
+/// Mark the core as halted (or running) for the next tick's accounting.
+pub fn set_idle(idle: bool) {
+    IDLE.store(idle, Ordering::Relaxed);
+}
+
 pub fn init() {
     program(FREQ_HZ);
 }
@@ -37,9 +55,39 @@ fn program(freq_hz: u32) {
     }
 }
 
+/// Stop channel 0 from free-running, for a machine that has nothing left to do but wait.
+///
+/// Masking IRQ0 at the PIC stops the interrupt being DELIVERED; it does not stop the 8254 from
+/// counting. The emulator still models a device that ticks 100 times a second, and a host that is
+/// emulating a counter is a host burning CPU on behalf of a guest that is asleep — which is
+/// exactly what the idle column of `scripts/comparative-bench.sh` measures, and exactly where this
+/// kernel was losing it.
+///
+/// Mode 0 (interrupt on terminal count) does not reload: the counter runs down once and then sits
+/// there. So this is not "a slower tick", it is the last tick. Anything that needs a periodic
+/// timer again calls [`init`], which reprograms mode 3 from scratch.
+#[cfg(feature = "interactive")]
+pub fn quiesce() {
+    unsafe {
+        // Channel 0, access lobyte/hibyte, mode 0 (one-shot), binary.
+        Port::<u8>::new(COMMAND).write(0x30u8);
+        Port::<u8>::new(CHANNEL0).write(0xFFu8);
+        Port::<u8>::new(CHANNEL0).write(0xFFu8);
+    }
+}
+
 /// Called from the IRQ0 handler.
+///
+/// This is where the resident governor actually stands its watch (ADR-167): the real periodic
+/// interrupt accounts the interval it just closed as busy or idle, then offers the tick. Both
+/// calls are no-ops until the watch is commissioned, and neither ever waits on the watch lock — a
+/// handler that spun for a lock held by the code it interrupted would deadlock the core.
 pub fn tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let idle = IDLE.load(Ordering::Relaxed);
+    let (busy, idle_ticks) = if idle { (0, 1) } else { (1, 0) };
+    kernel_core::lethed::resident::account(0, busy, idle_ticks);
+    kernel_core::lethed::resident::on_timer_tick(now, THERMAL_STANDIN_MC);
 }
 
 pub fn ticks() -> u64 {

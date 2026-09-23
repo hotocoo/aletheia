@@ -587,6 +587,23 @@ CONTRACT=(
   "shellstorm: two hundred and fifty-six reporting commands allocate NOTHING"
   "shellstorm: a thousand submitted lines keep a bounded history and cost only the line itself"
   "shellstorm: the same session told twice prints byte-for-byte the same answer"
+  # Lethe, the resident performance advisor (REQ-ML-007, ADR-165). The advisory discipline
+  # must not vary by CPU: the bundled blob verifies, wrong blobs are refused BY NAME, parity
+  # with the trainer holds, and the advised path obeys the ADR-076 contract it advises.
+  "lethe: the bundled advisor verifies at boot (both trees present, compare bound exact)"
+  "lethe: every way a blob can be wrong is a named refusal"
+  "lethe: the committed parity fixture replays exactly through the live observer"
+  "lethe: with Lethe present the governor range is never left - the overclock band stays authority-only"
+  "lethe: demanded silicon is never parked; every park happened at zero demand"
+  "lethe: with the advisor absent the advised path is bit-identical to the baseline governor"
+  "lethe: the observer is bounded - slots refuse overflow, rings saturate, no history means no guess"
+  "lethed: a replayed or rolled-back tick is refused by name and moves nothing"
+  "lethed: a tick sooner than the cadence floor is refused and rate-limits churn"
+  "lethed: exactly one domain is serviced per tick, round-robin over the watch"
+  "lethed: the advisor is withheld until a full window of post-resync truth exists"
+  "lethed: a stale window is resynced and the advisor withheld, never guessed through"
+  "lethed: while the thermal cooldown is latched the governor stands down and heat wins"
+  "lethed: the resident holds no grant, so no reachable point leaves the governor range"
 )
 
 hr() { printf '========================================================================\n'; }

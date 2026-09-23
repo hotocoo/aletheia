@@ -59,6 +59,10 @@ WORKLOAD_OPS="${WORKLOAD_OPS:-25}"
 BOOT_SAMPLES="${BOOT_SAMPLES:-3}"
 
 fail=0
+# `set -u` plus an early return from typed_workload (WORKLOAD_OPS=0) left this unbound and killed
+# the run mid-leg. Declared once, so turning the workload leg off is a supported thing to do.
+WORKLOAD_MS=""
+MONITOR_PID=""
 hr() { printf '========================================================================\n'; }
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
@@ -135,15 +139,23 @@ typed_workload() {
 boot_median() {
   local label="$1" marker="$2"; shift 2
   local -a samples=()
+  local -a splits=()
   local i
   for i in $(seq 1 "$BOOT_SAMPLES"); do
     boot_and_measure "$label-$i" "$marker" "$@" || return 1
     samples+=("$BOOT_MS")
+    [ -n "${SPLIT_MS:-}" ] && splits+=("$SPLIT_MS")
     # Only the last run's idle number is kept: idle is idle, and it is already a median over samples.
   done
   BOOT_MS="$(printf '%s\n' "${samples[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')"
   BOOT_ALL="$(printf '%s ' "${samples[@]}")"
   printf '    boot to a prompt: median %s ms over %s runs (%s)\n' "$BOOT_MS" "$BOOT_SAMPLES" "$BOOT_ALL"
+  SPLIT_MEDIAN=""
+  if [ "${#splits[@]}" -gt 0 ]; then
+    SPLIT_MEDIAN="$(printf '%s\n' "${splits[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')"
+    printf '    firmware share: %s ms — kernel share: %s ms (the part this project wrote)\n' \
+      "$SPLIT_MEDIAN" "$((BOOT_MS - SPLIT_MEDIAN))"
+  fi
   return 0
 }
 
@@ -159,19 +171,65 @@ boot_and_measure() {
   "${argv[@]}" < "$fifo" > "$log" 2>&1 &
   local pid=$!
 
-  local waited=0
+  # SOME GUESTS DO NOT LISTEN TO THE SERIAL LINE BEFORE THEIR KERNEL STARTS. Redox's bootloader
+  # draws a video-mode picker and waits on the UEFI CONSOLE, which under `-nographic` nobody can
+  # answer — the guest is blocked, not slow, and a harness that reported "no prompt" would be
+  # reporting its own inability to press a key. `MONITOR_KEYS` names keys to send through the QEMU
+  # monitor until the marker appears. This drives FIRMWARE, never the measured workload: the
+  # typed-workload leg still goes over the serial line like every other guest's.
+  if [ -n "${MONITOR_SOCK:-}" ] && [ -n "${MONITOR_KEYS:-}" ]; then
+    (
+      sleep 8
+      for _ in $(seq 1 40); do
+        grep -q "$marker" "$log" 2>/dev/null && break
+        python3 - "$MONITOR_SOCK" $MONITOR_KEYS <<'EOPY' 2>/dev/null || true
+import socket, sys, time
+sock, keys = sys.argv[1], sys.argv[2:]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sock)
+time.sleep(0.3)
+for k in keys:
+    s.sendall(("sendkey %s\n" % k).encode())
+    time.sleep(0.3)
+s.close()
+EOPY
+        sleep 2
+      done
+    ) &
+    MONITOR_PID=$!
+  fi
+
+  # POLL GRANULARITY IS PART OF THE MEASUREMENT. This loop used to `sleep 1`, which put one
+  # SECOND of quantization on a two-to-three second number: every boot time was rounded up to
+  # roughly the next poll, and a gap between two legs could be mostly the sleep. 5 ms is far below
+  # anything either guest can do and makes the reported difference the guests' difference.
+  # OPTIONAL SPLIT. `SPLIT_MARKER` names the line a guest prints the moment it owns the machine,
+  # so the total can be divided into the share spent in firmware and the share spent in the kernel.
+  # Aletheia boots through OVMF; the Linux leg is `-kernel`-loaded and skips firmware entirely, so
+  # comparing their TOTALS compares two different boot paths. This is how that stops being a
+  # caveat in prose and becomes a number.
+  SPLIT_MS=""
+  local split_seen=0
+  local deadline=$((SECONDS + BOOT_TIMEOUT))
   while ! grep -q "$marker" "$log" 2>/dev/null; do
+    if [ -n "${SPLIT_MARKER:-}" ] && [ "$split_seen" -eq 0 ] \
+       && grep -q "$SPLIT_MARKER" "$log" 2>/dev/null; then
+      SPLIT_MS=$(( $(python3 -c 'import time;print(int(time.time()*1000))') - t0 ))
+      split_seen=1
+    fi
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "  FAIL [$label] the guest exited before it reached a prompt"
       sed -n '$p' "$log"; exec 9>&-; return 1
     fi
-    sleep 1; waited=$((waited + 1))
-    if [ "$waited" -ge "$BOOT_TIMEOUT" ]; then
+    sleep 0.005
+    if [ "$SECONDS" -ge "$deadline" ]; then
       echo "  FAIL [$label] no prompt within ${BOOT_TIMEOUT}s"
       kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1
     fi
   done
   t1="$(python3 -c 'import time;print(int(time.time()*1000))')"
+  [ -n "${MONITOR_PID:-}" ] && kill "$MONITOR_PID" 2>/dev/null; MONITOR_PID=""
   BOOT_MS=$((t1 - t0))
   echo "    booted to a prompt in ${BOOT_MS} ms"
 
@@ -187,7 +245,14 @@ boot_and_measure() {
   done
   # The guest stays ALIVE for the typed-workload leg: boot and idle say how a machine waits,
   # the workload says how it ANSWERS. Only after it does the guest get put down.
-  typed_workload "$label" "$log" || { kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1; }
+  # Redox is excluded from the typed-workload leg, and only from that leg: its image boots to a
+  # login prompt, and the credentials are printed on its own console rather than guessed — but
+  # logging in would be measuring how well this script drives somebody else's OS, not how well
+  # that OS answers. Its boot and idle numbers are measured exactly like everyone else's.
+  case "$label" in
+    redox*) : ;;
+    *) typed_workload "$label" "$log" || { kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1; } ;;
+  esac
   kill -9 "$pid" 2>/dev/null
   exec 9>&-
 
@@ -233,6 +298,7 @@ cp "$OVMF_VARS_F" "$WORK/al-vars.fd"
 dd if=/dev/zero of="$WORK/al-s.img" bs=1048576 count=1 2>/dev/null
 dd if=/dev/zero of="$WORK/al-p.img" bs=1048576 count=1 2>/dev/null
 
+SPLIT_MARKER="calling ExitBootServices"
 if boot_median aletheia "aletheia> " \
     qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -display none -serial stdio -monitor none \
     -drive "if=pflash,format=raw,unit=0,file=$OVMF_CODE_F,readonly=on" \
@@ -241,18 +307,53 @@ if boot_median aletheia "aletheia> " \
     -drive "if=none,format=raw,file=$WORK/al-s.img,id=blk0" -device virtio-blk-pci,drive=blk0 \
     -drive "if=none,format=raw,file=$WORK/al-p.img,id=blk1" -device virtio-blk-pci,drive=blk1 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot; then
-  AL_BOOT_MS="$BOOT_MS"; AL_IDLE="$IDLE_CPU"; AL_WL_MS="$WORKLOAD_MS"
+  AL_KERNEL_MS=$((BOOT_MS - ${SPLIT_MEDIAN:-0})); AL_FW_MS="${SPLIT_MEDIAN:-}"; AL_BOOT_MS="$BOOT_MS"; AL_IDLE="$IDLE_CPU"; AL_WL_MS="$WORKLOAD_MS"
 else
   fail=1
 fi
 
 # ---------------------------------------------------------------------------------------------
+SPLIT_MARKER=""
 hr; echo "==> Linux (same host, same qemu-system-x86_64, same TCG, same -m/-smp/-cpu)"; hr
 
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "  Linux leg needs Docker to build the initramfs — SKIPPED (never a silent pass)."
-elif ! curl -sI --max-time 20 "$KERNEL_URL" >/dev/null 2>&1; then
+if ! curl -sI --max-time 20 "$KERNEL_URL" >/dev/null 2>&1; then
   echo "  Linux leg needs network access to fetch the kernel — SKIPPED (never a silent pass)."
+elif ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+  # NO DOCKER: build the SAME initramfs from Alpine's own minirootfs tarball using the host's
+  # curl/tar/cpio/gzip. Docker was only ever a way to get a static busybox and a cpio; requiring a
+  # container daemon to run the comparison meant the comparison did not run on machines that have
+  # no daemon, which is the failure mode this harness exists to avoid. The guest ends in the same
+  # state either way — an interactive shell on ttyS0 — so the measurement is unchanged; only the
+  # way the bytes were assembled differs, and that is stated here rather than hidden.
+  echo "--> no Docker: building the busybox initramfs from the Alpine minirootfs tarball"
+  MINIROOT_URL="${MINIROOT_URL:-https://dl-cdn.alpinelinux.org/alpine/$ALPINE_VER/releases/x86_64/alpine-minirootfs-3.21.3-x86_64.tar.gz}"
+  if ! command -v cpio >/dev/null 2>&1; then
+    echo "  Linux leg needs cpio to build the initramfs — SKIPPED (never a silent pass)."
+  elif ! curl -sL --max-time 300 -o "$WORK/minirootfs.tar.gz" "$MINIROOT_URL" \
+       || [ ! -s "$WORK/minirootfs.tar.gz" ]; then
+    echo "  Linux leg could not fetch the minirootfs — SKIPPED (never a silent pass)."
+  else
+    mkdir -p "$WORK/mr" "$WORK/ir/bin" "$WORK/ir/lib" "$WORK/ir/dev" "$WORK/ir/proc" "$WORK/ir/sys"
+    # Alpine's busybox is linked against musl, not static like the busybox-static package the
+    # Docker path installs, so the loader and libc have to come along or /init dies before it can
+    # print anything. Extracting them is the whole difference between the two paths.
+    tar -xzf "$WORK/minirootfs.tar.gz" -C "$WORK/mr" ./bin/busybox ./lib 2>/dev/null \
+      || tar -xzf "$WORK/minirootfs.tar.gz" -C "$WORK/mr" bin/busybox lib 2>/dev/null
+    if [ ! -s "$WORK/mr/bin/busybox" ]; then
+      echo "  FAIL: the minirootfs carried no busybox"; fail=1
+    else
+      cp "$WORK/mr/bin/busybox" "$WORK/ir/bin/busybox"
+      chmod +x "$WORK/ir/bin/busybox"
+      for so in "$WORK/mr"/lib/ld-musl-*.so.* "$WORK/mr"/lib/libc.musl-*.so.*; do
+        [ -e "$so" ] && cp -a "$so" "$WORK/ir/lib/"
+      done
+      for a in sh cat echo mount sleep; do ln -sf busybox "$WORK/ir/bin/$a"; done
+      printf '#!/bin/busybox sh\n/bin/busybox mount -t proc proc /proc 2>/dev/null\n/bin/busybox mount -t sysfs sys /sys 2>/dev/null\n/bin/busybox echo LINUX-BENCH-PROMPT-READY\nexec /bin/busybox sh\n' > "$WORK/ir/init"
+      chmod +x "$WORK/ir/init"
+      ( cd "$WORK/ir" && find . | cpio -o -H newc 2>/dev/null | gzip -9 > "$WORK/initramfs.gz" ) \
+        || { echo "  FAIL: the initramfs did not build"; fail=1; }
+    fi
+  fi
 else
   echo "--> building a busybox initramfs whose /init prints a marker and execs a shell"
   # The guest must end in the SAME state as Aletheia's: an interactive shell on the serial line,
@@ -266,8 +367,9 @@ else
     chmod +x /ir/init
     cd /ir && find . | cpio -o -H newc 2>/dev/null | gzip -9 > /out/initramfs.gz
   ' >/dev/null 2>&1 || { echo "  FAIL: the initramfs did not build"; fail=1; }
+fi
 
-  if [ -s "$WORK/initramfs.gz" ]; then
+if [ -s "$WORK/initramfs.gz" ]; then
     echo "--> fetching $KERNEL_URL"
     if curl -sL --max-time 300 -o "$WORK/vmlinuz" "$KERNEL_URL" && [ -s "$WORK/vmlinuz" ]; then
       LX_BYTES=$(( $(wc -c < "$WORK/vmlinuz") + $(wc -c < "$WORK/initramfs.gz") ))
@@ -283,6 +385,49 @@ else
       fi
     else
       echo "  FAIL: the kernel did not download"; fail=1
+    fi
+fi
+
+# ---------------------------------------------------------------------------------------------
+# FreeBSD — the first PRODUCTION kernel on this bench besides Linux, on the same emulator.
+#
+# ATTEMPTED, AND CURRENTLY BLOCKED, AND SAID SO. FreeBSD's stock VM image boots its loader with
+# output on the serial line but hands the KERNEL a VGA console, so no login prompt ever reaches
+# ttyu0. Forcing it needs one of:
+#   * a `/boot.config` in the guest containing `-h`, or `console="comconsole"` in loader.conf —
+#     both are edits to somebody else's disk image, which this bench does not make; or
+#   * pausing the loader countdown and typing `boot -h`, which its loader does not accept from the
+#     QEMU monitor's `sendkey` (unlike Redox's, which does — see ADR-171).
+#
+# So this leg SKIPs with the reason rather than reporting "FreeBSD did not boot", which would be
+# the ADR-171 mistake again: a harness blaming a kernel for its own inability to press a key.
+# Point FREEBSD_IMG at an image whose serial console is already enabled and it measures normally.
+#
+# OPT-IN: the image is ~600 MB compressed, ~2.5 GB expanded.
+#   WITH_FREEBSD=1 [FREEBSD_IMG=/path/to/serial-enabled.qcow2] ./scripts/comparative-bench.sh
+# ---------------------------------------------------------------------------------------------
+FB_BOOT_MS=""; FB_IDLE=""; FB_BYTES=""
+if [ "${WITH_FREEBSD:-0}" = "1" ]; then
+  hr; echo "==> FreeBSD (same host, same emulator, same flags)"; hr
+  FB_IMG="${FREEBSD_IMG:-}"
+  if [ -z "$FB_IMG" ]; then
+    echo "  FreeBSD's stock VM image gives its KERNEL a VGA console, so no login prompt reaches"
+    echo "  ttyu0 and there is nothing on the serial line to measure. Enabling it means editing"
+    echo "  somebody else's disk image (/boot.config with -h, or console=\"comconsole\"), which this"
+    echo "  bench does not do. Its loader also ignores the QEMU monitor's sendkey, so it cannot be"
+    echo "  driven from outside the way Redox's can (ADR-171)."
+    echo "  SKIPPED — set FREEBSD_IMG to a serial-enabled image to measure it (never a silent pass)."
+  elif [ ! -f "$FB_IMG" ]; then
+    echo "  FREEBSD_IMG=$FB_IMG does not exist — SKIPPED (never a silent pass)."
+  else
+    FB_BYTES="$(wc -c < "$FB_IMG" | tr -d ' ')"
+    echo "    bootable payload: whole disk image — $FB_BYTES bytes"
+    if boot_median freebsd "login:" \
+        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -nographic -no-reboot \
+        -drive "format=qcow2,file=$FB_IMG"; then
+      FB_BOOT_MS="$BOOT_MS"; FB_IDLE="$IDLE_CPU"
+    else
+      echo "  FreeBSD did not reach a login prompt on this host — reported, not hidden."
     fi
   fi
 fi
@@ -313,12 +458,30 @@ if [ "${WITH_REDOX:-0}" = "1" ]; then
     # Redox's own marker: it prints a login prompt on the serial console. Matched on `login:` rather
     # than a shell prompt because the image boots to a getty, and forcing it further would be
     # measuring how well this script can drive somebody else's OS.
-    if boot_median redox "login:" \
-        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -display none -serial stdio -monitor none -no-reboot \
+    #
+    # TWO THINGS THIS LEG NEEDS THAT THE OTHERS DO NOT, both properties of Redox's image rather
+    # than of Redox's kernel. (1) It boots through UEFI, so it gets the same OVMF pflash Aletheia
+    # does — which also makes its total directly comparable to Aletheia's total, since both pay
+    # firmware and the Linux leg does not. (2) Its bootloader draws a video-mode picker and waits
+    # on the UEFI CONSOLE; under `-nographic` nobody can answer it, and the guest sits there
+    # blocked. It is released with `sendkey ret` through the QEMU monitor. That drives FIRMWARE,
+    # not the measured system: every serial byte still comes from the same code path as the other
+    # legs. Reported here because a reader should know this leg needed a keypress the others did
+    # not.
+    MONITOR_SOCK="$WORK/redox-mon.sock"
+    MONITOR_KEYS="ret"
+    rm -f "$MONITOR_SOCK"
+    if boot_median redox "redox login:" \
+        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -display none -serial stdio \
+        -no-reboot -monitor "unix:$MONITOR_SOCK,server,nowait" \
+        -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE_F" \
         -drive "format=raw,file=$WORK/redox.img"; then
-      RX_BOOT_MS="$BOOT_MS"; RX_IDLE="$IDLE_CPU"
+      RX_BOOT_MS="$BOOT_MS"; RX_IDLE="$IDLE_CPU"; MONITOR_SOCK=""; MONITOR_KEYS=""
     else
       echo "  Redox did not reach a login prompt on this host — reported, not hidden."
+      echo "  last serial bytes seen from the Redox guest:"
+      tail -c 400 "$WORK/redox-1.log" 2>/dev/null | tr -d '\000' | sed 's/^/    | /'
+      echo "  (monitor socket: $(test -S "$WORK/redox-mon.sock" && echo present || echo ABSENT))"
     fi
   fi
 else
@@ -344,6 +507,8 @@ hr; echo "RESULTS — same host, same emulator, same emulation mode, same end st
 printf '%-28s | %-18s | %-18s | %-18s\n' "" "Aletheia (x86-64)" "Linux 6.12-lts" "Redox OS"
 printf '%-28s-+-%-18s-+-%-18s-+-%-18s\n' "----------------------------" "------------------" "------------------" "------------------"
 printf '%-28s | %-18s | %-18s | %-18s\n' "boot to a prompt" "${AL_BOOT_MS:-FAIL} ms" "${LX_BOOT_MS:-SKIP} ms" "${RX_BOOT_MS:-SKIP} ms"
+printf '%-28s | %-18s | %-18s | %-18s\n' "  of which firmware (OVMF)" "${AL_FW_MS:-n/a} ms" "none (-kernel)" "-"
+printf '%-28s | %-18s | %-18s | %-18s\n' "  of which this kernel" "${AL_KERNEL_MS:-n/a} ms" "${LX_BOOT_MS:-SKIP} ms" "-"
 printf '%-28s | %-18s | %-18s | %-18s\n' "idle host CPU at prompt" "${AL_IDLE:-FAIL} %" "${LX_IDLE:-SKIP} %" "${RX_IDLE:-SKIP} %"
 printf '%-28s | %-18s | %-18s | %-18s\n' "bootable payload" "${AL_BYTES:-FAIL} B" "${LX_BYTES:-SKIP} B" "${RX_BYTES:-SKIP} B"
 printf '%-28s | %-18s | %-18s | %-18s\n' "typed echo round-trip" "${AL_WL_MS:-FAIL} ms" "${LX_WL_MS:-SKIP} ms" "n/a (login)"

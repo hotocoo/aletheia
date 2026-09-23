@@ -115,6 +115,11 @@ REQUIRED=(
   'ALL 5 SCHEDULER-STORM INVARIANTS HOLD'
   'ALL 5 FILESYSTEM-STORM INVARIANTS HOLD'
   'ALL 4 CONSOLE-STORM INVARIANTS HOLD'
+  # Lethe (REQ-ML-007, ADR-165) advises the same contract on every CPU.
+  'ALL 12 LETHE ADVISOR INVARIANTS HOLD'
+  # The resident governor (REQ-PM-002, ADR-166) stands the watch on every CPU: the tick contract
+  # depends on no device, so a second hypervisor must prove it too.
+  'ALL 15 RESIDENT GOVERNOR INVARIANTS HOLD'
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'

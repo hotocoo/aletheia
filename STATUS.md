@@ -33,7 +33,10 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (THE BROWSER WINDOW'S OWN KEYS — ADR-164. While the browser window holds focus,
+**As of:** 2026-09-23, latest (THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
+advisor (`lethe=12`) and the resident governor on real timer interrupts (`lethed=15`) boot on all three CPUs, 4-7 ms each,
+with a live census gated on every target; conformance 383 -> **397**; attack surface measured against Linux and the boot
+gap attributed, each its own CI job. Before it: THE BROWSER WINDOW'S OWN KEYS — ADR-164. While the browser window holds focus,
 `Ctrl+1..9` follow link `[n]` of the page it shows, `Ctrl+B` goes back and `Ctrl+F` forward; the desktop latches one
 `BrowserRequest` and the console session resolves it through the same navigator as `follow`, `back` and `forward`, so
 the window refuses exactly what the console refuses and names a missing link or empty history. Proved live on both
@@ -1267,6 +1270,439 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — the Lethe governor waves, merged (ADR-165..173)
+
+- **Nine waves from `wave/lethe` (2026-08-28 .. 2026-09-12) merged into main** instead of being dropped. They were written as ADR-078..086 on a branch cut before main used those numbers, so they land renumbered **ADR-165..173** (REQ-ML-006 -> **REQ-ML-007**, REQ-SEC-002 -> **REQ-SEC-005**; REQ-PM-002 unchanged). What they add: Lethe, the resident performance advisor over the ADR-076 power contract (`kernel-core/src/lethe.rs`, `lethe=12`), the resident governor on real timer interrupts (`kernel-core/src/lethed.rs`, `lethed=15`, live census gated on every CPU), a parked x86-64 console that stops the 8254 as well as masking IRQ0, the boot clock split, attack surface measured against Linux (`scripts/security-surface.sh`), a Redox and a FreeBSD leg in the comparative bench, and the boot-gap attribution (`scripts/boot-profile.sh`).
+- **Placed into today's structure, not replayed:** the two suites run after the input suite, each with a `[boot] FAMILY suite: N ms` lap, outside `STORMS_AT_BOOT` (they are contracts, not load tests); main's 1 kHz PIT and its removal of `pit::rearm` stand; the x86-64 console keeps IRQ0 live when a desktop is installed (ADR-080) and quiesces the counter only when none is.
+- **Proof on the merged tree:** build-all, kernel-core tests (835), vm-e2e on aarch64/riscv64/x86-64, conformance (397 behaviors on each CPU), console-e2e, desktop-e2e-dt, keyboard-e2e, vinput-e2e, browser-e2e, https-e2e, property-campaign, security-surface, boot-profile, quality-gate and the six doc gates all PASS locally.
+- The waves' own notes follow as they were written on the branch (numbers already renumbered; counts in them are the branch's, not today's).
+
+#### the verification is not slow, the emulator is (2026-09-12, ADR-173)
+
+ADR-172 named the next move and its one constraint: shaving the ~291 ms in the two ML advisor suites
+means making verification FASTER, never OPTIONAL. This wave went to shave them and found nothing
+there to shave.
+
+The largest single gap (~147 ms) is not an invariant check at all. It follows `[mlsched] ALL 12
+LIVE-ADVISORY INVARIANTS HOLD`, so the work happens AFTER the suite: it is
+`mlsched::commission(4_096, 7)`, the commissioning WORKLOAD that admits 4,096 real tasks through
+both an advised and a model-free scheduler and proves the advised drain is a permutation of the
+model-free one. First correction, to ADR-172's own wording: a large part of what it called
+"self-verification" is more precisely a commissioning workload, not an invariant check.
+
+Second question: is it quadratic? No. Timed natively, in `--release`, on the host — 512 / 1024 /
+2048 / 4096 tasks cost 0.37 / 0.69 / 1.39 / **2.64 ms**. Cleanly linear.
+
+The benchmarked image is already built `--release` (`opt-level = 3`, `lto = true`), so ~147 ms
+against 2.64 ms is roughly **56x** — squarely normal for QEMU TCG on compute-bound integer code.
+There is no algorithmic win available. The verification is not slow; the emulator is.
+
+**This distorts the boot comparison a THIRD way, and this one favours Linux.** Aletheia's
+self-verification is compute-bound — tight integer loops through two schedulers and two decision
+forests, exactly what TCG emulates worst. A Linux boot is dominated by device probing, firmware
+tables and I/O, which TCG handles comparatively well. So the ~735 ms ADR-172 attributed to
+self-verification is a TCG NUMBER, and on real silicon it would shrink by far more than Linux's boot
+would.
+
+Named non-claims, in register: that is a reason to be CAREFUL, not a reason to claim a win. Exactly
+ONE component was timed natively (`mlsched::commission`, 56x); the other ~588 ms was NOT, and no
+native boot of either system exists to compare. Extrapolating 56x across the whole share would be
+inventing a number. The honest statement is that the absolute boot figures in ADR-169 and ADR-172
+are properties of the measurement ENVIRONMENT as much as of either kernel, and closing that requires
+HARDWARE. ADR-172's ~70% figure stands and is corrected, not withdrawn. NO code changed: the suites
+keep their sizes, the schedulers keep their algorithms, the kernel is byte-for-byte what it was.
+
+A **FreeBSD leg** was also added to the bench (`WITH_FREEBSD=1`) and honestly SKIPs: FreeBSD's stock
+VM image gives its KERNEL a VGA console, so no login prompt reaches ttyu0 and there is nothing on
+the serial line to measure; enabling it means editing somebody else's disk image (`/boot.config`
+with `-h`, or `console="comconsole"`), which this bench does not do; and its loader ignores the QEMU
+monitor's `sendkey`, so it cannot be driven from outside the way Redox's can. Point `FREEBSD_IMG` at
+a serial-enabled image and it measures normally. Reported as a blocked leg with the reason rather
+than as "FreeBSD did not boot", which would repeat the ADR-171 mistake.
+
+#### the remaining boot gap is self-verification (2026-09-12, ADR-172)
+
+ADR-169 split the boot clock and left a specific, unexplained number: ~1077 ms of KERNEL share
+against Linux's ~1786 ms. An unattributed number is a number waiting to be misused — "our kernel
+boots in a second" invites exactly one follow-up, *doing what?*, and nothing here could answer it.
+
+`scripts/boot-profile.sh` boots the same interactive image the benchmark measures, on the same
+machine flag for flag, and timestamps every serial line as it arrives ON THE HOST. Host-side
+deliberately: a kernel timestamping itself would depend on a clock calibrated during the very window
+being measured, and the instrumentation would change the thing it measures. This way the binary
+profiled is the binary shipped.
+
+Two profiler bugs had to be fixed first, both the same species as the Redox skip in ADR-171 — a
+harness failing and blaming the kernel. A line-oriented reader blocks forever on the shell prompt
+because a prompt has NO trailing newline; it reported "the image never reached a prompt" for a boot
+that reached one in 2414 ms. A chunk-oriented reader sees the prompt but shreds every line into
+fragments, making "which print did this gap follow" meaningless. It now stamps whole lines when they
+complete and watches the residual tail separately for the prompt.
+
+```
+total to prompt: 2407 ms   firmware share: 1360 ms   kernel share: 1047 ms
+```
+
+The largest gaps after `ExitBootServices`: 146.8 ms after the mlsched invariants, 144.7 ms after the
+mlrisk invariants, 92.1 ms in mlrisk-stress, 89.7 ms in the SMP selftests, 65.1 + 64.1 ms in the
+benchmark selftests, 59.1 ms in the ring-3 advisory check, 50.4 ms in soak, 40.0 ms waiting for
+timer IRQs, 39.4 ms in the resident governor.
+
+Reported gaps total 879.7 ms of the kernel share, and **735.6 ms of that — 84% of attributed time,
+~70% of the whole kernel share — is Aletheia RUNNING ITS OWN INVARIANT SUITES.**
+
+So the boot comparison was never like-for-like in a SECOND way. ADR-169 found the first asymmetry
+(Aletheia pays for UEFI; the `-kernel`-loaded Linux leg does not). This is the second: Aletheia
+proves ~470 invariants on every boot and Linux proves none, because Linux does not run its test
+suite at boot and this kernel does, by design (ADR-061).
+
+**The suites are not going to be deleted to win a column.** A build that skips its own verification
+is not this operating system; stripping it to produce a faster number would be exactly the move the
+honesty rule exists to forbid, and the number would describe software nobody ships.
+
+Named non-claims, in register: the honest statement has THREE required parts and anyone quoting the
+first without the other two is quoting dishonestly — kernel share ~1047-1077 ms against Linux's
+~1786 ms; roughly 70% of Aletheia's is self-verification Linux does not perform; and Aletheia STILL
+LOSES the boot total because of firmware. This wave OPTIMIZED NOTHING: no boot path changed, the
+same binary was attributed rather than improved. A real target is now visible (the two ML advisor
+suites cost ~291 ms between them) but shaving it means making verification FASTER, never optional.
+The profile is one boot, on one host, under TCG, and gaps include serial transmission.
+
+#### a second operating system (2026-09-12, ADR-171)
+
+Every performance number here was measured against exactly one other OS. The harness had always
+carried a Redox leg, and it had always SKIPped on this host with "Redox did not reach a login
+prompt" — which was the harness describing ITS OWN inability to press a key, not a fact about Redox.
+Redox's bootloader draws a video-mode picker and waits on the UEFI CONSOLE; under `-nographic`
+nobody can answer it. The guest was BLOCKED, not slow, and reporting that as a skip was a bug in the
+instrument dressed up as a property of somebody else's operating system.
+
+Three fixes, all of them about the harness rather than about Redox: it gets the same OVMF pflash
+Aletheia does (it is a UEFI image); the picker is released with `sendkey ret` through the QEMU
+MONITOR, which drives FIRMWARE and never the measured system, so every serial byte still comes from
+the same path as the other legs; and it is excluded from the typed-workload leg AND ONLY THAT LEG,
+because logging in would measure how well this script can drive somebody else's OS. A latent bug
+surfaced on the way and is fixed: with `WORKLOAD_OPS=0`, `set -u` met an unbound `WORKLOAD_MS` and
+killed the run mid-leg.
+
+Three runs, same host, same `qemu-system-x86_64`, same TCG mode, same `-machine q35 -smp 4 -cpu
+qemu64`:
+
+| Column | Aletheia | Linux 6.12-lts | Redox OS |
+|---|---|---|---|
+| boot to a prompt (total) | 2500-2517 ms | 1777-1817 ms | 11371-11438 ms |
+| of which firmware (OVMF) | ~1433 ms | none (`-kernel`) | UEFI, not split |
+| of which this kernel | ~1077 ms | 1777-1817 ms | — |
+| idle host CPU at prompt | **0.0 %** | 0.3-0.7 % | 3.4 % |
+| bootable payload | **1.44 MB** | 14.16 MB | 536.87 MB |
+| typed echo round-trip | **65-66 ms** | 661-783 ms | n/a (login) |
+
+**Redox is the FAIR boot comparison.** It boots through UEFI like Aletheia, so both pay firmware and
+their totals are directly comparable in a way neither is with the `-kernel`-loaded Linux leg: ~2510
+ms against ~11412 ms, about **4.5x**. Aletheia wins EVERY measured column against Redox, including
+the boot total it loses to Linux.
+
+Named non-claims, in register: two operating systems is not "every other OS". Windows, macOS, the
+BSDs and every RTOS remain entirely unmeasured and no claim is made about them. Redox is a young
+research OS like this one — beating it is not the same as beating a production kernel, and the
+Linux leg is still the one that matters. Nothing here measures security (ADR-170 measures attack
+SURFACE, which is not the same thing), exploitability, throughput under real load, or hardware
+support. And `docs/MATURITY.md` still says plainly that nothing here is production-ready.
+
+#### attack surface is measured, not asserted (2026-09-12, ADR-170)
+
+The comparative benchmark made "faster than Linux" measurable. NOTHING here made "safer than Linux"
+measurable, so every security sentence in this repository was an adjective. That gap is worse than
+it looks: security is the easiest property in systems software to claim and the hardest to measure,
+and the standard move — compare your design story against somebody else's CVE count — is cheap and
+worthless. ADR-056 forbids that shape of argument everywhere else; it should not get an exemption on
+the one topic where the temptation is strongest.
+
+`scripts/security-surface.sh` measures things COUNTABLE ON BOTH SIDES from PRIMARY sources, names
+the threat model, and refuses to produce a verdict.
+
+**The threat model, stated up front:** unprivileged code already executing on the machine, in user
+space, trying to obtain authority it was not granted. Not physical access. Not a malicious
+hypervisor. Not supply chain (ADR-067 covers that). Not network-remote, because Aletheia's network
+stack is not exposed the way a general-purpose OS's is and the comparison would be dishonest.
+
+Aletheia's syscall surface is counted from its own ABI decode table, not a doc that could drift;
+Linux's from the kernel tree's own `arch/x86/entry/syscalls/syscall_64.tbl` at a pinned tag,
+fetched rather than cited. The column SKIPs loudly when offline.
+
+| | Aletheia | Linux 6.12 |
+|---|---|---|
+| syscalls exposed to user space | 11 | 375 |
+| of which gated on a named object capability | 8 | 0 (model differs) |
+| privileged lines of code | 39,984 counted Rust | ~40M cited C |
+| privileged code in a memory-safe language | yes, except 806 `unsafe` (2.02%) | no |
+
+Linux exposes **34.1x** as many entry points. Of Aletheia's eleven, eight consult a named capability
+action before the effect; the other three (yield, exit, register check) carry no object authority.
+
+Named non-claims, in register, and the script prints them in its own output: **this is NOT a
+verdict.** A smaller surface is not a safer system — surface is ONE input to risk, and the others
+(maturity, adversarial review, exploit economics, defense in depth, and the plain fact that Linux
+has been attacked by professionals for thirty years while Aletheia has never been attacked by
+anyone) are unmeasured here and every one favours Linux. The syscall ratio is real AND unfair:
+Linux's 375 exist because it runs containers, graphics, io_uring and BPF; Aletheia's 11 exist
+because it does almost nothing yet, and REMOVING FEATURES IS NOT A SECURITY TECHNIQUE. Linux's
+`capability-gated: 0` is its model, not a finding. The 2.02% `unsafe` figure says where an auditor
+should look, not how many bugs are there. NOT measured at all: exploitability, defect density, CVE
+history, side channels, speculative execution, firmware, or ANY other operating system — Windows,
+macOS, the BSDs and every RTOS are absent and no claim is made about them.
+
+#### the boot clock is split (2026-09-12, ADR-169)
+
+ADR-168 left one column lost and refused to spend the caveat that might have excused it: *splitting
+Aletheia's total into a firmware share and a kernel share has not been done, so no part of that gap
+is currently excused.* A caveat that excuses a loss without measuring it is worth nothing. Either
+the firmware share is real and can be shown, or the caveat should be deleted.
+
+`boot_and_measure` now takes an optional `SPLIT_MARKER` — the line a guest prints the moment it owns
+the machine, which for Aletheia is `calling ExitBootServices`. One boot yields two numbers, medianed
+over the same runs as everything else. The marker is cleared before the Linux leg, because Linux has
+no firmware share here: `-kernel` loading is the start of its own work, so its total IS its kernel
+share.
+
+| | Aletheia | Linux 6.12-lts |
+|---|---|---|
+| boot to a prompt (total) | 2507 / 2516 / 2509 ms | 1790 / 1780 / 1786 ms |
+| of which firmware (OVMF) | 1431 / 1429 / 1427 ms | none (`-kernel`) |
+| **of which this kernel** | **1076 / 1087 / 1082 ms** | **1790 / 1780 / 1786 ms** |
+
+The caveat was real, and it was most of the gap. On the part each project actually wrote, Aletheia
+reaches an interactive prompt in ~1082 ms against ~1786 ms — about **1.65x faster** — while STILL
+losing the total by ~0.72 s, because it pays for UEFI and the other leg does not. Both statements
+are true and neither replaces the other; the table prints all three rows so a reader cannot take one
+without seeing the others.
+
+Named non-claims, in register: splitting a number does not win it — the TOTAL boot column is still
+lost and still reported as lost, because a machine that boots through firmware takes longer to reach
+a prompt than one handed the CPU, and that is the honest end-to-end experience. The two kernel
+shares are far closer to like-for-like than the totals were but are NOT identical work: Linux's
+1786 ms includes QEMU loading and decompressing a 14.16 MB kernel-plus-initramfs payload, while
+Aletheia's 1082 ms starts from a 1.44 MB image firmware has already placed — part of the difference
+is the payload difference, priced separately in its own row, and anyone quoting the 1.65x owes the
+reader that sentence. This wave did NOT change the kernel: no boot path was optimized, the same
+binary was measured more carefully.
+
+#### a parked machine costs nothing (2026-09-12, ADR-168)
+
+The comparative benchmark exists so "faster than Linux" is a measurable statement rather than an
+adjective. Run honestly, it said Aletheia **LOST** the idle column: 0.5% host CPU at the prompt
+against Linux's 0.1-0.4%. That is one of the two genuinely fair columns in the whole table, so
+there was nowhere to put the loss except on this kernel. Two things were wrong — the instrument
+first, then the kernel.
+
+**The instrument.** `boot_and_measure` polled for the prompt marker with `sleep 1`: one SECOND of
+quantization on a two-to-three second measurement, so every boot time was rounded up toward the
+next poll and a gap between two legs could be mostly the sleep. At 5 ms the same binaries measure
+2487 ms against 1773 ms where the coarse poll reported 3065 against 2044 — both legs overstated,
+the reported gap shrinking from ~1.02 s to ~0.71 s. Pre-fix numbers are NOT comparable to post-fix
+ones and are retired rather than reconciled. The Linux leg also required Docker purely to obtain a
+static busybox, so on a machine with no container daemon the comparison SKIPped and the claim
+stayed unmeasured; it now builds the same busybox initramfs from Alpine's minirootfs with host
+tooling, carrying the musl loader.
+
+**The kernel.** `conirq::init` masked IRQ0 at the 8259A, which stops the interrupt being DELIVERED
+but does not stop the 8254 from COUNTING. The emulator went on modelling a device ticking a hundred
+times a second, and a host emulating a counter for a sleeping guest is a host burning CPU on behalf
+of nothing. Masking answered "does the kernel get woken up"; the column was asking "does the
+machine cost anything". `pit::quiesce()` reprograms channel 0 to mode 0 — interrupt on terminal
+count, which does not reload — so the counter runs down once and stops. Not a slower tick: the last
+tick.
+
+Idle host CPU at the prompt went from 0.5% to **0.0%** across three runs, against Linux's 0.6%. The
+column flipped because a real periodic cost was found and removed, not because a measurement was
+chosen differently.
+
+The table after both fixes (`docs/evidence/perf001`, three independent runs, same host, same
+`qemu-system-x86_64`, same TCG mode, same `-machine q35 -m 256 -smp 4 -cpu qemu64`, both to an
+interactive ttyS0 shell):
+
+| Column | Aletheia | Linux 6.12-lts | Winner |
+|---|---|---|---|
+| boot to a prompt (total) | 2507-2516 ms | 1780-1790 ms | Linux, by ~0.72 s |
+| idle host CPU at prompt | 0.0 % | 0.2-0.3 % | **Aletheia** |
+| bootable payload | 1,439,744 B | 14,163,373 B | **Aletheia**, 9.8x |
+| typed echo round-trip | 64-69 ms | 751-783 ms | **Aletheia**, ~11.3x |
+| privileged lines of code | 42,078 Rust | ~40M C (cited) | **Aletheia**, ~950x |
+
+Named non-claims, in register: four of five is NOT "Aletheia beats Linux". Boot time is still lost
+by ~0.71 s, and Aletheia boots through OVMF while the Linux leg is `-kernel`-loaded and skips
+firmware entirely — splitting Aletheia's total into firmware and kernel shares is the obvious next
+rung and HAS NOT been done, so no part of that gap is currently excused. The round-trip win carries
+a kernel-space/user-space asymmetry stated beside it (Aletheia's dispatcher is in kernel space;
+busybox `sh` is user space over syscalls). The payload win is mostly a size difference, not a
+design victory. NOTHING here measures security. NO other operating system is measured — Windows,
+macOS, the BSDs and every RTOS are absent, and the Redox leg is opt-in and was skipped. And
+`docs/MATURITY.md` still says plainly that nothing here is production-ready.
+
+#### the watch is wired to the clock (2026-09-12, ADR-167)
+
+ADR-166 closed with a named non-claim: *nothing calls `tick` from a real timer interrupt yet*. This
+wave closes that one. The resident governor is now driven by each target's real periodic interrupt,
+on demand it measures from the machine's own busy/idle split, with nobody declaring anything on its
+behalf.
+
+Two failure modes come free with wiring a governor to an interrupt handler, and both are refused by
+construction:
+
+* **The lock is never waited on.** A handler runs on top of what it interrupted, so if the
+  interrupted code held the watch lock, spinning would wait for code that cannot run until the
+  handler returns — a one-core deadlock with no second core to blame. `SpinLock::try_lock` (new,
+  and the only form a handler may use) turns that into `contended()`, a counted stand-down that is
+  REPORTED, never gated: a nonzero count is a fact about the machine, not a fault in it.
+* **An uncommissioned watch is a no-op.** The interrupt may be wired before the governor is stood,
+  in either order; an early tick does nothing rather than crashing or acting on stale state. And
+  `commission` refuses a second call, so a live governor is never silently replaced.
+
+Demand comes from the machine: on x86-64 the IRQ0 handler reads an IDLE flag the boot path sets
+around its `hlt`, so a tick that woke a halted core is an IDLE tick and one that interrupted working
+code is a BUSY tick; on aarch64 and RISC-V the timer trap fires while a ring-3/U-mode task runs, so
+the slice it closes is busy. Temperature is a fixed STAND-IN on every target and named as one in the
+source — no target exposes a thermal sensor to a guest, and inventing a curve would be the thing
+ADR-056 forbids.
+
+What the machine prints — the same governor, the same boot, two opposite regimes:
+
+```
+[lethed] THE WATCH IS LIVE: 5 of 5 real IRQ0 ticks admitted, demand 0% measured, point index 0
+[lethed] the watch under load: 14 of 14 ticks admitted, demand 100% measured, point index 2 of nominal 2
+[lethed] THE ADVISOR IS CONSULTED LIVE: 1 consultations over 16 admitted real timer ticks
+```
+
+Core halted: measured 0%, governor at the lowest point. Core working: measured 100%, governor at
+nominal and no further. Nobody supplied either number.
+
+Gated are the contract's properties, never the numbers: the census balances, `pm_refusals == 0`, the
+governor range is never left, measured demand is actually answered, and on x86-64 the advisor is
+genuinely consulted on live measurements (boot fails 619/618/617/616/615/614 respectively). A
+fifteenth boot invariant joins `lethed_suite` on all three targets — the machine-wide watch is stood
+exactly once and is a no-op until it is — and the VirtualBox gate requires the marker too
+(`lethed=15` on all four gates).
+
+Named non-claims, in register: **the advisor reaches live consultation on x86-64 only.** aarch64 and
+RISC-V arm their timer for the ring-3 run and disarm it after, so their watch sees six slices — under
+one 16-sample window — and correctly reports itself still WARMING rather than claiming a
+consultation it did not make. Giving those targets a free-running periodic tick is a separate rung.
+Still no MSR/CPPC/ACPI frequency programming (QEMU TCG exposes no frequency control to a guest, the
+ADR-071 posture). And still nothing about other operating systems: this says the governor is live,
+measured and bounded on THIS kernel, not that its power management beats Linux, Windows or anything
+else — no such comparison has been run.
+
+#### the advisor takes the watch (2026-09-12, ADR-166)
+
+ADR-165 published a named non-claim: *no live governor thread exists yet*. This wave closes it.
+`kernel-core/src/lethed.rs` is **the watch** — Lethe resident, running on the clock — and it closes
+the gap without loosening a single bound.
+
+The question a resident governor raises is not "what should the clock be" (ADR-165 answered that).
+It is **who gets to make the machine act, and how often**. A governor driven by the timer interrupt
+is reachable by anything that can influence when the timer fires, so the contract here is about the
+TICK, not the clock:
+
+* **The cadence is authority.** A tick is admitted only if it is strictly newer than the last
+  admitted tick and at least `min_gap` beyond it. A replayed or rolled-back timestamp is
+  `NotMonotone`, a too-eager one is `TooSoon`, a nested one is `Reentered` (the ADR-039 guard), an
+  empty watch is `NoDomains`, an unusable cadence is `BadCadence`. A refused tick moves NO state —
+  not the cursor, not the history, not the contract — and lands in a census that balances at every
+  instant. A host proof fires 10,000 ticks at a floor of 1,000 and asserts exactly 10 admissions:
+  churn, which on real silicon is energy and heat, cannot be amplified through this door.
+* **A stale window is not a window.** Past the staleness ceiling the machine moved without us, so
+  the governor RESYNCS — forgets every window, withholds the advisor until a full 16-sample window
+  refills with post-gap truth, and says how many times it did so. The same rule covers cold boot,
+  so the advisor is never consulted on a partially-filled ring: a feature built from six samples of
+  sixteen is not a weak signal, it is a false one. Withholding is ADR-056 applied to time.
+* **The work per tick is bounded, constant, and allocation-free.** Exactly one domain per tick,
+  round-robin: one demand read, one sensor read, one depth-3 tree walk, at most one contract act —
+  independent of domain count. The attached list is a fixed array claimed once, deliberately not
+  `domain_ids()`, which allocates.
+* **Demand is MEASURED, not declared.** `DemandMeter` turns busy/idle accounting into a percentage
+  over disjoint windows whose counters RENORMALIZE rather than saturate — saturation would destroy
+  the ratio and report a fully loaded domain as 1%, so an unconsumed window degrades in precision,
+  never in truth.
+* **The ceiling outranks the advisor.** While a thermal cooldown is latched the governor stands
+  down, even though the contract would permit a raise inside the governor range, because raising
+  silicon the thermal contract just clamped is how a machine oscillates at its trip point. It still
+  parks a genuinely idle domain — the one act that can only help while cooling.
+* **No new authority.** The resident holds no grant and offers no token, so the overclock band is
+  unreachable BY CONSTRUCTION, not by policy.
+
+Every act flows through `lethe::govern_one_advised` — ADR-165's sweep body, lifted unchanged, all
+32 pre-existing `lethe` and `pm` proofs still green — so the resident inherits that wave's proofs
+whole, including the one that matters most: with the advisor absent the advised path drives the
+machine through the SAME clock sequence as the untouched ADR-076 baseline. `PmEngine::govern` is
+byte-for-byte unchanged; `PmEngine::cooldown_remaining` became public, read-only, so the resident
+can see the ceiling holding and stand down on its own.
+
+Proofs: 15 host tests in `kernel-core/tests/lethed.rs` (adversarial clock streams that jump, stall
+and run BACKWARDS with the census asserted to balance at every step; the berserk-timer rate limit;
+stale resync and full-window rewarm; the advisor-free resident landing exactly on the baseline
+demand map over 40 randomized trials; no point above nominal over 4,000 ticks; demanded silicon
+never parked over 3,000 ticks; heat outranking the advisor for a whole 200-tick cooldown with
+`pm_refusals == 0`; meter exactness across the entire 0..=100 range and under `u64::MAX` input;
+capacity bounding; round-robin fairness), plus 14 invariants booting on all three targets
+(`[lethed] ALL 14 RESIDENT GOVERNOR INVARIANTS HOLD`, boot fails 620+i, `lethed=14`), and seven
+pinned cross-CPU in the conformance contract (159 -> 166 named behaviors).
+
+Named non-claims, in register: this wave makes the governor RESIDENT, not HARDWARE. Nothing calls
+`tick` from a real timer IRQ yet — the watch is built, proved and booted on three targets, and
+wiring it to each target's timer interrupt and to the scheduler's busy/idle accounting is the next
+rung, deliberately separate so the contract is proved before it is connected. The kernel still
+programs no MSR/CPPC/ACPI frequency control (QEMU TCG exposes none to a guest, the ADR-071
+posture), temperature is still reported by a caller rather than simulated thermodynamically, and
+ADR-165's benchmark numbers still live in the trainer's documented cost model — they say nothing
+about Linux, Windows, or any real operating system.
+
+#### Lethe, the resident performance advisor (2026-08-28, ADR-165)
+
+The power/performance contract (ADR-076) made frequency AUTHORITY and heat a HARD CEILING; this
+wave gives its governor a MEMORY that obeys it. `kernel-core/src/lethe_contract.rs` + `kernel-core/src/lethe.rs`
+define the 12-feature contract (demand history over 16 samples, dwell at the current point,
+churn in the last 16 steps, reported temperature against the trip margin, the point's share of
+the governor range) and the advisor: two decision trees packed into `models/lethe_pm.alth`,
+verified at load against ten named refusals — including a CYCLE check (load walks each tree
+with a visited set, because an evaluate-time loop would be a hang, not an error) and an
+inverted training box (the range guard must be able to fire). `govern_advised` observes the
+live state EXCLUSIVELY (history strictly before the advice acts), consults the advisor, and
+acts only through the contract's own named APIs — `request_index`, `wake`, `enter_idle` — so
+every act is audited and every refusal named.
+
+The advisor proposes; the contract disposes. The suite proves the sharp edges: with a
+full-ceiling grant MINTED and the advisor decisive, no reachable point exceeds nominal; parks
+happen only at zero demand; residency is monotone and wake latency is a sum of real wake costs;
+the census accounts for every consultation; and with the advisor ABSENT — or abstaining on a
+collapsed training box — the advised path drives the machine through the SAME clock sequence as
+the untouched `govern` baseline. `PmEngine::govern` is byte-for-byte unchanged.
+
+Proofs: 13 host tests in kernel-core/tests/lethe.rs (the full mutation table for every named
+refusal, contract/blob agreement, fixture parity with determinism, the absent- and
+abstaining-advisor equivalence sweeps over randomized multi-regime traces, the safety sweep,
+engine-level determinism including the ledger, ledger wraparound, observer bounds with
+features in-domain for arbitrary streams, degenerate-input withholding, a REPORTED advice-cost
+measurement of ~370 ns/advice in a debug build), plus the 12 invariants booting on all three
+targets (`[lethe] ALL 12 LETHE ADVISOR INVARIANTS HOLD`, boot fails 580+i), seven pinned
+cross-CPU in the conformance contract. The marker maps changed deliberately (lethe=12,
+ADR-061).
+
+The benchmark proof is vendored (docs/evidence/lethe006): a deterministic trainer/exporter
+(six workload regimes with a thermal stand-in that heats on the clock each arm ran at;
+cost-sensitive depth-3 CART on expected per-row cost; K=16 class-consistent counterfactual
+rollout labels; two DAgger rounds on the policy's own trajectory) plus the six-arm comparison
+on 300 held-out traces — ADR-076 baseline, eager C2 parker, TUNED classic hysteresis, Lethe,
+always-nominal, always-low — under a documented cost model (ramp 2 steps, wake penalties 1/3
+steps, CV² energy with the ladder's own mV, unmet work weighted 10× energy with the α sweep
+published). Lethe 0.6100 vs baseline 0.6280 (+2.88%) and hysteresis 0.6876 (+11.29%),
+dominating the baseline on BOTH components; the per-regime decomposition shows the lead is the
+idle policy (0.017 vs 0.097 on idle regimes) and Boost's anti-churn pinning (staccato 1.017 vs
+1.083), with the bursty regime honestly LOST (0.869 vs 0.857). Named non-claims, in the
+register: the numbers live in the simulator's cost model (the kernel models transitions as
+free); no live governor thread exists yet (residency = wired into the model's govern path and
+proved at boot, the pre-REQ-ML-003 posture); the corpus is synthetic — this says nothing about
+real silicon or real operating systems.
 
 ### 2026-09-23 — the browser window's own keys (ADR-164)
 
