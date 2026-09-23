@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Where does Aletheia's boot time actually go? (REQ-PERF-001, ADR-085)
+# Where does Aletheia's boot time actually go? (REQ-PERF-001, ADR-172)
 #
-# ADR-082 split the boot clock into a firmware share and a kernel share and found ~1077 ms of
+# ADR-169 split the boot clock into a firmware share and a kernel share and found ~1077 ms of
 # kernel. That number is only useful if it can be attributed, so this script attributes it:
 # it boots the real image and timestamps EVERY serial line as it arrives on the host, then reports
 # the largest gaps between consecutive lines.

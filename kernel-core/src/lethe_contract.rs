@@ -1,4 +1,4 @@
-//! The Lethe feature contract (REQ-ML-006, ADR-077).
+//! The Lethe feature contract (REQ-ML-007, ADR-077).
 //!
 //! Lethe — the resident performance advisor for the power/performance contract (ADR-076) — is a
 //! frozen integer model, and a frozen model is only as good as the agreement about what its input

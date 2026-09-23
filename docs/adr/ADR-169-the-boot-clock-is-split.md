@@ -1,8 +1,8 @@
-# ADR-082 — The boot clock is split: firmware is not the kernel
+# ADR-169 — The boot clock is split: firmware is not the kernel
 
 **Status:** Accepted (2026-09-12)
 **Requirements:** REQ-PERF-001 (advanced)
-**Builds on:** ADR-081 (a parked machine costs nothing), ADR-056 (the honesty rule).
+**Builds on:** ADR-168 (a parked machine costs nothing), ADR-056 (the honesty rule).
 
 ## Context
 
@@ -11,7 +11,7 @@ long as it had existed: Aletheia boots through OVMF, a full UEFI firmware implem
 Linux leg is loaded directly by QEMU's `-kernel` and skips firmware entirely. Comparing their
 totals compares two different boot paths.
 
-ADR-081 said that out loud and then refused to spend it: *"splitting Aletheia's total into a
+ADR-168 said that out loud and then refused to spend it: *"splitting Aletheia's total into a
 firmware share and a kernel share is the obvious next piece of work and has not been done, so no
 part of that gap is currently excused."*
 

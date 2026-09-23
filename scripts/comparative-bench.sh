@@ -387,10 +387,10 @@ fi
 #   * a `/boot.config` in the guest containing `-h`, or `console="comconsole"` in loader.conf —
 #     both are edits to somebody else's disk image, which this bench does not make; or
 #   * pausing the loader countdown and typing `boot -h`, which its loader does not accept from the
-#     QEMU monitor's `sendkey` (unlike Redox's, which does — see ADR-084).
+#     QEMU monitor's `sendkey` (unlike Redox's, which does — see ADR-171).
 #
 # So this leg SKIPs with the reason rather than reporting "FreeBSD did not boot", which would be
-# the ADR-084 mistake again: a harness blaming a kernel for its own inability to press a key.
+# the ADR-171 mistake again: a harness blaming a kernel for its own inability to press a key.
 # Point FREEBSD_IMG at an image whose serial console is already enabled and it measures normally.
 #
 # OPT-IN: the image is ~600 MB compressed, ~2.5 GB expanded.
@@ -405,7 +405,7 @@ if [ "${WITH_FREEBSD:-0}" = "1" ]; then
     echo "  ttyu0 and there is nothing on the serial line to measure. Enabling it means editing"
     echo "  somebody else's disk image (/boot.config with -h, or console=\"comconsole\"), which this"
     echo "  bench does not do. Its loader also ignores the QEMU monitor's sendkey, so it cannot be"
-    echo "  driven from outside the way Redox's can (ADR-084)."
+    echo "  driven from outside the way Redox's can (ADR-171)."
     echo "  SKIPPED — set FREEBSD_IMG to a serial-enabled image to measure it (never a silent pass)."
   elif [ ! -f "$FB_IMG" ]; then
     echo "  FREEBSD_IMG=$FB_IMG does not exist — SKIPPED (never a silent pass)."

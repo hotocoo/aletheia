@@ -1,8 +1,8 @@
-# ADR-084 — A second operating system: the skip was the harness, not Redox
+# ADR-171 — A second operating system: the skip was the harness, not Redox
 
 **Status:** Accepted (2026-09-12)
 **Requirements:** REQ-PERF-001 (advanced)
-**Builds on:** ADR-082 (the boot clock is split), ADR-081 (a parked machine costs nothing),
+**Builds on:** ADR-169 (the boot clock is split), ADR-168 (a parked machine costs nothing),
 ADR-056 (the honesty rule).
 
 ## Context
@@ -75,5 +75,5 @@ Aletheia wins every measured column against Redox, including the boot total it l
 * **The split row is blank for Redox.** Its firmware share was not separated, because it prints no
   marker at the moment it takes the machine and inventing one would mean patching somebody else's
   OS to win a row.
-* **Nothing here measures security.** ADR-083 measures attack *surface*, which is a different
+* **Nothing here measures security.** ADR-170 measures attack *surface*, which is a different
   thing, and it measures it only against Linux.

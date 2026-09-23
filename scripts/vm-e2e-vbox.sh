@@ -108,9 +108,9 @@ REQUIRED=(
   'ALL 14 POWER-PERFORMANCE INVARIANTS HOLD'
   # The composition contract (ALET-P2-021, ADR-077) is an arch-independent model too.
   'ALL 14 COMPOSITION-CONTRACT INVARIANTS HOLD'
-  # Lethe (REQ-ML-006, ADR-078) advises the same contract on every CPU.
+  # Lethe (REQ-ML-007, ADR-165) advises the same contract on every CPU.
   'ALL 12 LETHE ADVISOR INVARIANTS HOLD'
-  # The resident governor (REQ-PM-002, ADR-079) stands the watch on every CPU: the tick contract
+  # The resident governor (REQ-PM-002, ADR-166) stands the watch on every CPU: the tick contract
   # depends on no device, so a second hypervisor must prove it too.
   'ALL 15 RESIDENT GOVERNOR INVARIANTS HOLD'
   'DMA-BOUNDARY INVARIANTS HOLD'

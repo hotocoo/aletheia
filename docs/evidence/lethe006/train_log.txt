@@ -1,4 +1,4 @@
-== Lethe REQ-ML-006 trainer (deterministic, seeds fixed) ==
+== Lethe REQ-ML-007 trainer (deterministic, seeds fixed) ==
 corpus: 300 train / 300 held-out traces x 256 steps
 rows: 62008 freq / 14792 idle
 DAgger round 1: 62008 freq / 14792 idle rows

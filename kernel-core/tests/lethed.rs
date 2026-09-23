@@ -1,4 +1,4 @@
-//! Host proofs for the resident governor — Lethe on the clock (ADR-079).
+//! Host proofs for the resident governor — Lethe on the clock (ADR-166).
 //!
 //! The boot suite in `lethed_suite` proves what must hold on real silicon. These are the
 //! exhaustive sweeps that would cost too much boot heap to run there: randomized tick streams,
@@ -168,7 +168,7 @@ fn a_stale_window_is_resynced_not_guessed_through() {
 
 #[test]
 fn an_absent_advisor_drives_the_same_machine_as_the_baseline_governor() {
-    // The ADR-078 equivalence, now through the resident path: with no advisor, the watch must
+    // The ADR-165 equivalence, now through the resident path: with no advisor, the watch must
     // produce the same operating-point sequence as `PmEngine::govern` fed the same demand.
     let mut rng = Rng(0xA1E7_4E1A_0079);
     for _trial in 0..40 {

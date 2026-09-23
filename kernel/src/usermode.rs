@@ -550,7 +550,7 @@ const GICC_PMR: usize = 0x004;
 const GICC_IAR: usize = 0x00C;
 const GICC_EOIR: usize = 0x010;
 /// Real timer interrupts taken since boot — the monotone clock the resident governor is driven
-/// by on this target (ADR-080).
+/// by on this target (ADR-167).
 static TIMER_IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Reported die temperature, in milli-degrees C. A STAND-IN, and named as one: QEMU 'virt'
@@ -642,7 +642,7 @@ pub extern "C" fn el0_irq() {
     timer_arm(); // re-arm FIRST (level-triggered), before EOI
     gicc_w32(GICC_EOIR, iar);
 
-    // ADR-080 — the resident governor stands its watch on this real timer interrupt. A ring-3
+    // ADR-167 — the resident governor stands its watch on this real timer interrupt. A ring-3
     // task was running when it fired, so the slice just closed was genuinely BUSY; saying so is
     // what makes the governor's demand a measurement rather than an assumption. Both calls are
     // no-ops until the watch is commissioned, and neither ever waits on the watch lock — a

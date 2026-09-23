@@ -17,7 +17,7 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Was the CPU halted when this tick arrived? Set by whatever puts the core to sleep, read by the
 /// handler, so the demand the governor measures is the machine's OWN busy/idle split rather than a
-/// number somebody declared (ADR-080).
+/// number somebody declared (ADR-167).
 static IDLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Reported die temperature, in milli-degrees C.
@@ -78,7 +78,7 @@ pub fn rearm() {
 
 /// Called from the IRQ0 handler.
 ///
-/// This is where the resident governor actually stands its watch (ADR-080): the real periodic
+/// This is where the resident governor actually stands its watch (ADR-167): the real periodic
 /// interrupt accounts the interval it just closed as busy or idle, then offers the tick. Both
 /// calls are no-ops until the watch is commissioned, and neither ever waits on the watch lock — a
 /// handler that spun for a lock held by the code it interrupted would deadlock the core.

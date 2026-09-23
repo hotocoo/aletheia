@@ -82,7 +82,7 @@ column flipped.
 **Boot time — Linux wins the total; Aletheia wins the part it wrote.** Aletheia boots through
 OVMF, a full UEFI firmware implementation; the Linux leg is loaded directly by QEMU's `-kernel` and
 skips firmware entirely. That caveat used to sit in prose, excusing a loss without measuring it.
-It is now measured (ADR-082): the harness timestamps `calling ExitBootServices` as well as the
+It is now measured (ADR-169): the harness timestamps `calling ExitBootServices` as well as the
 prompt, so one boot yields both shares.
 
 OVMF costs ~1429 ms. Aletheia's own kernel reaches an interactive prompt in ~1082 ms against

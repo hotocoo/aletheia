@@ -1,4 +1,4 @@
-# ADR-081 — A parked machine costs nothing: stop the counter, don't just mask it
+# ADR-168 — A parked machine costs nothing: stop the counter, don't just mask it
 
 **Status:** Accepted (2026-09-12)
 **Requirements:** REQ-PERF-001 (advanced), REQ-CON-006 (advanced)
@@ -86,7 +86,7 @@ The full table after both fixes (`docs/evidence/perf001`, three runs):
   the obvious next piece of work and **has not been done**, so no part of that gap is currently
   excused. The round-trip win carries a kernel-space/user-space asymmetry stated beside it. The
   payload win is mostly a size difference.
-  *(Superseded in part by ADR-082, which measured the split rather than leaving it as prose: OVMF
+  *(Superseded in part by ADR-169, which measured the split rather than leaving it as prose: OVMF
   costs ~1429 ms and this kernel's own share is ~1082 ms against Linux's ~1786 ms. The TOTAL boot
   column is still lost, and is still reported as lost.)*
 * **Nothing here measures security.** The idle column is a performance result. Capability and

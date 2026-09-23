@@ -1,7 +1,7 @@
-# ADR-083 — Attack surface is measured, not asserted
+# ADR-170 — Attack surface is measured, not asserted
 
 **Status:** Accepted (2026-09-12)
-**Requirements:** REQ-SEC-002 (new)
+**Requirements:** REQ-SEC-005 (new)
 **Builds on:** ADR-056 (the honesty rule), ADR-003 (adversarial security-behaviour regressions),
 ADR-067 (the supply chain is verified, live, recorded).
 

@@ -1,4 +1,4 @@
-//! Host-exhaustive proofs of the Lethe advisor (REQ-ML-006, ADR-077).
+//! Host-exhaustive proofs of the Lethe advisor (REQ-ML-007, ADR-077).
 //!
 //! The in-kernel `lethe_suite` proves the core promises at boot on every target on a fixed
 //! platform; these tests are the EXHAUSTIVE sweeps the boot heap cannot afford (ADR-063):

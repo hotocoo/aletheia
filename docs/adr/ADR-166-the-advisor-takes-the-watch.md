@@ -1,14 +1,14 @@
-# ADR-079 — The advisor takes the watch: Lethe as a resident governor
+# ADR-166 — The advisor takes the watch: Lethe as a resident governor
 
 **Status:** Accepted (2026-09-12)
-**Requirements:** REQ-PM-002 (new), REQ-ML-006 (advanced)
-**Supersedes:** nothing. **Builds on:** ADR-076 (the power/performance contract), ADR-078 (Lethe,
+**Requirements:** REQ-PM-002 (new), REQ-ML-007 (advanced)
+**Supersedes:** nothing. **Builds on:** ADR-076 (the power/performance contract), ADR-165 (Lethe,
 the resident performance advisor), ADR-039 (re-entrancy is detectable and fatal), ADR-056 (the
 honesty rule), ADR-061 (the gate counts itself), ADR-063 (the boot heap never frees).
 
 ## Context
 
-ADR-078 delivered an advisor and proved it hard: a frozen integer model in one verified `ALTH1`
+ADR-165 delivered an advisor and proved it hard: a frozen integer model in one verified `ALTH1`
 blob, ten named load-time refusals, twelve boot invariants on three targets, thirteen host proofs,
 and a published comparative benchmark that says where the model wins and where it honestly loses.
 
@@ -105,11 +105,11 @@ is unreachable **by construction, not by policy** — there is no code path from
 proof sweeps 4,000 ticks across four domains at randomized full demand and asserts no point ever
 exceeds nominal.
 
-### Every act still flows through ADR-078
+### Every act still flows through ADR-165
 
 `lethe::govern_advised`'s sweep body was lifted into `lethe::govern_one_advised` and the sweep now
 calls it per domain. The extraction is behavior-preserving — all 32 pre-existing `lethe` and `pm`
-proofs pass untouched — so the resident inherits ADR-078's proofs whole, including the one that
+proofs pass untouched — so the resident inherits ADR-165's proofs whole, including the one that
 matters most: **with the advisor absent, the advised path drives the machine through the same clock
 sequence as the untouched ADR-076 baseline.** `PmEngine::govern` remains byte-for-byte unchanged.
 
@@ -136,7 +136,7 @@ outranking the advisor, and the governor range never being left.
   does not program MSR/CPPC/ACPI frequency control — QEMU TCG exposes none to a guest, so a
   hardware rung attempted today could only prove that code ran, not that anything was enforced
   (the ADR-071 posture). Temperature is still reported by a caller, not simulated
-  thermodynamically. The benchmark numbers from ADR-078 still live in the trainer's documented cost
+  thermodynamically. The benchmark numbers from ADR-165 still live in the trainer's documented cost
   model and still say nothing about Linux, Windows, or any real operating system.
 * **Nothing calls `tick` from a real timer interrupt yet.** The watch is built, proved, and booted
   on three targets; wiring it to each target's timer IRQ and to the scheduler's busy/idle
@@ -145,4 +145,4 @@ outranking the advisor, and the governor range never being left.
 * **Marker map changed deliberately** (`lethed=14` on the aarch64, RISC-V, and x86-64 gates;
   ADR-061), and the conformance contract grew seven behaviors on all three targets.
 * **`PmEngine::cooldown_remaining` is now public**, read-only. `PmEngine::govern` and every ADR-076
-  and ADR-078 semantic is otherwise untouched.
+  and ADR-165 semantic is otherwise untouched.

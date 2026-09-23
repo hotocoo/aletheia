@@ -1,21 +1,21 @@
-# ADR-080 — The watch is wired to the clock: the governor runs on real timer interrupts
+# ADR-167 — The watch is wired to the clock: the governor runs on real timer interrupts
 
 **Status:** Accepted (2026-09-12)
 **Requirements:** REQ-PM-002 (advanced)
-**Builds on:** ADR-079 (the advisor takes the watch), ADR-078 (Lethe), ADR-076 (the
+**Builds on:** ADR-166 (the advisor takes the watch), ADR-165 (Lethe), ADR-076 (the
 power/performance contract), ADR-039 (re-entrancy is detectable and fatal), ADR-056 (the honesty
 rule), ADR-061 (the gate counts itself).
 
 ## Context
 
-ADR-079 built the watch and proved it on three targets, and then said plainly what it had not done:
+ADR-166 built the watch and proved it on three targets, and then said plainly what it had not done:
 
 > Nothing calls `tick` from a real timer interrupt yet. The watch is built, proved, and booted on
 > three targets; wiring it to each target's timer IRQ and to the scheduler's busy/idle accounting
 > is the next rung, and is deliberately separate so that the contract is proved before it is
 > connected.
 
-That is this ADR. It is a short one, because ADR-079 did the hard thinking; what remains is to
+That is this ADR. It is a short one, because ADR-166 did the hard thinking; what remains is to
 connect it without introducing the two failure modes that connecting a governor to an interrupt
 handler classically introduces.
 
@@ -102,7 +102,7 @@ stood exactly once and is a no-op until it is.
   enforced (the ADR-071 posture).
 * **Still nothing about other operating systems.** This wave says the governor is live, measured
   and bounded on this kernel. It does not say Aletheia's power management beats Linux, Windows or
-  anything else; no such comparison has been run, and ADR-078's benchmark numbers remain inside the
+  anything else; no such comparison has been run, and ADR-165's benchmark numbers remain inside the
   trainer's documented cost model.
 * **`SpinLock::try_lock` is new**, and is the only form an interrupt handler may use. Existing
   `lock()` callers are untouched.

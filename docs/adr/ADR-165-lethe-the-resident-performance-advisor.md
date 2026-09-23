@@ -1,6 +1,6 @@
-# ADR-078: Lethe — the resident performance advisor for the power/performance contract
+# ADR-165: Lethe — the resident performance advisor for the power/performance contract
 
-**Status:** Accepted · **Date:** 2026-08-28 · **Advances:** REQ-ML-006 (new; the advisor rung of
+**Status:** Accepted · **Date:** 2026-08-28 · **Advances:** REQ-ML-007 (new; the advisor rung of
 the power/performance contract) · **Builds on:** ADR-076 (frequency is authority, heat is a hard
 ceiling), ADR-056 (the ML risk advisor; advisory by construction), ADR-061 (marker maps),
 ADR-063 (never-freeing heap discipline)

@@ -225,7 +225,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         ActiveHal::current_privilege()
     );
 
-    // ADR-080 — stand the watch BEFORE the first interrupt can arrive. From here the resident
+    // ADR-167 — stand the watch BEFORE the first interrupt can arrive. From here the resident
     // governor is driven by real IRQ0 ticks, on demand it measures itself, with no caller
     // declaring anything on its behalf.
     {
@@ -280,7 +280,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         pit::ticks()
     );
 
-    // The watch is LIVE: this is the ADR-079 non-claim closing. Ticks reached the governor from a
+    // The watch is LIVE: this is the ADR-166 non-claim closing. Ticks reached the governor from a
     // real periodic interrupt, not from a test loop.
     match kernel_core::lethed::resident::census() {
         Some(c) if c.admitted > 0 && c.balances() => kprintln!(
@@ -565,7 +565,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
-    // Lethe (REQ-ML-006, ADR-077): the resident performance advisor for the power/performance
+    // Lethe (REQ-ML-007, ADR-077): the resident performance advisor for the power/performance
     // contract - a frozen integer model (two decision trees, ALTH1) consulted by the advised
     // governor path. The suite proves the advisory discipline on the live path: with Lethe
     // present the overclock band stays authority-only and demanded silicon is never parked;
@@ -597,7 +597,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
-    // ADR-079 - the advisor takes the WATCH. The resident governor runs on the clock: one
+    // ADR-166 - the advisor takes the WATCH. The resident governor runs on the clock: one
     // domain per tick, demand MEASURED from real accounting, a cadence that refuses a replayed
     // or berserk timer by name, and a thermal ceiling that outranks the model for the whole
     // cooldown. It mints no grant, so the overclock band is unreachable by construction.
@@ -617,7 +617,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
-    // ADR-080 — the watch has now been standing across every suite above, with interrupts on and
+    // ADR-167 — the watch has now been standing across every suite above, with interrupts on and
     // the core genuinely working. The governor should have MEASURED that and responded. Compare
     // against the idle reading taken right after `sti`: same machine, same governor, opposite
     // regime, and the only thing that changed is what the machine was actually doing.

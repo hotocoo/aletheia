@@ -1,4 +1,4 @@
-//! Lethe: the resident performance advisor for the power/performance contract (REQ-ML-006,
+//! Lethe: the resident performance advisor for the power/performance contract (REQ-ML-007,
 //! ADR-077).
 //!
 //! ADR-076 made frequency AUTHORITY and heat a HARD CEILING, and its demand governor maps the
@@ -616,7 +616,7 @@ pub struct GovernReport {
 
 impl GovernReport {
     /// Fold one domain-step's report into a running total. Saturating so a long-lived
-    /// resident governor (ADR-079) reports honestly at the counter ceiling instead of
+    /// resident governor (ADR-166) reports honestly at the counter ceiling instead of
     /// wrapping to a smaller number than it has already earned.
     pub fn merge(&mut self, other: &GovernReport) {
         self.steps = self.steps.saturating_add(other.steps);
@@ -681,7 +681,7 @@ pub fn govern_advised(
 }
 
 /// One advised governor step over ONE domain — the sweep body of [`govern_advised`], lifted
-/// so a resident governor (ADR-079) can service domains one per tick without duplicating the
+/// so a resident governor (ADR-166) can service domains one per tick without duplicating the
 /// proven decision path. Same observe-then-consult-then-act order, same named APIs, same
 /// census; an unregistered domain yields an all-zero report and touches nothing.
 ///

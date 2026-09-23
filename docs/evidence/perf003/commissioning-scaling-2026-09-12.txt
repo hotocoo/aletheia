@@ -1,4 +1,4 @@
-mlsched::commission scaling — native, host, --release (REQ-PERF-001, ADR-086)
+mlsched::commission scaling — native, host, --release (REQ-PERF-001, ADR-173)
 measured 2026-09-12 via a temporary kernel-core integration test
 
   tasks      time        admitted

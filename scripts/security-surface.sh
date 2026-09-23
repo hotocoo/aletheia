@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Attack-surface comparison against a real Linux kernel (REQ-SEC-001, ADR-083).
+# Attack-surface comparison against a real Linux kernel (REQ-SEC-001, ADR-170).
 #
 # WHY THIS EXISTS, AND WHAT IT REFUSES TO DO.
 #

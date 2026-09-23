@@ -1,12 +1,12 @@
-//! **The advisor takes the watch** — Lethe as a resident governor (REQ-ML-003, ADR-079).
+//! **The advisor takes the watch** — Lethe as a resident governor (REQ-ML-003, ADR-166).
 //!
-//! ADR-078 built an advisor and proved it: a frozen integer model, verified at load, consulted
+//! ADR-165 built an advisor and proved it: a frozen integer model, verified at load, consulted
 //! through the power contract's own named APIs. What it did not build was a *resident*. The
 //! advised path ran when a test called it, over a replayed fixture, with demand that some
 //! caller had declared. STATUS said so in as many words: *no live governor thread exists yet*.
 //! This module closes that named gap, and closes it without loosening a single bound.
 //!
-//! The question a resident governor raises is not "what should the clock be" — ADR-078 answered
+//! The question a resident governor raises is not "what should the clock be" — ADR-165 answered
 //! that. It is **who gets to make the machine act, and how often**. A governor that runs off the
 //! timer interrupt is reachable by anything that can make the timer fire. So the contract here is
 //! about the *tick*, not the clock:
@@ -40,12 +40,12 @@
 //!   observer and meters with it; a nested entry is [`TickRefusal::Reentered`] via the ADR-039
 //!   [`ReentryGuard`], counted and never interleaved.
 //!
-//! Every act still flows through `govern_one_advised`, which is the ADR-078 sweep body lifted
+//! Every act still flows through `govern_one_advised`, which is the ADR-165 sweep body lifted
 //! unchanged — so the resident inherits that wave's proofs whole, including the one that matters
 //! most: with the advisor absent, the advised path drives the machine through the *same* clock
 //! sequence as the untouched ADR-076 baseline.
 //!
-//! `docs/adr/ADR-079-the-advisor-takes-the-watch.md` states the decision;
+//! `docs/adr/ADR-166-the-advisor-takes-the-watch.md` states the decision;
 //! `kernel-core/tests/lethed.rs` proves it on the host; [`lethed_suite`] proves it on every boot
 //! of all three targets.
 
@@ -119,7 +119,7 @@ pub enum TickOutcome {
         consulted: bool,
         /// Did the thermal cooldown hold this domain down this tick?
         cooldown_held: bool,
-        /// What the advised step did, as ADR-078 counts it.
+        /// What the advised step did, as ADR-165 counts it.
         report: GovernReport,
     },
 }
@@ -457,7 +457,7 @@ impl ResidentGovernor {
 
 /// The machine-wide watch — one governor, behind one lock, for the machine's whole uptime.
 ///
-/// ADR-079 built and proved the watch; this is what lets a real timer interrupt *stand* it. The
+/// ADR-166 built and proved the watch; this is what lets a real timer interrupt *stand* it. The
 /// discipline here is entirely about the fact that the caller is an interrupt handler:
 ///
 /// * **The lock is never waited on.** A handler runs on top of whatever it interrupted, so if the

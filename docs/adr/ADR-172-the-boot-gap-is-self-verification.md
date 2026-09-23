@@ -1,13 +1,13 @@
-# ADR-085 — The remaining boot gap is self-verification, and it is not going to be deleted
+# ADR-172 — The remaining boot gap is self-verification, and it is not going to be deleted
 
 **Status:** Accepted (2026-09-12)
 **Requirements:** REQ-PERF-001 (advanced)
-**Builds on:** ADR-082 (the boot clock is split), ADR-061 (the gate counts itself),
+**Builds on:** ADR-169 (the boot clock is split), ADR-061 (the gate counts itself),
 ADR-056 (the honesty rule).
 
 ## Context
 
-ADR-082 split the boot clock and left a specific, unexplained number: ~1077 ms of **kernel share**,
+ADR-169 split the boot clock and left a specific, unexplained number: ~1077 ms of **kernel share**,
 against Linux's ~1786 ms. Aletheia wins that comparison, and still loses the boot *total* because it
 pays for UEFI.
 
@@ -31,7 +31,7 @@ line, and it includes serial transmission of the line that closes it. The script
 output.
 
 Two bugs in the profiler had to be fixed before it told the truth, and both were the same species
-as the Redox skip in ADR-084 — a harness failing and blaming the kernel:
+as the Redox skip in ADR-171 — a harness failing and blaming the kernel:
 
 * A line-oriented reader blocks forever on the shell prompt, because a prompt has **no trailing
   newline**. It reported "the image never reached a prompt" for a boot that reached one in 2414 ms.
@@ -68,7 +68,7 @@ about 70% of the whole kernel share — is Aletheia running its own invariant su
 
 ## Consequences
 
-* **The boot comparison was never like-for-like, in a second way.** ADR-082 found the first
+* **The boot comparison was never like-for-like, in a second way.** ADR-169 found the first
   asymmetry (Aletheia pays for UEFI, the `-kernel`-loaded Linux leg does not). This is the second:
   Aletheia proves ~470 invariants on every boot and Linux proves none. Linux does not run its test
   suite at boot; this kernel does, by design (ADR-061).

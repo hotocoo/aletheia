@@ -67,7 +67,7 @@ const SIE_STIE: u64 = 1 << 5; // Supervisor Timer Interrupt Enable
 // --- Timer preemption tuning (QEMU virt `time` CSR = 10 MHz) --------------------------------
 const SLICE_TICKS: u64 = 50_000; // ~5 ms slice: long enough to run, short enough to preempt fast
 /// Real timer interrupts taken since boot — the monotone clock the resident governor is driven by
-/// on this target (ADR-080).
+/// on this target (ADR-167).
 static TIMER_IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Reported die temperature, in milli-degrees C. A STAND-IN, and named as one: QEMU 'virt' exposes
@@ -463,7 +463,7 @@ extern "C" fn _user_trap_rust(frame: *mut TrapFrame) {
                          // SAFETY: single-owner static; no concurrent access (see `current`).
             unsafe { (*addr_of_mut!(SCHED)).preempted = true };
 
-            // ADR-080 — the resident governor stands its watch on this real S-mode timer interrupt.
+            // ADR-167 — the resident governor stands its watch on this real S-mode timer interrupt.
             // A U-mode task was running when it fired, so the slice just closed was genuinely BUSY.
             // Both calls are no-ops until the watch is commissioned, and neither ever waits on the
             // watch lock — spinning for a lock held by the interrupted code would deadlock the core.

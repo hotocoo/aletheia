@@ -663,7 +663,7 @@ impl PmEngine {
 
     /// Ticks left on a domain's latched thermal cooldown, or `None` when it is not cooling.
     ///
-    /// Read-only, and deliberately public: a resident governor (ADR-079) must be able to see
+    /// Read-only, and deliberately public: a resident governor (ADR-166) must be able to see
     /// that the ceiling is holding so it can stand down on its own, rather than raising a
     /// just-clamped domain back up inside the governor range — which the contract would
     /// permit (the cooldown gates the overclock band only) and which would be wrong.

@@ -275,7 +275,7 @@ CONTRACT=(
   "compositor: the painter's order is the z-order and only the owner may change it"
   "compositor: a fill buffer that is not exactly the packed size is refused by name"
   "compositor: an unchanged frame writes zero pixels and a one-pixel change writes exactly its region"
-  # Lethe, the resident performance advisor (REQ-ML-006, ADR-078). The advisory discipline
+  # Lethe, the resident performance advisor (REQ-ML-007, ADR-165). The advisory discipline
   # must not vary by CPU: the bundled blob verifies, wrong blobs are refused BY NAME, parity
   # with the trainer holds, and the advised path obeys the ADR-076 contract it advises.
   "lethe: the bundled advisor verifies at boot (both trees present, compare bound exact)"

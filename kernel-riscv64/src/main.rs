@@ -254,7 +254,7 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
-    // Lethe (REQ-ML-006, ADR-077): the resident performance advisor for the power/performance
+    // Lethe (REQ-ML-007, ADR-077): the resident performance advisor for the power/performance
     // contract - a frozen integer model (two decision trees, ALTH1) consulted by the advised
     // governor path. The suite proves the advisory discipline on the live path: with Lethe
     // present the overclock band stays authority-only and demanded silicon is never parked;
@@ -262,7 +262,7 @@ pub extern "C" fn kmain() -> ! {
     // baseline governor; every way the blob can be wrong is a named refusal; and parity with
     // the trainer is a committed fixture replayed through the live observer.
 
-    // ADR-080 — stand the watch before the ring-3 run, so real timer interrupts drive it.
+    // ADR-167 — stand the watch before the ring-3 run, so real timer interrupts drive it.
     {
         use kernel_core::pm::{OperatingPoint, PmEngine};
         const LADDER: [OperatingPoint; 4] = [
@@ -324,7 +324,7 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
-    // ADR-079 - the advisor takes the WATCH. The resident governor runs on the clock: one
+    // ADR-166 - the advisor takes the WATCH. The resident governor runs on the clock: one
     // domain per tick, demand MEASURED from real accounting, a cadence that refuses a replayed
     // or berserk timer by name, and a thermal ceiling that outranks the model for the whole
     // cooldown. It mints no grant, so the overclock band is unreachable by construction.
@@ -609,7 +609,7 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
-    // ADR-080 — the watch stood through the ring-3 run above, driven by REAL timer interrupts.
+    // ADR-167 — the watch stood through the ring-3 run above, driven by REAL timer interrupts.
     // The gated claims are the contract's, not the numbers': every tick accounted for, no
     // contract refusal, and the governor range never left.
     match kernel_core::lethed::resident::census() {
