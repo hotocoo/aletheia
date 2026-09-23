@@ -272,7 +272,7 @@ eventually(lambda o: ('first "%s' % index[:30]) in o, 'back to the index by Ctrl
 key('f', ctrl=True)
 eventually(lambda o: ('first "%s' % url[:30]) in o, 'forward to the plain page by Ctrl+F', secs=120)
 key('9', ctrl=True)
-eventually(lambda o: 'first "refused: the page offers no such link' in o, 'Ctrl+9 refused by name', secs=60)
+eventually(lambda o: 'first "refused: the page offers no su' in o, 'Ctrl+9 refused by name', secs=60)
 command('halt', need='halting', prompt=False)
 print('BROWSER LIVE E2E: PASS', flush=True)
 PY

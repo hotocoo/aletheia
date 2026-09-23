@@ -33,7 +33,11 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (AN INTERACTIVE BOOT PAYS FOR CONTRACTS, NOT STORMS — ADR-163. One constant per
+**As of:** 2026-09-23, latest (THE BROWSER WINDOW'S OWN KEYS — ADR-164. While the browser window holds focus,
+`Ctrl+1..9` follow link `[n]` of the page it shows, `Ctrl+B` goes back and `Ctrl+F` forward; the desktop latches one
+`BrowserRequest` and the console session resolves it through the same navigator as `follow`, `back` and `forward`, so
+the window refuses exactly what the console refuses and names a missing link or empty history. Proved live on both
+device-tree targets by `scripts/browser-e2e.sh`; conformance unchanged (383). Before it: AN INTERACTIVE BOOT PAYS FOR CONTRACTS, NOT STORMS — ADR-163. One constant per
 `kmain`, `STORMS_AT_BOOT = !cfg!(feature = "interactive")`, keeps the seven load blocks (bench, soak, mlrisk-stress,
 wmstorm, schedstorm, fsstorm, shellstorm) and aarch64's post-suite perf pass in the GATE image only; the interactive
 image prints one `[boot] deferred ...` line naming them and where they are proved. Gate images unchanged (conformance
@@ -1263,6 +1267,13 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-23 — the browser window's own keys (ADR-164)
+
+- **A window that shows links it cannot follow is half a browser.** ADR-160 left the window typed-only; `follow N`, `back` and `forward` lived at the console. Now `Ctrl+1..9`, `Ctrl+B` and `Ctrl+F` act in the window, only while it holds focus, only on a press with Ctrl held and Alt not (`browser_shortcut`, pure, host-tested). A bare digit stays URL text; `Ctrl+Alt+digit` stays a workspace; `Ctrl+W` stays close.
+- **The desktop still never dials.** The latch widens from a typed URL to one `BrowserRequest` (`Go`, `Follow`, `Back`, `Forward`); the console session resolves it through its own navigator, so an unpinned, blocked or plaintext target is refused in the window as at the console, and `refused: the page offers no such link` / `no previous page` / `no next page` name the empty cases.
+- **Live:** `scripts/browser-e2e.sh` step 6 - an HTML index with one link, `Ctrl+1` follows it (the peer sees the second GET), `Ctrl+B` back, `Ctrl+F` forward, `Ctrl+9` refused by name. The first CI run of this wave was red on the gate's own oracle: the readout cuts `first` at 30 bytes and the gate expected the whole refusal; it now matches the first 30 bytes.
+- No new boot invariants; conformance unchanged (383).
 
 ### 2026-09-23 — what an interactive boot pays for (ADR-163)
 
