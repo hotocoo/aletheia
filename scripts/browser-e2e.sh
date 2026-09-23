@@ -36,6 +36,12 @@ class Handler(BaseHTTPRequestHandler):
         print("peer:", fmt % args, flush=True)
     def do_GET(self):
         print("peer request:", self.path, "host:", self.headers.get("Host"), "agent:", self.headers.get("User-Agent"), flush=True)
+        if self.path == "/index.html":
+            body = (b"<html><head><title>Index</title></head><body><h1>Index</h1>"
+                    b"<p><a href=\"/plain.txt\">the plain page</a></p></body></html>")
+            self.send_response(200); self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "close")
+            self.end_headers(); self.wfile.write(body); return
         body = PLAIN if self.path == "/plain.txt" else b""
         self.send_response(200 if body else 404); self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "close")
@@ -174,9 +180,10 @@ def send(events):
     time.sleep(.15)
 def down(k): return {'type':'key','data':{'down':True,'key':{'type':'qcode','data':k}}}
 def up(k):   return {'type':'key','data':{'down':False,'key':{'type':'qcode','data':k}}}
-def key(k, shift=False):
+def key(k, shift=False, ctrl=False):
     ev=[down(k),up(k)]
     if shift: ev=[down('shift')]+ev+[up('shift')]
+    if ctrl: ev=[down('ctrl')]+ev+[up('ctrl')]
     send(ev)
 QCODE={'/':'slash','.':'dot','-':'minus',':':('semicolon',True),' ':'spc','\n':'ret'}
 def type_text(t):
@@ -248,6 +255,24 @@ eventually(lambda o: ('browser: url "%s", page' % plain) in o and 'first "refuse
            'the plaintext refusal in the browser window', secs=120)
 peer=peer_since()
 assert peer.count('peer request:') == 1, 'something was dialed for the plaintext URL: '+peer[-300:]
+# 6 - the window navigates by its own keys (ADR-164): an HTML page with one link, Ctrl+1 follows
+#     it (the window then shows the plain page's URL as its first line and the peer saw the GET),
+#     Ctrl+B goes back (the index is fetched again), Ctrl+F forward, Ctrl+9 is refused by name.
+for _ in plain: key('backspace')
+eventually(lambda o: 'browser: url ""' in o, 'the URL line emptied again')
+index='https://%s:%s/index.html' % (name, port)
+type_text(index); key('ret')
+eventually(lambda o: ('first "%s' % index[:30]) in o, 'the index page in the window', secs=120)
+key('1', ctrl=True)
+eventually(lambda o: ('first "%s' % url[:30]) in o, 'the followed link (plain page) in the window', secs=120)
+peer=peer_since()
+assert peer.count('peer request: /plain.txt') == 2, 'Ctrl+1 did not fetch the linked page: '+peer[-300:]
+key('b', ctrl=True)
+eventually(lambda o: ('first "%s' % index[:30]) in o, 'back to the index by Ctrl+B', secs=120)
+key('f', ctrl=True)
+eventually(lambda o: ('first "%s' % url[:30]) in o, 'forward to the plain page by Ctrl+F', secs=120)
+key('9', ctrl=True)
+eventually(lambda o: 'first "refused: the page offers no such link' in o, 'Ctrl+9 refused by name', secs=60)
 command('halt', need='halting', prompt=False)
 print('BROWSER LIVE E2E: PASS', flush=True)
 PY

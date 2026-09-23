@@ -2378,7 +2378,7 @@ pub type ServiceHook<'a, D> =
 /// person entered, and a place to put the page. Both are the platform's closures over its desktop
 /// door; a machine without a desktop passes hooks that return nothing and show nowhere.
 pub struct BrowserHooks<'a> {
-    pub take_navigation: &'a mut dyn FnMut() -> Option<([u8; crate::desktop::URL_LINE_CAP], usize)>,
+    pub take_navigation: &'a mut dyn FnMut() -> Option<crate::desktop::BrowserRequest>,
     pub show_page: &'a mut dyn FnMut(&[u8]),
 }
 
@@ -2387,13 +2387,42 @@ pub struct BrowserHooks<'a> {
 pub fn navigate_for_window<H: ShellHost>(
     host: &H,
     nav: &mut Navigator,
-    url: &[u8],
+    request: crate::desktop::BrowserRequest,
     show_page: &mut dyn FnMut(&[u8]),
 ) {
+    use crate::desktop::BrowserRequest;
     let mut text = [0u8; 1024];
     let mut len = 0usize;
     let mut grid = crate::textgrid::TextGrid::new(30, 8);
-    let refused: Option<&[u8]> = match nav.navigate(url) {
+    // Every request resolves through the navigator exactly as the console's verbs do (ADR-164):
+    // a typed URL through `navigate`, a numbered link through the page's own hrefs, back and
+    // forward through history - so the window can refuse nothing less and nothing more.
+    let mut target = [0u8; crate::browser::MAX_URL];
+    let resolved = match request {
+        BrowserRequest::Go(url, n) => nav.navigate(&url[..n]),
+        BrowserRequest::Follow(k) => match nav.link_target(k, &mut target) {
+            Some(n) => nav.navigate(&target[..n]),
+            None => {
+                grid.write(b"refused: the page offers no such link");
+                return show_window(&grid, &mut text, &mut len, show_page);
+            }
+        },
+        BrowserRequest::Back => match nav.back() {
+            Some(url) => nav.resolve(&url),
+            None => {
+                grid.write(b"refused: no previous page");
+                return show_window(&grid, &mut text, &mut len, show_page);
+            }
+        },
+        BrowserRequest::Forward => match nav.forward() {
+            Some(url) => nav.resolve(&url),
+            None => {
+                grid.write(b"refused: no next page");
+                return show_window(&grid, &mut text, &mut len, show_page);
+            }
+        },
+    };
+    let refused: Option<&[u8]> = match resolved {
         Ok(resolved) => {
             fetch_into(host, nav, resolved);
             None
@@ -2411,6 +2440,16 @@ pub fn navigate_for_window<H: ShellHost>(
         Some(why) => grid.write(why),
         None => nav.render(&mut grid),
     }
+    show_window(&grid, &mut text, &mut len, show_page)
+}
+
+/// Hand the window's grid to the desktop as lines of text, trailing blanks trimmed.
+fn show_window(
+    grid: &crate::textgrid::TextGrid,
+    text: &mut [u8; 1024],
+    len: &mut usize,
+    show_page: &mut dyn FnMut(&[u8]),
+) {
     for row in 0..grid.rows() {
         let line = grid.line(row);
         let end = line
@@ -2418,17 +2457,17 @@ pub fn navigate_for_window<H: ShellHost>(
             .rposition(|&b| b != b' ' && b != 0)
             .map_or(0, |i| i + 1);
         for &b in &line[..end] {
-            if len < text.len() {
-                text[len] = b;
-                len += 1;
+            if *len < text.len() {
+                text[*len] = b;
+                *len += 1;
             }
         }
-        if len < text.len() {
-            text[len] = b'\n';
-            len += 1;
+        if *len < text.len() {
+            text[*len] = b'\n';
+            *len += 1;
         }
     }
-    show_page(&text[..len]);
+    show_page(&text[..*len]);
 }
 
 pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
@@ -2447,8 +2486,8 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
     session.prompt(out);
     loop {
         let Some(byte) = getc() else {
-            if let Some((url, len)) = (browser.take_navigation)() {
-                navigate_for_window(host, &mut session.navigator, &url[..len], browser.show_page);
+            if let Some(request) = (browser.take_navigation)() {
+                navigate_for_window(host, &mut session.navigator, request, browser.show_page);
             }
             if service(ServicePhase::Idle, fs, dev, &mut *out) {
                 session.prompt(out);

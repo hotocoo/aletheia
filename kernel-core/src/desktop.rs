@@ -158,10 +158,40 @@ const BROWSER_X: i32 = 20;
 const BROWSER_Y: i32 = 210;
 /// The longest URL the window's line holds.
 pub const URL_LINE_CAP: usize = 128;
+
+/// What the browser window asks the platform to do (ADR-157, ADR-164). The desktop never dials:
+/// it latches ONE request at a time and the console session performs it through its own
+/// navigator - the same `go`, `follow`, `back` and `forward` a person types at the console.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserRequest {
+    /// Enter on the URL line: navigate to what was typed.
+    Go([u8; URL_LINE_CAP], usize),
+    /// `Ctrl+1..9`: follow link `[n]` of the page the window shows.
+    Follow(usize),
+    /// `Ctrl+B`.
+    Back,
+    /// `Ctrl+F`.
+    Forward,
+}
+
+/// The browser window's own keys (ADR-164), recognised only while it holds focus and only on a
+/// press with Ctrl held and Alt not: `Ctrl+1..9` follow a numbered link, `Ctrl+B` goes back,
+/// `Ctrl+F` forward. Pure, so the policy is testable without a device.
+fn browser_shortcut(code: u16, value: u32, ctrl: bool, alt: bool) -> Option<BrowserRequest> {
+    if value != 1 || !ctrl || alt {
+        return None;
+    }
+    match code {
+        KEY_1..=KEY_9 => Some(BrowserRequest::Follow((code - KEY_1 + 1) as usize)),
+        KEY_B => Some(BrowserRequest::Back),
+        KEY_F => Some(BrowserRequest::Forward),
+        _ => None,
+    }
+}
 /// The most page text the window keeps.
 const PAGE_CAP: usize = 1024;
 const HELP_COLS: u32 = 54;
-const HELP_ROWS: u32 = 19;
+const HELP_ROWS: u32 = 20;
 const HELP_X: i32 = 95;
 const HELP_Y: i32 = 30;
 const HELP_TITLE: &[u8] = b"shortcuts";
@@ -209,6 +239,9 @@ const CHROME: persona::ChromeMetrics = persona::ChromeMetrics {
 /// Cycle the desktop's shell persona. Alt+P is free on every persona and is deliberately NOT a
 /// window or workspace accelerator, so changing the convention can never also move a window.
 const KEY_P: u16 = 25;
+/// `Ctrl+B` / `Ctrl+F`: back / forward in the browser window (ADR-164).
+const KEY_B: u16 = 48;
+const KEY_F: u16 = 33;
 // The widest numbered command is `9 minimize focused` (18 cells); one extra cell leaves the
 // selection marker visible without truncating the accelerator label.
 const MENU_COLS: u32 = 20;
@@ -346,7 +379,7 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     /// The URL line as typed, and the last URL entered, latched until the platform collects it.
     url_line: [u8; URL_LINE_CAP],
     url_len: usize,
-    navigation: Option<([u8; URL_LINE_CAP], usize)>,
+    navigation: Option<BrowserRequest>,
     /// Enter was pressed and the platform has not pushed a page back yet (ADR-160).
     browser_fetching: bool,
     /// The page text the platform pushed (the navigation model's rendering), bounded.
@@ -781,6 +814,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             b"1-9  select a start-menu command",
             b"Alt+P  cycle the shell persona",
             b"Arrows/Enter browse and open in files",
+            b"Ctrl+1..9/B/F  follow link/back/fwd in browser",
         ];
         for line in HELP_LINES {
             help.write(line);
@@ -2054,6 +2088,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                     } else {
                         None
                     };
+                    // The browser window's own keys (ADR-164), only while it holds focus.
+                    let browser_key =
+                        if ev.ty == vinput::EV_KEY && self.comp.focus() == Some(BROWSER) {
+                            browser_shortcut(ev.code, ev.value, ctrl, alt)
+                        } else {
+                            None
+                        };
                     let workspace_key = if ev.ty == vinput::EV_KEY {
                         workspace_shortcut(ev.code, ev.value, ctrl, alt, shift)
                     } else {
@@ -2320,6 +2361,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         self.refresh_cursor_shape();
                         // Workspace shortcuts are desktop commands, never application input.
                         let _ = self.kb_dec.feed(ev);
+                    } else if let Some(req) = browser_key {
+                        self.request_browser(req);
+                        // A browser key is a desktop command, never a byte in the URL line.
+                        let _ = self.kb_dec.feed(ev);
                     } else if let Some(id) = alt_launcher {
                         if !self.wm.is_open(id) {
                             self.reopen_taskbar_window(id);
@@ -2510,7 +2555,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             };
             match b {
                 b'\r' | b'\n' if self.url_len > 0 => {
-                    self.navigation = Some((self.url_line, self.url_len));
+                    self.navigation = Some(BrowserRequest::Go(self.url_line, self.url_len));
                     self.browser_fetching = true;
                     let note = b"(fetching...)";
                     self.page[..note.len()].copy_from_slice(note);
@@ -2531,8 +2576,19 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
     /// The URL the person last entered in the browser window, if any, and clear it. Reported,
     /// not performed: the platform navigates (ADR-156) and pushes the page back.
-    pub fn take_navigation(&mut self) -> Option<([u8; URL_LINE_CAP], usize)> {
+    pub fn take_navigation(&mut self) -> Option<BrowserRequest> {
         self.navigation.take()
+    }
+
+    /// A browser key was pressed while the window held focus (ADR-164): latch the request and
+    /// show that something is on its way, exactly as Enter on the URL line does.
+    fn request_browser(&mut self, req: BrowserRequest) {
+        self.navigation = Some(req);
+        self.browser_fetching = true;
+        let note = b"(fetching...)";
+        self.page[..note.len()].copy_from_slice(note);
+        self.page_len = note.len();
+        self.browser_dirty = true;
     }
 
     /// The page the platform fetched, as the navigation model rendered it, bounded to what the
@@ -2662,6 +2718,7 @@ mod tests {
             b"1-9  select a start-menu command",
             b"Alt+P  cycle the shell persona",
             b"Arrows/Enter browse and open in files",
+            b"Ctrl+1..9/B/F  follow link/back/fwd in browser",
         ];
         assert_eq!(HELP_LINES.len(), super::HELP_ROWS as usize);
         assert!(HELP_LINES
@@ -2671,6 +2728,47 @@ mod tests {
             crate::textgrid::TextGrid::new(super::HELP_COLS, super::HELP_ROWS).pixel_size();
         assert!(super::HELP_X + w as i32 <= super::W as i32);
         assert!(super::HELP_Y + (h as i32) < super::H as i32);
+    }
+
+    #[test]
+    fn browser_keys_follow_links_and_walk_history_only_with_ctrl_on_a_press() {
+        use super::BrowserRequest::*;
+        assert_eq!(
+            super::browser_shortcut(super::KEY_1, 1, true, false),
+            Some(Follow(1))
+        );
+        assert_eq!(
+            super::browser_shortcut(super::KEY_9, 1, true, false),
+            Some(Follow(9))
+        );
+        assert_eq!(
+            super::browser_shortcut(super::KEY_B, 1, true, false),
+            Some(Back)
+        );
+        assert_eq!(
+            super::browser_shortcut(super::KEY_F, 1, true, false),
+            Some(Forward)
+        );
+        assert_eq!(
+            super::browser_shortcut(super::KEY_1, 0, true, false),
+            None,
+            "a release is not a request"
+        );
+        assert_eq!(
+            super::browser_shortcut(super::KEY_1, 1, false, false),
+            None,
+            "a bare digit is URL text"
+        );
+        assert_eq!(
+            super::browser_shortcut(super::KEY_1, 1, true, true),
+            None,
+            "Ctrl+Alt+digit is a workspace"
+        );
+        assert_eq!(
+            super::browser_shortcut(super::KEY_W, 1, true, false),
+            None,
+            "Ctrl+W stays the close gesture"
+        );
     }
 
     #[test]
