@@ -48,7 +48,7 @@ fn a_line_that_lost_bytes_is_cancelled_and_the_next_line_is_clean() {
     // Every overflow length, every terminator: the damaged line ends in Ctrl-C, never in a CR the
     // editor would run, and the following line arrives exactly as typed.
     for extra in 1..40usize {
-        for term in [b'\r', b'\n'] {
+        for &term in b"\r\n" {
             let mut r = ConsoleRing::new();
             for _ in 0..(DATA_CAPACITY + extra) {
                 r.push(b'a');
