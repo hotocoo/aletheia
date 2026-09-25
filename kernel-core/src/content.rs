@@ -246,6 +246,18 @@ fn tag_name(inner: &[u8]) -> (bool, [u8; TAG_CAP], usize) {
     (closing, name, n)
 }
 
+/// Whether the bytes after a `<` open markup, as the HTML tokenizer decides it: a letter (a tag),
+/// `/` (an end tag, or a bogus comment such as `</1 ...>`), `!` (a comment or declaration) or `?`
+/// (a bogus comment). Anything else - `<1`, `< `, `<<`, `<` at the end - is a literal `<`.
+/// Reading it as a tag would swallow everything to the next `>`, including the opener of a real
+/// `<script>` or `<template>`, and that element's content would then show.
+fn opens_markup(rest: &[u8]) -> bool {
+    match rest.first() {
+        Some(&b) => b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?'),
+        None => false,
+    }
+}
+
 /// The value of attribute `key` inside a tag's bytes, if present and quoted.
 fn attribute<'b>(inner: &'b [u8], key: &[u8]) -> Option<&'b [u8]> {
     let mut i = 0;
@@ -319,7 +331,7 @@ pub fn render<'a>(html: &[u8], out: &'a mut [u8], width: usize, rows: usize) -> 
     let mut scratch = [0u8; 256];
 
     while i < doc.len() {
-        if doc[i] == b'<' {
+        if doc[i] == b'<' && opens_markup(&doc[i + 1..]) {
             // A comment or declaration: skipped whole.
             if doc[i..].starts_with(b"<!--") {
                 match doc[i + 4..].windows(3).position(|w| w == b"-->") {
@@ -447,10 +459,12 @@ pub fn render<'a>(html: &[u8], out: &'a mut [u8], width: usize, rows: usize) -> 
             }
             continue;
         }
-        let text_end = doc[i..]
+        // A `<` that opens no markup is a literal character: the text runs past it.
+        let from = if doc[i] == b'<' { i + 1 } else { i };
+        let text_end = doc[from..]
             .iter()
             .position(|&b| b == b'<')
-            .map_or(doc.len(), |p| i + p);
+            .map_or(doc.len(), |p| from + p);
         let raw = &doc[i..text_end];
         if in_title {
             let n = decode_entities(raw, &mut scratch);

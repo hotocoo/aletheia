@@ -205,7 +205,17 @@ fn gen_document(g: &mut Gen) -> Vec<u8> {
             9 => d.extend_from_slice(g.pick(&ENTITIES).as_bytes()),
             10 => d.extend_from_slice(b"<!-- comment with <tags> and & -->"),
             11 => d.extend_from_slice(b"<!DOCTYPE html>"),
-            12 => d.extend(g.bytes_range(1, 24)), // raw bytes 0..255, controls included
+            // Raw bytes 0..255, controls included. A raw `<` is written `<1`, which the HTML
+            // tokenizer reads as a literal `<`: a bare one could start a tag (`<v<template>` is
+            // ONE tag named `v<template`) and hide the next opener from a real browser too.
+            12 => {
+                for b in g.bytes_range(1, 24) {
+                    d.push(b);
+                    if b == b'<' {
+                        d.push(b'1');
+                    }
+                }
+            }
             13 => d.extend_from_slice(b"\x1b[31m\x07\x00\r\n\t"),
             14 => {
                 for _ in 0..g.range(1, 60) {
@@ -774,4 +784,27 @@ fn a_navigator_under_random_operations_never_resolves_what_the_operator_did_not_
             v
         },
     );
+}
+
+/// Nightly seed 0xA1E7_0210_5EED case 839 (2026-09-23..25): a stray `<1u` with no `>` before a
+/// real `<template>` was read as one tag running to the template's own `>`, so the template's
+/// content rendered. A `<` that opens no markup is now a literal character.
+#[test]
+fn a_stray_angle_bracket_does_not_swallow_the_next_hidden_element() {
+    for doc in [
+        &b"a <1u junk <template href=\"x\">NEVERSHOWN</template> b"[..],
+        b"a < <script>NEVERSHOWN</script> b",
+        b"a << <style>NEVERSHOWN</style> b",
+        b"a <1 <iframe>NEVERSHOWN</iframe> <",
+    ] {
+        let mut out = [0u8; 256];
+        let r = render(doc, &mut out, 80, 10);
+        assert!(
+            !r.text.windows(HIDDEN.len()).any(|w| w == HIDDEN),
+            "{:?}",
+            r.text
+        );
+        assert!(r.text.starts_with(b"a <"), "{:?}", r.text);
+        check_document(doc);
+    }
 }
