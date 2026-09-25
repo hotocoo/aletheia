@@ -658,8 +658,13 @@ cd aletheia && cargo test        # full conformance + unit suite (deterministic;
 cd kernel-core && cargo test     # the shared substrate's hosted proofs — 452 tests incl. soak + the self-benchmark suite
 ./scripts/e2e-all.sh             # all three CPU targets + the VirtualBox rung, one aggregate pass/fail
 ./scripts/console-e2e.sh         # boot, type, halt, reboot, read it back — three targets
-./scripts/comparative-bench.sh   # Aletheia vs a real Linux kernel on the SAME emulator:
-                                 # boot, idle CPU, and a typed echo-workload leg under load
+./scripts/comparative-bench.sh   # Aletheia vs Linux, Redox and FreeBSD on the SAME emulator:
+                                 # boot, idle CPU, typed echo load, IPC round trip (docs/BENCHMARKS.md)
+# Adversarial, live, on all three CPUs (each seeded; CI seeds them with the run number):
+./scripts/console-fuzz-e2e.sh    # hostile bytes typed at the console (ADR-180)
+./scripts/net-fuzz-e2e.sh        # a hostile TCP/TLS/HTTP/DNS peer (ADR-181)
+./scripts/desktop-fuzz-e2e.sh    # random keyboard/tablet storms; the heap must plateau (ADR-182)
+./scripts/crash-e2e.sh           # SIGKILL mid-write, many times; every object whole after (ADR-183)
 ```
 
 Two of those proofs deserve naming. The **long-running soak**
