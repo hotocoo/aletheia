@@ -8,8 +8,7 @@
 # table (filled here by `trust` on the serial line), dials TLS 1.3 to the peer on THIS host,
 # renders the answer and pushes it back into the window. Every step is asked of the machine through
 # the console's `input` readout, which reads the window's own state (ADR-160), and of the peer,
-# which logs what it was asked. Both device-tree targets; x86-64 runs the identical code path
-# behind its own desktop gate.
+# which logs what it was asked. All three CPUs: the device-tree targets and x86-64 under OVMF.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -x "$HOME/.cargo/bin/cargo" ]; then export PATH="$HOME/.cargo/bin:$PATH"; fi
@@ -90,6 +89,8 @@ trap cleanup EXIT
 fail=0
 run_target() {
   local arch="$1" dir qemu machine cpu target elf img qmp ser log rootbin dtbraw dtb
+  local -a args=()
+  if [ "$arch" != x86_64 ]; then
   if [ "$arch" = aarch64 ]; then
     dir="$ROOT/kernel"; qemu=qemu-system-aarch64; target=aarch64-unknown-none-softfloat
     machine='virt,iommu=smmuv3,highmem-ecam=off,gic-version=2'; cpu=cortex-a72
@@ -115,7 +116,7 @@ run_target() {
   local -a devices=(-device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device
     -drive "if=none,format=raw,file=$pciimg,id=pciblk0" -device virtio-blk-pci,disable-legacy=on,drive=pciblk0
     -netdev user,id=n0 -device virtio-net-device,netdev=n0 -device virtio-rng-device)
-  local -a args=("$qemu" -machine "$machine" -cpu "$cpu" -smp 4 -m 128M -display none -S
+  args=("$qemu" -machine "$machine" -cpu "$cpu" -smp 4 -m 128M -display none -S
     -global virtio-mmio.force-legacy=false
     -drive "if=none,format=raw,file=$img,id=blk0" -device virtio-blk-device,drive=blk0
     "${devices[@]}"
@@ -133,6 +134,43 @@ run_target() {
     args+=( -global arm-smmuv3.stage=2 -fw_cfg "name=opt/org.aletheia/capvault-root,file=$rootbin" -fw_cfg "name=opt/org.aletheia/dtb,file=$dtb" )
   else
     args+=( -bios default )
+  fi
+
+  fi
+  if [ "$arch" = x86_64 ]; then
+    # x86-64: a UEFI disk image under OVMF, every device over PCI - the same window path, the same
+    # driver below, on the third CPU (until 2026-09-25 x86-64 only had the console's path gated).
+    local code="" vars=""
+    for c in "${OVMF_CODE:-}" /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+        /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd; do
+      [ -n "$c" ] && [ -f "$c" ] && { code="$c"; break; }
+    done
+    for v in "${OVMF_VARS:-}" /opt/homebrew/share/qemu/edk2-i386-vars.fd \
+        /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
+      [ -n "$v" ] && [ -f "$v" ] && { vars="$v"; break; }
+    done
+    if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || [ -z "$code" ] || [ -z "$vars" ]; then
+      echo "BROWSER-E2E-$arch: SKIP (needs qemu-system-x86_64 + OVMF; this leg did NOT run)"; return 0
+    fi
+    dir="$ROOT/kernel-x86_64"
+    echo "==> [$arch] build interactive UEFI image"
+    (cd "$dir" && cargo build --release --features interactive) || { echo "BROWSER-E2E-$arch: FAIL (build)"; fail=1; return 1; }
+    img="$dir/build/browser-e2e.img"; mkdir -p "$dir/build"
+    python3 "$dir/scripts/mkesp.py" --efi "$dir/target/x86_64-unknown-uefi/release/aletheia-kernel-x86_64.efi" \
+      --out "$img" >/dev/null || { echo "BROWSER-E2E-$arch: FAIL (image)"; fail=1; return 1; }
+    local work; work="$(mktemp -d)"; cp "$vars" "$work/vars.fd"
+    dd if=/dev/zero of="$work/scratch.img" bs=1048576 count=1 2>/dev/null
+    qmp="${TMPDIR:-/tmp}/aletheia-browser-$arch-$$.qmp"; ser="${TMPDIR:-/tmp}/aletheia-browser-$arch-$$.ser"
+    log="$dir/build/browser-e2e-$arch.log"; rm -f "$qmp" "$ser" "$log"
+    args=(qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -display none -S
+      -drive "if=pflash,format=raw,unit=0,readonly=on,file=$code"
+      -drive "if=pflash,format=raw,unit=1,file=$work/vars.fd"
+      -drive "format=raw,file=$img"
+      -drive "if=none,format=raw,file=$work/scratch.img,id=blk0" -device virtio-blk-pci,drive=blk0
+      -device virtio-gpu-pci,disable-legacy=on -device virtio-keyboard-pci -device virtio-tablet-pci
+      -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -device virtio-rng-pci,disable-legacy=on
+      -chardev "socket,id=ser0,path=$ser,server=on,wait=off" -serial chardev:ser0
+      -qmp "unix:$qmp,server,nowait")
   fi
 
   "${args[@]}" & local pid=$!
@@ -288,6 +326,7 @@ PY
 
 run_target aarch64
 run_target riscv64
+run_target x86_64
 if [ "$fail" -eq 0 ]; then
   echo "BROWSER-E2E: PASS — a URL typed into the desktop's browser window with a real keyboard fetched a real page over TLS and showed it there; plaintext typed there was refused there"
 else

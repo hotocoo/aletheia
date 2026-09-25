@@ -1271,6 +1271,12 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-25 — the browser window, live on x86-64 too
+
+- `scripts/browser-e2e.sh` gains an x86-64 leg (q35 + OVMF, virtio gpu/keyboard/tablet/net/rng over
+  PCI): Alt+5, a URL typed key by key, the page fetched over TLS 1.3 and shown in the window,
+  plaintext refused there. PASS on aarch64, riscv64 and x86-64; CI installs the x86 toolchain.
+
 ### 2026-09-25 — an answer in hand is not refused (ADR-177)
 
 - The agent loop ends a session with the machine's own answer, labelled, when the model keeps
