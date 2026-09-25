@@ -15,6 +15,10 @@ bench = false
 # (REQ-CON-001, ADR-044). OFF by default so every gate keeps its exit-code contract; an interactive
 # session has no verdict to give, and a gate that waited for input would hang rather than fail.
 interactive = []
+# Heap forensics (ADR-182): once the interactive console is up, print every allocation's size and
+# frame-pointer backtrace to the serial line, for `scripts/heaptrace-symbolize.py`. Diagnostic
+# only; never in a gate build.
+heaptrace = []
 
 [dependencies]
 # The single shared Hal trait (defined once in kernel-core, not copied per target).

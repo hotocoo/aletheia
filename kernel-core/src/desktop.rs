@@ -480,8 +480,9 @@ fn is_context_menu_shortcut(ty: u16, code: u16, value: u32, shift: bool) -> bool
     ty == vinput::EV_KEY && code == KEY_F10 && value == 1 && shift
 }
 
-fn render_menu(menu: &TextGrid, selected: usize, out: &mut Vec<u8>) {
-    let mut grid = menu.clone();
+fn render_menu(grid: &mut TextGrid, selected: usize, out: &mut Vec<u8>) {
+    // In place, not on a clone (ADR-182): this runs on every hover over the menu, and a cloned
+    // grid per repaint was a leak on a heap that never frees.
     grid.clear();
     for (index, item) in MENU_ITEMS.iter().enumerate() {
         if index == selected {
@@ -867,7 +868,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         taskbar.render_packed(b"desktop", &mut taskbar_packed);
         comp.fill_packed(TASKBAR, tok_taskbar, &taskbar_packed)
             .map_err(|_| "the taskbar's first paint was refused")?;
-        let menu = TextGrid::new(MENU_COLS, MENU_ROWS);
+        let mut menu = TextGrid::new(MENU_COLS, MENU_ROWS);
         let (menu_w, menu_h) = menu.pixel_size();
         let tok_menu = comp
             .mint_surface(MENU, menu_w, menu_h)
@@ -875,7 +876,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         comp.attach(MENU, tok_menu, MENU_MARGIN, MENU_MARGIN)
             .map_err(|_| "the desktop menu placement was refused")?;
         let mut menu_packed = Vec::new();
-        render_menu(&menu, 0, &mut menu_packed);
+        render_menu(&mut menu, 0, &mut menu_packed);
         comp.fill_packed(MENU, tok_menu, &menu_packed)
             .map_err(|_| "the desktop menu's first paint was refused")?;
         comp.set_visible(MENU, tok_menu, false)
@@ -1489,7 +1490,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     }
 
     fn repaint_menu(&mut self) {
-        render_menu(&self.menu, self.menu_selected, &mut self.menu_packed);
+        render_menu(&mut self.menu, self.menu_selected, &mut self.menu_packed);
         let _ = self
             .comp
             .fill_packed(MENU, self.menu_token, &self.menu_packed);

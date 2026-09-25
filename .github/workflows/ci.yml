@@ -355,6 +355,22 @@ jobs:
       - name: Attack the live network stack on each CPU
         run: NET_FUZZ_COMMANDS=60 NET_FUZZ_SEED=$(printf '0x%x' "$GITHUB_RUN_NUMBER") ./scripts/net-fuzz-e2e.sh
 
+  desktop-fuzz-e2e:
+    name: The desktop under random input (virtio keyboard/tablet storms, heap plateau, on all three targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU for all three targets and OVMF
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf && (sudo apt-get install -y qemu-system-riscv || true)
+      - name: Install Rust nightly + all cross targets
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup component add rust-src --toolchain nightly-2026-08-09
+          rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly-2026-08-09
+      # ADR-182: seeded by the run number; the heap must plateau over the last third.
+      - name: Storm the desktop on each CPU
+        run: DFUZZ_EVENTS=4500 DFUZZ_SEED=$(printf '0x%x' "$GITHUB_RUN_NUMBER") ./scripts/desktop-fuzz-e2e.sh
+
   console-ai-e2e:
     name: The model drives the console (plan in English, validate, type at a booted machine)
     runs-on: ubuntu-latest

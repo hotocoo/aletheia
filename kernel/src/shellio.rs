@@ -296,6 +296,8 @@ pub fn interactive() -> ! {
         crate::heap::free_bytes()
     );
     kprintln!("========================================");
+    #[cfg(feature = "heaptrace")]
+    crate::heap::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
     match crate::virtio::persistent_device() {
         Some(mut disk) => {
             kprintln!(

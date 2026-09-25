@@ -322,7 +322,7 @@ impl Page {
 }
 
 /// Where the browser is: its hosts, its history and the page it shows.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Navigator {
     pub hosts: HostTable,
     pub blocked: BlockList,
@@ -330,6 +330,11 @@ pub struct Navigator {
     /// operator names another with `nameserver`. Configuration, like the trust and block lists:
     /// `forget` keeps it.
     pub nameserver: ([u8; 4], u16),
+    /// The grids pages are rendered into, kept (ADR-182): one per surface that shows a page, built
+    /// on first use and reused, instead of a fresh `TextGrid` per navigation on a heap that never
+    /// frees. `None` only while a render has the grid out.
+    pub(crate) console_grid: Option<crate::textgrid::TextGrid>,
+    pub(crate) window_grid: Option<crate::textgrid::TextGrid>,
     /// The links the current page offered (ADR-158), numbered as the renderer printed them.
     links: [([u8; crate::content::HREF_CAP], usize); crate::content::MAX_LINKS],
     link_count: usize,
@@ -353,6 +358,8 @@ impl Navigator {
             hosts: HostTable::default(),
             blocked: BlockList::default(),
             nameserver: DEFAULT_NAMESERVER,
+            console_grid: None,
+            window_grid: None,
             links: [([0u8; crate::content::HREF_CAP], 0); crate::content::MAX_LINKS],
             link_count: 0,
             history: [None; HISTORY],

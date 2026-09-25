@@ -29,8 +29,47 @@ impl BumpAlloc {
 // #[global_allocator] static.
 unsafe impl Sync for BumpAlloc {}
 
+/// Set once the interactive console is up (feature `heaptrace` only).
+#[cfg(feature = "heaptrace")]
+pub static TRACE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Print `[heaptrace] <size> <ra0> <ra1> ...` by walking the AArch64 frame-record chain (x29).
+/// Reads only frame records the running code built; stops at a null or misaligned record.
+#[cfg(feature = "heaptrace")]
+fn trace(size: usize) {
+    use core::fmt::Write;
+    struct U;
+    impl core::fmt::Write for U {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            crate::uart::puts(s);
+            Ok(())
+        }
+    }
+    let mut fp: usize;
+    // SAFETY: reading the frame-pointer register has no side effect.
+    unsafe { core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack)) };
+    let _ = write!(U, "[heaptrace] {}", size);
+    for _ in 0..8 {
+        if fp == 0 || !fp.is_multiple_of(16) {
+            break;
+        }
+        // SAFETY: a frame record is two words at x29: the caller's x29, then the return address.
+        let (next, ra) = unsafe { (*(fp as *const usize), *((fp + 8) as *const usize)) };
+        let _ = write!(U, " {:x}", ra);
+        if next <= fp {
+            break;
+        }
+        fp = next;
+    }
+    crate::uart::puts("\n");
+}
+
 unsafe impl GlobalAlloc for BumpAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        #[cfg(feature = "heaptrace")]
+        if TRACE.load(Ordering::Relaxed) {
+            trace(layout.size());
+        }
         let heap_start = &__heap_start as *const u8 as usize;
         let heap_end = &__heap_end as *const u8 as usize;
 

@@ -474,7 +474,11 @@ impl LineEditor {
             oldest.push_str(line);
             self.history.push(oldest);
         } else {
-            self.history.push(line.to_string());
+            // Room for any line from the start (ADR-182): a recycled entry that later holds a
+            // longer line must not regrow, and on a heap that never frees every regrowth leaked.
+            let mut entry = String::with_capacity(MAX_LINE);
+            entry.push_str(line);
+            self.history.push(entry);
         }
     }
 
@@ -1126,9 +1130,18 @@ fn fetch_into<H: ShellHost>(host: &H, nav: &mut Navigator, resolved: Resolved) {
     }
 }
 
-fn print_page(nav: &Navigator, out: &mut dyn FnMut(&str)) {
-    let mut grid = crate::textgrid::TextGrid::new(64, 16);
+fn print_page(nav: &mut Navigator, out: &mut dyn FnMut(&str)) {
+    let mut grid = nav
+        .console_grid
+        .take()
+        .unwrap_or_else(|| crate::textgrid::TextGrid::new(64, 16));
+    grid.clear();
     nav.render(&mut grid);
+    print_grid(&grid, out);
+    nav.console_grid = Some(grid);
+}
+
+fn print_grid(grid: &crate::textgrid::TextGrid, out: &mut dyn FnMut(&str)) {
     for row in 0..grid.rows() {
         let line = grid.line(row);
         let end = line
@@ -2627,10 +2640,25 @@ pub fn navigate_for_window<H: ShellHost>(
     request: crate::desktop::BrowserRequest,
     show_page: &mut dyn FnMut(&[u8]),
 ) {
+    let mut grid = nav
+        .window_grid
+        .take()
+        .unwrap_or_else(|| crate::textgrid::TextGrid::new(30, 8));
+    grid.clear();
+    navigate_into_grid(host, nav, request, show_page, &mut grid);
+    nav.window_grid = Some(grid);
+}
+
+fn navigate_into_grid<H: ShellHost>(
+    host: &H,
+    nav: &mut Navigator,
+    request: crate::desktop::BrowserRequest,
+    show_page: &mut dyn FnMut(&[u8]),
+    grid: &mut crate::textgrid::TextGrid,
+) {
     use crate::desktop::BrowserRequest;
     let mut text = [0u8; 1024];
     let mut len = 0usize;
-    let mut grid = crate::textgrid::TextGrid::new(30, 8);
     // Every request resolves through the navigator exactly as the console's verbs do (ADR-164):
     // a typed URL through `navigate`, a numbered link through the page's own hrefs, back and
     // forward through history - so the window can refuse nothing less and nothing more.
@@ -2641,21 +2669,21 @@ pub fn navigate_for_window<H: ShellHost>(
             Some(n) => nav.navigate(&target[..n]),
             None => {
                 grid.write(b"refused: the page offers no such link");
-                return show_window(&grid, &mut text, &mut len, show_page);
+                return show_window(grid, &mut text, &mut len, show_page);
             }
         },
         BrowserRequest::Back => match nav.back() {
             Some(url) => nav.resolve(&url),
             None => {
                 grid.write(b"refused: no previous page");
-                return show_window(&grid, &mut text, &mut len, show_page);
+                return show_window(grid, &mut text, &mut len, show_page);
             }
         },
         BrowserRequest::Forward => match nav.forward() {
             Some(url) => nav.resolve(&url),
             None => {
                 grid.write(b"refused: no next page");
-                return show_window(&grid, &mut text, &mut len, show_page);
+                return show_window(grid, &mut text, &mut len, show_page);
             }
         },
     };
@@ -2675,9 +2703,9 @@ pub fn navigate_for_window<H: ShellHost>(
     };
     match refused {
         Some(why) => grid.write(why),
-        None => nav.render(&mut grid),
+        None => nav.render(grid),
     }
-    show_window(&grid, &mut text, &mut len, show_page)
+    show_window(grid, &mut text, &mut len, show_page)
 }
 
 /// Hand the window's grid to the desktop as lines of text, trailing blanks trimmed.

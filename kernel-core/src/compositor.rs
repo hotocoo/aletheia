@@ -400,6 +400,14 @@ pub struct Compositor {
     focus: Option<u32>,
     /// Per-minted-surface bounded event queues; they die with the surface.
     queues: Vec<(u32, VecDeque<Event>)>,
+    /// Buffers of detached surfaces and their queues, kept for the next mint (ADR-182). The boot
+    /// heap never frees (ADR-063): dropping a closed window's pixels lost them, and every reopen
+    /// minted new ones - the desktop fuzz measured ~127 KB per 1,500 random events.
+    spare_surfaces: Vec<ClientSurface>,
+    spare_queues: Vec<VecDeque<Event>>,
+    /// The other half of a double buffer for `resize_surface` (ADR-182): the new bits are built
+    /// here and swapped in, so a resize drag costs no allocation per motion event.
+    resize_spare: Vec<u64>,
     next_event: u64,
     /// Events DROPPED (a full queue behind a surface that stopped draining) and input-op
     /// refusals — both counted, never silent.
@@ -426,6 +434,9 @@ impl Compositor {
             input_session: None,
             focus: None,
             queues: Vec::new(),
+            spare_surfaces: Vec::new(),
+            spare_queues: Vec::new(),
+            resize_spare: Vec::new(),
             next_event: 1,
             events_dropped: 0,
             input_refusals: 0,
@@ -449,22 +460,58 @@ impl Compositor {
         if self.surfaces.len() >= MAX_SURFACES {
             return Err(CompFault::NoSpace);
         }
-        let pixels = width as usize * height as usize;
-        self.surfaces.push((
-            id,
-            ClientSurface {
-                id,
-                width,
-                height,
-                bits: vec![0u64; pixels.div_ceil(64)],
-                damage: Vec::new(),
-                whole_damage: false,
-            },
-        ));
+        let words = (width as usize * height as usize).div_ceil(64);
+        // A detached surface's buffers first (ADR-182): the smallest spare that holds this size.
+        let reuse = self
+            .spare_surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.bits.capacity() >= words)
+            .min_by_key(|(_, s)| s.bits.capacity())
+            .map(|(i, _)| i);
+        let surface = match reuse {
+            Some(i) => {
+                let mut s = self.spare_surfaces.swap_remove(i);
+                s.id = id;
+                s.width = width;
+                s.height = height;
+                s.bits.clear();
+                s.bits.resize(words, 0);
+                s.damage.clear();
+                s.whole_damage = false;
+                s
+            }
+            None => {
+                // Capacity for a whole scanout from birth (ADR-182): a window can be resized up to
+                // the scanout, and a buffer that grew on its first resize was an allocation per
+                // window on a heap that never frees. Paid once per surface, at mint.
+                let scanout_words =
+                    (self.scanout.0 as usize * self.scanout.1 as usize).div_ceil(64);
+                let mut bits = Vec::with_capacity(words.max(scanout_words));
+                bits.resize(words, 0);
+                ClientSurface {
+                    id,
+                    width,
+                    height,
+                    bits,
+                    damage: Vec::new(),
+                    whole_damage: false,
+                }
+            }
+        };
+        self.surfaces.push((id, surface));
         self.next_serial += 1;
         let token = self.next_serial ^ self.secret;
         self.tokens.push((id, token));
-        self.queues.push((id, VecDeque::new()));
+        let queue = self
+            .spare_queues
+            .pop()
+            .map(|mut q| {
+                q.clear();
+                q
+            })
+            .unwrap_or_default();
+        self.queues.push((id, queue));
         Ok(token)
     }
 
@@ -551,7 +598,18 @@ impl Compositor {
             return Err(CompFault::OffScanout { surface: id });
         }
 
-        let mut bits = vec![0u64; (width as usize * height as usize).div_ceil(64)];
+        let mut bits = core::mem::take(&mut self.resize_spare);
+        let words = (width as usize * height as usize).div_ceil(64);
+        // Grow at most ONCE (ADR-182): straight to a whole scanout's worth, the largest a window
+        // can be placed at, rather than by doubling - each doubling on a heap that never frees is
+        // a fresh allocation, and the buffers circulate between surfaces on every resize.
+        if bits.capacity() < words {
+            let scanout_words = (self.scanout.0 as usize * self.scanout.1 as usize).div_ceil(64);
+            bits.reserve_exact(words.max(scanout_words));
+        }
+        bits.clear();
+        bits.resize(words, 0);
+        let old = self.surface(id).ok_or(CompFault::UnknownSurface(id))?;
         let copy_w = old_width.min(width);
         let copy_h = old_height.min(height);
         for y in 0..copy_h {
@@ -568,9 +626,10 @@ impl Compositor {
         let surface = self.surface_mut(id).ok_or(CompFault::UnknownSurface(id))?;
         surface.width = width;
         surface.height = height;
-        surface.bits = bits;
+        let previous = core::mem::replace(&mut surface.bits, bits);
         surface.damage.clear();
         surface.whole_damage = true;
+        self.resize_spare = previous;
         self.damage_scanout_at(id, placement.x, placement.y);
         Ok(())
     }
@@ -647,9 +706,16 @@ impl Compositor {
             self.damage_scanout_at(id, x, y);
         }
         self.placed.retain(|p| p.surface != id);
-        self.surfaces.retain(|(sid, _)| *sid != id);
+        // Kept, not dropped (ADR-182): the next mint reuses these buffers.
+        if let Some(i) = self.surfaces.iter().position(|(sid, _)| *sid == id) {
+            let (_, surface) = self.surfaces.remove(i);
+            self.spare_surfaces.push(surface);
+        }
         self.tokens.retain(|(sid, _)| *sid != id);
-        self.queues.retain(|(sid, _)| *sid != id);
+        if let Some(i) = self.queues.iter().position(|(sid, _)| *sid == id) {
+            let (_, queue) = self.queues.remove(i);
+            self.spare_queues.push(queue);
+        }
         if self.focus == Some(id) {
             self.focus = None;
         }

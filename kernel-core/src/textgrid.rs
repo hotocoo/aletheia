@@ -72,6 +72,10 @@ pub struct TextGrid {
     refused: u64,
     /// Something changed since the last `take_dirty`.
     dirty: bool,
+    /// The other half of a double buffer for `resize` (ADR-182): a resize builds the new layout
+    /// here and swaps, so a window dragged through a hundred sizes allocates at most its
+    /// high-water size, not a fresh grid per motion event on a heap that never frees.
+    spare: Vec<u8>,
 }
 
 impl TextGrid {
@@ -89,6 +93,7 @@ impl TextGrid {
             lines: 0,
             refused: 0,
             dirty: true,
+            spare: Vec::new(),
         }
     }
 
@@ -108,7 +113,9 @@ impl TextGrid {
     pub fn resize(&mut self, cols: u32, rows: u32) {
         let cols = cols.max(1);
         let rows = rows.max(1);
-        let mut cells = alloc::vec![b' '; (cols * rows) as usize];
+        let mut cells = core::mem::take(&mut self.spare);
+        cells.clear();
+        cells.resize((cols * rows) as usize, b' ');
         let copy_cols = self.cols.min(cols);
         let copy_rows = self.rows.min(rows);
         for row in 0..copy_rows {
@@ -119,7 +126,7 @@ impl TextGrid {
         }
         self.cols = cols;
         self.rows = rows;
-        self.cells = cells;
+        self.spare = core::mem::replace(&mut self.cells, cells);
         self.col = self.col.min(cols - 1);
         self.row = self.row.min(rows - 1);
         self.dirty = true;
