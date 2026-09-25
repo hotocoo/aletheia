@@ -30,7 +30,10 @@ from pathlib import Path
 SECTOR = 512
 MAGIC = b"KDMV"
 # qemu-img emits the CID as an unpadded hexadecimal integer, so leading zeroes may be omitted.
-CID = re.compile(rb"(?m)^CID=([0-9a-fA-F]{7,8})$")
+# Any length 1..8: a random 32-bit CID printed unpadded is seven digits one time in sixteen, but
+# SIX or fewer one time in 256 - which the CI runner drew (2026-09-25: "normalize selftest vmdk"
+# failed once and passed on rerun, the flake memory had written off as the runner's).
+CID = re.compile(rb"(?m)^CID=([0-9a-fA-F]{1,8})$")
 
 
 def descriptor_region(data: bytes) -> tuple[int, int]:
@@ -108,15 +111,17 @@ def self_test(vmdk: Path) -> int:
     m = CID.search(text)
     if m is None:
         raise SystemExit("error: self-test needs a descriptor with a CID")
-    # Seven digits: the same descriptor one byte shorter, its padding one byte longer.
-    seven_text = text[: m.start()] + b"CID=abcdef1" + text[m.end():]
-    seven_region = seven_text + b"\x00" * (len(region) - len(seven_text))
-    seven = data[:start] + seven_region + data[end:]
-    assert len(seven) == len(data)
+    # Every shorter shape, down to one digit: the same descriptor N bytes shorter, its padding N
+    # bytes longer, must normalize to the 8-digit result exactly.
     eight = normalized(data, digest)
-    seven_norm = normalized(seven, digest)
-    if seven_norm != eight or len(seven_norm) != len(data):
-        raise SystemExit("error: a 7-digit and an 8-digit CID did not normalize to the same bytes")
+    for short in (b"abcdef1", b"abcde1", b"ab1", b"1"):
+        short_text = text[: m.start()] + b"CID=" + short + text[m.end():]
+        short_region = short_text + b"\x00" * (len(region) - len(short_text))
+        shorter = data[:start] + short_region + data[end:]
+        assert len(shorter) == len(data)
+        short_norm = normalized(shorter, digest)
+        if short_norm != eight or len(short_norm) != len(data):
+            raise SystemExit(f"error: a {len(short)}-digit and an 8-digit CID did not normalize to the same bytes")
     # The fallback route must agree byte for byte with the header route.
     broken = bytearray(data)
     struct.pack_into("<QQ", broken, 28, 0, 0)
@@ -125,7 +130,7 @@ def self_test(vmdk: Path) -> int:
     if via_fallback[SECTOR:] != eight[SECTOR:]:
         raise SystemExit("error: the CID-locating route did not agree with the header route")
     print(
-        f"normalize-vmdk self-test: PASS (7- and 8-digit CIDs normalize to identical "
+        f"normalize-vmdk self-test: PASS (1- to 8-digit CIDs normalize to identical "
         f"{len(data)}-byte files, by the header and by the CID line)"
     )
     return 0
