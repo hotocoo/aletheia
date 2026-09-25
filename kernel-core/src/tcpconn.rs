@@ -436,6 +436,12 @@ impl Connection {
         match self.state {
             TcpState::Closed | TcpState::TimeWait => None,
             TcpState::SynSent => {
+                // The SYN backs off (RFC 6298 section 5.5): each unanswered SYN doubles the wait
+                // before the next, so five tries cover ~31 RTOs rather than 5. With a fixed RTO a
+                // peer - or an emulator's NAT on a loaded host - that took longer than a second to
+                // answer was declared gone (2026-09-25, `https-e2e.sh` x86-64 at load average 46).
+                let backoff = self.rto << u32::from(self.retries.saturating_sub(1).min(4));
+                let expired = now.saturating_sub(self.last_tx) >= backoff;
                 if !self.syn_due && !expired {
                     return None;
                 }

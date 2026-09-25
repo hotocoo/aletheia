@@ -58,6 +58,9 @@ pub enum NavRefusal {
     Blocked,
 }
 
+/// The name server a fresh navigator asks: QEMU user-net's built-in resolver.
+pub const DEFAULT_NAMESERVER: ([u8; 4], u16) = ([10, 0, 2, 3], crate::dns::PORT);
+
 /// The hosts a person refused (Lethe's tracker rule, ADR-159): operator-filled, bounded, checked
 /// before the trust table so a pin does not override a block.
 #[derive(Clone, Copy, Debug)]
@@ -323,6 +326,10 @@ impl Page {
 pub struct Navigator {
     pub hosts: HostTable,
     pub blocked: BlockList,
+    /// Where `trust NAME PIN` asks for NAME's address (ADR-178). QEMU user-net's resolver until the
+    /// operator names another with `nameserver`. Configuration, like the trust and block lists:
+    /// `forget` keeps it.
+    pub nameserver: ([u8; 4], u16),
     /// The links the current page offered (ADR-158), numbered as the renderer printed them.
     links: [([u8; crate::content::HREF_CAP], usize); crate::content::MAX_LINKS],
     link_count: usize,
@@ -345,6 +352,7 @@ impl Navigator {
         Navigator {
             hosts: HostTable::default(),
             blocked: BlockList::default(),
+            nameserver: DEFAULT_NAMESERVER,
             links: [([0u8; crate::content::HREF_CAP], 0); crate::content::MAX_LINKS],
             link_count: 0,
             history: [None; HISTORY],

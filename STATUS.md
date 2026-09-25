@@ -1271,6 +1271,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — trust by name (ADR-178)
+
+- `trust NAME PIN` asks the `nameserver` (default 10.0.2.3:53, set with `nameserver ADDR PORT`) for
+  NAME's address and pins it under the typed root; a blocked host is refused before the question is
+  asked, and a failed lookup pins nothing. `https-e2e.sh` proves it live on all three CPUs with a
+  DNS stub whose log shows the blocked name was never asked about.
+- TCP's SYN retransmission backs off exponentially (RFC 6298 5.5): a connect now survives ~6 s of
+  silence instead of ~1 s, after the x86-64 leg lost one connect at load average 46. `tcpconn`
+  invariant 3 proves the doubling.
+
 ### 2026-09-25 — the browser window, live on x86-64 too
 
 - `scripts/browser-e2e.sh` gains an x86-64 leg (q35 + OVMF, virtio gpu/keyboard/tablet/net/rng over

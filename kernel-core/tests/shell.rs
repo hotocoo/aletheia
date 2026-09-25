@@ -677,3 +677,87 @@ fn the_live_console_suite_passes_on_the_host_too() {
     assert_eq!(n as usize, names.len());
     assert!(n >= 15, "the suite lost invariants: {n}");
 }
+
+/// ADR-178: `trust NAME PIN` asks the nameserver - but never for a blocked host, and a refusal
+/// pins nothing. The host counts every question it is asked.
+#[test]
+fn trust_by_name_asks_the_nameserver_but_never_for_a_blocked_host() {
+    use core::cell::Cell;
+    struct Dns {
+        asked: Cell<usize>,
+        server: Cell<([u8; 4], u16)>,
+    }
+    impl ShellHost for Dns {
+        fn arch(&self) -> &str {
+            "dns-host"
+        }
+        fn uptime_ns(&self) -> u64 {
+            1
+        }
+        fn free_frames(&self) -> usize {
+            1
+        }
+        fn total_frames(&self) -> usize {
+            1
+        }
+        fn privilege(&self) -> u64 {
+            1
+        }
+        fn authorize(&self, _action: ShellAction) -> bool {
+            true
+        }
+        fn dns_resolve(
+            &self,
+            server: [u8; 4],
+            port: u16,
+            name: &[u8],
+        ) -> Result<kernel_core::dns::Resolved, &'static str> {
+            self.asked.set(self.asked.get() + 1);
+            self.server.set((server, port));
+            if name == b"nowhere.test" {
+                return Err("the server says that name does not exist");
+            }
+            Ok(kernel_core::dns::Resolved {
+                addrs: [[10, 0, 2, 9], [0; 4], [0; 4], [0; 4]],
+                count: 1,
+                dropped: 0,
+                ttl: 60,
+                cnames: 0,
+            })
+        }
+    }
+    let host = Dns {
+        asked: Cell::new(0),
+        server: Cell::new(([0; 4], 0)),
+    };
+    let pin = "ab".repeat(32);
+    let script = format!(
+        "block evil.test\rtrust evil.test {pin}\rtrust nowhere.test {pin}\rnameserver 10.0.2.2 5353\rtrust good.test {pin}\rnameserver\rgo https://good.test/\rtrust plain.test 10.0.2.4 {pin}\r"
+    );
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let mut session = Session::new();
+    let mut log = String::new();
+    for b in script.bytes() {
+        session.feed(b, &host, &mut fs, &mut dev, &mut |s| log.push_str(s));
+    }
+    assert!(
+        log.contains("trust: evil.test is blocked; its address was not asked for"),
+        "{log}"
+    );
+    assert!(
+        log.contains("trust: nowhere.test was not resolved"),
+        "{log}"
+    );
+    assert!(log.contains("trust: good.test at 10.0.2.9"), "{log}");
+    assert!(log.contains("nameserver: 10.0.2.2:5353"), "{log}");
+    assert!(log.contains("trust: plain.test at 10.0.2.4"), "{log}");
+    // evil.test was never asked; nowhere.test and good.test were; plain.test named its own address.
+    assert_eq!(host.asked.get(), 2);
+    assert_eq!(host.server.get(), ([10, 0, 2, 2], 5353));
+    assert!(
+        !log.contains("nowhere.test at"),
+        "a failed lookup pinned nothing: {log}"
+    );
+}

@@ -916,7 +916,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "trust NAME IP PIN",
-        "pin the Ed25519 root PIN (64 hex) for host NAME at IP: the only hosts `go` will dial",
+        "pin the Ed25519 root PIN (64 hex) for host NAME at IP: the only hosts `go` will dial; `trust NAME PIN` asks the nameserver for IP",
+    ),
+    (
+        "nameserver [ADDR] [PORT]",
+        "where `trust NAME PIN` asks for addresses (default 10.0.2.3 53); no arguments prints it",
     ),
     (
         "go URL",
@@ -1649,6 +1653,41 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 Err(why) => outf!(out, "resolve: {}", why),
             }
         }
+        "nameserver" => {
+            let (addr, port_text) = split_first(rest);
+            if addr.is_empty() {
+                let (a, p) = nav.nameserver;
+                outf!(out, "nameserver: {}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], p);
+                return Outcome::Continue;
+            }
+            // Choosing whom to ask changes what this machine will be told: a WRITE, approved like one.
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let Some(ip) = parse_ipv4_address(addr) else {
+                out("usage: nameserver ADDR PORT (ADDR is dotted quad, e.g. 10.0.2.3)");
+                return Outcome::Continue;
+            };
+            let port = if port_text.trim().is_empty() {
+                Some(crate::dns::PORT)
+            } else {
+                port_text.trim().parse::<u16>().ok().filter(|&p| p != 0)
+            };
+            let Some(port) = port else {
+                out("usage: nameserver ADDR PORT (PORT is 1..65535)");
+                return Outcome::Continue;
+            };
+            nav.nameserver = (ip, port);
+            outf!(
+                out,
+                "nameserver: {}.{}.{}.{}:{} (trust NAME PIN asks here; nothing it answers is trusted)",
+                ip[0],
+                ip[1],
+                ip[2],
+                ip[3],
+                port
+            );
+        }
         "trust" => {
             // Choosing whom to trust changes what this machine will speak to: a WRITE, approved
             // like one.
@@ -1656,8 +1695,48 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             let (name, tail) = split_first(rest);
-            let (ip_text, pin_text) = split_first(tail);
-            let Some(ip) = parse_ipv4_address(ip_text) else {
+            let (mut ip_text, mut pin_text) = split_first(tail);
+            // `trust NAME PIN`: the address comes from the nameserver (ADR-178). A blocked host is
+            // refused BEFORE the question is asked (ADR-159), and the pin stays the whole of the
+            // trust: the answer only says where to dial.
+            let mut asked: Option<([u8; 4], u16)> = None;
+            let mut resolved = [0u8; 4];
+            if pin_text.trim().is_empty() && parse_hex_key(ip_text).is_some() {
+                pin_text = ip_text;
+                ip_text = "";
+                if nav.blocked.contains(name.as_bytes()) {
+                    outf!(
+                        out,
+                        "trust: {} is blocked; its address was not asked for",
+                        name
+                    );
+                    return Outcome::Continue;
+                }
+                if !crate::dns::name_is_askable(name.as_bytes()) {
+                    out("usage: trust NAME PIN (NAME is a hostname the nameserver can be asked for)");
+                    return Outcome::Continue;
+                }
+                let (server, port) = nav.nameserver;
+                match host.dns_resolve(server, port, name.as_bytes()) {
+                    Ok(r) => resolved = r.addresses()[0],
+                    Err(why) => {
+                        outf!(
+                            out,
+                            "trust: {} was not resolved: {}; nothing was pinned",
+                            name,
+                            why
+                        );
+                        return Outcome::Continue;
+                    }
+                }
+                asked = Some((server, port));
+            }
+            let ip = if asked.is_some() {
+                Some(resolved)
+            } else {
+                parse_ipv4_address(ip_text)
+            };
+            let Some(ip) = ip else {
                 out("usage: trust NAME IP PIN (IP is dotted quad, e.g. 10.0.2.2)");
                 return Outcome::Continue;
             };
@@ -1665,6 +1744,18 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 out("usage: trust NAME IP PIN (PIN is the root's Ed25519 public key, 64 hex digits)");
                 return Outcome::Continue;
             };
+            if let Some((server, port)) = asked {
+                outf!(
+                    out,
+                    "trust: asked {}.{}.{}.{}:{} for {}; the pin decides trust, the answer only where to dial",
+                    server[0],
+                    server[1],
+                    server[2],
+                    server[3],
+                    port,
+                    name
+                );
+            }
             match nav.hosts.trust(name.as_bytes(), ip, pin) {
                 Ok(()) => outf!(
                     out,

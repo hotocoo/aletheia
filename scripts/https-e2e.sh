@@ -124,9 +124,44 @@ fi
 echo "==> the HTTPS peer is listening on 127.0.0.1:$PEER_PORT as $SERVER_NAME (the guest dials 10.0.2.2:$PEER_PORT)"
 echo "==> the pin the operator types: $PIN"
 
+# A DNS stub for `trust NAME PIN` (ADR-178): it answers $SERVER_NAME with 10.0.2.2 (where the peer
+# is reached), refuses every other name, and logs every question - so a blocked host that was asked
+# about shows up here.
+DNS_LOG="$(mktemp)"; DNS_PORT_FILE="$(mktemp)"
+python3 - "$DNS_PORT_FILE" "$SERVER_NAME" > "$DNS_LOG" 2>&1 <<'PYDNS' &
+import socket, struct, sys
+port_file, served = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("127.0.0.1", 0))
+open(port_file, "w").write(str(s.getsockname()[1]))
+s.settimeout(1800)
+while True:
+    try:
+        msg, addr = s.recvfrom(512)
+    except socket.timeout:
+        break
+    labels, at = [], 12
+    while msg[at]:
+        n = msg[at]; labels.append(msg[at + 1:at + 1 + n].decode()); at += 1 + n
+    name = ".".join(labels).lower()
+    print("dns query:", name, flush=True)
+    question = msg[12:at + 5]
+    if name == served:
+        ans = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + bytes([10, 0, 2, 2])
+        reply = msg[:2] + struct.pack(">HHHHH", 0x8180, 1, 1, 0, 0) + question + ans
+    else:
+        reply = msg[:2] + struct.pack(">HHHHH", 0x8183, 1, 0, 0, 0) + question
+    s.sendto(reply, addr)
+PYDNS
+DNS_PID=$!
+DNS_PORT=""
+for _ in $(seq 1 50); do DNS_PORT="$(cat "$DNS_PORT_FILE" 2>/dev/null)"; [ -n "$DNS_PORT" ] && break; sleep 0.2; done
+[ -n "$DNS_PORT" ] || { echo "HTTPS-E2E: FAIL (the DNS stub never opened a port)"; exit 1; }
+echo "==> the DNS stub answers on 127.0.0.1:$DNS_PORT (the guest asks 10.0.2.2:$DNS_PORT)"
+
 cleanup() {
-  kill "$PEER_PID" 2>/dev/null
-  rm -rf "$PORT_FILE" "$PEER_PY" "$WORK"
+  kill "$PEER_PID" "$DNS_PID" 2>/dev/null
+  rm -rf "$PORT_FILE" "$PEER_PY" "$WORK" "$DNS_PORT_FILE"
 }
 trap cleanup EXIT
 
@@ -193,6 +228,13 @@ check_transcript() {
   grep -q "go: no root pinned" <<<"$log" || { echo "  FAIL [$label] an unpinned host was not refused before dialing"; bad=1; }
   grep -q "go: plaintext refused" <<<"$log" || { echo "  FAIL [$label] a plaintext URL was not refused"; bad=1; }
   grep -q "trust: $SERVER_NAME at 10.0.2.2" <<<"$log" || { echo "  FAIL [$label] trust did not pin the host"; bad=1; }
+  # ADR-178: the address came from the nameserver; a blocked host was never asked about; a name the
+  # server does not know pinned nothing.
+  grep -q "trust: asked 10.0.2.2:$DNS_PORT for $SERVER_NAME" <<<"$log" || { echo "  FAIL [$label] trust NAME PIN did not ask the nameserver"; bad=1; }
+  grep -q "trust: evil.test is blocked; its address was not asked for" <<<"$log" || { echo "  FAIL [$label] a blocked host was not refused before its lookup"; bad=1; }
+  grep -q "dns query: evil.test" "$DNS_LOG" && { echo "  FAIL [$label] the nameserver was asked about a blocked host"; bad=1; }
+  grep -q "trust: nowhere.test was not resolved: the server says that name does not exist" <<<"$log" || { echo "  FAIL [$label] an unknown name was not refused by name"; bad=1; }
+  grep -q "trust: nowhere.test at" <<<"$log" && { echo "  FAIL [$label] a failed lookup pinned a host"; bad=1; }
   [ "$(grep -c "^HTTP 200 OK" <<<"$log")" -ge 3 ] || { echo "  FAIL [$label] the browser pages did not render their status lines (go, go, back)"; bad=1; }
   grep -q "^https://$SERVER_NAME:$PEER_PORT/chunked.txt" <<<"$log" || { echo "  FAIL [$label] the chunked page's URL line never rendered"; bad=1; }
   # The content renderer (ADR-158): the HTML page shows its heading, its link numbered and its
@@ -209,7 +251,7 @@ check_transcript() {
   # `back` nowhere to go.
   grep -q "^blocked $SERVER_NAME" <<<"$log" || { echo "  FAIL [$label] block did not take the host"; bad=1; }
   grep -q "go: that host is blocked" <<<"$log" || { echo "  FAIL [$label] a blocked pinned host was not refused by name"; bad=1; }
-  local after_block; after_block="$(sed -n '/^aletheia> block /,$p' <<<"$log")"
+  local after_block; after_block="$(sed -n "/^aletheia> block $SERVER_NAME/,\$p" <<<"$log")"
   grep -q "^HTTP " <<<"$after_block" && { echo "  FAIL [$label] something was fetched after the block"; bad=1; }
   grep -q "forgotten: history, page and links" <<<"$log" || { echo "  FAIL [$label] forget did not answer"; bad=1; }
   grep -q "back: no previous page" <<<"$log" || { echo "  FAIL [$label] back after forget still had somewhere to go"; bad=1; }
@@ -231,7 +273,11 @@ SESSION_CMDS=(
   "https 10.0.2.2 $PEER_PORT $SERVER_NAME $PIN /big.txt"
   "https 10.0.2.2 $PEER_PORT $SERVER_NAME $PIN /missing.txt"
   "go https://$SERVER_NAME:$PEER_PORT/plain.txt"
-  "trust $SERVER_NAME 10.0.2.2 $PIN"
+  "nameserver 10.0.2.2 $DNS_PORT"
+  "block evil.test"
+  "trust evil.test $PIN"
+  "trust nowhere.test $PIN"
+  "trust $SERVER_NAME $PIN"
   "go http://$SERVER_NAME:$PEER_PORT/plain.txt"
   "go https://$SERVER_NAME:$PEER_PORT/plain.txt"
   "go https://$SERVER_NAME:$PEER_PORT/chunked.txt"

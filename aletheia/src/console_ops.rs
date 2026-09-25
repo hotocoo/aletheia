@@ -107,7 +107,7 @@ fn risk_of(name: &str) -> Risk {
         // and both still require approval.
         // `resolve` too: a DNS query announces this machine to a server (ADR-176).
         "write" | "append" | "touch" | "cp" | "mv" | "rm" | "reboot" | "halt" | "tcp" | "tls"
-        | "https" | "resolve" => Risk::Destructive,
+        | "https" | "resolve" | "nameserver" => Risk::Destructive,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
         | "history" | "echo" | "clear" | "input" => Risk::Safe,
@@ -308,6 +308,7 @@ mod tests {
                     | "tls"
                     | "https"
                     | "resolve"
+                    | "nameserver"
                     | "trust"
                     | "go"
                     | "back"

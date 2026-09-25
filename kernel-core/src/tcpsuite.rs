@@ -124,16 +124,21 @@ pub fn tcpconn_suite(
     {
         let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
         c.open(0x3000, 0).ok();
+        // Stepped one tick at a time so the SPACING is observed: each wait doubles (RFC 6298
+        // section 5.5), and after MAX_RETRIES sends the peer is gone, not waited on forever.
+        let mut sends: [u64; MAX_RETRIES as usize + 1] = [0; MAX_RETRIES as usize + 1];
+        let mut n = 0usize;
         let mut now = 0u64;
-        let mut sends = 0;
-        for _ in 0..(MAX_RETRIES as u32 + 3) {
-            if c.poll_transmit(now, &mut tx).is_some() {
-                sends += 1;
+        while now <= RTO * 64 && c.state() != TcpState::Closed {
+            if c.poll_transmit(now, &mut tx).is_some() && n < sends.len() {
+                sends[n] = now;
+                n += 1;
             }
-            now += RTO;
+            now += 1;
         }
+        let doubling = (1..n).all(|i| sends[i] - sends[i - 1] == RTO << (i as u32 - 1));
         check!(
-            sends == MAX_RETRIES as u32 && c.state() == TcpState::Closed,
+            n == MAX_RETRIES as usize && doubling && c.state() == TcpState::Closed,
             "tcpconn: an unanswered SYN is retransmitted to the budget, then the peer is gone"
         );
     }
