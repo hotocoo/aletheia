@@ -14,7 +14,7 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 0
 fi
 
-IMG="${LINUX_BENCH_IMAGE:-gcc:13-slim}"
+IMG="${LINUX_BENCH_IMAGE:-gcc:13}"
 echo "==> real-Linux pipe round-trip baseline (image: $IMG)"
 
 docker run --rm -i "$IMG" bash -s <<'EOF'
