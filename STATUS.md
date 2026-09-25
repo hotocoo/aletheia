@@ -1271,6 +1271,13 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — pull the plug (ADR-183)
+
+- New gate `scripts/crash-e2e.sh`: on one persistent disk, 12 times per CPU, the running machine is
+  SIGKILLed at a random moment inside a stream of rewrites and removals; after every crash the
+  namespace must mount and every object must hold one whole, legal version. PASS on aarch64, riscv64
+  and x86-64 (6,000-15,000 versions issued per CPU, ~70% of checks found the object present).
+
 ### 2026-09-26 — the desktop under random input, and heap forensics (ADR-182)
 
 - New gate `scripts/desktop-fuzz-e2e.sh`: seeded random keyboard/tablet storms through QMP on
