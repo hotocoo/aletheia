@@ -471,6 +471,21 @@ pub fn dns_suite(
         "dns: an A record owned by a different name is not an address for ours"
     );
 
+    // 9 - a CNAME chain is followed to its end: www.aletheia.test is an alias whose rdata points
+    //     at "aletheia.test" inside the question, and the A record is owned by that target.
+    const CHAIN: [u8; 65] = [
+        0x22, 0x22, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0, //
+        3, b'w', b'w', b'w', 8, b'a', b'l', b'e', b't', b'h', b'e', b'i', b'a', 4, b't', b'e',
+        b's', b't', 0, 0, 1, 0, 1, //
+        0xC0, 0x0C, 0, 5, 0, 1, 0, 0, 0, 60, 0, 2, 0xC0, 0x10, //
+        0xC0, 0x10, 0, 1, 0, 1, 0, 0, 0, 45, 0, 4, 10, 0, 2, 2,
+    ];
+    let r = parse_answer(&CHAIN, 0x2222, b"www.aletheia.test");
+    check!(
+        matches!(r, Ok(r) if r.addresses() == [[10, 0, 2, 2]] && r.cnames == 1 && r.ttl == 45),
+        "dns: a CNAME is followed to the A record its target owns, and the link is counted"
+    );
+
     Ok(n)
 }
 
@@ -487,19 +502,15 @@ mod tests {
             }
         })
         .unwrap_or_else(|(i, name)| panic!("dns invariant {i} failed: {name}"));
-        assert_eq!(n, 8);
+        assert_eq!(n, 9);
         assert!(failed.is_none());
     }
 
     #[test]
     fn a_cname_chain_resolves_to_its_end_and_is_bounded() {
-        // www -> alias (CNAME, rdata compressed to the question), then an A for the question name.
+        // The chain itself is boot invariant 9. Here: a CNAME whose target is itself is followed at
+        // most MAX_CNAMES times, then refused as NoAddress, never looped on.
         let name = b"www.example.test";
-        let m = build_answer_for_tests(7, name, 0, &[(TYPE_A, 90, &[192, 0, 2, 1])]);
-        let r = parse_answer(&m, 7, name).unwrap();
-        assert_eq!(r.addresses(), [[192, 0, 2, 1]]);
-
-        // A CNAME whose target is itself: followed at most MAX_CNAMES times, then NoAddress.
         let m = build_answer_for_tests(8, name, 0, &[(TYPE_CNAME, 90, &[0xC0, 0x0C])]);
         assert_eq!(parse_answer(&m, 8, name), Err(DnsError::NoAddress));
     }

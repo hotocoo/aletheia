@@ -521,6 +521,7 @@ CONTRACT=(
   "dns: a self or forward compression pointer is refused, so a pointer loop cannot run"
   "dns: every prefix of an answer is refused as truncated, never read past its end"
   "dns: an A record owned by a different name is not an address for ours"
+  "dns: a CNAME is followed to the A record its target owns, and the link is counted"
 
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.

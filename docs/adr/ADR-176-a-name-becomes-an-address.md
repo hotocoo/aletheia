@@ -40,8 +40,8 @@ This ADR deliberately does not wire `resolve` into `go` or `trust`.
 
 ## Proof
 
-* Boot: `dns_suite`, 8 invariants on aarch64, riscv64 and x86-64 (`dns=8` in all three expected
-  maps, and the 8 rows in `conformance.sh`), exit base 1060. Host tests add a CNAME chain, a
+* Boot: `dns_suite`, 9 invariants (the 9th a real CNAME chain) on aarch64, riscv64 and x86-64 (`dns=9` in all three expected
+  maps, and the 9 rows in `conformance.sh`), exit base 1060. Host tests add a
   self-referencing CNAME that stays bounded, the address cap, and case-insensitive names.
 * Live: `scripts/dns-e2e.sh` (a CI job) asks a Python stub on the runner six questions whose answers
   are known (two A records; a CNAME chain; NXDOMAIN; a spoofed id; TC; a self-pointing name) plus a

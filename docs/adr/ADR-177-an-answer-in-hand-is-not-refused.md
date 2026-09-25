@@ -49,7 +49,7 @@ first two before). Deterministic arms PASS on all three.
 
 **Good.** A small model that forgets to summarize no longer turns a correct session into a refusal.
 
-**Costs.** The final answer can be the machine's words rather than the model's sentence. It says so.
+**Costs.** The final answer can be the machine's words rather than the model's sentence. It says so in prose only: the driver exits 10 ("answered") exactly as for a model answer, so a script cannot tell the two apart without reading the label.
 
 **Not claimed.** The model's own answers are still sometimes its reasoning ("The user wants me
 to: ..."). The gate checks what was typed and confirmed by the console, not the prose.

@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn repeating_a_command_that_already_answered_is_no_progress() {
+    fn repeating_a_reading_that_already_answered_ends_with_the_machines_answer() {
         let mut s = Session::new("r", "", 6, false);
         // A model that will not stop repeating itself is corrected toward answering, and when it
         // keeps repeating anyway the bound is still there underneath.
@@ -1654,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn reading_the_same_object_twice_with_nothing_in_between_is_still_no_progress() {
+    fn reading_the_same_object_twice_with_nothing_in_between_ends_with_the_machines_answer() {
         // The case the bound was written for, and it must survive the fix to the case it broke.
         let mut s = Session::new("what is in poem", "", 6, false);
         s.turns.push(Turn {

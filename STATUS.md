@@ -1292,7 +1292,7 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
   questions, TC, NXDOMAIN, SERVFAIL, malformed or looping compression and address-less answers by
   name. `resolve NAME [SERVER [PORT]]` at the console (default 10.0.2.3). An answer is where to dial,
   never whom to trust: TLS still checks the pinned root.
-- Boot: `dns=8` on aarch64, riscv64 and x86-64; conformance gains the 8 rows. Live:
+- Boot: `dns=9` on aarch64, riscv64 and x86-64 (the 9th a real CNAME chain); conformance gains the 9 rows. Live:
   `scripts/dns-e2e.sh` (new CI job) PASS on all three CPUs against a stub with six known answers,
   plus `example.com` through QEMU's resolver.
 
