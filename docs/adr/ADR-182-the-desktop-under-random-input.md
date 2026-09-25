@@ -41,7 +41,9 @@ No panic, no hang, on any CPU. It found heap growth per interaction on the never
 
 Measured after the fixes, the last third of a 9,000-event storm grows the heap by 7.2 KB on aarch64,
 0 on riscv64 and 3.2 KB on x86-64 (about 2 bytes per event of remaining first-use); host tests show
-drag, cursor motion and close/reopen cost 0 bytes.
+drag, cursor motion and close/reopen cost 0 bytes. Re-traced with `heaptrace` after the mint-capacity
+change: the last third of a 9,000-event storm on aarch64 allocated 768 B in 2 allocations, both the
+spare-surface pool's `Vec` growing (bounded by `MAX_SURFACES`); nothing else.
 
 ## Consequences
 
