@@ -94,7 +94,8 @@ The model is a property of the **system**, not a constant in the source — and 
 $ aletheiad model list
    id                         quant           size  state
    bge-small-en-v1.5          -             64 MiB  present, unpinned
-*  lfm2.5                     Q4_K_M      1596 MiB  present, pinned, default
+*  davidau-neo-max            Q8_0        2976 MiB  present, pinned, default
+   lfm2.5                     Q4_K_M      1596 MiB  present, pinned
    minicpm                    Q8_0        1100 MiB  present, pinned
    qwen3.6-40b-gr…o-max-mtp   -          22583 MiB  present, unpinned
    aletheia-lm                -                  -  not yet trained
@@ -109,7 +110,7 @@ clear its parameters are defaults rather than findings.
 
 ```bash
 aletheiad model list          # what this machine actually has; * marks the running selection
-aletheiad model use lfm2.5    # switch — a unique prefix is enough; persisted under $HOME/.aletheia
+aletheiad model use lfm2.5    # switch back to stock LFM2.5 — a unique prefix is enough; persisted under $HOME/.aletheia
 aletheiad model status        # selected model, weights, checksum verification, what is being served
 aletheiad model pull          # fetch the selected model's weights (never committed to the repo)
 aletheiad model bench         # run the whole operation surface through it (below)
@@ -147,6 +148,16 @@ correctly on two consecutive runs**, median ~3.5 s, control arm 6/6 at 0 ms. Get
 four real defects — including a health probe that had tried only the first resolved address since
 ADR-017, which made a *running* model indistinguishable from no model at all. See
 [ADR-052](docs/adr/ADR-052-the-model-is-a-system-property.md).
+
+**Temporary default since 2026-09-25: DavidAU's LFM2.5 merge** (`davidau-neo-max`,
+`LFM2.5-2.6B-Q3.8-TBrilliance-NEO-MAX-Q8_0.gguf`, Apache-2.0, same LFM2.5-2.6B base), until
+`aletheia-lm` is ready. Measured on the same workstation, two consecutive runs each: operations
+**5/6** (misses `capability.grant`), median **583 ms**; console **7/8** (misses `head manifesto 1`);
+live `console-ai-e2e` model arm PASS; `console-agent-e2e` model arm PASS on x86-64 only (on aarch64
+and riscv64 it re-reads `cat poem` instead of answering). Stock LFM2.5 recorded 6/6 and 8/8, so
+the merge is faster and slightly less accurate; it is forced-thinking and runs in no-think mode
+under the GBNF grammar (the JSON-schema path is refused by llama.cpp with thinking off). See
+[ADR-174](docs/adr/ADR-174-davidau-lfm-is-the-temporary-default.md).
 
 This benchmark covers the hosted Core's **six operations**. It does **not** drive the kernel console
 (`kernel-core/src/shell.rs`), which runs in kernel space with no inference engine underneath it and

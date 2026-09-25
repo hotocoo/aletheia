@@ -1,0 +1,43 @@
+# DavidAU's LFM2.5 merge — the TEMPORARY default resident model (ADR-174, under ADR-052).
+#
+# Same base as `lfm2.5.toml` (LiquidAI/LFM2.5-2.6B, Apache-2.0), fine-tuned by DavidAU with the
+# "Qwen3.8 Turbo Brilliance" data and NEO-MAX imatrix quantization, Q8_0 (the file the operator already serves). It is the default UNTIL Aletheia-LM
+# (`aletheia-lm.toml`) is ready; stock LFM2.5 stays selectable with `aletheiad model use lfm2.5`.
+#
+# `sha256` and `size_bytes` were MEASURED on the blob in the local HF cache (`shasum -a 256`,
+# `stat`), and match the hub's LFS object id. The runtime fields below were measured on this file,
+# not inherited from the stock model: a merge is a different model with the same architecture.
+
+[model]
+id          = "davidau-neo-max"
+name        = "LFM2.5-2.6B TBrilliance NEO-MAX Q8_0 (DavidAU)"
+repo        = "DavidAU/LFM2.5-2.6B-Qwen3.8-Turbo-Brilliance-Power-X12-NEO-MAX-GGUF"
+file        = "LFM2.5-2.6B-Q3.8-TBrilliance-NEO-MAX-Q8_0.gguf"
+quant       = "Q8_0"
+sha256      = "524dbaa84e79279977f62978a12f4d97c76e30a2c3976f7f21ed78e73e4b837e"
+size_bytes  = 3120573088
+# Unique to this file: "LFM2.5" alone would let a stock LFM2.5 holding the port pass the check and
+# record its latency under this model's name (ADR-052).
+serve_id    = "NEO-MAX"
+default     = true
+
+[runtime]
+backend           = "llama_cpp"
+endpoint          = "http://localhost:8080"
+context           = 8192
+# MEASURED forced-thinking: asked for "ok" it spends ~100 reasoning tokens first. The request path
+# sends `enable_thinking = false` for it (2 tokens for the same answer), as for minicpm.
+thinking          = true
+temperature       = 0.0
+top_p             = 1.0
+# GRAMMAR, not schema - the opposite of stock LFM2.5, and measured: with thinking switched off,
+# llama.cpp refuses the JSON-schema request outright ("Failed to initialize samplers"), and with
+# thinking left on the schema path returns broken JSON after ~500 tokens. The GBNF grammar with
+# thinking off returns the object in 8 tokens.
+structured_output = "gbnf-grammar"
+
+[provision]
+#   aletheiad model pull
+#   hf download DavidAU/LFM2.5-2.6B-Qwen3.8-Turbo-Brilliance-Power-X12-NEO-MAX-GGUF \
+#       LFM2.5-2.6B-Q3.8-TBrilliance-NEO-MAX-Q8_0.gguf
+# The deterministic interpreter carries the OS whenever no model is available.

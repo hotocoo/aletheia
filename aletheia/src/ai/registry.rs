@@ -265,6 +265,7 @@ pub fn discover(root: &Path) -> Vec<ModelEntry> {
 
 /// The manifests Aletheia ships. These CHARACTERIZE models — they do not decide which exist.
 const MANIFESTS: &[&str] = &[
+    include_str!("../../../models/davidau-neo-max.toml"),
     include_str!("../../../models/lfm2.5.toml"),
     include_str!("../../../models/minicpm.toml"),
     include_str!("../../../models/aletheia-lm.toml"),
@@ -666,10 +667,10 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_manifest_is_marked_default_and_it_is_lfm2_5() {
+    fn exactly_one_manifest_is_marked_default_and_it_is_davidau_neo_max() {
         let defaults: Vec<ModelEntry> = manifests().into_iter().filter(|e| e.default).collect();
         assert_eq!(defaults.len(), 1, "exactly one model may be the default");
-        assert_eq!(defaults[0].id, "lfm2.5");
+        assert_eq!(defaults[0].id, "davidau-neo-max");
         assert_eq!(defaults[0].sha256.len(), 64);
     }
 

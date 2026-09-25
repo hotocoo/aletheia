@@ -1,4 +1,4 @@
-# Aletheia first-party AI model manifest — the DEFAULT resident model (ADR-017, ADR-052).
+# Stock LiquidAI LFM2.5 manifest — the default until ADR-174 made davidau-neo-max the temporary default.
 #
 # The model INTEGRATION ships in-repo (aletheia/src/ai/); the WEIGHTS are an external artifact
 # provisioned ON DEMAND into the local Hugging Face cache by `aletheiad model pull`
@@ -20,7 +20,7 @@ size_bytes  = 1674454848
 # recorded (ADR-052). Without this, a benchmark run against whatever else happens to hold the port
 # reports another model's latency under this model's name.
 serve_id    = "LFM2.5"
-default     = true
+default     = false
 
 [runtime]
 backend           = "llama_cpp"

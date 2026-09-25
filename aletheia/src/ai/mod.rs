@@ -73,14 +73,15 @@ pub mod config {
     use super::registry::{self, ModelEntry};
     use std::path::Path;
 
-    /// The built-in default, mirroring `models/lfm2.5.toml`. These constants are what a caller with
+    /// The built-in default, mirroring `models/davidau-neo-max.toml`. These constants are what a caller with
     /// no data directory and no environment gets; they exist so the AI subsystem has an answer
     /// before any selection has ever been made, and a unit test holds them equal to the manifest so
     /// the two cannot drift.
-    pub const DEFAULT_MODEL_REF: &str = "LiquidAI/LFM2.5-2.6B-GGUF";
-    pub const DEFAULT_MODEL_FILE: &str = "LFM2.5-2.6B-Q4_K_M.gguf";
+    pub const DEFAULT_MODEL_REF: &str =
+        "DavidAU/LFM2.5-2.6B-Qwen3.8-Turbo-Brilliance-Power-X12-NEO-MAX-GGUF";
+    pub const DEFAULT_MODEL_FILE: &str = "LFM2.5-2.6B-Q3.8-TBrilliance-NEO-MAX-Q8_0.gguf";
     pub const DEFAULT_MODEL_SHA256: &str =
-        "79fdf00351b46cf26f020aead28d01889886be87c55fa0eb907e6f9b00bfee14";
+        "524dbaa84e79279977f62978a12f4d97c76e30a2c3976f7f21ed78e73e4b837e";
     pub const DEFAULT_MODEL_CTX: u32 = 8192;
     pub const DEFAULT_ENDPOINT: &str = "http://localhost:8080";
 
@@ -403,7 +404,7 @@ mod tests {
         // resolver here would test the contents of $HOME instead of the copy.
         let m = super::registry::manifests()
             .into_iter()
-            .find(|e| e.id == "lfm2.5")
+            .find(|e| e.default)
             .expect("the pinned default manifest ships with the OS");
         assert_eq!(m.repo, DEFAULT_MODEL_REF);
         assert_eq!(m.file, DEFAULT_MODEL_FILE);
