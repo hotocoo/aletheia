@@ -99,6 +99,30 @@ pub fn fetch(
     }
 }
 
+/// Ask the DNS server at `server:port` for `name`'s addresses (ADR-176), over the same device.
+/// The query id and source port come from the machine's clock, so an off-path guess must hit both.
+pub fn resolve(
+    server: [u8; 4],
+    port: u16,
+    name: &[u8],
+) -> Result<kernel_core::dns::Resolved, &'static str> {
+    // SAFETY: main thread only (the console's own thread), and the device outlives the machine.
+    let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
+        return Err("this machine has no network device");
+    };
+    let t = ActiveHal::timer_ticks();
+    // SAFETY: as above; this is the sole writer of the port counter.
+    let sport = unsafe {
+        let p = NEXT_PORT;
+        NEXT_PORT = if p == u16::MAX { FIRST_PORT } else { p + 1 };
+        p
+    };
+    // SAFETY: the device was brought up by the boot and its queues are live.
+    unsafe {
+        kernel_core::virtionet::resolve_name(dev, server, port, sport, (t ^ (t >> 17)) as u16, name)
+    }
+}
+
 /// Open a TLS 1.3 conversation with `ip:port` as `server_name`, trusting exactly the Ed25519 root
 /// `pin`, at the time this machine's own clock reads (ADR-148), and carry `request` and its
 /// answer protected (ADR-151).

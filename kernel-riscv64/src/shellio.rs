@@ -111,6 +111,15 @@ impl ShellHost for Host {
         crate::netstatic::fetch(ip, port, request, reply)
     }
 
+    fn dns_resolve(
+        &self,
+        server: [u8; 4],
+        port: u16,
+        name: &[u8],
+    ) -> Result<kernel_core::dns::Resolved, &'static str> {
+        crate::netstatic::resolve(server, port, name)
+    }
+
     /// A protected conversation with a peer, over the same device, judged at this machine's own
     /// clock, trusting exactly the root the operator named (ADR-151).
     fn tls_fetch(

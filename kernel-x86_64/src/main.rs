@@ -2008,6 +2008,30 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // DNS (REQ-NET-007, ADR-176): a name becomes an address. The resolver's reader is proved on
+    // fixed messages at boot; the live query is the console's `resolve`, gated in dns-e2e.sh.
+    kprintln!("");
+    kprintln!("--- dns selftests (A-record query + bounded answer reader, no device) ---");
+    match kernel_core::dns::dns_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => {
+            kprintln!("[dns] ALL {} DNS INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] dns suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("dns")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[dns] FAILED at dns invariant {}: {}", idx, name);
+            ActiveHal::exit(1060 + idx as i32);
+        }
+    }
+
     // LETHE'S POLICY CONTRACT (REQ-WEB-005, ADR-159; Lethe stage N6): HTTPS-first with plaintext
     // refused rather than rewritten, blocked hosts refused before lookup, no third-party requests
     // from the renderer, one fixed user agent, no site data kept, `forget` and an empty start.

@@ -820,6 +820,17 @@ pub trait ShellHost {
         Err("this machine has no network device")
     }
 
+    /// Ask the DNS server at `server:port` for `name`'s A records (ADR-176). Defaulted to a named
+    /// refusal for the same reason as `tcp_fetch`: a machine with no NIC says so.
+    fn dns_resolve(
+        &self,
+        _server: [u8; 4],
+        _port: u16,
+        _name: &[u8],
+    ) -> Result<crate::dns::Resolved, &'static str> {
+        Err("this machine has no network device")
+    }
+
     /// The machine's live input session, if the target installed one (ALET-P2-021's hardware
     /// rung, ADR-080). Default `None` — a target with no desktop says so instead of reporting
     /// zeros that would look like a session nobody can steer.
@@ -898,6 +909,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "https ADDR PORT NAME PIN PATH",
         "GET PATH from NAME over TLS 1.3 under the root PIN; print the status, headers and body",
+    ),
+    (
+        "resolve NAME [SERVER [PORT]]",
+        "ask a DNS server (default 10.0.2.3 53) for NAME's addresses; an answer is where to dial, never trust",
     ),
     (
         "trust NAME IP PIN",
@@ -1577,6 +1592,61 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     }
                 }
                 Err(why) => outf!(out, "https: {}", why),
+            }
+        }
+        "resolve" => {
+            // A query announces this machine to a server, like `tcp`: authorized as a WRITE to the
+            // world. The answer is printed, not trusted: `trust` still takes the address from the
+            // operator, and TLS still checks the pinned root (ADR-176).
+            if !authorize(host, ShellAction::Write, out) {
+                return Outcome::Continue;
+            }
+            let (name, tail) = split_first(rest);
+            let (server_text, port_text) = split_first(tail);
+            if !crate::dns::name_is_askable(name.as_bytes()) {
+                out("usage: resolve NAME [SERVER [PORT]] (NAME is a hostname, e.g. example.com)");
+                return Outcome::Continue;
+            }
+            let server = if server_text.is_empty() {
+                Some([10, 0, 2, 3])
+            } else {
+                parse_ipv4_address(server_text)
+            };
+            let Some(server) = server else {
+                out("usage: resolve NAME [SERVER [PORT]] (SERVER is dotted quad, e.g. 10.0.2.3)");
+                return Outcome::Continue;
+            };
+            let port = if port_text.is_empty() {
+                Some(crate::dns::PORT)
+            } else {
+                port_text.trim().parse::<u16>().ok().filter(|&p| p != 0)
+            };
+            let Some(port) = port else {
+                out("usage: resolve NAME [SERVER [PORT]] (PORT is 1..65535)");
+                return Outcome::Continue;
+            };
+            match host.dns_resolve(server, port, name.as_bytes()) {
+                Ok(r) => {
+                    let mut addrs = crate::linebuf::LineBuf::<80>::new();
+                    for (i, a) in r.addresses().iter().enumerate() {
+                        let sep = if i > 0 { ", " } else { "" };
+                        let _ = core::fmt::Write::write_fmt(
+                            &mut addrs,
+                            format_args!("{}{}.{}.{}.{}", sep, a[0], a[1], a[2], a[3]),
+                        );
+                    }
+                    let addrs = addrs.as_str();
+                    outf!(
+                        out,
+                        "resolve {}: {} (ttl {} s, {} CNAME link(s), {} more not kept) - where to dial, not whom to trust",
+                        name,
+                        addrs,
+                        r.ttl,
+                        r.cnames,
+                        r.dropped
+                    );
+                }
+                Err(why) => outf!(out, "resolve: {}", why),
             }
         }
         "trust" => {

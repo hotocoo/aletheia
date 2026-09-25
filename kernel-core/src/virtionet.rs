@@ -674,6 +674,44 @@ impl<'a, H: VirtioHal, T: Transport> NetLink<'a, H, T> {
     }
 }
 
+/// Ask `server:port` for `name`'s address (ADR-176): one query, one verified reply, read by the
+/// bounded DNS reader. A server off this machine's /24 is reached through the gateway's MAC.
+///
+/// The answer tells the console where to dial, never whom to believe: see `dns`'s module header.
+///
+/// # Safety
+/// The device must be live.
+pub unsafe fn resolve_name<H: VirtioHal, T: Transport>(
+    dev: &VirtioNet<H, T>,
+    server: [u8; 4],
+    port: u16,
+    sport: u16,
+    id: u16,
+    name: &[u8],
+) -> Result<crate::dns::Resolved, &'static str> {
+    let mut query = [0u8; crate::dns::MAX_NAME + 20];
+    let qlen =
+        crate::dns::write_query(&mut query, id, name).map_err(crate::dns::DnsError::describe)?;
+    let hop = if server[..3] == GUEST_IP[..3] {
+        server
+    } else {
+        GATEWAY_IP
+    };
+    let mac = dev
+        .arp_resolve(hop)
+        .map_err(|_| "no answer to the address resolution for the name server")?;
+    let (reply, len) = dev
+        .udp_exchange(server, mac, sport, port, id, &query[..qlen])
+        .map_err(|e| match e {
+            NetError::Timeout => "the name server did not answer",
+            _ => "the network device refused the query",
+        })?;
+    if len == 0 {
+        return Err("the name server did not answer");
+    }
+    crate::dns::parse_answer(&reply[..len], id, name).map_err(crate::dns::DnsError::describe)
+}
+
 impl<H: VirtioHal, T: Transport> crate::tcpnet::Ipv4Link for NetLink<'_, H, T> {
     fn send_ipv4(&self, datagram: &[u8]) -> Result<(), crate::tcpnet::LinkError> {
         // SAFETY: a `NetLink` is only constructed by `resolve`, which requires a live device, and

@@ -512,6 +512,16 @@ CONTRACT=(
   "policy: forget empties history, page and links and keeps the operator's trust and block lists"
   "policy: a fresh navigator holds nothing - no hosts, no blocks, no history, no page; every host is unknown"
 
+  # The DNS resolver's reader (ADR-176): the same questions and the same refusals on every CPU.
+  "dns: a query is header, labels, type A and class IN with recursion desired, nothing else"
+  "dns: an empty, spaced, dashed-edge, trailing-dot, non-ASCII or over-long name is refused by name"
+  "dns: an answer yields its A records in order with the smallest TTL"
+  "dns: an answer with a foreign id, or to a different name, is someone else's and refused"
+  "dns: a question sent back, a truncated answer, NXDOMAIN and SERVFAIL are refused by name"
+  "dns: a self or forward compression pointer is refused, so a pointer loop cannot run"
+  "dns: every prefix of an answer is refused as truncated, never read past its end"
+  "dns: an A record owned by a different name is not an address for ours"
+
   # The TLS 1.3 record layer (ADR-143): the same framing, the same sequencing and the same
   # refusals on every CPU.
   "tlsrecord: a sealed record opens to the same bytes and the same inner content type"

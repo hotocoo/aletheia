@@ -1271,6 +1271,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-25 — a name becomes an address (ADR-176)
+
+- `kernel_core::dns`: one A-record query, one bounded reader that refuses foreign ids, foreign
+  questions, TC, NXDOMAIN, SERVFAIL, malformed or looping compression and address-less answers by
+  name. `resolve NAME [SERVER [PORT]]` at the console (default 10.0.2.3). An answer is where to dial,
+  never whom to trust: TLS still checks the pinned root.
+- Boot: `dns=8` on aarch64, riscv64 and x86-64; conformance gains the 8 rows. Live:
+  `scripts/dns-e2e.sh` (new CI job) PASS on all three CPUs against a stub with six known answers,
+  plus `example.com` through QEMU's resolver.
+
 ### 2026-09-25 — x86-64 joins the live TLS and HTTPS gates
 
 - `scripts/tls-e2e.sh` and `scripts/https-e2e.sh` gain an x86-64 leg (q35 + OVMF, virtio-net-pci,

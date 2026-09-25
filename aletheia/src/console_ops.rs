@@ -105,8 +105,9 @@ fn risk_of(name: &str) -> Risk {
         // FACING. Each announces this machine to a peer that did not ask, and sends it bytes the
         // operator typed (`tls` protected, but sent all the same). Nothing on this medium changes,
         // and both still require approval.
+        // `resolve` too: a DNS query announces this machine to a server (ADR-176).
         "write" | "append" | "touch" | "cp" | "mv" | "rm" | "reboot" | "halt" | "tcp" | "tls"
-        | "https" => Risk::Destructive,
+        | "https" | "resolve" => Risk::Destructive,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
         | "history" | "echo" | "clear" | "input" => Risk::Safe,
@@ -306,6 +307,7 @@ mod tests {
                     | "tcp"
                     | "tls"
                     | "https"
+                    | "resolve"
                     | "trust"
                     | "go"
                     | "back"
