@@ -206,6 +206,23 @@ pub fn pop() -> Option<u8> {
     byte
 }
 
+/// Sleep until an interrupt might have delivered input - and never while input is already waiting
+/// (ADR-180). The ring is checked with IRQs MASKED, and `wfi` still wakes on a pending IRQ with them
+/// masked; the IRQ is then taken when they are restored. The old idle ran `wfi` after `pop` had
+/// already unmasked, so a byte that landed in between slept in the ring until the NEXT interrupt:
+/// the console fuzz saw a prompt never come back, at random lines, on all three CPUs.
+#[cfg(feature = "interactive")]
+pub fn wait_for_input() {
+    let were = mask_irqs();
+    // SAFETY: IRQs are masked and this is the only consumer, so no other reference to RING exists.
+    let empty = unsafe { (*core::ptr::addr_of!(RING)).is_empty() };
+    if empty {
+        // SAFETY: a hint with no memory effects; a pending IRQ ends it even while masked.
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
+    }
+    restore_irqs(were);
+}
+
 /// How many bytes the ring refused because the console could not keep up.
 #[cfg(feature = "interactive")]
 pub fn dropped() -> u64 {

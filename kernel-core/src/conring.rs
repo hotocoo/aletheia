@@ -12,16 +12,32 @@
 //! nothing they already typed was rewritten underneath them. Every dropped byte is counted, so the
 //! loss is reportable rather than invisible.
 //!
-//! **Capacity is [`RING_CAPACITY`] = `shell::MAX_LINE`**, so a complete line always fits: an overflow
-//! means the operator got ahead of a command that was still running, never that one line was too long
-//! for the buffer that carries it.
+//! **Capacity is [`RING_CAPACITY`] = `shell::MAX_LINE` + 1, and the last slot is kept for a line
+//! terminator** (ADR-180), so a complete line AND the CR that ends it always fit. Until 2026-09-26 the
+//! capacity was `MAX_LINE` exactly: a pasted line of 256 bytes filled the ring, drop-newest discarded
+//! its CR, and the console looked hung until the operator pressed Enter again - at which point the
+//! truncated line ran. The live console fuzz found it on all three CPUs.
+//!
+//! **A line that lost bytes is cancelled, never run.** Once any byte of a line is dropped, that line's
+//! terminator is delivered as Ctrl-C: the editor abandons the damaged line (`^C`), and the next line
+//! starts clean. The attribution is in-band, so drops can never be charged to the wrong line.
 //!
 //! This type is plain data with no locking of its own. The target owns the static instance and the
 //! critical section around it, because "how do I keep an interrupt out of this" is a CPU question and
 //! this crate answers none of those.
 
-/// Bytes the ring holds. Equal to `shell::MAX_LINE` so one full line can never overflow it.
-pub const RING_CAPACITY: usize = 256;
+/// Bytes the ring holds: one full line plus the terminator that ends it.
+pub const RING_CAPACITY: usize = crate::shell::MAX_LINE + 1;
+
+/// Bytes a line may occupy: every slot but the one kept for its terminator.
+pub const DATA_CAPACITY: usize = RING_CAPACITY - 1;
+
+/// What the terminator of a damaged line becomes: the editor's cancel key.
+const CANCEL: u8 = crate::shell::CTRL_C;
+
+fn is_terminator(b: u8) -> bool {
+    b == b'\r' || b == b'\n'
+}
 
 /// A single-producer (the interrupt) single-consumer (the console loop) byte ring.
 pub struct ConsoleRing {
@@ -36,6 +52,8 @@ pub struct ConsoleRing {
     /// Bytes the device offered that the ring refused. Never resets: a console that lost input
     /// should be able to say so at any later moment.
     dropped: u64,
+    /// A byte of the line now arriving was dropped: its terminator is delivered as Ctrl-C.
+    damaged: bool,
 }
 
 impl Default for ConsoleRing {
@@ -52,6 +70,7 @@ impl ConsoleRing {
             tail: 0,
             len: 0,
             dropped: 0,
+            damaged: false,
         }
     }
 
@@ -78,10 +97,27 @@ impl ConsoleRing {
     ///
     /// Called from interrupt context, so it does no work that can fail, block, or allocate.
     pub fn push(&mut self, byte: u8) -> bool {
-        if self.len == RING_CAPACITY {
+        let terminator = is_terminator(byte);
+        // A data byte may not take the slot kept for the terminator.
+        let room = if terminator {
+            RING_CAPACITY
+        } else {
+            DATA_CAPACITY
+        };
+        if self.len >= room {
             self.dropped = self.dropped.saturating_add(1);
+            self.damaged = true;
             return false;
         }
+        let byte = if terminator && self.damaged {
+            self.damaged = false;
+            CANCEL
+        } else {
+            if terminator {
+                self.damaged = false;
+            }
+            byte
+        };
         self.buf[self.head] = byte;
         self.head = (self.head + 1) % RING_CAPACITY;
         self.len += 1;
@@ -104,8 +140,10 @@ impl ConsoleRing {
     ///
     /// Returns whether the sequence was accepted.
     pub fn push_seq(&mut self, bytes: &[u8]) -> bool {
-        if bytes.len() > self.free() {
+        // A decoded key is data: it may not take the terminator's slot either.
+        if bytes.len() > DATA_CAPACITY.saturating_sub(self.len) {
             self.dropped = self.dropped.saturating_add(bytes.len() as u64);
+            self.damaged = true;
             return false;
         }
         for b in bytes {
@@ -172,20 +210,21 @@ pub fn ring_suite<F: FnMut(u32, bool, &str)>(logger: &mut F) -> Result<u32, (u32
     //    overflows the buffer that carries it.
     let mut r = ConsoleRing::new();
     let mut accepted = 0usize;
-    for i in 0..RING_CAPACITY {
-        if r.push((i % 251) as u8) {
+    for i in 0..crate::shell::MAX_LINE {
+        if r.push(b'a' + (i % 26) as u8) {
             accepted += 1;
         }
     }
+    let ended = r.push(b'\r');
     check!(
         "conring: the ring accepts exactly its capacity, and one whole line fits",
-        accepted == RING_CAPACITY && r.is_full() && RING_CAPACITY == crate::shell::MAX_LINE
+        accepted == crate::shell::MAX_LINE && ended && r.is_full() && r.dropped() == 0
     );
 
     // 4. THE policy: a full ring drops the NEWEST byte. What was already typed is never rewritten,
     //    so a command in the buffer cannot be silently turned into a different command.
     let mut r = ConsoleRing::new();
-    for _ in 0..RING_CAPACITY {
+    for _ in 0..DATA_CAPACITY {
         r.push(b'A');
     }
     let refused = !r.push(b'Z');
@@ -197,7 +236,7 @@ pub fn ring_suite<F: FnMut(u32, bool, &str)>(logger: &mut F) -> Result<u32, (u32
 
     // 5. And the loss is counted, exactly — a console that lost input can say how much.
     let mut r = ConsoleRing::new();
-    for _ in 0..RING_CAPACITY {
+    for _ in 0..DATA_CAPACITY {
         r.push(b'A');
     }
     for _ in 0..17 {
@@ -211,15 +250,15 @@ pub fn ring_suite<F: FnMut(u32, bool, &str)>(logger: &mut F) -> Result<u32, (u32
     // 6. Dropping does not corrupt what is held: after an overflow the ring still reads back exactly
     //    the bytes it accepted, in order.
     let mut r = ConsoleRing::new();
-    for i in 0..RING_CAPACITY {
-        r.push((i % 251) as u8);
+    for i in 0..DATA_CAPACITY {
+        r.push(0x20 + (i % 90) as u8);
     }
     for _ in 0..50 {
         r.push(0xFF);
     }
     let mut intact = true;
-    for i in 0..RING_CAPACITY {
-        if r.pop() != Some((i % 251) as u8) {
+    for i in 0..DATA_CAPACITY {
+        if r.pop() != Some(0x20 + (i % 90) as u8) {
             intact = false;
             break;
         }
@@ -299,6 +338,31 @@ pub fn ring_suite<F: FnMut(u32, bool, &str)>(logger: &mut F) -> Result<u32, (u32
     check!(
         "conring: an escape sequence is admitted whole or not at all, never truncated",
         refused && unchanged && accepted && intact
+    );
+
+    // 10. A pasted line longer than the ring (ADR-180): it keeps its terminator, the terminator
+    //     arrives as Ctrl-C so the damaged line is cancelled rather than run truncated, and the next
+    //     line is delivered clean.
+    let mut r = ConsoleRing::new();
+    for _ in 0..300 {
+        r.push(b'a');
+    }
+    let ended = r.push(b'\r');
+    let mut data = 0usize;
+    let mut last = 0u8;
+    while let Some(b) = r.pop() {
+        if b == b'a' {
+            data += 1;
+        }
+        last = b;
+    }
+    for b in b"ls\r" {
+        r.push(*b);
+    }
+    let clean = r.pop() == Some(b'l') && r.pop() == Some(b's') && r.pop() == Some(b'\r');
+    check!(
+        "conring: a line that overflows keeps its terminator as Ctrl-C, so it is cancelled, never run truncated",
+        ended && data == DATA_CAPACITY && last == CANCEL && clean && r.dropped() == 300 - DATA_CAPACITY as u64
     );
 
     Ok(n)

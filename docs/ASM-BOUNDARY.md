@@ -34,20 +34,19 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 |------|-------|--------------------------|
 | `kernel/src/arch.rs` | 3 | aarch64 system-register read/write, fence + wfe/sev, counter reads |
 | `kernel/src/bench.rs` | 4 | cycle-counter and barrier instructions for the boot benchmark family |
-| `kernel/src/conirq.rs` | 6 | GIC interrupt acknowledge/EOI sequencing for the console input path, plus the generic-timer PPI the live desktop is pumped from (ADR-085): CNTFRQ read, CNTP_TVAL/CNTP_CTL arm |
+| `kernel/src/conirq.rs` | 7 | GIC interrupt acknowledge/EOI sequencing for the console input path, plus the generic-timer PPI the live desktop is pumped from (ADR-085): CNTFRQ read, CNTP_TVAL/CNTP_CTL arm; and the console idle's `wfi`, issued with IRQs masked after the ring is checked empty (ADR-180) |
 | `kernel/src/main.rs` | 2 | entry hand-off from the `_start` stub; boot stack/exception-level setup |
 | `kernel/src/semihosting.rs` | 2 | ARM semihosting call sequence (HLT instruction) |
-| `kernel/src/shellio.rs` | 2 | polled PL011 UART read/write for early console output |
+| `kernel/src/shellio.rs` | 1 | the PSCI `SYSTEM_RESET` call behind `reboot` (the idle's `wfi` moved to `conirq.rs`, ADR-180) |
 | `kernel/src/smp.rs` | 6 | secondary-CPU startup trampoline, PSCI CPU_ON conduit, IPI dispatch |
 | `kernel/src/usermode.rs` | 9 | EL0 transition eret frames, syscall entry/return, context switch |
 | `kernel/src/virtio.rs` | 1 | MMIO notify write with device-memory fence |
 | `kernel/src/vm.rs` | 13 | TTBR0 load, TLBI shootdown variants, DSB/ISB barriers, descriptor walks |
 | `kernel-riscv64/src/arch.rs` | 1 | csrrw/csrr system-register access |
-| `kernel-riscv64/src/conirq.rs` | 6 | PLIC claim/complete sequencing for console interrupts, plus the S-mode timer the live desktop is pumped from (ADR-085): the `time` CSR read and the `sie.STIE` enable |
+| `kernel-riscv64/src/conirq.rs` | 7 | PLIC claim/complete sequencing for console interrupts, plus the S-mode timer the live desktop is pumped from (ADR-085): the `time` CSR read and the `sie.STIE` enable; and the console idle's `wfi`, issued with `sstatus.SIE` clear after the ring is checked empty (ADR-180) |
 | `kernel-riscv64/src/exit.rs` | 1 | QEMU test-finish exit path |
 | `kernel-riscv64/src/main.rs` | 1 | entry hand-off from the SBI-booted start stub |
 | `kernel-riscv64/src/sbi.rs` | 2 | SBI ecall wrappers (console putchar, system reset) |
-| `kernel-riscv64/src/shellio.rs` | 1 | polled UART read/write for early console output |
 | `kernel-riscv64/src/smp.rs` | 6 | secondary hart start via SBI HSM, IPI via CLINT/SSIP |
 | `kernel-riscv64/src/trap.rs` | 5 | stvec vector stubs, scause/seepage-free save/restore frames |
 | `kernel-riscv64/src/usermode.rs` | 9 | U-mode transition sret frames, syscall trampolines |
@@ -56,10 +55,10 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel-x86_64/src/hal.rs` | 2 | port-mapped I/O (in/out), cli/sti/hlt |
 | `kernel-x86_64/src/pci.rs` | 2 | legacy PCI config-space ports 0xCF8/0xCFC |
 | `kernel-x86_64/src/hwpm.rs` | 2 | `rdmsr`/`wrmsr` for the architectural HWP performance registers |
-| `kernel-x86_64/src/shellio.rs` | 1 | polled 16550 UART I/O ports |
 | `kernel-x86_64/src/smp.rs` | 3 | INIT-SIPI startup sequence, LAPIC EOI, pause |
 | `kernel-x86_64/src/usermode.rs` | 2 | syscall/sysret fast-path and iretq ring-3 frames |
 | `kernel-x86_64/src/virtio.rs` | 1 | MMIO notify write |
+| `kernel-x86_64/src/conirq.rs` | 1 | the console idle's `sti; hlt`, issued after IF was cleared and the ring checked empty, so `sti`'s shadow cannot lose the wake-up (ADR-180) |
 
 ## Rules of the boundary
 

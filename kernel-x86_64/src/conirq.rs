@@ -103,6 +103,24 @@ pub fn pop() -> Option<u8> {
     })
 }
 
+/// Sleep until an interrupt might have delivered input - and never while input is already waiting
+/// (ADR-180). IF is cleared, the ring checked, and only then `sti; hlt`: `sti`'s one-instruction
+/// shadow means an IRQ that arrives after the check still wakes the `hlt`. The old idle ran
+/// `sti; hlt` after `pop` had already set IF again, so a byte that landed in between slept in the
+/// ring until the NEXT interrupt: the console fuzz saw a prompt never come back, at random lines.
+#[cfg(feature = "interactive")]
+pub fn wait_for_input() {
+    x86_64::instructions::interrupts::disable();
+    // SAFETY: IF is clear and this is the only consumer, so no other reference to RING exists.
+    let empty = unsafe { (*core::ptr::addr_of!(RING)).is_empty() };
+    if empty {
+        // SAFETY: the canonical idle pair; neither instruction touches memory.
+        unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack, preserves_flags)) };
+    } else {
+        x86_64::instructions::interrupts::enable();
+    }
+}
+
 /// How many bytes the ring refused because the console could not keep up.
 #[cfg(feature = "interactive")]
 pub fn dropped() -> u64 {

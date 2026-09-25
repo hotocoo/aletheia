@@ -79,5 +79,5 @@ fn the_boot_suite_passes_on_the_host_against_a_never_freeing_counter() {
         assert!(ok, "{name}");
     })
     .unwrap();
-    assert_eq!(n, 4);
+    assert_eq!(n, 5);
 }

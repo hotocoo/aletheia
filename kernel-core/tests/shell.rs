@@ -761,3 +761,29 @@ fn trust_by_name_asks_the_nameserver_but_never_for_a_blocked_host() {
         "a failed lookup pinned nothing: {log}"
     );
 }
+
+/// ADR-180: a line that ends in a lone ESC (or an unfinished `ESC [`) still ends at its Enter, and
+/// the next line runs. The live console fuzz found the first case eating the CR.
+#[test]
+fn an_unfinished_escape_never_eats_the_enter() {
+    for tail in [&b"\x1b"[..], b"\x1b[", b"\x1b[1;", b"\x1bO", b"\x1b\x1b"] {
+        let mut ed = LineEditor::new();
+        for b in b"ec" {
+            ed.feed(*b, &mut |_| {});
+        }
+        for b in tail {
+            ed.feed(*b, &mut |_| {});
+        }
+        assert!(
+            matches!(ed.feed(b'\r', &mut |_| {}), Edit::Line(_)),
+            "the Enter after {tail:?} was eaten"
+        );
+        for b in b"ho" {
+            ed.feed(*b, &mut |_| {});
+        }
+        match ed.feed(b'\r', &mut |_| {}) {
+            Edit::Line(l) => assert_eq!(l, "ho", "after {tail:?}"),
+            other => panic!("the next line did not arrive after {tail:?}: {other:?}"),
+        }
+    }
+}

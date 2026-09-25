@@ -5,12 +5,18 @@
 //! afterwards**. A ring that overwrote its oldest byte could turn a typed command into a DIFFERENT
 //! command that the editor would accept without complaint, so the tests below check the surviving
 //! contents, not merely the counters.
-use kernel_core::conring::{ConsoleRing, RING_CAPACITY};
+use kernel_core::conring::{ConsoleRing, DATA_CAPACITY, RING_CAPACITY};
 use kernel_core::shell::MAX_LINE;
 
 /// Deterministic pseudo-random byte, so a sweep is reproducible without an RNG in `no_std`.
 fn mix(i: u32) -> u8 {
-    ((i.wrapping_mul(2_654_435_761) >> 13) & 0xff) as u8
+    let b = ((i.wrapping_mul(2_654_435_761) >> 13) & 0xff) as u8;
+    // DATA bytes only: CR and LF are line terminators, with their own slot and their own tests.
+    if b == b'\r' || b == b'\n' {
+        b'.'
+    } else {
+        b
+    }
 }
 
 fn drain(r: &mut ConsoleRing) -> Vec<u8> {
@@ -23,18 +29,57 @@ fn drain(r: &mut ConsoleRing) -> Vec<u8> {
 
 #[test]
 fn a_full_line_always_fits_so_overflow_never_means_line_too_long() {
-    assert_eq!(RING_CAPACITY, MAX_LINE);
+    // A whole line of data AND the terminator that ends it (ADR-180).
+    assert_eq!(DATA_CAPACITY, MAX_LINE);
+    assert_eq!(RING_CAPACITY, MAX_LINE + 1);
+    let mut r = ConsoleRing::new();
+    for i in 0..MAX_LINE as u32 {
+        assert!(r.push(mix(i)));
+    }
+    assert!(
+        !r.push(b'x'),
+        "a data byte may not take the terminator's slot"
+    );
+    assert!(r.push(b'\r'), "the terminator always has room");
+}
+
+#[test]
+fn a_line_that_lost_bytes_is_cancelled_and_the_next_line_is_clean() {
+    // Every overflow length, every terminator: the damaged line ends in Ctrl-C, never in a CR the
+    // editor would run, and the following line arrives exactly as typed.
+    for extra in 1..40usize {
+        for term in [b'\r', b'\n'] {
+            let mut r = ConsoleRing::new();
+            for _ in 0..(DATA_CAPACITY + extra) {
+                r.push(b'a');
+            }
+            assert!(r.push(term));
+            let got = drain(&mut r);
+            assert_eq!(got.len(), DATA_CAPACITY + 1);
+            assert_eq!(
+                *got.last().unwrap(),
+                kernel_core::shell::CTRL_C,
+                "extra {extra}"
+            );
+            assert!(!got.contains(&b'\r') && !got.contains(&b'\n'));
+            for b in b"ls\r" {
+                assert!(r.push(*b));
+            }
+            assert_eq!(drain(&mut r), b"ls\r");
+            assert_eq!(r.dropped(), extra as u64);
+        }
+    }
 }
 
 #[test]
 fn the_ring_is_fifo_at_every_fill_level() {
-    for fill in 0..=RING_CAPACITY {
+    for fill in 0..=DATA_CAPACITY {
         let mut r = ConsoleRing::new();
         let written: Vec<u8> = (0..fill as u32).map(mix).collect();
         for b in &written {
             assert!(
                 r.push(*b),
-                "capacity is {RING_CAPACITY}, refused at fill {fill}"
+                "capacity is {DATA_CAPACITY}, refused at fill {fill}"
             );
         }
         assert_eq!(r.len(), fill);
@@ -47,18 +92,18 @@ fn the_ring_is_fifo_at_every_fill_level() {
 fn an_overflow_drops_the_newest_and_the_survivors_are_the_oldest_prefix() {
     // The property that matters: after any amount of overpressure, what remains is EXACTLY the
     // first RING_CAPACITY bytes offered — never a window that slid forward.
-    for excess in [1usize, 7, 100, RING_CAPACITY, RING_CAPACITY * 3] {
+    for excess in [1usize, 7, 100, DATA_CAPACITY, DATA_CAPACITY * 3] {
         let mut r = ConsoleRing::new();
-        let offered: Vec<u8> = (0..(RING_CAPACITY + excess) as u32).map(mix).collect();
+        let offered: Vec<u8> = (0..(DATA_CAPACITY + excess) as u32).map(mix).collect();
         let mut accepted = 0usize;
         for b in &offered {
             if r.push(*b) {
                 accepted += 1;
             }
         }
-        assert_eq!(accepted, RING_CAPACITY, "excess {excess}");
+        assert_eq!(accepted, DATA_CAPACITY, "excess {excess}");
         assert_eq!(r.dropped(), excess as u64, "excess {excess}");
-        assert_eq!(drain(&mut r), offered[..RING_CAPACITY], "excess {excess}");
+        assert_eq!(drain(&mut r), offered[..DATA_CAPACITY], "excess {excess}");
     }
 }
 

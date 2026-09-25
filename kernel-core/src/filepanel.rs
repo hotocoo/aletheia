@@ -395,18 +395,26 @@ fn publish_listing<D: BlockDevice>(
     dev: &D,
     publish: &mut dyn FnMut(&[FileRow], u32, u32),
 ) {
-    let Ok(entries) = fs.list(dev) else {
-        return;
-    };
+    // Streamed into a fixed array (ADR-180). This runs after EVERY command, and it used to call
+    // `fs.list()` - a `Vec<DirEntry>` with a `String` per name - plus a `Vec<FileRow>`: ~227 bytes
+    // per command on a heap that never frees, which the console fuzz found killing every CPU after
+    // ~1,900 commands. The namespace holds at most `MAX_FILES` names, so the array always fits.
+    let mut rows = [FileRow::new(b"", 0, 0); crate::fs::MAX_FILES];
+    let mut n = 0usize;
     let mut used = 0u32;
-    let mut rows: Vec<FileRow> = Vec::with_capacity(entries.len());
-    for e in &entries {
-        let blocks = e.blocks() as u32;
-        used = used.saturating_add(blocks);
-        rows.push(FileRow::new(e.name.as_bytes(), e.len as u64, blocks));
+    let listed = fs.for_each(dev, |name, _start, len| {
+        if n < rows.len() {
+            let blocks = len.div_ceil(crate::storage::BLOCK_SIZE) as u32;
+            used = used.saturating_add(blocks);
+            rows[n] = FileRow::new(name.as_bytes(), len as u64, blocks);
+            n += 1;
+        }
+    });
+    if listed.is_err() {
+        return;
     }
     let free = fs.free_blocks(dev).unwrap_or(0) as u32;
-    publish(&rows, free, free.saturating_add(used));
+    publish(&rows[..n], free, free.saturating_add(used));
 }
 
 /// Print the object the operator opened, the way `cat` would, into whatever surfaces the console

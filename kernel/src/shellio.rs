@@ -90,10 +90,15 @@ impl ShellHost for Host {
     /// preemption suite in `usermode.rs`, which runs BEFORE the interactive handoff, and whether it
     /// is still enabled at the prompt is not something this comment has checked — so the UART is the
     /// only wake source this relies on.
+    fn heap_bytes(&self) -> Option<(usize, usize)> {
+        Some((crate::heap::used_bytes(), crate::heap::free_bytes()))
+    }
     fn idle(&self) {
-        // SAFETY: `wfi` is a hint with no memory effects. Interrupts are unmasked in the console
-        // loop's context, so the UART IRQ (and the generic timer PPI) will resume execution.
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) }
+        // Check-then-sleep with interrupts masked, so input that arrived after the loop's last
+        // `pop` is never slept on (ADR-180). Without the interactive console there is no ring and
+        // no loop that idles, so the trait's do-nothing default is the honest answer.
+        #[cfg(feature = "interactive")]
+        crate::conirq::wait_for_input();
     }
     /// Reset through PSCI `SYSTEM_RESET`, over the same `hvc` conduit `smp.rs` already uses to start
     /// the secondary CPUs — so this is the firmware interface this kernel is already talking to,

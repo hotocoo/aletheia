@@ -1271,6 +1271,20 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — the console under hostile input (ADR-180)
+
+- New gate `scripts/console-fuzz-e2e.sh`: seeded hostile lines (every command with hostile
+  arguments, control bytes, escapes, high bytes, 257-2000-byte lines, a full filesystem) typed into
+  the booted OS on aarch64, riscv64 and x86-64, each followed by an `echo` sentinel.
+- It found six defects, all fixed at the root: a pasted long line hung the console (the ring had no
+  room for the CR; now a damaged line is cancelled, `conring` invariant 10); a lone ESC ate the
+  Enter; the idle could sleep on input that had already arrived (`conirq::wait_for_input` on every
+  target); and three per-command heap leaks (history cloned per line, Tab collecting candidates, the
+  file panel re-listing the namespace) that killed every CPU after ~1,100-1,900 commands. The session
+  path now allocates 0 bytes per command on real aarch64 (`shellstorm` invariant 5; `mem` prints
+  the heap).
+- Fuzz PASS: 1,500 lines per CPU on two seeds, and a 5,000-line soak (10,000 commands per CPU with sentinels) on a third.
+
 ### 2026-09-26 — IPC across address spaces is timed, against Linux (ADR-179)
 
 - Each target's user-mode suite times 1000 kernel-endpoint round trips between two address spaces

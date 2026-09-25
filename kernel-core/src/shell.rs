@@ -132,6 +132,10 @@ pub enum Edit {
     Pending,
     /// The user pressed return: here is the finished line, and the editor is empty again.
     Line(String),
+    /// The user pressed return, and the finished line is borrowed from the editor
+    /// (`LineEditor::submitted`) rather than handed out - what `feed_in_place` returns so a session
+    /// allocates nothing per line (ADR-180). `feed` turns it into `Line`.
+    Submitted,
     /// The user pressed Ctrl-C: whatever was typed is discarded, and no command runs.
     Cancelled,
     /// The user pressed Tab: the caller knows what names exist, so completion is resolved one level
@@ -170,6 +174,8 @@ pub struct LineEditor {
     hist: Option<usize>,
     /// What was typed before the walk started, restored by walking back down past the newest entry.
     stash: Vec<u8>,
+    /// The line most recently submitted, kept (with its capacity) until the next one.
+    submitted: Vec<u8>,
 }
 
 impl Default for LineEditor {
@@ -189,6 +195,7 @@ impl LineEditor {
             history: Vec::new(),
             hist: None,
             stash: Vec::new(),
+            submitted: Vec::with_capacity(MAX_LINE),
         }
     }
 
@@ -415,15 +422,24 @@ impl LineEditor {
         let next = match self.hist {
             // Starting a walk: remember what was being typed, so walking back down returns it.
             None => {
-                self.stash = self.buf.clone();
+                // Into the stash's own buffer, not a fresh clone (ADR-180).
+                self.stash.clear();
+                self.stash.extend_from_slice(&self.buf);
                 self.history.len() - 1
             }
             Some(0) => return, // already at the oldest: stay, rather than wrap to the newest
             Some(i) => i - 1,
         };
         self.hist = Some(next);
-        let entry = self.history[next].clone();
+        self.show_history(next, echo);
+    }
+
+    /// Show history entry `i` as the line, without cloning it: the entry and the line buffer are
+    /// both fields of `self`, so the entry is lent out by swapping it with a spare buffer.
+    fn show_history(&mut self, i: usize, echo: &mut dyn FnMut(&str)) {
+        let entry = core::mem::take(&mut self.history[i]);
         self.replace_line(entry.as_bytes(), echo);
+        self.history[i] = entry;
     }
 
     /// Walk to the next (newer) history entry, and past the newest back to what was being typed.
@@ -431,12 +447,12 @@ impl LineEditor {
         let Some(i) = self.hist else { return };
         if i + 1 < self.history.len() {
             self.hist = Some(i + 1);
-            let entry = self.history[i + 1].clone();
-            self.replace_line(entry.as_bytes(), echo);
+            self.show_history(i + 1, echo);
         } else {
             self.hist = None;
             let stash = core::mem::take(&mut self.stash);
             self.replace_line(&stash, echo);
+            self.stash = stash; // hand the buffer back, capacity and all
         }
     }
 
@@ -498,6 +514,20 @@ impl LineEditor {
     /// terminal — nothing is echoed for a byte that was refused, so what the user sees is what the
     /// kernel actually holds.
     pub fn feed(&mut self, byte: u8, echo: &mut dyn FnMut(&str)) -> Edit {
+        match self.feed_in_place(byte, echo) {
+            Edit::Submitted => Edit::Line(String::from(self.submitted())),
+            other => other,
+        }
+    }
+
+    /// The line most recently submitted (valid until the next Enter).
+    pub fn submitted(&self) -> &str {
+        core::str::from_utf8(&self.submitted).unwrap_or("")
+    }
+
+    /// `feed`, except that Enter returns `Edit::Submitted` and leaves the line in `submitted()`:
+    /// the allocation-free form the console session uses (ADR-180).
+    pub fn feed_in_place(&mut self, byte: u8, echo: &mut dyn FnMut(&str)) -> Edit {
         // ---- escape-sequence parsing comes first: inside a sequence, no byte means what it says --
         match self.esc {
             EscState::Ground => {}
@@ -516,7 +546,12 @@ impl LineEditor {
                         self.esc = EscState::Escape;
                         return Edit::Pending;
                     }
-                    // `ESC` then anything else is not a sequence this editor knows. The byte is
+                    // A control byte after a lone ESC means what it says, exactly as inside a CSI
+                    // sequence below: a line ending in ESC must still end. Until 2026-09-26 this
+                    // arm swallowed the CR too, and the live console fuzz caught a prompt that
+                    // never came back on aarch64 and x86-64 (ADR-180).
+                    b if b < 0x20 || b == 0x7f => {}
+                    // `ESC` then any other byte is not a sequence this editor knows. The byte is
                     // SWALLOWED, not typed: admitting it is exactly the bug this parser exists to
                     // fix, and a lone ESC on a serial line is nearly always the head of a sequence
                     // whose tail this editor has no rule for.
@@ -557,12 +592,21 @@ impl LineEditor {
             // may send either (and CRLF then arrives as a complete line plus one empty one).
             b'\r' | b'\n' => {
                 echo("\r\n");
-                let line = String::from_utf8(core::mem::take(&mut self.buf)).unwrap_or_default(); // unreachable: only ASCII was admitted
+                // The finished line moves into `submitted` by SWAPPING buffers, and the line buffer
+                // is cleared rather than taken: both keep their capacity, so a session that types
+                // forever allocates nothing per line (ADR-180; `take` left a zero-capacity buffer
+                // that regrew on every line, a leak on a heap that never frees).
+                core::mem::swap(&mut self.buf, &mut self.submitted);
+                self.buf.clear();
                 self.cursor = 0;
                 self.hist = None;
                 self.stash.clear();
-                self.remember(&line);
-                Edit::Line(line)
+                let line = core::mem::take(&mut self.submitted);
+                // SAFETY-free: only ASCII was ever admitted, so this cannot fail.
+                let text = core::str::from_utf8(&line).unwrap_or("");
+                self.remember(text);
+                self.submitted = line;
+                Edit::Submitted
             }
             // Ctrl-C: abandon the line. Visible, because a silent discard looks like a hang.
             CTRL_C => {
@@ -848,6 +892,12 @@ pub trait ShellHost {
     /// hardware nobody enumerated.
     fn cpu_count(&self) -> usize {
         1
+    }
+    /// The kernel heap: `(used, free)` bytes (ADR-180). The heap never frees (ADR-063), so a session
+    /// that costs memory per command is a machine that dies of being used; `mem` shows the number
+    /// so the operator - and the console fuzz - can see it move. `None` for a stand with no heap.
+    fn heap_bytes(&self) -> Option<(usize, usize)> {
+        None
     }
     /// Wait until something might have happened, called when the input ring is empty (REQ-CON-006).
     ///
@@ -1289,6 +1339,9 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 "input: {} byte(s) dropped since boot",
                 host.input_dropped()
             );
+            if let Some((used, free)) = host.heap_bytes() {
+                outf!(out, "heap: {} B used, {} B free (never freed)", used, free);
+            }
         }
         "faults" => {
             if !authorize(host, ShellAction::Inspect, out) {
@@ -2323,57 +2376,77 @@ impl Session {
     /// that actually exist. Completing file names from the real directory rather than from a guess
     /// is what makes `cat` usable on a machine whose names were typed months ago.
     fn complete<D: BlockDevice>(&mut self, fs: &Filesystem, dev: &D, out: &mut dyn FnMut(&str)) {
-        let line = self.editor.line().to_string();
-        let cursor = self.editor.cursor();
-        let head = &line[..cursor];
-        let start = head.rfind(' ').map(|i| i + 1).unwrap_or(0);
-        let token = &head[start..];
-        let mut cands: Vec<String> = Vec::new();
-        if start == 0 {
-            for (name, _) in COMMANDS {
-                let verb = split_first(name).0;
-                if verb.starts_with(token) {
-                    cands.push(verb.to_string());
+        // Allocation-free (ADR-180): the token is copied to the stack, candidates are STREAMED
+        // twice (once to find what they share, once to print them if they are ambiguous), and the
+        // common prefix lives in a fixed buffer. The first version collected a `Vec<String>` of
+        // candidates plus a `list()` of the namespace on every Tab, ~3.8 KB per press on a heap
+        // that never frees.
+        let mut token_buf = [0u8; MAX_LINE];
+        let (token_len, at_word_start) = {
+            let line = self.editor.line();
+            let cursor = self.editor.cursor();
+            let head = &line[..cursor];
+            let start = head.rfind(' ').map(|i| i + 1).unwrap_or(0);
+            let token = &head[start..];
+            token_buf[..token.len()].copy_from_slice(token.as_bytes());
+            (token.len(), start == 0)
+        };
+        let token = core::str::from_utf8(&token_buf[..token_len]).unwrap_or("");
+        let visit = |f: &mut dyn FnMut(&str)| {
+            if at_word_start {
+                for (name, _) in COMMANDS {
+                    let verb = split_first(name).0;
+                    if verb.starts_with(token) {
+                        f(verb);
+                    }
                 }
+            } else {
+                let _ = fs.for_each(dev, |name, _, _| {
+                    if name.starts_with(token) {
+                        f(name);
+                    }
+                });
             }
-        } else if let Ok(entries) = fs.list(dev) {
-            for e in entries {
-                if e.name.starts_with(token) {
-                    cands.push(e.name);
-                }
+        };
+        let mut common = [0u8; MAX_LINE];
+        let mut common_len = 0usize;
+        let mut count = 0usize;
+        visit(&mut |c: &str| {
+            let c = c.as_bytes();
+            if count == 0 {
+                common_len = c.len().min(MAX_LINE);
+                common[..common_len].copy_from_slice(&c[..common_len]);
+            } else {
+                common_len = common[..common_len]
+                    .iter()
+                    .zip(c.iter())
+                    .take_while(|(a, b)| a == b)
+                    .count();
             }
-        }
-        if cands.is_empty() {
+            count += 1;
+        });
+        if count == 0 {
             return;
         }
-        // The longest prefix every candidate shares: typing stops exactly where the choice begins,
-        // which is the behavior that makes completion feel like typing rather than like a menu.
-        let mut common = cands[0].clone();
-        for c in &cands[1..] {
-            let n = common
-                .bytes()
-                .zip(c.bytes())
-                .take_while(|(a, b)| a == b)
-                .count();
-            common.truncate(n);
+        // Complete to what every candidate shares: typing stops exactly where the choice begins,
+        // which is the behavior that makes completion feel like typing and not like a menu.
+        if common_len > token_len {
+            let add = core::str::from_utf8(&common[token_len..common_len]).unwrap_or("");
+            self.editor.insert_str(add, out);
         }
-        if common.len() > token.len() {
-            let add = common[token.len()..].to_string();
-            self.editor.insert_str(&add, out);
-        }
-        if cands.len() == 1 {
+        if count == 1 {
             // One answer: finish the word and separate it, so the next argument can be typed.
             if !self.editor.line()[..self.editor.cursor()].ends_with(' ') {
                 self.editor.insert_str(" ", out);
             }
-        } else if common.len() == token.len() {
-            // Ambiguous with nothing to add: SHOW the choice rather than beeping at the operator,
+        } else if common_len == token_len {
+            // Ambiguous and nothing to add: SHOW the choice instead of beeping at the operator,
             // then reprint the prompt and the line exactly as it was.
             out("\r\n");
-            for c in &cands {
+            visit(&mut |c: &str| {
                 out(c);
-                out("  ");
-            }
+                out(" ");
+            });
             out("\r\n");
             out(PROMPT);
             self.editor.redraw(out);
@@ -2394,8 +2467,8 @@ impl Session {
             self.started = true;
             out(PROMPT);
         }
-        match self.editor.feed(byte, out) {
-            Edit::Pending => Outcome::Continue,
+        match self.editor.feed_in_place(byte, out) {
+            Edit::Pending | Edit::Line(_) => Outcome::Continue,
             Edit::Complete => {
                 self.complete(fs, dev, out);
                 Outcome::Continue
@@ -2404,16 +2477,19 @@ impl Session {
                 out(PROMPT);
                 Outcome::Continue
             }
-            Edit::Line(line) => {
+            Edit::Submitted => {
+                let line = self.editor.submitted();
                 // The history the `history` command prints is the SAME list the up arrow walks:
                 // one list, so what the operator is shown and what they can recall cannot diverge.
-                let history = self.editor.history().to_vec();
+                // BORROWED, not cloned: `to_vec()` here copied all 32 entries on every line, ~3.6 KB
+                // per command on a heap that never frees, and the console fuzz ran aarch64 out of
+                // heap after ~1100 commands (ADR-180).
                 let outcome = execute(
-                    &line,
+                    line,
                     host,
                     fs,
                     dev,
-                    &history,
+                    self.editor.history(),
                     &mut self.navigator,
                     &mut |s| {
                         out(s);

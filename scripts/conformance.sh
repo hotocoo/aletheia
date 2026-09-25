@@ -217,6 +217,7 @@ CONTRACT=(
   "conring: a full ring refuses the NEWEST byte and never overwrites the oldest"
   "conring: every refused byte is counted (loss is reportable, not invisible)"
   "conring: after an overflow the accepted bytes are still intact and in order"
+  "conring: a line that overflows keeps its terminator as Ctrl-C, so it is cancelled, never run truncated"
   "console: a non-printable byte never enters the line"
   "console: a line stops growing at its bound instead of allocating"
   "console: Ctrl-C discards the line without running it"
@@ -598,6 +599,7 @@ CONTRACT=(
   "shellstorm: two hundred and fifty-six reporting commands allocate NOTHING"
   "shellstorm: a thousand submitted lines keep a bounded history and cost only the line itself"
   "shellstorm: the same session told twice prints byte-for-byte the same answer"
+  "shellstorm: the whole session path - typing, Tab, history walk, reporting commands - allocates NOTHING"
   # Lethe, the resident performance advisor (REQ-ML-007, ADR-165). The advisory discipline
   # must not vary by CPU: the bundled blob verifies, wrong blobs are refused BY NAME, parity
   # with the trainer holds, and the advised path obeys the ADR-076 contract it advises.

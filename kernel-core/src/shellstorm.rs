@@ -143,17 +143,10 @@ pub fn storm_suite<H: ShellHost>(
             "shellstorm: a command that returns data costs its data, not a multiple of it"
         );
     }
-    // 4 — THE SAME SESSION TWICE PRINTS THE SAME BYTES.
+    // 4 — THE SAME SESSION TWICE PRINTS THE SAME BYTES. `df`, not `mem`: `mem` reports the heap
+    //     watermark (ADR-180), and the transcript's own log string moves it between the tellings.
     {
-        let script = [
-            "help",
-            "ver",
-            "mem",
-            "ls",
-            "stat note",
-            "wc note",
-            "history",
-        ];
+        let script = ["help", "ver", "df", "ls", "stat note", "wc note", "history"];
         let mut transcript = |fs: &mut Filesystem, dev: &mut MemBlockDevice| -> String {
             let mut log = String::new();
             for c in script {
@@ -173,6 +166,45 @@ pub fn storm_suite<H: ShellHost>(
         check!(
             !a.is_empty() && a == b,
             "shellstorm: the same session told twice prints byte-for-byte the same answer"
+        );
+    }
+    // 5 — THE WHOLE SESSION PATH, as a person drives it (ADR-180). Claims 1-4 drove `execute` and
+    //     the editor separately, and `Session::feed` - the path that joins them - cloned all of
+    //     history on every line and let Tab collect a `Vec<String>`: ~3.6 KB per command, found by
+    //     the live console fuzz when aarch64 ran out of heap after ~1100 hostile lines. Here the
+    //     real session types reporting commands, walks history with Ctrl-P/Ctrl-N, and presses Tab
+    //     both at a command and at a file name; the heap must not move.
+    {
+        let mut session = shell::Session::new();
+        let mut out = |_: &str| {};
+        let script: &[&[u8]] = &[
+            b"ver\r",
+            b"mem\r",
+            b"ls\r",
+            b"history\r",
+            b"he\t\r",
+            b"stat no\t\x03",
+            b"\x10\x10\x0e\r",
+            b"\x03",
+            b"help\r",
+        ];
+        let mut round =
+            |session: &mut shell::Session, fs: &mut Filesystem, dev: &mut MemBlockDevice| {
+                for _ in 0..(COMMANDS / script.len() as u32) {
+                    for line in script {
+                        for b in line.iter() {
+                            let _ = session.feed(*b, host, fs, dev, &mut out);
+                        }
+                    }
+                }
+            };
+        round(&mut session, &mut fs, &mut dev); // warm-up: history and line buffers now exist
+        let before = used_bytes();
+        round(&mut session, &mut fs, &mut dev);
+        let after = used_bytes();
+        check!(
+            after == before,
+            "shellstorm: the whole session path - typing, Tab, history walk, reporting commands - allocates NOTHING"
         );
     }
     let _: Vec<u8> = Vec::new(); // keep the alloc import honest on every feature combination

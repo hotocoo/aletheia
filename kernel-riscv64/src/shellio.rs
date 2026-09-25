@@ -85,10 +85,15 @@ impl ShellHost for Host {
     /// (REQ-CON-002), and the UART's external interrupt is what ends the wait. On RISC-V `wfi` is
     /// permitted to return spuriously, which the surrounding `loop` already handles: a spurious wake
     /// simply asks the ring again.
+    fn heap_bytes(&self) -> Option<(usize, usize)> {
+        Some((crate::heap::used_bytes(), crate::heap::free_bytes()))
+    }
     fn idle(&self) {
-        // SAFETY: `wfi` is a hint with no memory effects. `sstatus.SIE` is set in the console loop's
-        // context, so the PLIC's external interrupt resumes execution.
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) }
+        // Check-then-sleep with interrupts masked, so input that arrived after the loop's last
+        // `pop` is never slept on (ADR-180). Without the interactive console there is no ring and
+        // no loop that idles, so the trait's do-nothing default is the honest answer.
+        #[cfg(feature = "interactive")]
+        crate::conirq::wait_for_input();
     }
     /// Reset through the SBI System Reset extension — the firmware call, because on RISC-V there is
     /// no reset register a supervisor may write and OpenSBI is the thing that owns the platform.

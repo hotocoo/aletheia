@@ -320,6 +320,24 @@ jobs:
       - name: Boot with --features interactive, type at the prompt, halt, reboot, read it back
         run: ./scripts/console-e2e.sh
 
+  console-fuzz-e2e:
+    name: The console under hostile input (seeded fuzz typed at the running OS, on all three targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU for all three targets, OVMF firmware, mtools
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 ovmf mtools && (sudo apt-get install -y qemu-system-riscv || true)
+      - name: Install Rust nightly + all cross targets
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup component add rust-src --toolchain nightly-2026-08-09
+          rustup target add aarch64-unknown-none-softfloat riscv64gc-unknown-none-elf x86_64-unknown-uefi --toolchain nightly-2026-08-09
+      # ADR-180: seeded hostile lines (every command with hostile arguments, control bytes, escapes,
+      # high bytes, over-long lines, a full filesystem), each followed by an echo sentinel. The seed
+      # is the run number, so every push fuzzes different input and a failure names its seed.
+      - name: Type a thousand hostile lines at each CPU
+        run: FUZZ_LINES=1000 FUZZ_SEED=$(printf '0x%x' "$GITHUB_RUN_NUMBER") ./scripts/console-fuzz-e2e.sh
+
   console-ai-e2e:
     name: The model drives the console (plan in English, validate, type at a booted machine)
     runs-on: ubuntu-latest

@@ -98,10 +98,15 @@ impl ShellHost for Host {
     /// argument: `hlt` with interrupts masked is a machine that never wakes. `sti` has a
     /// one-instruction interrupt shadow, so the pair cannot lose an interrupt that arrives between
     /// them — this is the canonical idle idiom for exactly that reason.
+    fn heap_bytes(&self) -> Option<(usize, usize)> {
+        Some((crate::heap::used_bytes(), crate::heap::free_bytes()))
+    }
     fn idle(&self) {
-        // SAFETY: enabling interrupts is what the console loop already runs with, and `hlt` merely
-        // parks the CPU until one arrives. Neither instruction touches memory.
-        unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack, preserves_flags)) }
+        // Check-then-sleep with interrupts masked, so input that arrived after the loop's last
+        // `pop` is never slept on (ADR-180). Without the interactive console there is no ring and
+        // no loop that idles, so the trait's do-nothing default is the honest answer.
+        #[cfg(feature = "interactive")]
+        crate::conirq::wait_for_input();
     }
     fn cpu_count(&self) -> usize {
         crate::smp::declared_cpu_count()
