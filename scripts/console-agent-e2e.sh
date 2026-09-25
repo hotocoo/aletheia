@@ -413,7 +413,7 @@ run_bounds() {
     if [ "$rc" -eq 0 ] || [ -n "$out" ]; then
       echo "  FAIL [$label/$arm] a command whose answer was already in the transcript ran again"; bad=1
     else
-      echo "    a repeated command was refused as no progress"
+      echo "    a repeated command was not typed again (rc=$rc: no progress, or the machine's own answer)"
     fi
   fi
   rm -f "$t" "$o"
@@ -429,7 +429,11 @@ run_arm() {
   TURN_MS=(); TURN_CALLS=()
 
   if ! session_open "$@"; then
-    echo "  FAIL [$label/$arm] the machine never reached a prompt"
+    # A boot that never reached a prompt FAILS the gate, whichever arm it was. It used to return
+    # without setting `fail`, so a model arm that never booted printed FAIL under a PASS verdict.
+    echo "  FAIL [$label/$arm] the machine never reached a prompt; last bytes it printed:"
+    tail -c 600 "$SESSION_LOG" 2>/dev/null | tr -d '\000' | sed 's/^/    | /'
+    fail=1
     session_close; return 1
   fi
 

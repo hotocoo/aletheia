@@ -1271,6 +1271,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-25 — an answer in hand is not refused (ADR-177)
+
+- The agent loop ends a session with the machine's own answer, labelled, when the model keeps
+  re-asking for a reading whose answer is already on the transcript; a repeated mutation still
+  refuses. `console-agent-e2e` model arm now PASS on aarch64, riscv64 and x86-64 (was FAIL on two).
+- The gate no longer prints FAIL under a PASS verdict when an arm's machine never boots.
+- riscv64 `u-mode` invariant 13 stops failing on a saturated host: it checks that the counter never
+  goes backwards and that each task advances over the run, not in every 5 ms wall-clock slice.
+
 ### 2026-09-25 — a name becomes an address (ADR-176)
 
 - `kernel_core::dns`: one A-record query, one bounded reader that refuses foreign ids, foreign

@@ -534,6 +534,16 @@ pub fn advance(
         // argument spellings that render identically are the same command typed twice.
         if repeats_since_the_machine_changed(session, &line) {
             if corrected >= MAX_CORRECTIONS {
+                // A repeated READING whose answer is already on the transcript: the request was
+                // answered by the machine, and only the model's summary is missing. The session
+                // ends with the machine's own words, labelled as such, rather than refusing a
+                // request whose answer is in hand (ADR-177; ADR-055: the bound stops the loop,
+                // not the request). A repeated MUTATION still refuses: that is damage, not an
+                // answer.
+                if let Some(answer) = machine_answer_for(session, &line) {
+                    session.answer = Some(answer.clone());
+                    return Ok(Advance::Done(answer));
+                }
                 return Err(AgentRefusal::NoProgress { line });
             }
             session.corrections.push(Correction {
@@ -635,6 +645,31 @@ fn repeats_since_the_machine_changed(session: &Session, line: &str) -> bool {
         None => &session.turns[..],
     };
     considered.iter().any(|t| t.line == line)
+}
+
+/// The machine's latest answer to `line`, as a session answer, when `line` is a reading that was
+/// already typed and answered since the machine last changed. `None` for a mutation or for a line
+/// with no observation yet.
+fn machine_answer_for(session: &Session, line: &str) -> Option<String> {
+    if line_changes_the_machine(line) {
+        return None;
+    }
+    let obs = session
+        .turns
+        .iter()
+        .rev()
+        .find(|t| t.line == line)?
+        .observation
+        .as_deref()?;
+    let flat: Vec<&str> = obs
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    Some(admit_observation(&format!(
+        "the model kept asking for `{line}` instead of answering; the machine's answer was: {}",
+        flat.join(" / ")
+    )))
 }
 
 /// Does running this line change what a later command would print?
@@ -1095,11 +1130,19 @@ mod tests {
         ]);
         adv(&mut s, &agent).unwrap();
         s.observe("manifesto  poem").unwrap();
-        assert_eq!(
-            adv(&mut s, &agent).unwrap_err(),
-            AgentRefusal::NoProgress { line: "ls".into() }
-        );
+        // ADR-177: the bound still trips, and nothing more is typed, but the request was answered
+        // by the machine, so the session ends with the machine's answer, labelled as such.
+        match adv(&mut s, &agent).unwrap() {
+            Advance::Done(a) => {
+                assert!(
+                    a.contains("kept asking for `ls`") && a.contains("manifesto  poem"),
+                    "{a}"
+                )
+            }
+            other => panic!("expected the machine's answer, got {other:?}"),
+        }
         assert_eq!(s.corrections.len(), MAX_CORRECTIONS);
+        assert_eq!(s.turns.len(), 1, "nothing more was typed");
     }
 
     #[test]
@@ -1628,9 +1671,10 @@ mod tests {
         }
         let agent = scripted(moves);
         match adv(&mut s, &agent) {
-            Err(AgentRefusal::NoProgress { line }) => assert_eq!(line, "cat poem"),
-            other => panic!("expected no-progress, got {other:?}"),
+            Ok(Advance::Done(a)) => assert!(a.contains("hello world!"), "{a}"),
+            other => panic!("expected the machine's answer to `cat poem`, got {other:?}"),
         }
+        assert_eq!(s.turns.len(), 2, "the repeated read was never typed");
     }
 
     #[test]

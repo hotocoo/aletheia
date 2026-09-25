@@ -1266,7 +1266,14 @@ fn run_preemptive() -> (bool, bool) {
         }
         counts[cur] += 1;
         let prog = tcb[cur].regs[18]; // s2 progress counter
-        if prog <= last_prog[cur] {
+                                      // State preserved means the counter NEVER goes backwards: a lost or crossed context
+                                      // resumes the task with another value (the fresh frame's 0, or the other task's count).
+                                      // A slice with ZERO progress is not a lost context. `rdtime` is wall-clock under TCG, and
+                                      // on a saturated host (2026-09-25: a llama.cpp server beside the gate) the resume path
+                                      // alone outlasted the 5 ms slice, the task took its interrupt before one `addi`, and this
+                                      // invariant failed for the host's load. That the task advances at all is checked over the
+                                      // whole run, below.
+        if prog < last_prog[cur] {
             progress_ok = false;
         }
         last_prog[cur] = prog;
@@ -1276,7 +1283,8 @@ fn run_preemptive() -> (bool, bool) {
     stie_disable();
 
     let fair = clean && counts.iter().all(|&c| c > 0);
-    (fair, progress_ok)
+    let advanced = last_prog.iter().all(|&p| p > 0);
+    (fair, progress_ok && advanced)
 }
 
 // --- Invariants 11-13: capability-secure kernel-mediated IPC --------------------------------
