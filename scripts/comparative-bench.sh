@@ -119,6 +119,29 @@ typed_workload() {
   return 0
 }
 
+# THE IPC LEG (ADR-179): a message round trip between two address spaces. Aletheia times its own at
+# boot (kernel endpoint, `[bench] ipc:` line); Linux runs `pingpong` (two processes, two pipes) in
+# the same guest the typed workload used. Per boot; the leg keeps the last boot's number.
+IPC_ROUND_TRIPS="${IPC_ROUND_TRIPS:-1000}"
+AL_IPC_NS=""; LX_IPC_NS=""
+ipc_leg() {
+  local label="$1" log="$2" deadline v
+  case "$label" in
+    aletheia*)
+      v="$(sed -n 's/.*\[bench\] ipc: [0-9]* cross-address-space round trips | \([0-9]*\) ns.*/\1/p' "$log" | tail -1)"
+      [ -n "$v" ] && AL_IPC_NS="$v" ;;
+    linux*)
+      printf 'pingpong %s\n' "$IPC_ROUND_TRIPS" >&9
+      deadline=$((SECONDS + 120))
+      until grep -q "^PINGPONG .* ok=" "$log"; do
+        [ "$SECONDS" -ge "$deadline" ] && { echo "    ipc: pingpong never answered (no leg number)"; return 0; }
+        sleep 0.05
+      done
+      v="$(sed -n 's/^PINGPONG .* ns\/rt=\([0-9]*\) ok=1.*/\1/p' "$log" | tail -1)"
+      if [ -n "$v" ]; then LX_IPC_NS="$v"; else echo "    ipc: pingpong reported a wrong round trip"; fi ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------------------------
 # Boot something, wait for the string that means "there is a prompt", and then measure the host CPU
 # the guest costs while NOBODY IS TYPING.
@@ -259,6 +282,7 @@ EOPY
     redox*|freebsd*) : ;;  # boot to a login prompt: no credentials are guessed
     *) typed_workload "$label" "$log" || { kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1; } ;;
   esac
+  ipc_leg "$label" "$log"
   kill -9 "$pid" 2>/dev/null
   exec 9>&-
 
@@ -365,9 +389,38 @@ else
   # The guest must end in the SAME state as Aletheia's: an interactive shell on the serial line,
   # blocked on input. A distro that boots into a service manager would be measuring the distro.
   docker run --rm -v "$WORK:/out" --platform linux/amd64 alpine:3.21 sh -c '
-    apk add --no-cache busybox-static cpio >/dev/null 2>&1
+    apk add --no-cache busybox-static cpio gcc musl-dev >/dev/null 2>&1
     mkdir -p /ir/bin /ir/dev /ir/proc /ir/sys
     cp /bin/busybox.static /ir/bin/busybox
+    # The IPC leg (ADR-179): two processes, two pipes, N round trips of 8 bytes - the same shape as
+    # the kernel-endpoint ping-pong Aletheia times at boot, under the same emulator.
+    cat > /tmp/pingpong.c <<"EOC"
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/wait.h>
+int main(int argc, char **argv) {
+  long n = argc > 1 ? atol(argv[1]) : 1000;
+  int a[2], b[2]; unsigned long long v = 0;
+  if (pipe(a) || pipe(b)) return 1;
+  pid_t c = fork();
+  if (c == 0) {
+    for (long i = 0; i <= n; i++) { if (read(a[0], &v, 8) != 8) _exit(2); v ^= 0xA5A5A5A5ULL; if (write(b[1], &v, 8) != 8) _exit(3); }
+    _exit(0);
+  }
+  struct timespec t0, t1; int ok = 1;
+  v = 0; write(a[1], &v, 8); read(b[0], &v, 8);  /* warm-up outside the meter */
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  for (long i = 1; i <= n; i++) { v = i; write(a[1], &v, 8); read(b[0], &v, 8); if (v != ((unsigned long long)i ^ 0xA5A5A5A5ULL)) ok = 0; }
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  waitpid(c, 0, 0);
+  long long ns = (t1.tv_sec - t0.tv_sec) * 1000000000LL + (t1.tv_nsec - t0.tv_nsec);
+  printf("PINGPONG %ld round trips ns/rt=%lld ok=%d\n", n, ns / n, ok);
+  return ok ? 0 : 4;
+}
+EOC
+    gcc -O2 -static -o /ir/bin/pingpong /tmp/pingpong.c
     for a in sh cat echo mount sleep; do ln -sf busybox /ir/bin/$a; done
     printf "#!/bin/busybox sh\n/bin/busybox mount -t proc proc /proc 2>/dev/null\n/bin/busybox mount -t sysfs sys /sys 2>/dev/null\n/bin/busybox echo LINUX-BENCH-PROMPT-READY\nexec /bin/busybox sh\n" > /ir/init
     chmod +x /ir/init
@@ -550,6 +603,7 @@ printf "$F" "  of which this kernel" "${AL_KERNEL_MS:-n/a} ms" "${LX_BOOT_MS:-SK
 printf "$F" "idle host CPU at prompt" "${AL_IDLE:-FAIL} %" "${LX_IDLE:-SKIP} %" "${RX_IDLE:-SKIP} %" "${FB_IDLE:-SKIP} %"
 printf "$F" "bootable payload" "${AL_BYTES:-FAIL} B" "${LX_BYTES:-SKIP} B" "${RX_BYTES:-SKIP} B" "${FB_BYTES:-SKIP} B"
 printf "$F" "typed echo round-trip" "${AL_WL_MS:-FAIL} ms" "${LX_WL_MS:-SKIP} ms" "n/a (login)" "n/a (login)"
+printf "$F" "IPC round trip, 2 spaces" "${AL_IPC_NS:-n/a} ns" "${LX_IPC_NS:-n/a} ns" "n/a (login)" "n/a (login)"
 printf "$F" "privileged lines of code" "$KLOC (Rust)" "~40M (C, cited)" "n/a" "n/a"
 hr
 cat <<'RUSTOS'

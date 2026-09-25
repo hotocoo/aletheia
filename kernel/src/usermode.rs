@@ -1150,6 +1150,88 @@ fn run_ipc() -> (bool, bool, bool) {
     (delivered, send_denied, recv_denied)
 }
 
+/// IPC across address spaces, TIMED (ADR-179): the aarch64 twin of the x86-64 benchmark. One round
+/// trip is A sends, B receives, B sends the reply, A receives: four EL0 entries, four `svc` traps,
+/// eight TTBR0 switches - more crossing than a Linux pipe ping-pong, so the comparison errs against
+/// this kernel. One Trial serves every excursion and SEND/RECV authorize on the Allow arm, which
+/// builds nothing: the heap must not move across the timed loop.
+///
+/// Returns `(every_body_crossed_intact, nanoseconds_per_round_trip, heap_bytes_grown)`.
+pub fn run_ipc_pingpong(n: u64) -> (bool, u64, isize) {
+    use crate::hal::{ActiveHal, Hal};
+    let root_main = vm::active_root();
+    let (Some(root_a), Some(root_b)) = (vm::build_identity(), vm::build_identity()) else {
+        return (false, 0, 0);
+    };
+    let a_code = map_user_code(root_a, USER_CODE_VA, &STUB_SYSCALL);
+    let a_stack = map_user_stack(root_a, USER_STACK_VA);
+    let b_code = map_user_code(root_b, USER_CODE_VA, &STUB_SYSCALL);
+    let b_stack = map_user_stack(root_b, USER_STACK_VA);
+    let mapped = a_code.is_some() && a_stack.is_some() && b_code.is_some() && b_stack.is_some();
+    let mut ok = mapped;
+    let mut ns = 0u64;
+    let mut grown = 0isize;
+    if mapped {
+        let mut engine = CapEngine::new(0x1BC0, 1000);
+        let caps =
+            alloc::vec![engine.mint("ipc-bench", "ipc.msg", Scope::All, Constraints::none())];
+        // SAFETY: single-threaded suite; install the one trial every excursion's handler reads.
+        unsafe {
+            *addr_of_mut!(CURRENT) = Some(Trial {
+                engine,
+                store: Store::new(),
+                caps,
+                action: "ipc.msg",
+                armed: false,
+                allowed: false,
+                isolation_held: false,
+                fault_va: 0,
+            });
+            *addr_of_mut!(ENDPOINT) = None;
+            *addr_of_mut!(IPC_BLOCK_MODE) = false;
+        }
+        let trip = |root: usize, x0: u64, x8: u64| {
+            let mut f = TrapFrame::new_entry(USER_CODE_VA, USER_STACK_TOP, x0, x8);
+            // SAFETY: `root` identity-maps the running kernel; one EL0 syscall, then back.
+            unsafe {
+                vm::switch_address_space(root);
+                resume_frame(&mut f as *mut TrapFrame);
+                vm::switch_address_space(root_main);
+            }
+        };
+        let round = |i: u64| -> bool {
+            trip(root_a, i, SYS_SEND);
+            trip(root_b, 0, SYS_RECV);
+            let got = unsafe { *addr_of!(IPC_RECEIVED) };
+            trip(root_b, got ^ 0xA5A5_A5A5, SYS_SEND);
+            trip(root_a, 0, SYS_RECV);
+            got == i && unsafe { *addr_of!(IPC_RECEIVED) } == i ^ 0xA5A5_A5A5
+        };
+        ok &= round(0); // warm-up outside the meter
+        let heap0 = crate::heap::used_bytes();
+        let t0 = ActiveHal::timer_ticks();
+        for i in 1..=n {
+            ok &= round(i);
+        }
+        let ticks = ActiveHal::timer_ticks().wrapping_sub(t0);
+        grown = crate::heap::used_bytes() as isize - heap0 as isize;
+        ns = ActiveHal::ticks_to_ns(ticks) / n.max(1);
+        // SAFETY: excursions complete; retire the trial.
+        unsafe { *addr_of_mut!(CURRENT) = None };
+    }
+    for (root, va, f) in [
+        (root_a, USER_STACK_VA, a_stack),
+        (root_a, USER_CODE_VA, a_code),
+        (root_b, USER_STACK_VA, b_stack),
+        (root_b, USER_CODE_VA, b_code),
+    ] {
+        if let Some(f) = f {
+            drop_user_page(root, va, f);
+        }
+    }
+    (ok, ns, grown)
+}
+
 // ---------------------------------------------------------------------------
 // Cooperative multitasking: two EL0 tasks context-switch via yield under a round-robin scheduler.
 // ---------------------------------------------------------------------------
@@ -2162,5 +2244,21 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "process-info: capability-bound EL0 query returns live supervisor counters"
     );
 
+    // IPC across address spaces, timed (ADR-179): the number is REPORTED, never gated.
+    let (crossed, ns_per_rt, grown) = run_ipc_pingpong(IPC_BENCH_ROUND_TRIPS);
+    kprintln!(
+        "[bench] ipc: {} cross-address-space round trips | {} ns/round-trip (4 EL0 entries, 4 syscall traps, 8 TTBR0 switches each) | heap +{} B",
+        IPC_BENCH_ROUND_TRIPS,
+        ns_per_rt,
+        grown
+    );
+    check!(
+        crossed && grown == 0,
+        "ipc: a thousand round trips between two address spaces all cross intact, and the heap does not move"
+    );
+
     Ok(n)
 }
+
+/// Round trips the boot's IPC benchmark times (ADR-179).
+const IPC_BENCH_ROUND_TRIPS: u64 = 1000;

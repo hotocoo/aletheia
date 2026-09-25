@@ -1349,6 +1349,105 @@ fn run_ipc() -> (bool, bool, bool) {
     (delivered, send_denied, recv_denied)
 }
 
+/// IPC across address spaces, TIMED (ADR-179): the RISC-V twin of the x86-64 benchmark. Each space
+/// maps the send stub at `USER_CODE_VA` and the receive stub one page above it, because this
+/// target's stubs name their syscall in code. One round trip is A sends, B receives, B sends the
+/// reply, A receives: four U-mode entries, four `ecall` traps, eight `satp` switches. One Trial
+/// serves every excursion, and the heap must not move across the timed loop.
+///
+/// Returns `(every_body_crossed_intact, nanoseconds_per_round_trip, heap_bytes_grown)`.
+fn run_ipc_pingpong(n: u64) -> (bool, u64, isize) {
+    use crate::hal::{ActiveHal, Hal};
+    const RECV_VA: usize = USER_CODE_VA + 2 * frames::FRAME_SIZE;
+    let root_main = vm::active_root();
+    let (Some(root_a), Some(root_b)) = (vm::build_identity(), vm::build_identity()) else {
+        return (false, 0, 0);
+    };
+    let mut pages: [(usize, usize, Option<frames::PhysFrame>); 6] = [
+        (
+            root_a,
+            USER_CODE_VA,
+            map_user_code(root_a, USER_CODE_VA, stub(_stub_send_s, _stub_send_e)),
+        ),
+        (
+            root_a,
+            RECV_VA,
+            map_user_code(root_a, RECV_VA, stub(_stub_recv_s, _stub_recv_e)),
+        ),
+        (root_a, USER_STACK_VA, map_user_data(root_a, USER_STACK_VA)),
+        (
+            root_b,
+            USER_CODE_VA,
+            map_user_code(root_b, USER_CODE_VA, stub(_stub_send_s, _stub_send_e)),
+        ),
+        (
+            root_b,
+            RECV_VA,
+            map_user_code(root_b, RECV_VA, stub(_stub_recv_s, _stub_recv_e)),
+        ),
+        (root_b, USER_STACK_VA, map_user_data(root_b, USER_STACK_VA)),
+    ];
+    let mut ok = pages.iter().all(|p| p.2.is_some());
+    let mut ns = 0u64;
+    let mut grown = 0isize;
+    if ok {
+        let mut engine = CapEngine::new(0x1BC0, 1000);
+        let caps =
+            alloc::vec![engine.mint("ipc-bench", "ipc.msg", Scope::All, Constraints::none())];
+        // SAFETY: single-owner trial slot for the whole loop; the endpoint starts empty.
+        unsafe {
+            *addr_of_mut!(CURRENT) = Some(Trial {
+                engine,
+                store: Store::new(),
+                caps,
+                action: "ipc.msg",
+                armed: false,
+                allowed: false,
+                isolation_held: false,
+                fault_va: 0,
+            });
+            *addr_of_mut!(ENDPOINT) = None;
+        }
+        let trip = |root: usize, entry: usize, body: u64| {
+            let mut f = make_frame(entry, USER_STACK_TOP, body, body, 0);
+            // SAFETY: `root` identity-maps the running kernel; one U-mode syscall, then back.
+            unsafe {
+                vm::switch_address_space(root);
+                run_one_shot(&mut f);
+                vm::switch_address_space(root_main);
+            }
+        };
+        let round = |i: u64| -> bool {
+            trip(root_a, USER_CODE_VA, i);
+            trip(root_b, RECV_VA, 0);
+            let got = unsafe { *addr_of!(IPC_RECEIVED) };
+            trip(root_b, USER_CODE_VA, got ^ 0xA5A5_A5A5);
+            trip(root_a, RECV_VA, 0);
+            got == i && unsafe { *addr_of!(IPC_RECEIVED) } == i ^ 0xA5A5_A5A5
+        };
+        ok &= round(0); // warm-up outside the meter
+        let heap0 = crate::heap::used_bytes();
+        let t0 = ActiveHal::timer_ticks();
+        for i in 1..=n {
+            ok &= round(i);
+        }
+        let ticks = ActiveHal::timer_ticks().wrapping_sub(t0);
+        grown = crate::heap::used_bytes() as isize - heap0 as isize;
+        ns = ActiveHal::ticks_to_ns(ticks) / n.max(1);
+        // SAFETY: excursions complete; retire the trial.
+        unsafe { *addr_of_mut!(CURRENT) = None };
+    }
+    for (root, va, f) in pages.iter_mut() {
+        if let Some(f) = f.take() {
+            vm::unmap_page(*root, *va);
+            frames::free_as(f, Owner::USER);
+        }
+    }
+    vm::destroy_space(root_a);
+    vm::destroy_space(root_b);
+    (ok, ns, grown)
+}
+
 // --- Invariants 17-19: real blocking IPC (REQ-IPC-010) --------------------------------------
 /// Prove real blocking IPC on RISC-V (the aarch64 twin): a receiver that `recv`s an EMPTY endpoint
 /// BLOCKS (descheduled via `kernel_core::sched`), a sender's `send` WAKES it and the kernel delivers
@@ -1861,5 +1960,21 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "process-info: capability-bound U-mode query returns live supervisor counters"
     );
 
+    // IPC across address spaces, timed (ADR-179): the number is REPORTED, never gated.
+    let (crossed, ns_per_rt, grown) = run_ipc_pingpong(IPC_BENCH_ROUND_TRIPS);
+    kprintln!(
+        "[bench] ipc: {} cross-address-space round trips | {} ns/round-trip (4 U-mode entries, 4 syscall traps, 8 satp switches each) | heap +{} B",
+        IPC_BENCH_ROUND_TRIPS,
+        ns_per_rt,
+        grown
+    );
+    check!(
+        crossed && grown == 0,
+        "ipc: a thousand round trips between two address spaces all cross intact, and the heap does not move"
+    );
+
     Ok(n)
 }
+
+/// Round trips the boot's IPC benchmark times (ADR-179).
+const IPC_BENCH_ROUND_TRIPS: u64 = 1000;

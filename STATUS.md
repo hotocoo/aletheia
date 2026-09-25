@@ -1271,6 +1271,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — IPC across address spaces is timed, against Linux (ADR-179)
+
+- Each target's user-mode suite times 1000 kernel-endpoint round trips between two address spaces
+  and gates that every body crosses and the heap does not move (`usermode` 33/33/40). Boot numbers
+  under TCG: x86-64 21.9 us, aarch64 27.5 us, riscv64 41.7 us.
+- `comparative-bench.sh` runs a static pipe `pingpong` in the Linux guest: same emulator, Aletheia
+  22.1 us against Linux 41.1 us per round trip. ADR-179 names the asymmetries (a one-word mailbox
+  with no scheduler in the loop against buffered pipes and a scheduler wakeup).
+- Same day: the storage bench stopped timing its own workload generator (aarch64 83 -> 70 us/tx).
+
 ### 2026-09-26 — trust by name (ADR-178)
 
 - `trust NAME PIN` asks the `nameserver` (default 10.0.2.3:53, set with `nameserver ADDR PORT`) for

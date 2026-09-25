@@ -75,7 +75,7 @@ Total 2213 ms = firmware 1443 ms + kernel 770 ms. The largest gaps after ExitBoo
 aarch64: one `svc` trap and `eret` costs 386 ns, so the capability check Aletheia adds costs
 0.87x one syscall trap.
 
-The Linux pipe round-trip is 22.2 µs (`linux_pipe_bench.sh`, 200,000 iterations, 2 processes,
+The Linux pipe round-trip is 22.2 µs in Docker's hardware VM, and 41.1 µs under the same TCG as Aletheia's 22.1 µs kernel-endpoint round trip (ADR-179, section 1's bench). (`linux_pipe_bench.sh`, 200,000 iterations, 2 processes,
 Docker's hardware-virtualized Linux VM). **This is not comparable** with the delivery row above:
 Aletheia's loop crosses no address space, the Linux pipe crosses two. No cross-address-space IPC
 benchmark exists yet.
@@ -113,8 +113,10 @@ DavidAU LFM2.5 NEO-MAX Q8_0 on llama.cpp: 5/6 operations planned correctly, medi
    per transaction under TCG. What remains is the checksum. A word-at-a-time hash would cut it
    several-fold, but it is the journal's ON-DISK format: changing it needs a versioned record so
    a device written by an older kernel still recovers. A decision for its own ADR, not a bench fix.
-4. **A cross-address-space IPC benchmark**, so Aletheia's IPC can be compared with the Linux pipe
-   baseline honestly. Without it, section 3's delivery row cannot be set against Linux.
+4. **Cross-address-space IPC: measured (ADR-179).** Same emulator: Aletheia's kernel endpoint
+   22.1 us per round trip, Linux pipes 41.1 us. Aletheia pays more boundary crossings but copies
+   nothing and has no scheduler in the loop; ADR-179 says what that does and does not show.
+   Next step for a fair fight: time a SCHEDULED, blocking endpoint (REQ-IPC-010's path).
 5. **Model accuracy.** The temporary default misses one operation and one console line, and its
    multi-step agent loop stalls on aarch64 and riscv64. Aletheia-LM, or prompt work on the agent
    transcript, is the fix.

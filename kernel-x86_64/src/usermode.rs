@@ -1465,6 +1465,88 @@ fn run_endpoint_excursion(
     take_trial().allowed
 }
 
+/// IPC across address spaces, TIMED (ADR-179): `n` round trips between two ring-3 processes in
+/// separate PML4 spaces through the kernel endpoint. One round trip is A sends, B receives, B sends
+/// the reply, A receives: four ring-3 entries, four `int 0x80` traps, eight CR3 writes. That is MORE
+/// crossing than a Linux pipe ping-pong (four syscalls, two context switches), so the comparison
+/// errs against this kernel. One Trial serves every excursion, and SEND/RECV authorize on the
+/// `evaluate` Allow arm, which builds nothing: the heap must not move across the timed loop.
+///
+/// Returns `(every_body_crossed_intact, nanoseconds_per_round_trip, heap_bytes_grown)`.
+pub fn run_ipc_pingpong(n: u64) -> (bool, u64, isize) {
+    use crate::hal::{ActiveHal, Hal};
+    let root_main = vm::active_root();
+    let (root_a, root_b) = match (vm::build_space(), vm::build_space()) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return (false, 0, 0),
+    };
+    let stub = stub_bytes!(stub_syscall_start, stub_syscall_end);
+    let a_code = vm::map_stub_frame(root_a, USER_CODE_VA, stub);
+    let a_stack = vm::map_user(root_a, USER_STACK_VA, true);
+    let b_code = vm::map_stub_frame(root_b, USER_CODE_VA, stub);
+    let b_stack = vm::map_user(root_b, USER_STACK_VA, true);
+    let mapped = a_code.is_some() && a_stack.is_some() && b_code.is_some() && b_stack.is_some();
+    let mut ok = mapped;
+    let mut ns = 0u64;
+    let mut grown = 0isize;
+    if mapped {
+        let mut engine = CapEngine::new(0x1BC0, 1000);
+        let caps =
+            alloc::vec![engine.mint("ipc-bench", "ipc.msg", Scope::All, Constraints::none())];
+        set_trial(Trial {
+            engine,
+            store: Store::new(),
+            caps,
+            action: "ipc.msg",
+            armed: false,
+            expect_fault_va: 0,
+            allowed: false,
+            isolation_held: false,
+            fault_va: 0,
+        });
+        // SAFETY: single-threaded suite, IF=0; the endpoint starts empty.
+        unsafe {
+            *addr_of_mut!(ENDPOINT) = None;
+            *addr_of_mut!(IPC_BLOCK_MODE) = false;
+        }
+        let trip = |root: u64, rax: u64, rdi: u64| {
+            let mut f = TrapFrame::new_user(USER_CODE_VA, USER_STACK_TOP, RFLAGS_COOP);
+            f.regs[RAX] = rax;
+            f.regs[RDI] = rdi;
+            // SAFETY: `root` maps the running kernel; switch in, one ring-3 syscall, switch back.
+            unsafe {
+                vm::switch_to(root);
+                resume_frame(&mut f as *mut TrapFrame);
+                vm::switch_to(root_main);
+            }
+        };
+        let round = |i: u64| -> bool {
+            trip(root_a, SYS_SEND, i);
+            trip(root_b, SYS_RECV, 0);
+            let got = unsafe { *addr_of!(IPC_RECEIVED) };
+            trip(root_b, SYS_SEND, got ^ 0xA5A5_A5A5);
+            trip(root_a, SYS_RECV, 0);
+            got == i && unsafe { *addr_of!(IPC_RECEIVED) } == i ^ 0xA5A5_A5A5
+        };
+        ok &= round(0); // warm-up: first touches of both spaces happen outside the meter
+        let heap0 = crate::heap::used_bytes();
+        let t0 = ActiveHal::timer_ticks();
+        for i in 1..=n {
+            ok &= round(i);
+        }
+        let ticks = ActiveHal::timer_ticks().wrapping_sub(t0);
+        grown = crate::heap::used_bytes() as isize - heap0 as isize;
+        let hz = ActiveHal::timer_freq_hz().max(1);
+        ns = ((ticks as u128 * 1_000_000_000) / (hz as u128 * n.max(1) as u128)) as u64;
+        let _ = take_trial();
+    }
+    free_leaf(root_a, USER_STACK_VA, a_stack);
+    free_leaf(root_a, USER_CODE_VA, a_code);
+    free_leaf(root_b, USER_STACK_VA, b_stack);
+    free_leaf(root_b, USER_CODE_VA, b_code);
+    (ok, ns, grown)
+}
+
 /// Prove **capability-secure kernel IPC**: a message sent by one ring-3 process is delivered to
 /// another in a DIFFERENT address space, through the kernel endpoint, only when both hold the
 /// authorizing capability. Returns `(delivered_across_spaces, uncapable_send_denied,
@@ -2548,5 +2630,22 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "process-info: capability-bound ring-3 query returns live supervisor counters"
     );
 
+    // IPC across address spaces, timed (ADR-179). The number is REPORTED, never gated (it is an
+    // emulator's); what is gated is that every body crossed intact and the heap did not move.
+    let (crossed, ns_per_rt, grown) = run_ipc_pingpong(IPC_BENCH_ROUND_TRIPS);
+    crate::kprintln!(
+        "[bench] ipc: {} cross-address-space round trips | {} ns/round-trip (4 ring-3 entries, 4 syscall traps, 8 CR3 writes each) | heap +{} B",
+        IPC_BENCH_ROUND_TRIPS,
+        ns_per_rt,
+        grown
+    );
+    check!(
+        crossed && grown == 0,
+        "ipc: a thousand round trips between two address spaces all cross intact, and the heap does not move"
+    );
+
     Ok(n)
 }
+
+/// Round trips the boot's IPC benchmark times (ADR-179).
+const IPC_BENCH_ROUND_TRIPS: u64 = 1000;
