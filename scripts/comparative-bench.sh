@@ -179,8 +179,10 @@ boot_and_measure() {
   # typed-workload leg still goes over the serial line like every other guest's.
   if [ -n "${MONITOR_SOCK:-}" ] && [ -n "${MONITOR_KEYS:-}" ]; then
     (
-      sleep 8
-      for _ in $(seq 1 40); do
+      # Keys go out every second from the first second: the old 8 s head start was added to the
+      # measured guest's boot time whether its picker needed it or not.
+      sleep 1
+      for _ in $(seq 1 120); do
         grep -q "$marker" "$log" 2>/dev/null && break
         python3 - "$MONITOR_SOCK" $MONITOR_KEYS <<'EOPY' 2>/dev/null || true
 import socket, sys, time
@@ -194,7 +196,7 @@ for k in keys:
     time.sleep(0.3)
 s.close()
 EOPY
-        sleep 2
+        sleep 1
       done
     ) &
     MONITOR_PID=$!
@@ -250,7 +252,7 @@ EOPY
   # logging in would be measuring how well this script drives somebody else's OS, not how well
   # that OS answers. Its boot and idle numbers are measured exactly like everyone else's.
   case "$label" in
-    redox*) : ;;
+    redox*|freebsd*) : ;;  # boot to a login prompt: no credentials are guessed
     *) typed_workload "$label" "$log" || { kill -9 "$pid" 2>/dev/null; exec 9>&-; return 1; } ;;
   esac
   kill -9 "$pid" 2>/dev/null
@@ -410,13 +412,32 @@ FB_BOOT_MS=""; FB_IDLE=""; FB_BYTES=""
 if [ "${WITH_FREEBSD:-0}" = "1" ]; then
   hr; echo "==> FreeBSD (same host, same emulator, same flags)"; hr
   FB_IMG="${FREEBSD_IMG:-}"
+  # FreeBSD's stock VM image gives its KERNEL a VGA console, so nothing reaches the serial line.
+  # Its BASIC-CI image is the project's own build for headless CI: serial console on, same kernel.
+  # Fetched once into a cache (it is ~640 MB) and checked against the release's CHECKSUM.SHA256,
+  # so the leg measures FreeBSD's published bytes rather than an image this script edited.
+  FB_VER="${FREEBSD_VER:-15.1-RELEASE}"
+  FB_BASE="https://download.freebsd.org/releases/CI-IMAGES/$FB_VER/amd64/Latest"
+  FB_XZ="FreeBSD-$FB_VER-amd64-BASIC-CI-ufs.raw.xz"
+  FB_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/aletheia-bench"
   if [ -z "$FB_IMG" ]; then
-    echo "  FreeBSD's stock VM image gives its KERNEL a VGA console, so no login prompt reaches"
-    echo "  ttyu0 and there is nothing on the serial line to measure. Enabling it means editing"
-    echo "  somebody else's disk image (/boot.config with -h, or console=\"comconsole\"), which this"
-    echo "  bench does not do. Its loader also ignores the QEMU monitor's sendkey, so it cannot be"
-    echo "  driven from outside the way Redox's can (ADR-171)."
-    echo "  SKIPPED — set FREEBSD_IMG to a serial-enabled image to measure it (never a silent pass)."
+    mkdir -p "$FB_CACHE"
+    FB_SUM="$(curl -fsL --max-time 60 "$FB_BASE/CHECKSUM.SHA256" | grep "($FB_XZ)" | awk '{print $NF}')"
+    if [ ! -s "$FB_CACHE/${FB_XZ%.xz}" ]; then
+      curl -fsL --max-time 1800 -o "$FB_CACHE/$FB_XZ" "$FB_BASE/$FB_XZ" || rm -f "$FB_CACHE/$FB_XZ"
+      if [ -n "$FB_SUM" ] && [ -s "$FB_CACHE/$FB_XZ" ] \
+          && [ "$(shasum -a 256 "$FB_CACHE/$FB_XZ" | awk '{print $1}')" = "$FB_SUM" ]; then
+        xz -dkf "$FB_CACHE/$FB_XZ" && rm -f "$FB_CACHE/$FB_XZ"
+      else
+        echo "  $FB_BASE/$FB_XZ did not download or failed its SHA256 ($FB_SUM)."
+        rm -f "$FB_CACHE/$FB_XZ"
+      fi
+    fi
+    [ -s "$FB_CACHE/${FB_XZ%.xz}" ] && FB_IMG="$FB_CACHE/${FB_XZ%.xz}"
+  fi
+  case "$FB_IMG" in *.qcow2) FB_FMT=qcow2 ;; *) FB_FMT=raw ;; esac
+  if [ -z "$FB_IMG" ]; then
+    echo "  No serial-console FreeBSD image — SKIPPED (set FREEBSD_IMG; never a silent pass)."
   elif [ ! -f "$FB_IMG" ]; then
     echo "  FREEBSD_IMG=$FB_IMG does not exist — SKIPPED (never a silent pass)."
   else
@@ -424,7 +445,7 @@ if [ "${WITH_FREEBSD:-0}" = "1" ]; then
     echo "    bootable payload: whole disk image — $FB_BYTES bytes"
     if boot_median freebsd "login:" \
         qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -nographic -no-reboot \
-        -drive "format=qcow2,file=$FB_IMG"; then
+        -drive "format=$FB_FMT,file=$FB_IMG,snapshot=on"; then
       FB_BOOT_MS="$BOOT_MS"; FB_IDLE="$IDLE_CPU"
     else
       echo "  FreeBSD did not reach a login prompt on this host — reported, not hidden."
@@ -446,13 +467,25 @@ fi
 RX_BOOT_MS=""; RX_IDLE=""; RX_BYTES=""
 if [ "${WITH_REDOX:-0}" = "1" ]; then
   hr; echo "==> Redox OS (same host, same emulator, same flags)"; hr
-  RX_URL="${REDOX_URL:-https://static.redox-os.org/img/x86_64/redox_server_x86_64_2026-07-27_475_harddrive.img.zst}"
+  # Redox's server keeps only the LATEST dated image, so a pinned URL 404s within weeks (the
+  # 2026-07-27 pin did, and `curl` without `-f` saved the 404 page as the "image"). Resolve the
+  # newest server image from the directory listing unless REDOX_URL pins one.
+  RX_DIR="https://static.redox-os.org/img/x86_64"
+  RX_URL="${REDOX_URL:-}"
+  if [ -z "$RX_URL" ]; then
+    RX_NAME="$(curl -fsL --max-time 60 "$RX_DIR/" | grep -o 'redox_server_x86_64_[^"]*_harddrive\.img\.zst' | sort -u | tail -1)"
+    [ -n "$RX_NAME" ] && RX_URL="$RX_DIR/$RX_NAME"
+  fi
   if ! command -v zstd >/dev/null 2>&1; then
     echo "  Redox leg needs zstd to decompress the image — SKIPPED (never a silent pass)."
-  elif ! curl -sL --max-time 900 -o "$WORK/redox.img.zst" "$RX_URL" || [ ! -s "$WORK/redox.img.zst" ]; then
-    echo "  Redox image did not download — SKIPPED (never a silent pass)."
+  elif [ -z "$RX_URL" ]; then
+    echo "  Redox image listing at $RX_DIR/ named no server image — SKIPPED (never a silent pass)."
+  elif ! curl -fsL --max-time 900 -o "$WORK/redox.img.zst" "$RX_URL" || [ ! -s "$WORK/redox.img.zst" ]; then
+    echo "  Redox image did not download from $RX_URL — SKIPPED (never a silent pass)."
+  elif ! zstd -qdf "$WORK/redox.img.zst" -o "$WORK/redox.img"; then
+    echo "  Redox image from $RX_URL did not decompress — SKIPPED (never a silent pass)."
   else
-    zstd -qdf "$WORK/redox.img.zst" -o "$WORK/redox.img" 2>/dev/null
+    echo "    image: $RX_URL"
     RX_BYTES="$(wc -c < "$WORK/redox.img" | tr -d ' ')"
     echo "    bootable payload: whole disk image — $RX_BYTES bytes"
     # Redox's own marker: it prints a login prompt on the serial console. Matched on `login:` rather
@@ -504,15 +537,16 @@ echo "     number is not measured here and is cited only for scale.)"
 
 # ---------------------------------------------------------------------------------------------
 hr; echo "RESULTS — same host, same emulator, same emulation mode, same end state"; hr
-printf '%-28s | %-18s | %-18s | %-18s\n' "" "Aletheia (x86-64)" "Linux 6.12-lts" "Redox OS"
-printf '%-28s-+-%-18s-+-%-18s-+-%-18s\n' "----------------------------" "------------------" "------------------" "------------------"
-printf '%-28s | %-18s | %-18s | %-18s\n' "boot to a prompt" "${AL_BOOT_MS:-FAIL} ms" "${LX_BOOT_MS:-SKIP} ms" "${RX_BOOT_MS:-SKIP} ms"
-printf '%-28s | %-18s | %-18s | %-18s\n' "  of which firmware (OVMF)" "${AL_FW_MS:-n/a} ms" "none (-kernel)" "-"
-printf '%-28s | %-18s | %-18s | %-18s\n' "  of which this kernel" "${AL_KERNEL_MS:-n/a} ms" "${LX_BOOT_MS:-SKIP} ms" "-"
-printf '%-28s | %-18s | %-18s | %-18s\n' "idle host CPU at prompt" "${AL_IDLE:-FAIL} %" "${LX_IDLE:-SKIP} %" "${RX_IDLE:-SKIP} %"
-printf '%-28s | %-18s | %-18s | %-18s\n' "bootable payload" "${AL_BYTES:-FAIL} B" "${LX_BYTES:-SKIP} B" "${RX_BYTES:-SKIP} B"
-printf '%-28s | %-18s | %-18s | %-18s\n' "typed echo round-trip" "${AL_WL_MS:-FAIL} ms" "${LX_WL_MS:-SKIP} ms" "n/a (login)"
-printf '%-28s | %-18s | %-18s | %-18s\n' "privileged lines of code" "$KLOC (Rust)" "~40M (C, cited)" "n/a"
+F='%-28s | %-18s | %-18s | %-18s | %-18s\n'
+printf "$F" "" "Aletheia (x86-64)" "Linux 6.12-lts" "Redox OS" "FreeBSD"
+printf '%-28s-+-%-18s-+-%-18s-+-%-18s-+-%-18s\n' "----------------------------" "------------------" "------------------" "------------------" "------------------"
+printf "$F" "boot to a prompt" "${AL_BOOT_MS:-FAIL} ms" "${LX_BOOT_MS:-SKIP} ms" "${RX_BOOT_MS:-SKIP} ms" "${FB_BOOT_MS:-SKIP} ms"
+printf "$F" "  of which firmware (OVMF)" "${AL_FW_MS:-n/a} ms" "none (-kernel)" "-" "-"
+printf "$F" "  of which this kernel" "${AL_KERNEL_MS:-n/a} ms" "${LX_BOOT_MS:-SKIP} ms" "-" "-"
+printf "$F" "idle host CPU at prompt" "${AL_IDLE:-FAIL} %" "${LX_IDLE:-SKIP} %" "${RX_IDLE:-SKIP} %" "${FB_IDLE:-SKIP} %"
+printf "$F" "bootable payload" "${AL_BYTES:-FAIL} B" "${LX_BYTES:-SKIP} B" "${RX_BYTES:-SKIP} B" "${FB_BYTES:-SKIP} B"
+printf "$F" "typed echo round-trip" "${AL_WL_MS:-FAIL} ms" "${LX_WL_MS:-SKIP} ms" "n/a (login)" "n/a (login)"
+printf "$F" "privileged lines of code" "$KLOC (Rust)" "~40M (C, cited)" "n/a" "n/a"
 hr
 cat <<'RUSTOS'
 OTHER RUST OPERATING SYSTEMS — attributes, not numbers.
