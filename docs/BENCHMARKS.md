@@ -105,9 +105,14 @@ DavidAU LFM2.5 NEO-MAX Q8_0 on llama.cpp: 5/6 operations planned correctly, medi
    Done: the bench gives no leg a NIC it does not need (saved 85 ms of firmware ROM init here).
 2. **Boot-time commissioning.** The `mlsched` commissioning run is the largest kernel gap
    (174 ms under TCG), but ADR-173 timed it natively at 2.6 ms: a TCG artifact, not a target.
-3. **Storage transactions** are the slowest in-kernel operation by two orders of magnitude
-   (38-83 µs). Profile the write path (block writes per transaction, virtio-blk request count)
-   before changing it.
+3. **Storage transactions: attributed.** Timed natively (`--release`), one journal commit of two
+   blocks costs 11.1 us, nearly all of it the byte-serial FNV-1a checksum over the 8 KiB payload
+   (five 4 KiB block copies cost about 1 us). The boot bench also paid for its own workload
+   generator: a `% 251` per byte and two extra hashes per step cost more than the commit itself in
+   a debug image. That harness cost is gone (2026-09-26): aarch64 83 -> 70 us, x86-64 57 -> 33 us
+   per transaction under TCG. What remains is the checksum. A word-at-a-time hash would cut it
+   several-fold, but it is the journal's ON-DISK format: changing it needs a versioned record so
+   a device written by an older kernel still recovers. A decision for its own ADR, not a bench fix.
 4. **A cross-address-space IPC benchmark**, so Aletheia's IPC can be compared with the Linux pipe
    baseline honestly. Without it, section 3's delivery row cannot be set against Linux.
 5. **Model accuracy.** The temporary default misses one operation and one console line, and its

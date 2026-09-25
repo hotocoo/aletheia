@@ -345,30 +345,39 @@ fn fs_phase<H: Hal>(txs: usize) -> FsBench {
         updates.push((h, [0u8; BLOCK_SIZE]));
     }
     let mut expect = [0u64; 2];
-    fn fill(updates: &mut [(usize, [u8; BLOCK_SIZE])], expect: &mut [u64; 2], step: usize) {
+    // The workload generator must cost far less than the thing it feeds. It used to reduce every
+    // byte `% 251` and hash both blocks on every step: in a debug image that was ~71 us per
+    // transaction against the journal's own ~37 us, so "storage" measured mostly the harness
+    // (2026-09-25). Now: no division, and the expected hash only on the steps that verify.
+    fn fill(
+        updates: &mut [(usize, [u8; BLOCK_SIZE])],
+        expect: &mut [u64; 2],
+        step: usize,
+        want_expect: bool,
+    ) {
+        let s = (step as u8).wrapping_mul(37);
         for (k, (_, data)) in updates.iter_mut().enumerate() {
+            let base = s ^ (k as u8).wrapping_mul(11);
             for (i, b) in data.iter_mut().enumerate() {
-                *b = (step as u8)
-                    .wrapping_mul(37)
-                    .wrapping_add(i as u8)
-                    .wrapping_add((k as u8).wrapping_mul(11))
-                    % 251;
+                *b = base ^ (i as u8);
             }
-            expect[k] = fnv1a(FS_SEED, data);
+            if want_expect {
+                expect[k] = fnv1a(FS_SEED, data);
+            }
         }
     }
 
     // Steady-state warm-up: ONE commit writes journal slots 1..2 and both home blocks; every later
     // commit rewrites exactly those blocks in place. After this, touched can only grow if the
     // harness started measuring SETUP instead of WORK - which invariant 5 refuses.
-    fill(&mut updates, &mut expect, 0);
+    fill(&mut updates, &mut expect, 0, true);
     let _ = j.commit(&mut dev, &updates);
 
     let mut out = FsBench::default(); // counters count UP from zero; none is pre-seeded
     let t0 = H::timer_ticks();
     for step in 0..txs {
         if step != 0 {
-            fill(&mut updates, &mut expect, step);
+            fill(&mut updates, &mut expect, step, step % VERIFY_EVERY == 0);
         }
         if j.commit(&mut dev, &updates).is_err() {
             out.commit_errors += 1;
@@ -394,7 +403,7 @@ fn fs_phase<H: Hal>(txs: usize) -> FsBench {
     // Steady-state proof window: the SAME work again, unmetered except for block materialization.
     let touched_before = dev.touched().len();
     for step in txs..txs * 2 {
-        fill(&mut updates, &mut expect, step);
+        fill(&mut updates, &mut expect, step, step + 1 == txs * 2);
         let _ = j.commit(&mut dev, &updates);
     }
     out.steady_new_blocks = dev.touched().len() as isize - touched_before as isize;
