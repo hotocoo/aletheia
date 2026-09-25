@@ -20,7 +20,8 @@ ALETHEIA_PROPERTY_SEED=<hex> ALETHEIA_PROPERTY_CASES=1024 cargo test --release -
 
 | | Aletheia | Linux 6.12-lts | Redox OS | FreeBSD 15.1 |
 |---|---|---|---|---|
-| boot to a prompt (median of 5) | 2306 ms | 1780 ms | 5946 ms | 18254 ms |
+| boot to a prompt, no NIC (median of 3) | 2132-2310 ms | 1834 ms | 4402 ms | 13488 ms |
+| boot to a prompt, q35 default NIC (median of 5) | 2306 ms | 1780 ms | 5946 ms | 18254 ms |
 | of which firmware | 1452 ms (OVMF) | none (`-kernel`) | OVMF, included | SeaBIOS, included |
 | of which the kernel | 854 ms | 1780 ms | - | - |
 | idle host CPU at the prompt | 0.0 % | 0.5-0.7 % | 3.4 % | 0.3-0.4 % |
@@ -29,8 +30,13 @@ ALETHEIA_PROPERTY_SEED=<hex> ALETHEIA_PROPERTY_CASES=1024 cargo test --release -
 | syscalls exposed to user space | 11 (8 capability-gated) | 375 | - | - |
 | privileged lines of code | ~65-70k Rust (967 `unsafe`) | ~40M C (cited) | - | - |
 
-Samples: Aletheia 2337/2317/2306/2291/2288; Linux 1802/1796/1778/1775/1780; Redox
-6233/6100/5946/5919/4412; FreeBSD 18254/18777/18001/21329/18039.
+Samples with the default NIC: Aletheia 2337/2317/2306/2291/2288; Linux 1802/1796/1778/1775/1780;
+Redox 6233/6100/5946/5919/4412; FreeBSD 18254/18777/18001/21329/18039. Without a NIC
+(`-nic none`, now the bench default on every leg): Aletheia 2168/2132/2111 and, in a second run,
+2310 median; Linux 1834/1882/1824; Redox 4402 median; FreeBSD 13488/11999/13875. q35's default
+e1000e costs FreeBSD about 4.8 s (it waits for DHCP), Redox about 1.5 s and Aletheia about 0.1 s
+(OVMF initializes the NIC's option ROM). Aletheia's two no-NIC runs differ by 180 ms: that is the
+host-load noise floor for this machine.
 
 Read with care:
 
@@ -91,13 +97,14 @@ DavidAU LFM2.5 NEO-MAX Q8_0 on llama.cpp: 5/6 operations planned correctly, medi
 
 ## 6. What to improve, ranked by what the numbers show
 
-1. **Boot path, not kernel.** OVMF is 63 % of Aletheia's boot. A direct-boot entry for x86-64
-   (a PVH ELF note so QEMU `-kernel` can load it, as it loads Linux) removes firmware from the
-   comparison and from VM boots. This is the biggest single boot win available.
-2. **Boot-time commissioning.** The `mlsched` commissioning run (174 ms under TCG, 2.6 ms native)
-   is the largest kernel gap. ADR-172/173 decided verification stays mandatory; running it after
-   the prompt, instead of before, would keep it mandatory and shorten time-to-prompt. That needs
-   its own ADR.
+1. **Boot path: not a kernel problem.** OVMF is about 1.27 s of Aletheia's boot under TCG, but
+   the boot-profile stamps show Aletheia's own code before ExitBootServices costs 16 ms (GOP
+   lookup, image bounds). The rest is EDK2 itself. A firmware-free entry (PVH) would shrink only
+   QEMU boots, while VMware, VirtualBox and hardware all boot through UEFI, so it would be
+   benchmark tuning, not an improvement. The fair comparison is the "of which the kernel" row.
+   Done: the bench gives no leg a NIC it does not need (saved 85 ms of firmware ROM init here).
+2. **Boot-time commissioning.** The `mlsched` commissioning run is the largest kernel gap
+   (174 ms under TCG), but ADR-173 timed it natively at 2.6 ms: a TCG artifact, not a target.
 3. **Storage transactions** are the slowest in-kernel operation by two orders of magnitude
    (38-83 µs). Profile the write path (block writes per transaction, virtio-blk request count)
    before changing it.

@@ -17,6 +17,10 @@
 # It also reports what Aletheia LOSES. A benchmark that only prints the columns its author wins is
 # marketing, and this repository's `docs/MATURITY.md` exists precisely to stop that.
 #
+# NO NIC ON ANY LEG (`-nic none`). q35 otherwise adds an e1000e whose iPXE option ROM the
+# firmware initializes (~85 ms of Aletheia's OVMF share) and which a guest may wait on for DHCP.
+# No leg's end state needs a network, so none gets one.
+#
 # WHAT IS AND IS NOT BEING COMPARED. Linux 6.12-lts is a general-purpose kernel with drivers for
 # tens of thousands of devices, filesystems, namespaces, a network stack and thirty years of
 # hardware workarounds. Aletheia's console kernel is a microkernel with one filesystem, one block
@@ -308,7 +312,7 @@ if boot_median aletheia "aletheia> " \
     -drive "format=raw,file=$IMG" \
     -drive "if=none,format=raw,file=$WORK/al-s.img,id=blk0" -device virtio-blk-pci,drive=blk0 \
     -drive "if=none,format=raw,file=$WORK/al-p.img,id=blk1" -device virtio-blk-pci,drive=blk1 \
-    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot; then
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot -nic none; then
   AL_KERNEL_MS=$((BOOT_MS - ${SPLIT_MEDIAN:-0})); AL_FW_MS="${SPLIT_MEDIAN:-}"; AL_BOOT_MS="$BOOT_MS"; AL_IDLE="$IDLE_CPU"; AL_WL_MS="$WORKLOAD_MS"
 else
   fail=1
@@ -373,12 +377,12 @@ fi
 
 if [ -s "$WORK/initramfs.gz" ]; then
     echo "--> fetching $KERNEL_URL"
-    if curl -sL --max-time 300 -o "$WORK/vmlinuz" "$KERNEL_URL" && [ -s "$WORK/vmlinuz" ]; then
+    if curl -fsL --retry 5 --retry-all-errors --max-time 300 -o "$WORK/vmlinuz" "$KERNEL_URL" && [ -s "$WORK/vmlinuz" ]; then
       LX_BYTES=$(( $(wc -c < "$WORK/vmlinuz") + $(wc -c < "$WORK/initramfs.gz") ))
       echo "    bootable payload: vmlinuz + initramfs — $LX_BYTES bytes"
       echo "    kernel: $(file "$WORK/vmlinuz" | sed -n 's/.*version \([^ ]*\).*/\1/p')"
       if boot_median linux "LINUX-BENCH-PROMPT-READY" \
-          qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64 -display none -serial stdio -monitor none -no-reboot \
+          qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64 -display none -serial stdio -monitor none -no-reboot -nic none \
           -kernel "$WORK/vmlinuz" -initrd "$WORK/initramfs.gz" \
           -append "console=ttyS0 quiet rdinit=/init"; then
         LX_BOOT_MS="$BOOT_MS"; LX_IDLE="$IDLE_CPU"; LX_STATUS="OK"; LX_WL_MS="$WORKLOAD_MS"
@@ -444,7 +448,7 @@ if [ "${WITH_FREEBSD:-0}" = "1" ]; then
     FB_BYTES="$(wc -c < "$FB_IMG" | tr -d ' ')"
     echo "    bootable payload: whole disk image — $FB_BYTES bytes"
     if boot_median freebsd "login:" \
-        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -nographic -no-reboot \
+        qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -nographic -no-reboot -nic none \
         -drive "format=$FB_FMT,file=$FB_IMG,snapshot=on"; then
       FB_BOOT_MS="$BOOT_MS"; FB_IDLE="$IDLE_CPU"
     else
@@ -506,7 +510,7 @@ if [ "${WITH_REDOX:-0}" = "1" ]; then
     rm -f "$MONITOR_SOCK"
     if boot_median redox "redox login:" \
         qemu-system-x86_64 -machine q35 -m 2048 -smp 4 -cpu qemu64 -display none -serial stdio \
-        -no-reboot -monitor "unix:$MONITOR_SOCK,server,nowait" \
+        -no-reboot -nic none -monitor "unix:$MONITOR_SOCK,server,nowait" \
         -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE_F" \
         -drive "format=raw,file=$WORK/redox.img"; then
       RX_BOOT_MS="$BOOT_MS"; RX_IDLE="$IDLE_CPU"; MONITOR_SOCK=""; MONITOR_KEYS=""

@@ -26,7 +26,7 @@ if [ -x "$HOME/.cargo/bin/cargo" ]; then export PATH="$HOME/.cargo/bin:$PATH"; f
 TOP_N="${TOP_N:-15}"
 MARKER="${MARKER:-aletheia>}"
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap '[ -n "${KEEP_STAMPS:-}" ] && cp "$STAMPS" "$KEEP_STAMPS"; rm -rf "$WORK"' EXIT
 
 hr() { printf '========================================================================\n'; }
 
@@ -76,7 +76,7 @@ qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -nographic \
   -drive "format=raw,file=$IMG" \
   -drive "if=none,format=raw,file=$SCRATCH,id=blk0" -device virtio-blk-pci,drive=blk0 \
   -drive "if=none,format=raw,file=$PERSIST,id=blk1" -device virtio-blk-pci,drive=blk1 \
-  -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot \
+  -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot ${QEMU_EXTRA:-} \
   < "$FIFO" 2>&1 \
   | python3 -u -c '
 import sys, time
