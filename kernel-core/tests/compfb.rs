@@ -357,3 +357,47 @@ fn the_device_legs_move_clip_and_z_flips_are_visible_in_real_pages() {
     }
     assert_eq!(surf.get(603, 203), Ok(false), "detach: the wallpaper shows");
 }
+
+/// The desktop's photograph (desktop.rs `WALLPAPER`): the wallpaper surface's PAPER pixels take
+/// the photo's colour, its INK pixels stay white, another surface over it stays 1-bit, and the
+/// readback still says paper for every photo pixel - so every existing pixel assertion holds.
+#[test]
+fn a_wallpaper_surface_shows_its_photograph_only_in_its_own_paper_pixels() {
+    static PHOTO: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let photo: &'static [u8] = PHOTO.get_or_init(|| {
+        (0..W as usize * H as usize * 3)
+            .map(|i| (i % 251) as u8)
+            .collect()
+    });
+    let pages = Pages::new(PAGES);
+    let mut comp = Compositor::new(0x0C0F_FEE1, W, H);
+    let wall = comp.mint_surface(1, W, H).unwrap();
+    let r = |x, y, w, h| Rect { x, y, w, h };
+    comp.fill_rect(1, wall, r(0, 0, W, 8), true).unwrap();
+    comp.attach(1, wall, 0, 0).unwrap();
+    let win = comp.mint_surface(2, 40, 20).unwrap();
+    comp.attach(2, win, 100, 100).unwrap();
+    let mut surf = Surface::new(&pages.addrs, W, H).unwrap();
+    let refused = {
+        let mut sink = ComposeSink::new(&mut surf).with_wallpaper(1, photo);
+        comp.compose_frame(&mut sink);
+        sink.refusals()
+    };
+    assert_eq!(refused, 0);
+    let px = |x: u32, y: u32| {
+        let i = (y * W + x) as usize * 3;
+        [photo[i], photo[i + 1], photo[i + 2], 0xFF]
+    };
+    // Paper of the wallpaper: the photo, and it reads back as paper.
+    for (x, y) in [(0, 8), (320, 120), (639, 239), (99, 100)] {
+        assert_eq!(
+            surf.get_bgra(x, y).unwrap(),
+            px(x, y),
+            "photo at ({x}, {y})"
+        );
+        assert!(!surf.get(x, y).unwrap());
+    }
+    // Ink of the wallpaper: white. The window above it: plain paper, not the photo.
+    assert_eq!(surf.get_bgra(5, 3).unwrap(), kernel_core::fbcon::FG);
+    assert_eq!(surf.get_bgra(110, 110).unwrap(), kernel_core::fbcon::BG);
+}

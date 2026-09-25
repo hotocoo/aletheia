@@ -84,8 +84,12 @@ impl<'a> Surface<'a> {
 
     /// Set one pixel to ink or background. Out-of-surface is a refusal, never a wrap.
     pub fn set(&mut self, x: u32, y: u32, ink: bool) -> Result<(), FbError> {
+        self.set_bgra(x, y, if ink { FG } else { BG })
+    }
+
+    /// Set one pixel to a BGRA colour. Out-of-surface is a refusal, never a wrap.
+    pub fn set_bgra(&mut self, x: u32, y: u32, c: [u8; 4]) -> Result<(), FbError> {
         let (p, o) = self.locate(x, y)?;
-        let c = if ink { FG } else { BG };
         let addr = match self.pages.get(p) {
             Some(a) => *a + o,
             None => return Err(FbError::OffSurface),
@@ -101,16 +105,26 @@ impl<'a> Surface<'a> {
         Ok(())
     }
 
-    /// Read one pixel back. The renderer's readback is exactly what host tests and the device
-    /// suite assert against — a renderer nobody can read cannot be proved.
+    /// Read one pixel back: ink is exactly [`FG`]. The renderer's readback is exactly what host
+    /// tests and the device suite assert against — a renderer nobody can read cannot be proved.
+    /// A photograph pixel is never ink: the wallpaper asset caps every channel below 0xFF.
     pub fn get(&self, x: u32, y: u32) -> Result<bool, FbError> {
+        Ok(self.get_bgra(x, y)? == FG)
+    }
+
+    /// Read one pixel's BGRA bytes back.
+    pub fn get_bgra(&self, x: u32, y: u32) -> Result<[u8; 4], FbError> {
         let (p, o) = self.locate(x, y)?;
         let addr = match self.pages.get(p) {
             Some(a) => *a + o,
             None => return Err(FbError::OffSurface),
         };
-        // SAFETY: same region proof as `set`.
-        Ok(unsafe { (addr as *const u8).read_volatile() } != 0)
+        let mut c = [0u8; 4];
+        for (i, b) in c.iter_mut().enumerate() {
+            // SAFETY: same region proof as `set`.
+            *b = unsafe { (addr as *const u8).add(i).read_volatile() };
+        }
+        Ok(c)
     }
 
     /// Fill every pixel.
@@ -137,6 +151,9 @@ pub struct ComposeSink<'s, 'p> {
     surf: &'s mut Surface<'p>,
     puts: u64,
     refused: u64,
+    /// A surface whose PAPER pixels show a photograph instead of [`BG`]: (surface id, packed BGR
+    /// rows at the scanout's width). Ink pixels stay [`FG`], so every readback is unchanged.
+    wallpaper: Option<(u32, &'static [u8])>,
 }
 
 impl<'s, 'p> ComposeSink<'s, 'p> {
@@ -146,7 +163,15 @@ impl<'s, 'p> ComposeSink<'s, 'p> {
             surf,
             puts: 0,
             refused: 0,
+            wallpaper: None,
         }
+    }
+
+    /// Paint surface `surface`'s paper pixels from `bgr` (3 bytes per pixel, rows at the
+    /// scanout's width). A pixel past the image's end falls back to [`BG`], never a wrap.
+    pub fn with_wallpaper(mut self, surface: u32, bgr: &'static [u8]) -> Self {
+        self.wallpaper = Some((surface, bgr));
+        self
     }
 
     /// Pixels the compositor asked this sink to write — mirrors `FrameStats::pixels_blitted`.
@@ -166,6 +191,25 @@ impl crate::compositor::Raster for ComposeSink<'_, '_> {
         self.puts += 1;
         if self.surf.set(x, y, ink).is_err() {
             self.refused += 1;
+        }
+    }
+
+    fn put_from(&mut self, surface: u32, x: u32, y: u32, ink: bool) {
+        let photo = match self.wallpaper {
+            Some((id, bgr)) if id == surface && !ink => {
+                let i = (y as usize * self.surf.width as usize + x as usize) * 3;
+                bgr.get(i..i + 3).map(|p| [p[0], p[1], p[2], 0xFF])
+            }
+            _ => None,
+        };
+        match photo {
+            Some(c) => {
+                self.puts += 1;
+                if self.surf.set_bgra(x, y, c).is_err() {
+                    self.refused += 1;
+                }
+            }
+            None => self.put(x, y, ink),
         }
     }
 }

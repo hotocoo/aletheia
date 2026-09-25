@@ -50,9 +50,9 @@ run_target() {
   "${args[@]}" & local pid=$!
   trap 'kill -9 "$pid" 2>/dev/null || true; rm -f "$qmp" "$ser"' RETURN
 
-  python3 - "$qmp" "$ser" "$log" <<'PY'
+  python3 - "$qmp" "$ser" "$log" "$dir/target/desktop-e2e-$arch.ppm" "$ROOT/kernel-core/assets/wallpaper-640x240.bgr" <<'PY'
 import json, re, socket, sys, threading, time
-qmp, serial, log = sys.argv[1:]
+qmp, serial, log, shot, photo = sys.argv[1:]
 def conn(path):
     end=time.time()+60
     while time.time()<end:
@@ -116,6 +116,25 @@ def eventually(pred, why, secs=20):
         if pred(last): return last
     raise RuntimeError('the machine never reported '+why+': '+last[-300:])
 t=txt(); assert '[desktop] LIVE:' in t; assert 'ALL 10 INPUT-HARDWARE INVARIANTS HOLD' in t
+# The photograph behind the wallpaper (ADR-175) must reach the DISPLAY, not just the model: dump
+# the scanout through QMP and count the pixels that equal the asset's pixel at the same place.
+# Windows cover part of it and the panel's ink border covers the edge, so the bound is a share,
+# and a 1-bit desktop (no photo) matches almost nothing.
+def photo_share():
+    r=qcmd({'execute':'screendump','arguments':{'filename':shot}})
+    if 'error' in r: raise RuntimeError(r['error'])
+    raw=open(shot,'rb').read(); parts=raw.split(b'\n',3)
+    w,h=map(int,parts[1].split()); px=parts[3]; bgr=open(photo,'rb').read()
+    assert (w,h)==(640,240), (w,h)
+    hit=sum(1 for i in range(w*h) if px[3*i]==bgr[3*i+2] and px[3*i+1]==bgr[3*i+1] and px[3*i+2]==bgr[3*i])
+    return hit/(w*h)
+share=0.0
+for _ in range(50):
+    share=photo_share()
+    if share>=0.25: break
+    time.sleep(.2)
+print(f'wallpaper photo share of the scanout: {share:.1%} ({shot})')
+assert share>=0.25, f'the photograph did not reach the display: {share:.1%} of pixels match'
 o=command('input'); m=re.search(r'events posted (\d+) dropped (\d+)',o); assert m and m.group(1)=='0' and m.group(2)=='0'
 send([{'type':'abs','data':{'axis':'x','value':16384}},{'type':'abs','data':{'axis':'y','value':16384}}])
 eventually(lambda o: 'cursor: (320, 120) shown' in o, 'the pointer move')

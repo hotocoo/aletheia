@@ -1279,7 +1279,7 @@ impl Compositor {
                 let sx = (xx as i32 - p.x) as u32;
                 let sy = (yy as i32 - p.y) as u32;
                 let ink = s.pixel(sx, sy);
-                sink.put(xx, yy, ink);
+                sink.put_from(p.surface, xx, yy, ink);
                 stats.pixels_blitted += 1;
             }
         }
@@ -1438,6 +1438,12 @@ impl Compositor {
 /// real framebuffer-backed raster; tests hand canary-guarded ones.
 pub trait Raster {
     fn put(&mut self, x: u32, y: u32, ink: bool);
+    /// The same write, told which surface the pixel was read from. A sink that colours pixels by
+    /// their origin (the desktop's photograph behind its wallpaper panel) overrides this; every
+    /// other sink gets the plain 1-bit write.
+    fn put_from(&mut self, _surface: u32, x: u32, y: u32, ink: bool) {
+        self.put(x, y, ink);
+    }
 }
 
 // ---------------------------------------------------------------------------

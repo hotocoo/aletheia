@@ -108,6 +108,12 @@ pub const PAGES: usize = virtiogpu::CONSOLE_FB_PAGES;
 /// Surface ids: the wallpaper panel (the desktop's own, not a window) and the two WINDOWS the
 /// manager holds — the terminal and the system monitor (ADR-084).
 const PANEL: u32 = 1;
+/// The photograph behind the wallpaper panel's paper pixels: NASA ISS007-E-17719, sunrise over
+/// the Earth's limb from the International Space Station (public domain, NASA). Cropped to 8:3,
+/// scaled to the scanout, packed BGR, every channel capped at 0xFE so no photo pixel reads back
+/// as ink. It lives in the image, not the heap (ADR-063: the boot heap never frees).
+const WALLPAPER: &[u8] = include_bytes!("../assets/wallpaper-640x240.bgr");
+const _: () = assert!(WALLPAPER.len() == W as usize * H as usize * 3);
 pub const WINDOW: u32 = 2;
 pub const MONITOR: u32 = 3;
 const TASKBAR: u32 = 4;
@@ -990,7 +996,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     fn show_frame(&mut self) -> Result<u64, &'static str> {
         let mut surf = Surface::new(&self.pages, W, H)
             .map_err(|_| "the backing pages did not form a raster")?;
-        let mut sink = ComposeSink::new(&mut surf);
+        let mut sink = ComposeSink::new(&mut surf).with_wallpaper(PANEL, WALLPAPER);
         let st = self.comp.compose_frame(&mut sink);
         if sink.refusals() != 0 {
             return Err("the real raster refused a put the model's bounds allowed");
