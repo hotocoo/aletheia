@@ -258,14 +258,26 @@ while sent < total:
         sent += len(evs)
     if rng.randrange(25) == 0 or sent >= total:
         n += 1
-        mark = len(txt())
-        s.sendall(b'\recho DF-%d\r' % n)
-        tag = '\nDF-%d\r' % n
-        end = time.time() + 60
-        while tag not in txt()[mark:]:
-            if time.time() > end:
-                raise SystemExit('FAIL: after %d events the console no longer answered the sentinel; last: %r' % (sent, txt()[-400:]))
-            time.sleep(.05)
+        # The serial sentinel and the virtio keyboard feed the SAME console line, so a keystroke
+        # still in flight can land inside it (CI seed 0x166 saw `uecho DF-6`). Let the desktop
+        # drain for a moment, then send; a polluted sentinel is retried with a fresh tag.
+        time.sleep(.3)
+        answered = False
+        for attempt in range(3):
+            tag_n = n * 10 + attempt
+            mark = len(txt())
+            s.sendall(b'\recho DF-%d\r' % tag_n)
+            tag = '\nDF-%d\r' % tag_n
+            end = time.time() + 20
+            while time.time() < end:
+                if tag in txt()[mark:]:
+                    answered = True
+                    break
+                time.sleep(.05)
+            if answered:
+                break
+        if not answered:
+            raise SystemExit('FAIL: after %d events the console no longer answered the sentinel; last: %r' % (sent, txt()[-400:]))
         for bad in BAD:
             if bad in txt()[start:]:
                 raise SystemExit('FAIL: after %d events the machine printed %r; last: %r' % (sent, bad, txt()[-600:]))
