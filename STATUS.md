@@ -1271,6 +1271,41 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-25 — x86-64 joins the live TLS and HTTPS gates
+
+- `scripts/tls-e2e.sh` and `scripts/https-e2e.sh` gain an x86-64 leg (q35 + OVMF, virtio-net-pci,
+  virtio-rng-pci) typing the SAME operator script as aarch64 and riscv64, judged by the same checks
+  against the same OpenSSL / `http.server` peer. Before today x86-64 ran the identical TLS and HTTP
+  code with no live peer at all. Both gates PASS on all three CPUs; CI installs the x86 toolchain
+  for both jobs so the leg runs rather than SKIPs (`bff8f6b`).
+
+### 2026-09-25 — four operating systems benchmarked on one emulator (`docs/BENCHMARKS.md`)
+
+- `comparative-bench.sh` measures Aletheia, Linux 6.12, Redox and FreeBSD 15.1 again: the Redox
+  leg resolves the newest image (its pin had 404'd) and no longer charges Redox an 8 s keypress
+  delay; FreeBSD boots its official serial-console BASIC-CI image; no leg gets a NIC it does not
+  need. No-NIC boot medians: Aletheia 2132-2310 ms (kernel share ~800 ms), Linux 1834 ms, Redox
+  4402 ms, FreeBSD 13488 ms. Idle CPU at the prompt: Aletheia 0.0 %, Linux 0.6 %, Redox 2.9 %.
+- Stress: property campaigns pass on 8 seeds (1,024 scheduler loads and 32,768 hostile documents
+  per seed, `--release`). The report ranks what to improve; firmware-free boot is rejected as
+  benchmark tuning (Aletheia's pre-ExitBootServices code costs 16 ms; the rest is EDK2).
+
+### 2026-09-25 — a photograph behind the desktop (ADR-175)
+
+- The wallpaper panel's paper pixels show NASA ISS007-E-17719 (public domain), 640x240 BGR in the
+  kernel image. `Raster::put_from` tells the sink which surface a pixel came from; surfaces stay
+  1-bit. `desktop-e2e-dt.sh` screendumps the live scanout and requires >= 25% photo pixels
+  (aarch64 45.2%, riscv64 43.8%). Photorealistic rendering stays out of reach of this compositor.
+
+### 2026-09-25 — DavidAU's LFM2.5 merge is the temporary default model (ADR-174)
+
+- `models/davidau-neo-max.toml` (Q8_0, sha256 `524dbaa8…837e`) is the default until Aletheia-LM is
+  ready; stock `lfm2.5` stays selectable. Measured: forced-thinking (runs no-think), GBNF grammar,
+  `serve_id = "NEO-MAX"`. Operations 5/6 at median 583 ms, console 7/8, `console-ai-e2e` model arm
+  PASS, `console-agent-e2e` model arm PASS on x86-64 only. Stock LFM2.5 recorded 6/6 and 8/8.
+- Same day (`14cadb1`): the renderer reads a `<` that opens no markup as literal text (nightly
+  property campaign case 839); nightly re-dispatched green.
+
 ### 2026-09-23 — the Lethe governor waves, merged (ADR-165..173)
 
 - **Nine waves from `wave/lethe` (2026-08-28 .. 2026-09-12) merged into main** instead of being dropped. They were written as ADR-078..086 on a branch cut before main used those numbers, so they land renumbered **ADR-165..173** (REQ-ML-006 -> **REQ-ML-007**, REQ-SEC-002 -> **REQ-SEC-005**; REQ-PM-002 unchanged). What they add: Lethe, the resident performance advisor over the ADR-076 power contract (`kernel-core/src/lethe.rs`, `lethe=12`), the resident governor on real timer interrupts (`kernel-core/src/lethed.rs`, `lethed=15`, live census gated on every CPU), a parked x86-64 console that stops the 8254 as well as masking IRQ0, the boot clock split, attack surface measured against Linux (`scripts/security-surface.sh`), a Redox and a FreeBSD leg in the comparative bench, and the boot-gap attribution (`scripts/boot-profile.sh`).
