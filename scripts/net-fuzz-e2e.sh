@@ -168,11 +168,15 @@ rng = random.Random(int(seed, 16) ^ sum(label.encode()))
 BAD = [b"panic", b"PANIC", b"FATAL", b"[FAIL", b"Kernel fault", b"unhandled"]
 p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 buf = bytearray()
+logf = open(os.environ["NET_FUZZ_LOG"], "wb") if os.environ.get("NET_FUZZ_LOG") else None
 def pump(t):
     r, _, _ = select.select([p.stdout], [], [], t)
     if r:
         c = os.read(p.stdout.fileno(), 65536)
-        if c: buf.extend(c); return True
+        if c:
+            buf.extend(c)
+            if logf: logf.write(c); logf.flush()
+            return True
     return False
 def fail(why, cmd=None):
     print(f"  FAIL [{label}] {why} (seed {seed})")
@@ -260,10 +264,15 @@ fail=0; declare -a RESULTS=()
 mmio_leg() {
   local label="$1" dir="$2" triple="$3" bin="$4"; shift 4
   echo "==> $label: building WITH the interactive console"
-  ( cd "$ROOT/$dir" && cargo build -q --features interactive ) || { echo "  FAIL [$label] build"; return 1; }
+  local elf="$ROOT/$dir/target/$triple/debug/$bin"
+  if [ "$label" = aarch64 ] && [ -n "${NET_FUZZ_ELF:-}" ]; then
+    elf="$NET_FUZZ_ELF"  # a prebuilt kernel, e.g. a `heaptrace` build (ADR-182)
+  else
+    ( cd "$ROOT/$dir" && cargo build -q --features interactive ) || { echo "  FAIL [$label] build"; return 1; }
+  fi
   local img="$ROOT/$dir/target/netfuzz-scratch.img"
   dd if=/dev/zero of="$img" bs=1048576 count=1 2>/dev/null
-  fuzz_one "$label" 0 "$@" -kernel "$ROOT/$dir/target/$triple/debug/$bin" \
+  fuzz_one "$label" 0 "$@" -kernel "$elf" \
     -global virtio-mmio.force-legacy=false \
     -drive "if=none,format=raw,file=$img,id=blk0" -device virtio-blk-device,drive=blk0 \
     "${net_devices_mmio[@]}"

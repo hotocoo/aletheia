@@ -1296,8 +1296,8 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
   x86-64: every command refused by name, no panic, heap bounded, clean `halt`.
 - It found per-conversation heap leaks (~1.3 KB per `tls`, ~4.8 KB per `https`): HMAC and Ed25519
   built `Vec`s per call. Both now stream through new incremental `Sha256` / `Sha512`; `tls`, `tcp`
-  and `resolve` cost 0 B per command in steady state. An `https` residual of 100-200 B on some
-  conversations is recorded and bounded.
+  and `resolve` cost 0 B per command in steady state; the apparent `https` residual was later
+  attributed with `heaptrace` to the history filling to its 32 entries (bounded, first-use).
 
 ### 2026-09-26 — the console under hostile input (ADR-180)
 

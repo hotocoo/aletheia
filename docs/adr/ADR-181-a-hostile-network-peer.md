@@ -42,7 +42,11 @@ known-answer test and boot invariant checks them; new host tests prove streaming
 equals the one-shot digest. After the fix, measured over 120 hostile conversations: `tcp`, `tls`
 and `resolve` cost 0 bytes in steady state. `https` still costs 100-200 B on some conversations
 (and 33 KB once, the record workspace ADR-143 builds the first time a handshake reaches traffic
-keys). That residual is recorded, bounded by the gate, and not yet attributed.
+keys). **Attributed later the same day** with ADR-182's `heaptrace` (`NET_FUZZ_ELF` +
+`NET_FUZZ_LOG` + `scripts/heaptrace-symbolize.py`): after the console starts, the only allocations
+in an 80-command storm are that one-time workspace and the command history filling to its 32
+entries (each entry `MAX_LINE` bytes since ADR-182). The "https residual" was history first-fill,
+charged to whichever command's line was remembered first; nothing is spent per conversation.
 
 ## Consequences
 
@@ -52,4 +56,4 @@ generator knows, and a long browsing session no longer leaks kilobytes per page.
 **Costs.** The gate takes about 30-40 s per CPU for 80 commands.
 
 **Not claimed.** The peer does not attack the TCP layer below the socket (no forged segments,
-no out-of-window data), and the `https` residual above is open.
+no out-of-window data).
