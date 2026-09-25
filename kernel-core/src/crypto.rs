@@ -5,7 +5,6 @@
 //! A caller-supplied key is not itself a secure-boot chain; capability-image key lifecycle remains a
 //! separate requirement.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 const INITIAL: [u32; 8] = [
@@ -149,34 +148,81 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     state[7] = state[7].wrapping_add(h);
 }
 
+/// SHA-256 over data that arrives in pieces (ADR-181): HMAC and the TLS transcript hash feed it
+/// a key pad and then a message, and concatenating them first cost a `Vec` per call on a heap
+/// that never frees.
+#[derive(Clone)]
+pub struct Sha256 {
+    state: [u32; 8],
+    block: [u8; 64],
+    fill: usize,
+    total: u64,
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sha256 {
+    pub const fn new() -> Self {
+        Sha256 {
+            state: INITIAL,
+            block: [0u8; 64],
+            fill: 0,
+            total: 0,
+        }
+    }
+
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.total = self.total.wrapping_add(data.len() as u64);
+        if self.fill > 0 {
+            let take = (64 - self.fill).min(data.len());
+            self.block[self.fill..self.fill + take].copy_from_slice(&data[..take]);
+            self.fill += take;
+            data = &data[take..];
+            if self.fill < 64 {
+                return;
+            }
+            let block = self.block;
+            compress(&mut self.state, &block);
+            self.fill = 0;
+        }
+        while data.len() >= 64 {
+            let mut block = [0u8; 64];
+            block.copy_from_slice(&data[..64]);
+            compress(&mut self.state, &block);
+            data = &data[64..];
+        }
+        self.block[..data.len()].copy_from_slice(data);
+        self.fill = data.len();
+    }
+
+    pub fn finalize(mut self) -> [u8; 32] {
+        let bit_len = self.total.wrapping_mul(8);
+        let mut block = [0u8; 64];
+        block[..self.fill].copy_from_slice(&self.block[..self.fill]);
+        block[self.fill] = 0x80;
+        if self.fill >= 56 {
+            compress(&mut self.state, &block);
+            block = [0u8; 64];
+        }
+        block[56..].copy_from_slice(&bit_len.to_be_bytes());
+        compress(&mut self.state, &block);
+        let mut out = [0u8; 32];
+        for (i, word) in self.state.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+}
+
 /// SHA-256 digest, RFC 6234-compatible.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut state = INITIAL;
-    let mut offset = 0usize;
-    while offset + 64 <= data.len() {
-        let mut block = [0u8; 64];
-        block.copy_from_slice(&data[offset..offset + 64]);
-        compress(&mut state, &block);
-        offset += 64;
-    }
-
-    let remaining = data.len() - offset;
-    let mut block = [0u8; 64];
-    block[..remaining].copy_from_slice(&data[offset..]);
-    block[remaining] = 0x80;
-    if remaining >= 56 {
-        compress(&mut state, &block);
-        block = [0u8; 64];
-    }
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    block[56..].copy_from_slice(&bit_len.to_be_bytes());
-    compress(&mut state, &block);
-
-    let mut out = [0u8; 32];
-    for (i, word) in state.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    out
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize()
 }
 
 /// HMAC-SHA256 for arbitrary key lengths.
@@ -196,15 +242,17 @@ pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
         opad[i] ^= normalized[i];
     }
 
-    let mut inner = Vec::with_capacity(BLOCK + message.len());
-    inner.extend_from_slice(&ipad);
-    inner.extend_from_slice(message);
-    let inner_hash = sha256(&inner);
+    // Streamed, not concatenated (ADR-181): the TLS key schedule runs HMAC dozens of times per
+    // handshake, and a `Vec` per call was ~4 KB per conversation on a heap that never frees.
+    let mut inner = Sha256::new();
+    inner.update(&ipad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
 
-    let mut outer = vec![0u8; BLOCK + inner_hash.len()];
-    outer[..BLOCK].copy_from_slice(&opad);
-    outer[BLOCK..].copy_from_slice(&inner_hash);
-    sha256(&outer)
+    let mut outer = Sha256::new();
+    outer.update(&opad);
+    outer.update(&inner_hash);
+    outer.finalize()
 }
 
 /// Constant-time comparison for fixed-size authentication tags.
@@ -612,6 +660,25 @@ pub fn aead_open(
         }
     }
     Ok(pt)
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    #[test]
+    fn streaming_in_any_split_equals_one_shot() {
+        let data: alloc::vec::Vec<u8> = (0..300u32).map(|i| (i * 17 % 251) as u8).collect();
+        for len in [0usize, 1, 55, 56, 63, 64, 65, 119, 120, 128, 300] {
+            let want = sha256(&data[..len]);
+            for split in [0usize, 1, 3, 32, 63, 64, 100] {
+                let cut = split.min(len);
+                let mut h = Sha256::new();
+                h.update(&data[..cut]);
+                h.update(&data[cut..len]);
+                assert_eq!(h.finalize(), want, "len {len} split {split}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

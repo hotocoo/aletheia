@@ -1271,6 +1271,17 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — a hostile network peer, live (ADR-181)
+
+- New gate `scripts/net-fuzz-e2e.sh`: a seeded peer answers the guest's `tcp`, `tls`, `https` and
+  `resolve` with resets, garbage, 16 MiB record headers, trickles, floods, silence, real TLS
+  followed by garbage or malformed HTTP, and hostile DNS replies. PASS on aarch64, riscv64 and
+  x86-64: every command refused by name, no panic, heap bounded, clean `halt`.
+- It found per-conversation heap leaks (~1.3 KB per `tls`, ~4.8 KB per `https`): HMAC and Ed25519
+  built `Vec`s per call. Both now stream through new incremental `Sha256` / `Sha512`; `tls`, `tcp`
+  and `resolve` cost 0 B per command in steady state. An `https` residual of 100-200 B on some
+  conversations is recorded and bounded.
+
 ### 2026-09-26 — the console under hostile input (ADR-180)
 
 - New gate `scripts/console-fuzz-e2e.sh`: seeded hostile lines (every command with hostile

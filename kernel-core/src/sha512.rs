@@ -95,6 +95,84 @@ const K: [u64; 80] = [
     0x6c44198c4a475817,
 ];
 
+/// SHA-512 over data that arrives in pieces (ADR-181). Ed25519 hashes R || A || M, and building
+/// that concatenation cost a `Vec` per signature check on a heap that never frees.
+#[derive(Clone)]
+pub struct Sha512 {
+    h: [u64; 8],
+    block: [u8; 128],
+    fill: usize,
+    total: u128,
+}
+
+impl Default for Sha512 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sha512 {
+    pub const fn new() -> Self {
+        Sha512 {
+            h: [
+                0x6a09e667f3bcc908,
+                0xbb67ae8584caa73b,
+                0x3c6ef372fe94f82b,
+                0xa54ff53a5f1d36f1,
+                0x510e527fade682d1,
+                0x9b05688c2b3e6c1f,
+                0x1f83d9abfb41bd6b,
+                0x5be0cd19137e2179,
+            ],
+            block: [0u8; 128],
+            fill: 0,
+            total: 0,
+        }
+    }
+
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.total = self.total.wrapping_add(data.len() as u128);
+        if self.fill > 0 {
+            let take = (128 - self.fill).min(data.len());
+            self.block[self.fill..self.fill + take].copy_from_slice(&data[..take]);
+            self.fill += take;
+            data = &data[take..];
+            if self.fill < 128 {
+                return;
+            }
+            let block = self.block;
+            compress(&mut self.h, &block);
+            self.fill = 0;
+        }
+        while data.len() >= 128 {
+            let mut block = [0u8; 128];
+            block.copy_from_slice(&data[..128]);
+            compress(&mut self.h, &block);
+            data = &data[128..];
+        }
+        self.block[..data.len()].copy_from_slice(data);
+        self.fill = data.len();
+    }
+
+    pub fn finalize(mut self) -> [u8; DIGEST_LEN] {
+        let bitlen = self.total.wrapping_mul(8);
+        let mut block = [0u8; 128];
+        block[..self.fill].copy_from_slice(&self.block[..self.fill]);
+        block[self.fill] = 0x80;
+        if self.fill + 1 + 16 > 128 {
+            compress(&mut self.h, &block);
+            block = [0u8; 128];
+        }
+        block[112..].copy_from_slice(&bitlen.to_be_bytes());
+        compress(&mut self.h, &block);
+        let mut out = [0u8; DIGEST_LEN];
+        for (i, word) in self.h.iter().enumerate() {
+            out[i * 8..i * 8 + 8].copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+}
+
 /// The SHA-512 digest of `data`.
 pub fn sha512(data: &[u8]) -> [u8; DIGEST_LEN] {
     let mut h: [u64; 8] = [
@@ -304,6 +382,25 @@ pub fn sha512_suite(
     }
 
     Ok(n)
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    #[test]
+    fn streaming_in_any_split_equals_one_shot() {
+        let data: alloc::vec::Vec<u8> = (0..700u32).map(|i| (i * 31 % 251) as u8).collect();
+        for len in [0usize, 1, 111, 112, 127, 128, 129, 255, 256, 257, 700] {
+            let want = sha512(&data[..len]);
+            for split in [0usize, 1, 7, 64, 127, 128, 200] {
+                let cut = split.min(len);
+                let mut h = Sha512::new();
+                h.update(&data[..cut]);
+                h.update(&data[cut..len]);
+                assert_eq!(h.finalize(), want, "len {len} split {split}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -25,7 +25,6 @@
 //! `S + L` accepts a second, different signature for the same message, which is the malleability
 //! that breaks anything using a signature as an identifier.
 
-use crate::sha512::sha512;
 use crate::x25519::Fe;
 
 /// A public key, a signature, a message: the whole of what verification needs.
@@ -306,11 +305,13 @@ pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(),
 
     // k = SHA-512(R || A || M), used unreduced: the cofactored equation below depends only on
     // k mod L once torsion is annihilated (module docs).
-    let mut hash_input = alloc::vec::Vec::with_capacity(64 + message.len());
-    hash_input.extend_from_slice(&r_bytes);
-    hash_input.extend_from_slice(&a_bytes);
-    hash_input.extend_from_slice(message);
-    let k = sha512(&hash_input);
+    // Streamed, not concatenated (ADR-181): a `Vec` per signature check was a leak per TLS
+    // conversation on a heap that never frees.
+    let mut hasher = crate::sha512::Sha512::new();
+    hasher.update(&r_bytes);
+    hasher.update(&a_bytes);
+    hasher.update(message);
+    let k = hasher.finalize();
 
     // [8S]B  ==  [8]R + [8k]A
     let eight = |p: Point| p.double().double().double();
