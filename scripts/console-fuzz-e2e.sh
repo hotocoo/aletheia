@@ -137,7 +137,16 @@ def sentinel(n, limit):
 for i in range(1, lines + 1):
     data = line()
     t0 = time.time()
+    mark = len(buf)
     p.stdin.write(data + b"\r"); p.stdin.flush()
+    # The sentinel waits for the hostile line's own prompt: typed into the same burst, it could
+    # overflow the input ring behind an over-long line on a slow host, and a ring that drops the
+    # newest bytes is doing exactly what ADR-045 says (the first CI run, seed 0x164, lost it so).
+    end = time.time() + per_line
+    while buf.find(PROMPT, mark) < 0:
+        if p.poll() is not None or time.time() > end:
+            fail(f"line {i} of {lines} never got its prompt back", data)
+        pump(0.02)
     if not sentinel(i, per_line):
         fail(f"line {i} of {lines}: the console never answered the sentinel after it", data)
     dt = time.time() - t0
