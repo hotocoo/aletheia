@@ -1,6 +1,6 @@
 # Releasing Aletheia — every stable version ships a VMware package, pushed to GitHub
 
-**Policy (REQ-REL-001, from v0.1.0 on):** a stable version is a git tag `vX.Y.Z` on `main`. Every
+**Policy (REQ-REL-003, from v0.1.0 on):** a stable version is a git tag `vX.Y.Z` on `main`. Every
 such tag MUST produce the x86-64 VMware package and PUBLISH it as release assets on that tag in
 GitHub. No stable version exists without its package; no package is published without having
 booted from its own disks first.

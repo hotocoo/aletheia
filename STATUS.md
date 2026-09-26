@@ -922,7 +922,7 @@ service is still installed with the suite machine's capacity for feature normali
 Same day, before this wave: v0.1.0 was cut on `a52d48b` and RELEASED — `scripts/release-vmware.sh`
 built both disks, booted the packaged VMDKs under QEMU+OVMF on the runner and
 `.github/workflows/release.yml` published the zip, its digest and SHA256SUMS as the tag's release
-assets (REQ-REL-001, `docs/RELEASING.md`); and three CI jobs red since ADR-074 for reasons only the
+assets (REQ-REL-003, `docs/RELEASING.md`); and three CI jobs red since ADR-074 for reasons only the
 runner could see were fixed — the ubuntu-24.04 runner's QEMU 8.2 creates the virt machine's SMMUv3
 stage-1-only (`-global arm-smmuv3.stage=2` in `scripts/vm-e2e.sh`), a newer stable clippy rejects
 `chunks_exact(2)` (`kernel-core/src/udpv4.rs` uses `as_chunks`), and GNU grep reads `\r` in an ERE
@@ -1232,7 +1232,7 @@ scripts/console-ai-e2e.sh, scripts/console-e2e.sh, scripts/keyboard-e2e.sh, scri
 input-hardware rung),
 scripts/quality-gate.sh, scripts/release-vmware.sh (the VMware package — both disks built,
 packaged and BOOTED from their own VMDKs on every push; on every `vX.Y.Z` tag
-.github/workflows/release.yml publishes the same package as GitHub release assets, REQ-REL-001,
+.github/workflows/release.yml publishes the same package as GitHub release assets, REQ-REL-003,
 docs/RELEASING.md), and the four VM gates — scripts/vm-e2e.sh (aarch64),
 scripts/vm-e2e-riscv.sh (RISC-V), scripts/vm-e2e-x86.sh (x86-64 under OVMF) and
 scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/desktop-e2e-dt.sh
@@ -1270,6 +1270,13 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-09-26 — the browser follows redirects, under its own policy (ADR-190)
+
+- `go` and the browser window follow `301/302/303/307/308` up to 5 hops: https only, same-host paths
+  or a named https URL, every target through the same trust/block check `go` applies; loops,
+  downgrades, blocked or untrusted targets and a missing `Location` refused by name. `browser=9` on
+  all three CPUs; live in `scripts/https-e2e.sh` on all three.
 
 ### 2026-09-26 — the OS starts its own thinking systems (ADR-189)
 

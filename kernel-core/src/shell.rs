@@ -1237,11 +1237,53 @@ fn browse<H: ShellHost>(
 
 /// Fetch a resolved page over the TLS client and hand the answer to the navigator.
 fn fetch_into<H: ShellHost>(host: &H, nav: &mut Navigator, resolved: Resolved) {
+    let mut resolved = resolved;
+    let mut hops: u8 = 0;
+    loop {
+        match fetch_once(host, nav, resolved) {
+            None => {
+                nav.note_redirects(hops);
+                return;
+            }
+            // A redirect (ADR-190): the target must pass the same policy `go` applies — a trusted
+            // host, not blocked, https only — and the chain is bounded.
+            Some(next) => {
+                if hops >= crate::browser::MAX_REDIRECTS {
+                    nav.set_failure(next, "too many redirects");
+                    return;
+                }
+                hops += 1;
+                match nav.resolve(&next) {
+                    Ok(r) => resolved = r,
+                    Err(crate::browser::NavRefusal::Blocked) => {
+                        nav.set_failure(next, "the redirect names a blocked host");
+                        return;
+                    }
+                    Err(_) => {
+                        nav.set_failure(
+                            next,
+                            "the redirect names a host this machine does not trust",
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One conversation. `Some(url)` when the answer is a redirect to follow; `None` when the page (or
+/// the named reason there is none) has been handed to the navigator.
+fn fetch_once<H: ShellHost>(
+    host: &H,
+    nav: &mut Navigator,
+    resolved: Resolved,
+) -> Option<crate::browser::Url> {
     let url = resolved.url;
     let mut request = [0u8; 1024];
     let Ok(request_len) = crate::http::request(url.host(), url.path(), &mut request) else {
         nav.set_failure(url, "the request does not fit");
-        return;
+        return None;
     };
     let mut reply = [0u8; 4096];
     match host.tls_fetch(
@@ -1257,6 +1299,21 @@ fn fetch_into<H: ShellHost>(host: &H, nav: &mut Navigator, resolved: Resolved) {
             let mut body = [0u8; crate::browser::BODY_CAP];
             match crate::http::parse(raw, &mut body, report.truncated) {
                 Ok(response) => {
+                    if crate::browser::is_redirect(response.status) {
+                        match response.header(raw, b"location") {
+                            Some(loc) => match crate::browser::redirect_target(&url, loc) {
+                                Ok(next) => return Some(next),
+                                Err(why) => {
+                                    nav.set_failure(url, why);
+                                    return None;
+                                }
+                            },
+                            None => {
+                                nav.set_failure(url, "a redirect with no Location");
+                                return None;
+                            }
+                        }
+                    }
                     let is_html = response
                         .header(raw, b"content-type")
                         .is_some_and(|v| v.len() >= 9 && v[..9].eq_ignore_ascii_case(b"text/html"));
@@ -1291,6 +1348,7 @@ fn fetch_into<H: ShellHost>(host: &H, nav: &mut Navigator, resolved: Resolved) {
         }
         Err(why) => nav.set_failure(url, why),
     }
+    None
 }
 
 fn print_page(nav: &mut Navigator, out: &mut dyn FnMut(&str)) {

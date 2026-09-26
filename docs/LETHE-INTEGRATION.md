@@ -75,3 +75,5 @@ exact upstream revision whose behaviour the invariants must match.
 
 Until one of those happens, the accurate sentence is: *Aletheia tracks Lethe's upstream by commit
 and intends to adopt its security contract natively; Lethe's engine does not run on the kernel.*
+
+**After Track 2 (2026-09-26, ADR-190):** the browser follows redirects under its own policy — https only, trusted and unblocked targets, at most five hops — proved at boot (`browser=9`) and live on all three CPUs.

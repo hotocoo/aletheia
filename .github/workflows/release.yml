@@ -1,5 +1,5 @@
 # Every stable version ships a VMware package, and the package is PUSHED TO GITHUB as release
-# assets on the tag (REQ-REL-001, from v0.1.0 on). The package is built by scripts/release-vmware.sh
+# assets on the tag (REQ-REL-003, from v0.1.0 on). The package is built by scripts/release-vmware.sh
 # — the same script the main pipeline runs on every push as a dev package, so this job never runs
 # code the gates have not — and it is BOOTED from its own VMDKs under QEMU+OVMF before anything is
 # uploaded. Idempotent: re-running on the same tag replaces the assets (`--clobber`), never fails on

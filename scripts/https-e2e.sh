@@ -65,6 +65,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body))); self.send_header("Connection", "close")
             self.end_headers(); self.wfile.write(body)
+        elif self.path in ("/moved", "/away"):   # ADR-190: one hop home, one hop to a blocked host
+            self.send_response(302)
+            self.send_header("Location", "/plain.txt" if self.path == "/moved" else "https://evil.test/")
+            self.send_header("Content-Length", "0"); self.send_header("Connection", "close")
+            self.end_headers()
         elif self.path == "/big.txt":
             body = b"0123456789" * 400          # 4000 bytes: more than the console shows
             self.send_response(200); self.send_header("Content-Type", "text/plain")
@@ -249,6 +254,9 @@ check_transcript() {
   # Lethe's policy contract (ADR-159), live: a host the person blocks is refused by name even though
   # it is pinned and was just fetched from, and nothing is dialed after the block; `forget` leaves
   # `back` nowhere to go.
+  grep -q "HTTP 200 OK (after 1 redirect(s))" <<<"$log" || { echo "  FAIL [$label] a redirect home was not followed (ADR-190)"; bad=1; }
+  grep -q "refused: the redirect names a blocked host" <<<"$log" || { echo "  FAIL [$label] a redirect to a blocked host was not refused by name"; bad=1; }
+  grep -q "peer request: /moved" "$PEER_LOG" || { echo "  FAIL [$label] the peer never saw the redirecting GET"; bad=1; }
   grep -q "^blocked $SERVER_NAME" <<<"$log" || { echo "  FAIL [$label] block did not take the host"; bad=1; }
   grep -q "go: that host is blocked" <<<"$log" || { echo "  FAIL [$label] a blocked pinned host was not refused by name"; bad=1; }
   local after_block; after_block="$(sed -n "/^aletheia> block $SERVER_NAME/,\$p" <<<"$log")"
@@ -285,6 +293,8 @@ SESSION_CMDS=(
   "go https://$SERVER_NAME:$PEER_PORT/index.html"
   "follow 1"
   "follow 7"
+  "go https://$SERVER_NAME:$PEER_PORT/moved"
+  "go https://$SERVER_NAME:$PEER_PORT/away"
   "block $SERVER_NAME"
   "go https://$SERVER_NAME:$PEER_PORT/plain.txt"
   "forget"

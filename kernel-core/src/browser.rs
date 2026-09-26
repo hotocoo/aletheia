@@ -168,6 +168,64 @@ fn host_byte_ok(b: u8) -> bool {
     b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-'
 }
 
+/// Redirects one navigation may follow before it is refused (ADR-190).
+pub const MAX_REDIRECTS: u8 = 5;
+
+/// Is this status a redirect this browser follows?
+pub fn is_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// Where a `Location` sends a page at `from` (ADR-190): an absolute `https://` URL, or an
+/// absolute path on the same host. Anything else — `http://` (a downgrade), a scheme-relative or
+/// path-relative reference, a URL this parser refuses — is refused by name, never guessed at.
+pub fn redirect_target(from: &Url, location: &[u8]) -> Result<Url, &'static str> {
+    let loc = location.trim_ascii();
+    if loc.starts_with(b"https://") {
+        return parse_url(loc).map_err(|_| "the redirect names a URL this browser does not read");
+    }
+    if loc.starts_with(b"http://") {
+        return Err("the redirect would leave https");
+    }
+    if loc.first() != Some(&b'/') || loc.starts_with(b"//") {
+        return Err("the redirect is not an absolute path or an https URL");
+    }
+    let mut text = [0u8; 8 + MAX_HOST + 6 + MAX_PATH];
+    let mut n = 0;
+    let mut put = |bytes: &[u8]| -> Result<(), &'static str> {
+        let end = n + bytes.len();
+        if end > text.len() {
+            return Err("the redirect names a URL this browser does not read");
+        }
+        text[n..end].copy_from_slice(bytes);
+        n = end;
+        Ok(())
+    };
+    put(b"https://")?;
+    put(from.host())?;
+    if from.port != 443 {
+        let mut digits = [0u8; 6];
+        let mut d = 0;
+        let mut v = from.port;
+        let mut rev = [0u8; 5];
+        loop {
+            rev[d] = b'0' + (v % 10) as u8;
+            d += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        digits[0] = b':';
+        for i in 0..d {
+            digits[1 + i] = rev[d - 1 - i];
+        }
+        put(&digits[..1 + d])?;
+    }
+    put(loc)?;
+    parse_url(&text[..n]).map_err(|_| "the redirect names a URL this browser does not read")
+}
+
 /// Read a URL. Only `https://` is a URL this browser will navigate to.
 pub fn parse_url(text: &[u8]) -> Result<Url, UrlRefusal> {
     if text.len() > MAX_URL {
@@ -310,6 +368,8 @@ pub struct Page {
     pub truncated: bool,
     /// Set when nothing came back: the named reason the fetch or the navigation refused.
     pub failure: Option<&'static str>,
+    /// Redirects followed to reach this page (ADR-190).
+    pub redirects: u8,
 }
 
 impl Page {
@@ -460,6 +520,7 @@ impl Navigator {
             body_len: body.len().min(BODY_CAP),
             truncated: truncated || body.len() > BODY_CAP,
             failure: None,
+            redirects: 0,
         };
         page.reason[..page.reason_len].copy_from_slice(&reason[..page.reason_len]);
         page.body[..page.body_len].copy_from_slice(&body[..page.body_len]);
@@ -478,8 +539,20 @@ impl Navigator {
             body_len: 0,
             truncated: false,
             failure: Some(why),
+            redirects: 0,
         });
         self.link_count = 0;
+    }
+
+    /// Record how many redirects the current page took, and put the page's own URL — where the
+    /// redirects ended — in the history entry the navigation made (ADR-190).
+    pub fn note_redirects(&mut self, n: u8) {
+        if let Some(p) = self.page.as_mut() {
+            p.redirects = n;
+            if n > 0 && self.len > 0 {
+                self.history[self.cursor] = Some(p.url);
+            }
+        }
     }
 
     pub fn page(&self) -> Option<&Page> {
@@ -587,6 +660,11 @@ impl Navigator {
                 grid.write(page.reason());
                 if page.truncated {
                     grid.write(b" (cut)");
+                }
+                if page.redirects > 0 {
+                    grid.write(b" (after ");
+                    write_decimal(grid, page.redirects as usize);
+                    grid.write(b" redirect(s))");
                 }
                 grid.put(b'\n');
             }
@@ -780,6 +858,26 @@ pub fn browser_suite(
         );
     }
 
+    // 9 — ADR-190: a redirect stays on https and on a URL this browser reads — a same-host path
+    //     keeps the host and port, and a downgrade, a scheme-relative reference or a bare word is
+    //     refused by name rather than guessed at.
+    {
+        let from = parse_url(b"https://example.test:8443/a");
+        let ok = from.is_ok_and(|f| {
+            redirect_target(&f, b"/b")
+                .is_ok_and(|t| t.host() == b"example.test" && t.port == 8443 && t.path() == b"/b")
+                && redirect_target(&f, b"http://example.test/b").is_err()
+                && redirect_target(&f, b"//evil.test/").is_err()
+                && redirect_target(&f, b"b").is_err()
+                && is_redirect(302)
+                && !is_redirect(200)
+        });
+        check!(
+            ok,
+            "browser: a redirect is followed only to https, on the same host or a named one"
+        );
+    }
+
     Ok(n)
 }
 
@@ -795,7 +893,7 @@ mod tests {
             seen += 1;
         })
         .expect("the browser suite should hold");
-        assert_eq!(n, 8);
-        assert_eq!(seen, 8);
+        assert_eq!(n, 9);
+        assert_eq!(seen, 9);
     }
 }
