@@ -1,4 +1,4 @@
-# Aletheia benchmarks — 2026-09-25
+# Aletheia benchmarks — 2026-09-25, x86-64 re-measured 2026-09-27
 
 Every number here was measured on one workstation (Apple silicon, macOS, 16 cores), with QEMU
 TCG emulating the guest CPU. TCG slows compute-bound code by about 50x (ADR-173), so absolute
@@ -15,6 +15,38 @@ WITH_REDOX=1 WITH_FREEBSD=1 BOOT_SAMPLES=5 WORKLOAD_OPS=50 BOOT_TIMEOUT=400 ./sc
 ./scripts/linux_pipe_bench.sh
 ALETHEIA_PROPERTY_SEED=<hex> ALETHEIA_PROPERTY_CASES=1024 cargo test --release --test property_campaign   # in kernel-core
 ```
+
+## 0. Re-measured 2026-09-27 (ADR-208)
+
+ADR-200 found that x86-64's clock was the TSC, calibrated against two PIT ticks (903, 1167 and
+1292 MHz on three boots of one VM) and stopping while idle. Every x86-64 figure below that was
+measured before ADR-200 carries that error. This section re-measures what this repository compares
+across operating systems, with x86-64 now timed by the HPET; sections 1-3 are kept as they were
+measured, and where they disagree with this one, this one stands.
+
+`BOOT_SAMPLES=3 WORKLOAD_OPS=12 ./scripts/comparative-bench.sh` (Redox and FreeBSD not re-run):
+
+| | Aletheia (x86-64) | Linux 6.12-lts |
+|---|---|---|
+| boot to prompt, no NIC (median of 3) | 2210 ms (2233/2210/2189) | 1774 ms (1795/1774/1767) |
+| of firmware | 1371 ms (OVMF) | none (`-kernel`) |
+| of kernel | 839 ms | 1774 ms |
+| idle host CPU at prompt | 0.0 % | 2.0 % |
+| 12 typed `echo` round-trips | 42 ms (3 ms/op) | 350 ms (29 ms/op) |
+| bootable payload | 3,064,832 B | 14,208,432 B |
+
+Cross-address-space IPC (ADR-179's endpoint round trip, 1,000 round trips, boot `bench`):
+
+| | aarch64 | riscv64 | x86-64 |
+|---|---|---|---|
+| round trip, 2 address spaces | 30.0 us | 43.9 us | 27.4-29.9 us (two runs) |
+
+The x86-64 figure ADR-179 published, **22.1 us, was the miscalibrated TSC's**; timed by the HPET it
+is 27.4-29.9 us. Linux's pipe round trip under the same TCG, 41.1 us, was timed by the Linux guest's
+own clock and stands; the two still measure different things (ADR-179).
+
+x86-64 in-kernel costs from today's boot `bench` (HPET): authority check 110 ns, message delivery
+280 ns, scheduler dispatch 140 ns, storage transaction 30.1 us.
 
 ## 1. Four operating systems, same emulator (x86-64, `qemu-system-x86_64`, TCG, q35, 4 vCPU)
 
@@ -75,7 +107,7 @@ Total 2213 ms = firmware 1443 ms + kernel 770 ms. The largest gaps after ExitBoo
 aarch64: one `svc` trap and `eret` costs 386 ns, so the capability check Aletheia adds costs
 0.87x one syscall trap.
 
-The Linux pipe round-trip is 22.2 µs in Docker's hardware VM, and 41.1 µs under the same TCG as Aletheia's 22.1 µs kernel-endpoint round trip (ADR-179, section 1's bench). (`linux_pipe_bench.sh`, 200,000 iterations, 2 processes,
+The Linux pipe round-trip is 22.2 µs in Docker's hardware VM, and 41.1 µs under the same TCG as Aletheia's kernel-endpoint round trip (27.4-29.9 µs by the HPET, section 0; first published as 22.1 µs by the miscalibrated TSC). (`linux_pipe_bench.sh`, 200,000 iterations, 2 processes,
 Docker's hardware-virtualized Linux VM). **This is not comparable** with the delivery row above:
 Aletheia's loop crosses no address space, the Linux pipe crosses two. No cross-address-space IPC
 benchmark exists yet.
@@ -113,8 +145,9 @@ DavidAU LFM2.5 NEO-MAX Q8_0 on llama.cpp: 5/6 operations planned correctly, medi
    per transaction under TCG. What remains is the checksum. A word-at-a-time hash would cut it
    several-fold, but it is the journal's ON-DISK format: changing it needs a versioned record so
    a device written by an older kernel still recovers. A decision for its own ADR, not a bench fix.
-4. **Cross-address-space IPC: measured (ADR-179).** Same emulator: Aletheia's kernel endpoint
-   22.1 us per round trip, Linux pipes 41.1 us. Aletheia pays more boundary crossings but copies
+4. **Cross-address-space IPC: measured (ADR-179, re-timed ADR-208).** Same emulator: Aletheia's
+   kernel endpoint 27.4-29.9 us per round trip on x86-64 (the 22.1 us first published came from
+   the miscalibrated TSC), Linux pipes 41.1 us. Aletheia pays more boundary crossings but copies
    nothing and has no scheduler in the loop; ADR-179 says what that does and does not show.
    Next step for a fair fight: time a SCHEDULED, blocking endpoint (REQ-IPC-010's path).
 5. **Model accuracy.** The temporary default misses one operation and one console line, and its

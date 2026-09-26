@@ -1526,6 +1526,11 @@ pub const USERLAND_SHOW: &[u8] = include_bytes!("../../userland/bin/aarch64/show
 /// `probe`, from `userland/` (ADR-207): the boot suite's probe of `SYS_FS_READ`; never seeded.
 const USERLAND_PROBE: &[u8] = include_bytes!("../../userland/bin/aarch64/probe.elf");
 
+/// The run storms (ADR-202's faulting runs, ADR-204's writes, ADR-207's reads) prove bounds under
+/// load; like `kmain`'s storms (ADR-163) they run in the gate image only, so an interactive boot
+/// pays for the contracts and not for them.
+const STORMS: bool = !cfg!(feature = "interactive");
+
 /// Timer slices a console-started program gets before it is abandoned (ADR-201, ADR-203).
 const PROGRAM_SLICES: u32 = 64;
 /// Returns to the kernel a program gets in all, syscalls included (ADR-204): what abandons a
@@ -2746,25 +2751,27 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                 refused,
                 "read: a buffer in the code page, a name straddling the pages or outside them, an empty name, and a buffer past the stack are refused"
             );
-            let gross = |case: &[u8], svc: &mut dyn ProgramServices| {
-                let before = crate::heap::used_bytes();
-                let r = run(USERLAND_PROBE, case, svc);
-                (
-                    crate::heap::used_bytes() - before,
-                    r.is_some_and(|r| r.exited && r.status == 10),
-                )
-            };
-            let (few, few_ok) = gross(b"loop16", &mut svc);
-            let (many, many_ok) = gross(b"loop256", &mut svc);
-            crate::kprintln!(
-                "[usermode] read storm: 16 reads moved the gross heap {} B, 256 reads {} B",
-                few,
-                many
-            );
-            check!(
-                few_ok && many_ok && few == many,
-                "read: 256 reads allocate exactly what 16 do - nothing per read"
-            );
+            if STORMS {
+                let gross = |case: &[u8], svc: &mut dyn ProgramServices| {
+                    let before = crate::heap::used_bytes();
+                    let r = run(USERLAND_PROBE, case, svc);
+                    (
+                        crate::heap::used_bytes() - before,
+                        r.is_some_and(|r| r.exited && r.status == 10),
+                    )
+                };
+                let (few, few_ok) = gross(b"loop16", &mut svc);
+                let (many, many_ok) = gross(b"loop256", &mut svc);
+                crate::kprintln!(
+                    "[usermode] read storm: 16 reads moved the gross heap {} B, 256 reads {} B",
+                    few,
+                    many
+                );
+                check!(
+                    few_ok && many_ok && few == many,
+                    "read: 256 reads allocate exactly what 16 do - nothing per read"
+                );
+            }
         }
         let cv = t.code_va;
         let write = |addr: u64, len: u64| {
@@ -2797,35 +2804,38 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         // The write path allocates nothing per call (ADR-086 storm discipline): the gross heap
         // watermark moves exactly as much across 1024 writes as across 16.
-        let gross = |count: u64| {
-            let img = build(t, &kernel_core::elf::loop_writer_code(t.machine, count, 16));
-            let before = crate::heap::used_bytes();
-            let r = judge(&img, t).ok().and_then(|p| {
-                run_program(
-                    &p,
-                    b"",
-                    &mut kernel_core::progout::NoServices,
-                    PROGRAM_SLICES,
-                )
-            });
-            (crate::heap::used_bytes() - before, r)
-        };
-        let (few, few_run) = gross(16);
-        let (many, many_run) = gross(1024);
-        crate::kprintln!(
+        if STORMS {
+            let gross = |count: u64| {
+                let img = build(t, &kernel_core::elf::loop_writer_code(t.machine, count, 16));
+                let before = crate::heap::used_bytes();
+                let r = judge(&img, t).ok().and_then(|p| {
+                    run_program(
+                        &p,
+                        b"",
+                        &mut kernel_core::progout::NoServices,
+                        PROGRAM_SLICES,
+                    )
+                });
+                (crate::heap::used_bytes() - before, r)
+            };
+            let (few, few_run) = gross(16);
+            let (many, many_run) = gross(1024);
+            crate::kprintln!(
             "[usermode] write storm: 16 writes moved the gross heap {} B, 1024 writes {} B ({:?} / {:?} slices)",
             few,
             many,
             few_run.as_ref().map(|r| (r.slices, r.dropped)),
             many_run.as_ref().map(|r| (r.slices, r.dropped))
         );
-        check!(
-            few == many
-                && few_run.is_some_and(|r| r.exited && r.output.len() == 256 && r.dropped == 0)
-                && many_run
-                    .is_some_and(|r| r.exited && r.output.len() == 256 && r.dropped == 1008 * 16),
-            "write: 1024 writes allocate exactly what 16 do - nothing per call"
-        );
+            check!(
+                few == many
+                    && few_run.is_some_and(|r| r.exited && r.output.len() == 256 && r.dropped == 0)
+                    && many_run.is_some_and(|r| r.exited
+                        && r.output.len() == 256
+                        && r.dropped == 1008 * 16),
+                "write: 1024 writes allocate exactly what 16 do - nothing per call"
+            );
+        }
         let before = supervisor().terminated();
         let trapped = judge(&trap, t).ok().and_then(|p| {
             run_program(
@@ -2866,35 +2876,37 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             after_spin.is_some_and(|r| r.exited && r.status == HELLO_STATUS),
             "run: after an abandoned spinner, a program still runs and exits with its status"
         );
-        let (held, frames0, heap0) = (
-            supervisor().held(),
-            frames::free_count(),
-            crate::heap::live_bytes(),
-        );
-        let mut contained = 0;
-        for _ in 0..16 {
-            if judge(&trap, t)
-                .ok()
-                .and_then(|p| {
-                    run_program(
-                        &p,
-                        b"",
-                        &mut kernel_core::progout::NoServices,
-                        PROGRAM_SLICES,
-                    )
-                })
-                .is_some_and(|r| r.terminated.is_some())
-            {
-                contained += 1;
+        if STORMS {
+            let (held, frames0, heap0) = (
+                supervisor().held(),
+                frames::free_count(),
+                crate::heap::live_bytes(),
+            );
+            let mut contained = 0;
+            for _ in 0..16 {
+                if judge(&trap, t)
+                    .ok()
+                    .and_then(|p| {
+                        run_program(
+                            &p,
+                            b"",
+                            &mut kernel_core::progout::NoServices,
+                            PROGRAM_SLICES,
+                        )
+                    })
+                    .is_some_and(|r| r.terminated.is_some())
+                {
+                    contained += 1;
+                }
             }
-        }
-        check!(
+            check!(
             contained == 16
                 && supervisor().held() == held
                 && frames::free_count() == frames0
                 && crate::heap::live_bytes() == heap0,
             "run: sixteen faulting runs are all contained, hold no death record, and give back every frame and heap byte"
         );
+        }
     }
 
     Ok(n)
