@@ -505,6 +505,40 @@ impl Filesystem {
         Ok(out)
     }
 
+    /// Copy `name`'s bytes into `out` without allocating (ADR-207): the directory lookup reads the
+    /// slot in place (no `DirEntry` and its `String`), and the data blocks stream into `out`.
+    /// Returns the object's FULL length; when that exceeds `out`, only `out.len()` bytes were
+    /// copied, so a caller always learns that it was cut and by how much.
+    pub fn read_into<D: BlockDevice>(
+        &self,
+        dev: &D,
+        name: &str,
+        out: &mut [u8],
+    ) -> Result<usize, FsError> {
+        if !valid_name(name) {
+            return Err(FsError::BadName);
+        }
+        let dir = self.dir(dev)?;
+        let slot = Self::find_slot(&dir, name).ok_or(FsError::NotFound)?;
+        let (start, len) = Self::slot_extent(&dir, slot).ok_or(FsError::Corrupt)?;
+        let nblocks = len.div_ceil(BLOCK_SIZE);
+        if start < FILE_DATA_START || start + nblocks > dev.num_blocks() {
+            return Err(FsError::Corrupt);
+        }
+        let want = core::cmp::min(len, out.len());
+        let mut copied = 0;
+        for i in 0..nblocks {
+            if copied >= want {
+                break;
+            }
+            let blk = self.journal.read(dev, start + i)?;
+            let take = core::cmp::min(BLOCK_SIZE, want - copied);
+            out[copied..copied + take].copy_from_slice(&blk[..take]);
+            copied += take;
+        }
+        Ok(len)
+    }
+
     /// Remove `name`, as ONE transaction: its data blocks are overwritten with zeros (erase on
     /// delete — the storage twin of ADR-033), its bitmap bits are cleared, and its directory slot is
     /// freed. A crash leaves either the whole object or none of it.

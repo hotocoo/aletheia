@@ -10,6 +10,18 @@ path = "src/hello.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "show"
+path = "src/show.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "probe"
+path = "src/probe.rs"
+test = false
+bench = false
+
 [profile.release]
 opt-level = "s"
 panic = "abort"

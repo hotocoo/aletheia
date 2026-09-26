@@ -422,3 +422,38 @@ fn a_replace_whose_new_extent_overlaps_the_old_at_a_shifted_start_writes_each_bl
         assert!(got == next || got == again, "mixture at allow={allow}");
     }
 }
+
+/// `read_into` (ADR-207) returns exactly what `read` does, reports the full length when the buffer
+/// is shorter, and refuses what `read` refuses.
+#[test]
+fn read_into_matches_read_and_reports_truncation() {
+    let mut dev = kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 64);
+    kernel_core::fs::Filesystem::format(&mut dev).unwrap();
+    let mut fs = kernel_core::fs::Filesystem::mount(&mut dev).unwrap();
+    let big: Vec<u8> = (0..9000u32).map(|i| (i * 7) as u8).collect();
+    fs.create(&mut dev, "big", &big).unwrap();
+    fs.create(&mut dev, "small", b"note").unwrap();
+
+    let mut out = vec![0u8; 16_384];
+    assert_eq!(fs.read_into(&dev, "big", &mut out), Ok(9000));
+    assert_eq!(&out[..9000], &big[..]);
+    let mut short = [0u8; 100];
+    assert_eq!(
+        fs.read_into(&dev, "big", &mut short),
+        Ok(9000),
+        "full length reported"
+    );
+    assert_eq!(&short[..], &big[..100]);
+    let mut exact = [0u8; 4];
+    assert_eq!(fs.read_into(&dev, "small", &mut exact), Ok(4));
+    assert_eq!(&exact, b"note");
+    assert_eq!(
+        fs.read_into(&dev, "nosuch", &mut exact),
+        Err(kernel_core::fs::FsError::NotFound)
+    );
+    assert_eq!(
+        fs.read_into(&dev, "", &mut exact),
+        Err(kernel_core::fs::FsError::BadName)
+    );
+    assert_eq!(fs.read(&dev, "big").unwrap(), big);
+}

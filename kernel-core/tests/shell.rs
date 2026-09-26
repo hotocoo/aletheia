@@ -946,8 +946,13 @@ impl ShellHost for ProgramHost {
         &self,
         p: &kernel_core::elf::Placement,
         args: &[u8],
+        services: &mut dyn kernel_core::progout::ProgramServices,
     ) -> Option<kernel_core::shell::ProgramRun> {
         self.0.set(Some((p.vaddr, p.entry, p.code.len())));
+        // The run can read the console's namespace (ADR-207): the object `note` is there.
+        let mut buf = [0u8; 16];
+        assert_eq!(services.read_object("note", &mut buf), Ok(10));
+        assert_eq!(&buf[..10], b"just words");
         self.1.borrow_mut().push(args.to_vec());
         Some(kernel_core::shell::ProgramRun {
             slices: 1,

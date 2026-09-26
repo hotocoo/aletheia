@@ -86,8 +86,9 @@ impl ShellHost for Host {
         &self,
         program: &kernel_core::elf::Placement,
         args: &[u8],
+        services: &mut dyn kernel_core::progout::ProgramServices,
     ) -> Option<shell::ProgramRun> {
-        crate::usermode::run_program_live(program, args)
+        crate::usermode::run_program_live(program, args, services)
     }
     fn run_tasks(&self) -> Option<shell::TaskRun> {
         Some(crate::usermode::run_tasks_live())
@@ -263,9 +264,10 @@ fn mount_or_format<D: BlockDevice>(dev: &mut D) -> Option<Filesystem> {
             dev,
             crate::usermode::PROGRAM_TARGET,
             crate::usermode::USERLAND_HELLO,
+            crate::usermode::USERLAND_SHOW,
         ) {
             Ok(()) => {
-                kprintln!("[console] new namespace: seeded the programs `hello`, `trap` and `spin`")
+                kprintln!("[console] new namespace: seeded the programs `hello`, `show`, `trap` and `spin`")
             }
             Err(e) => kprintln!("[console] could not seed the namespace's programs: {:?}", e),
         }

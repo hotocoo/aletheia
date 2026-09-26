@@ -40,8 +40,8 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_REGCHECK,
-    SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_PROCESS_INFO, SYS_RECV,
+    SYS_REGCHECK, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's PML4 `vm.rs` performs the real page mapping into each space.
@@ -162,6 +162,8 @@ isr_syscall_entry:
     mov     rdi, [rbx + 0]           // num  = saved rax
     mov     rsi, [rbx + 40]          // arg  = saved rdi
     mov     rdx, [rbx + 32]          // arg2 = saved rsi (ADR-204: a length)
+    mov     rcx, [rbx + 24]          // arg3 = saved rdx (ADR-207)
+    mov     r8,  [rbx + 72]          // arg4 = saved r10 (ADR-207)
     and     rsp, -16                 // 16-align before a System V call
     call    x86_syscall
     mov     [rbx + 0], rax           // return value -> saved RAX, restored by resume_frame
@@ -660,11 +662,35 @@ static mut TCBS: [Tcb; NTASK] = [Tcb::new(); NTASK];
 
 /// The capability-gated syscall AND the scheduler hooks, over one path.
 #[no_mangle]
-pub extern "sysv64" fn x86_syscall(num: u64, arg: u64, arg2: u64) -> u64 {
+pub extern "sysv64" fn x86_syscall(num: u64, arg: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     if Syscall::decode(num).is_none() {
         return u64::MAX;
     }
     match num {
+        SYS_FS_READ => {
+            // Admitted here, served by the run loop once the program is off the CPU (ADR-207):
+            // rdi, rsi, rdx, r10 = name, name length, buffer, buffer length.
+            // SAFETY: single-threaded (IF=0 on the kernel side); the grant and the pending slot
+            // belong to the program running now.
+            unsafe {
+                match kernel_core::progout::admit_read(
+                    (*addr_of!(PROGRAM_GRANT)).as_ref(),
+                    arg,
+                    arg2,
+                    arg3,
+                    arg4,
+                    USER_CODE_VA,
+                    USER_STACK_VA,
+                    USER_STACK_TOP,
+                ) {
+                    Some(req) => {
+                        *addr_of_mut!(PENDING_READ) = Some(req);
+                        0
+                    }
+                    None => u64::MAX,
+                }
+            }
+        }
         SYS_WRITE_CONSOLE => {
             #[allow(clippy::let_unit_value)]
             let () = PROGRAM_WINDOW;
@@ -920,9 +946,10 @@ fn with_ring3_traps<R>(f: impl FnOnce() -> R) -> R {
 fn run_program_contained(
     program: &kernel_core::elf::Placement,
     args: &[u8],
+    services: &mut dyn kernel_core::progout::ProgramServices,
     budget: u32,
 ) -> Option<kernel_core::shell::ProgramRun> {
-    with_ring3_traps(|| run_program(program, args, budget))
+    with_ring3_traps(|| run_program(program, args, services, budget))
 }
 
 /// `#GP` dispatch (ALET-P1-011). A ring-3 task executed a privileged instruction. Same policy, third
@@ -1877,12 +1904,18 @@ const PROGRAM_WINDOW: () =
     assert!(USER_STACK_VA == USER_CODE_VA + 0x1000 && USER_STACK_TOP == USER_CODE_VA + 0x2000);
 /// The running program's `console.output` grant (ADR-204); `None` whenever no `run` is in progress.
 static mut PROGRAM_GRANT: Option<kernel_core::progout::Grant> = None;
+/// A `SYS_FS_READ` the handler admitted, for the run loop to serve (ADR-207).
+static mut PENDING_READ: Option<kernel_core::progout::ReadRequest> = None;
 /// What the running program has written (ADR-204).
 static mut PROGRAM_OUT: kernel_core::progout::OutputSink = kernel_core::progout::OutputSink::new();
 
 /// `hello`, built from Rust source in `userland/` for this CPU and checked in (ADR-205);
 /// `scripts/check-userland.sh` requires it to be exactly what the source builds.
 pub const USERLAND_HELLO: &[u8] = include_bytes!("../../userland/bin/x86_64/hello.elf");
+/// `show`, from `userland/` (ADR-207): seeded, prints an object from the namespace.
+pub const USERLAND_SHOW: &[u8] = include_bytes!("../../userland/bin/x86_64/show.elf");
+/// `probe`, from `userland/` (ADR-207): the boot suite's probe of `SYS_FS_READ`; never seeded.
+const USERLAND_PROBE: &[u8] = include_bytes!("../../userland/bin/x86_64/probe.elf");
 
 /// Timer slices a console-started program gets before it is abandoned (ADR-201, ADR-203).
 const PROGRAM_SLICES: u32 = 64;
@@ -1905,6 +1938,7 @@ pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
 pub fn run_program_live(
     program: &kernel_core::elf::Placement,
     args: &[u8],
+    services: &mut dyn kernel_core::progout::ProgramServices,
 ) -> Option<kernel_core::shell::ProgramRun> {
     x86_64::instructions::interrupts::without_interrupts(|| {
         // IRQ0 ends a ring-3 slice only through the preemption entry; the desktop's plain handler
@@ -1912,7 +1946,7 @@ pub fn run_program_live(
         // SAFETY: `isr_timer_entry` is the raw preemption entry the boot suite proves; IF=0.
         unsafe { idt::install_preemption_timer(addr_of!(isr_timer_entry) as u64) };
         let run = crate::pic::with_timer_unmasked(|| {
-            with_ring3_traps(|| run_program(program, args, PROGRAM_SLICES))
+            with_ring3_traps(|| run_program(program, args, services, PROGRAM_SLICES))
         });
         idt::restore_timer();
         run
@@ -1922,6 +1956,7 @@ pub fn run_program_live(
 fn run_program(
     program: &kernel_core::elf::Placement,
     args: &[u8],
+    services: &mut dyn kernel_core::progout::ProgramServices,
     budget: u32,
 ) -> Option<kernel_core::shell::ProgramRun> {
     use crate::hal::{ActiveHal, Hal};
@@ -1959,7 +1994,9 @@ fn run_program(
     unsafe {
         // Preemptible (ADR-203): IF is set in ring 3, so the PIT ends a slice the program never
         // yields; the kernel side stays IF=0. The stack starts below the arguments.
-        let mut frame = TrapFrame::new_user(program.entry, args_va, RFLAGS_IF);
+        // SysV: at a function's entry `rsp + 8` is 16-aligned, as if a `call` had pushed a return
+        // address (ADR-207 fixes this: `_start` was entered with rsp itself 16-aligned).
+        let mut frame = TrapFrame::new_user(program.entry, args_va - 8, RFLAGS_IF);
         frame.regs[RDI] = args_va;
         frame.regs[RSI] = args.len() as u64;
         (*addr_of_mut!(TCBS))[0] = Tcb { frame, done: false };
@@ -2000,6 +2037,7 @@ fn run_program(
     unsafe {
         *addr_of_mut!(PROGRAM_GRANT) = Some(kernel_core::progout::Grant::new(task ^ 0xA11E_7A0A));
         (*addr_of_mut!(PROGRAM_OUT)).reset();
+        *addr_of_mut!(PENDING_READ) = None;
     }
     // The budget is timer slices; a syscall returns here without spending one, so a separate cap
     // bounds a program that does nothing but trap (ADR-204).
@@ -2043,7 +2081,28 @@ fn run_program(
             run.status = status;
             break;
         }
+        // A read the handler admitted is served now, through the program's frames, and its result
+        // lands in the saved rax (ADR-207); the entry stub's own writeback happened first.
+        // SAFETY: single-threaded; the program is off the CPU.
+        if let Some(req) = unsafe { (*addr_of_mut!(PENDING_READ)).take() } {
+            if let (Some(c), Some(st)) = (code[0], stack[0]) {
+                // SAFETY: `c` and `st` are this run's own identity-mapped frames, one page each, and
+                // nothing else touches them while the program is off the CPU.
+                let result = unsafe {
+                    kernel_core::progout::serve_read(
+                        &req,
+                        services,
+                        core::slice::from_raw_parts(c.addr() as *const u8, 0x1000),
+                        core::slice::from_raw_parts_mut(st.addr() as *mut u8, 0x1000),
+                    )
+                };
+                // SAFETY: single-threaded; slot 0 is this program's saved context.
+                unsafe { (*addr_of_mut!(TCBS))[0].frame.regs[RAX] = result };
+            }
+        }
     }
+    // SAFETY: single-threaded; an abandoned program's request is never served.
+    unsafe { *addr_of_mut!(PENDING_READ) = None };
     if !run.exited && run.terminated.is_none() {
         resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
     }
@@ -2989,9 +3048,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         let t = PROGRAM_TARGET;
         let hello = build(t, hello_code(t.machine));
         let trap = build(t, trap_code(t.machine));
-        let ran = judge(&hello, t)
-            .ok()
-            .and_then(|p| run_program_contained(&p, b"", PROGRAM_SLICES));
+        let ran = judge(&hello, t).ok().and_then(|p| {
+            run_program_contained(
+                &p,
+                b"",
+                &mut kernel_core::progout::NoServices,
+                PROGRAM_SLICES,
+            )
+        });
         check!(
             ran.as_ref().is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
             "run: a program image from the namespace format runs in user mode and exits with its status (55)"
@@ -3006,9 +3070,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         // A program written in Rust (ADR-205): the seeded `hello`, compiled from userland/ for this
         // CPU, is judged and runs exactly as the hand-assembled one does.
-        let rust = judge(USERLAND_HELLO, t)
-            .ok()
-            .and_then(|p| run_program_contained(&p, b"", PROGRAM_SLICES));
+        let rust = judge(USERLAND_HELLO, t).ok().and_then(|p| {
+            run_program_contained(
+                &p,
+                b"",
+                &mut kernel_core::progout::NoServices,
+                PROGRAM_SLICES,
+            )
+        });
         check!(
             rust.is_some_and(|r| r.exited
                 && r.status == HELLO_STATUS
@@ -3017,9 +3086,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         // Arguments (ADR-206): handed at entry, greeted back; one byte past the bound is refused
         // before anything runs.
-        let greeted = judge(USERLAND_HELLO, t)
-            .ok()
-            .and_then(|p| run_program_contained(&p, b"World", PROGRAM_SLICES));
+        let greeted = judge(USERLAND_HELLO, t).ok().and_then(|p| {
+            run_program_contained(
+                &p,
+                b"World",
+                &mut kernel_core::progout::NoServices,
+                PROGRAM_SLICES,
+            )
+        });
         check!(
             greeted.is_some_and(|r| r.exited && r.output == b"hello from user mode: World\n"),
             "run: a program is handed its arguments at entry and reads them from its own stack page"
@@ -3028,16 +3102,99 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         check!(
             judge(USERLAND_HELLO, t)
                 .ok()
-                .and_then(|p| run_program_contained(&p, &too_many, PROGRAM_SLICES))
+                .and_then(|p| run_program_contained(
+                    &p,
+                    &too_many,
+                    &mut kernel_core::progout::NoServices,
+                    PROGRAM_SLICES
+                ))
                 .is_none(),
             "run: arguments past the bound are refused before the program starts"
         );
+        // Programs read the namespace that started them (ADR-207), over a scratch namespace the
+        // suite formats itself: served through the program's frames, refused by name otherwise,
+        // and allocating nothing per read.
+        {
+            use kernel_core::fs::Filesystem;
+            use kernel_core::progout::{FsServices, NoServices, ProgramServices};
+            let mut dev =
+                kernel_core::storage::MemBlockDevice::new(kernel_core::fs::FILE_DATA_START + 16);
+            let mounted = Filesystem::format(&mut dev)
+                .ok()
+                .and_then(|_| Filesystem::mount(&mut dev).ok());
+            let Some(mut fs) = mounted else {
+                return Err((n + 1, "read: the suite's scratch namespace would not mount"));
+            };
+            let created = fs.create(&mut dev, "note", b"just words").is_ok();
+            let run = |img: &[u8], a: &[u8], svc: &mut dyn ProgramServices| {
+                judge(img, t).ok().and_then(|p| {
+                    let p = &p;
+                    run_program_contained(p, a, svc, PROGRAM_SLICES)
+                })
+            };
+            let mut svc = FsServices { fs: &fs, dev: &dev };
+            let read = run(USERLAND_PROBE, b"read", &mut svc);
+            check!(
+                created
+                    && read
+                        .is_some_and(|r| r.exited && r.status == 10 && r.output == b"just words"),
+                "read: a program reads an object from the namespace that started it"
+            );
+            let shown = run(USERLAND_SHOW, b"note", &mut svc);
+            let bare = run(USERLAND_PROBE, b"read", &mut NoServices);
+            check!(
+                shown.is_some_and(|r| r.status == 10 && r.output == b"just words\n")
+                    && bare
+                        .is_some_and(|r| r.exited && r.status == u64::MAX && r.output.is_empty()),
+                "read: `show` prints an object; a run handed no namespace is refused"
+            );
+            let refused = [
+                &b"codebuf"[..],
+                b"straddle",
+                b"outside",
+                b"noname",
+                b"pastend",
+            ]
+            .iter()
+            .all(|case| {
+                run(USERLAND_PROBE, case, &mut svc)
+                    .is_some_and(|r| r.exited && r.status == u64::MAX)
+            });
+            check!(
+                refused,
+                "read: a buffer in the code page, a name straddling the pages or outside them, an empty name, and a buffer past the stack are refused"
+            );
+            let gross = |case: &[u8], svc: &mut dyn ProgramServices| {
+                let before = crate::heap::used_bytes();
+                let r = run(USERLAND_PROBE, case, svc);
+                (
+                    crate::heap::used_bytes() - before,
+                    r.is_some_and(|r| r.exited && r.status == 10),
+                )
+            };
+            let (few, few_ok) = gross(b"loop16", &mut svc);
+            let (many, many_ok) = gross(b"loop256", &mut svc);
+            crate::kprintln!(
+                "[usermode] read storm: 16 reads moved the gross heap {} B, 256 reads {} B",
+                few,
+                many
+            );
+            check!(
+                few_ok && many_ok && few == many,
+                "read: 256 reads allocate exactly what 16 do - nothing per read"
+            );
+        }
         let cv = t.code_va;
         let write = |addr: u64, len: u64| {
             let img = build(t, &kernel_core::elf::writer_code(t.machine, addr, len));
-            judge(&img, t)
-                .ok()
-                .and_then(|p| run_program_contained(&p, b"", PROGRAM_SLICES))
+            judge(&img, t).ok().and_then(|p| {
+                run_program_contained(
+                    &p,
+                    b"",
+                    &mut kernel_core::progout::NoServices,
+                    PROGRAM_SLICES,
+                )
+            })
         };
         let refused = [(cv - 0x1000, 8), (cv + 0x2000 - 4, 8), (cv, 65_537)]
             .iter()
@@ -3061,9 +3218,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         let gross = |count: u64| {
             let img = build(t, &kernel_core::elf::loop_writer_code(t.machine, count, 16));
             let before = crate::heap::used_bytes();
-            let r = judge(&img, t)
-                .ok()
-                .and_then(|p| run_program_contained(&p, b"", PROGRAM_SLICES));
+            let r = judge(&img, t).ok().and_then(|p| {
+                run_program_contained(
+                    &p,
+                    b"",
+                    &mut kernel_core::progout::NoServices,
+                    PROGRAM_SLICES,
+                )
+            });
             (crate::heap::used_bytes() - before, r)
         };
         let (few, few_run) = gross(16);
@@ -3083,9 +3245,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             "write: 1024 writes allocate exactly what 16 do - nothing per call"
         );
         let before = supervisor().terminated();
-        let trapped = judge(&trap, t)
-            .ok()
-            .and_then(|p| run_program_contained(&p, b"", PROGRAM_SLICES));
+        let trapped = judge(&trap, t).ok().and_then(|p| {
+            run_program_contained(
+                &p,
+                b"",
+                &mut kernel_core::progout::NoServices,
+                PROGRAM_SLICES,
+            )
+        });
         check!(
             trapped.is_some_and(|r| r.terminated.is_some() && !r.exited)
                 && supervisor().terminated() == before + 1,
@@ -3094,9 +3261,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         // A divide by zero (#DE, vector 0) - a vector the ring-3 suite never needed before.
         let de = build(t, &[0x48, 0x31, 0xc9, 0x48, 0xf7, 0xf1, 0xeb, 0xfe]);
         let before_de = supervisor().terminated();
-        let divided = judge(&de, t)
-            .ok()
-            .and_then(|p| run_program_contained(&p, b"", PROGRAM_SLICES));
+        let divided = judge(&de, t).ok().and_then(|p| {
+            run_program_contained(
+                &p,
+                b"",
+                &mut kernel_core::progout::NoServices,
+                PROGRAM_SLICES,
+            )
+        });
         check!(
             divided.is_some_and(|r| r.terminated.is_some())
                 && supervisor().terminated() == before_de + 1,
@@ -3104,16 +3276,26 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         // A program that never yields (ADR-203): the timer ends every slice, the budget ends it.
         let spin = build(t, spin_code(t.machine));
-        let spun = judge(&spin, t)
-            .ok()
-            .and_then(|p| run_program_contained(&p, b"", BOOT_SPIN_SLICES));
+        let spun = judge(&spin, t).ok().and_then(|p| {
+            run_program_contained(
+                &p,
+                b"",
+                &mut kernel_core::progout::NoServices,
+                BOOT_SPIN_SLICES,
+            )
+        });
         check!(
             spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.preempted == BOOT_SPIN_SLICES),
             "run: a program that never yields is preempted by the timer every slice and abandoned at its budget"
         );
-        let after_spin = judge(&hello, t)
-            .ok()
-            .and_then(|p| run_program_contained(&p, b"", PROGRAM_SLICES));
+        let after_spin = judge(&hello, t).ok().and_then(|p| {
+            run_program_contained(
+                &p,
+                b"",
+                &mut kernel_core::progout::NoServices,
+                PROGRAM_SLICES,
+            )
+        });
         check!(
             after_spin.is_some_and(|r| r.exited && r.status == HELLO_STATUS),
             "run: after an abandoned spinner, a program still runs and exits with its status"
@@ -3127,7 +3309,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         for _ in 0..16 {
             if judge(&trap, t)
                 .ok()
-                .and_then(|p| run_program_contained(&p, b"", PROGRAM_SLICES))
+                .and_then(|p| {
+                    run_program_contained(
+                        &p,
+                        b"",
+                        &mut kernel_core::progout::NoServices,
+                        PROGRAM_SLICES,
+                    )
+                })
                 .is_some_and(|r| r.terminated.is_some())
             {
                 contained += 1;

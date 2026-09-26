@@ -18,7 +18,9 @@ pub const SYS_RECV: u64 = 5;
 pub const SYS_REGCHECK: u64 = 6;
 /// Read-only process/supervisor counters. Returns packed `(terminated << 32) | escalations`.
 pub const SYS_PROCESS_INFO: u64 = 7;
-/// Read bytes from a capability-bound filesystem object. Reserved until user-memory copying lands.
+/// Read an object from the namespace that started the program (ADR-207): `(name, name_len, buf,
+/// buf_len)` in the first four argument registers (x0..x3, a0..a3, rdi/rsi/rdx/r10); returns the
+/// object's full length (copied: at most `buf_len`), or `u64::MAX` when refused.
 pub const SYS_FS_READ: u64 = 8;
 /// Write bytes to a capability-bound filesystem object. Reserved until user-memory copying lands.
 pub const SYS_FS_WRITE: u64 = 9;

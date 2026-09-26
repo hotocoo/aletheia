@@ -994,8 +994,14 @@ pub trait ShellHost {
         None
     }
     /// Run a judged program as one user-mode task through the advised scheduler (ADR-201), handing
-    /// it `args` (at most [`crate::elf::MAX_ARGS`] bytes) at entry (ADR-206).
-    fn run_program(&self, _program: &crate::elf::Placement, _args: &[u8]) -> Option<ProgramRun> {
+    /// it `args` (at most [`crate::elf::MAX_ARGS`] bytes) at entry (ADR-206) and serving its reads
+    /// of the namespace through `services` (ADR-207).
+    fn run_program(
+        &self,
+        _program: &crate::elf::Placement,
+        _args: &[u8],
+        _services: &mut dyn crate::progout::ProgramServices,
+    ) -> Option<ProgramRun> {
         None
     }
     /// Run this target's user-mode tasks through the advised scheduler now (ADR-199). `None` = this
@@ -1530,8 +1536,8 @@ fn split_first(line: &str) -> (&str, &str) {
     }
 }
 
-/// What a freshly formatted namespace starts with (ADR-201..205): the programs `hello` (built from
-/// Rust source in `userland/`, handed in by the target: prints a line, exits with 55), `trap`
+/// What a freshly formatted namespace starts with (ADR-201..207): the programs `hello` and `show`
+/// (built from Rust source in `userland/`, handed in by the target), `trap`
 /// (executes an undefined instruction) and `spin` (never yields) for this CPU, so a new machine has
 /// something to `run`, and two things that must be contained. Only ever called on the format
 /// path, so an object the operator removed is never brought back.
@@ -1540,8 +1546,10 @@ pub fn seed_namespace<D: BlockDevice>(
     dev: &mut D,
     target: crate::elf::Target,
     hello: &[u8],
+    show: &[u8],
 ) -> Result<(), crate::fs::FsError> {
     fs.create(dev, "hello", hello)?;
+    fs.create(dev, "show", show)?;
     let trap = crate::elf::build(target, crate::elf::trap_code(target.machine));
     fs.create(dev, "trap", &trap)?;
     let spin = crate::elf::build(target, crate::elf::spin_code(target.machine));
@@ -1556,6 +1564,7 @@ fn run_program(
     name: &str,
     args: &[u8],
     bytes: &[u8],
+    services: &mut dyn crate::progout::ProgramServices,
     out: &mut dyn FnMut(&str),
 ) {
     let Some(target) = host.program_target() else {
@@ -1579,7 +1588,7 @@ fn run_program(
         }
     };
     let before = crate::mlsched::resident::stats().unwrap_or_default();
-    let Some(run) = host.run_program(&program, args) else {
+    let Some(run) = host.run_program(&program, args, services) else {
         out("run: this machine cannot start a program from the console");
         return;
     };
@@ -2110,7 +2119,10 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 );
             } else {
                 match fs.read(dev, name) {
-                    Ok(bytes) => run_program(host, name, args.as_bytes(), &bytes, out),
+                    Ok(bytes) => {
+                        let mut services = crate::progout::FsServices { fs, dev };
+                        run_program(host, name, args.as_bytes(), &bytes, &mut services, out)
+                    }
                     Err(e) => out(&fs_error(e)),
                 }
             }

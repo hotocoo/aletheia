@@ -163,6 +163,9 @@ check_session() {
     # And arguments (ADR-206): what follows the name reaches the program, which greets it back.
     grep -q "^hello from user mode: to the world" <<<"$log" \
       || { echo "  FAIL [$label/first] hello was not handed its arguments"; bad=1; }
+    # And a program reads the namespace (ADR-207): `show` prints the object the operator wrote.
+    grep -q "run: show said:" <<<"$log" && [ "$(grep -c "^$BODY" <<<"$log")" -ge 2 ] \
+      || { echo "  FAIL [$label/first] show did not print manifesto"; bad=1; }
     grep -q "run: hello admitted: advisor said" <<<"$log" || { echo "  FAIL [$label/first] run did not report the advisor's answer"; bad=1; }
     # And a program that executes an undefined instruction costs that task, never the machine
     # (ADR-202): twice, each terminated by the supervisor, and `hello` still runs afterwards.
@@ -247,7 +250,7 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
@@ -325,7 +328,7 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?
