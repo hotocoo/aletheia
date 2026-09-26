@@ -25,8 +25,9 @@ every live timestamp, being uptime, landed "before" it. `silence` read hours str
   resident advisor with the pages it actually mapped, admitted through `resident::admit`, dispatched
   by `PriorityScheduler::schedule_next`, dispatches and exits fed back. It is the same
   `run_advised_scheduler` the boot suite proves, reached through `ShellHost::run_tasks`.
-* The run is fenced for a live machine. Interrupts are masked for its duration on aarch64 (DAIF.I)
-  and riscv64 (`sstatus.SIE` and every `sie` source, since an S-mode interrupt is taken from U-mode
+* The run is fenced for a live machine. The tasks' own frames already mask interrupts at the lower
+  privilege (aarch64 SPSR 0x3C0, x86-64 RFLAGS 0x2); the kernel side is masked for the run's
+  duration too, on aarch64 (DAIF.I), x86-64 (`without_interrupts`) and riscv64 (`sstatus.SIE` and every `sie` source, since an S-mode interrupt is taken from U-mode
   whatever SIE says); riscv64 also installs the user-mode trap vector for exactly the run, because
   the console runs on the kernel vector and an `ecall` taken there is stored through the task's own
   stack pointer.

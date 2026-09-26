@@ -1727,8 +1727,13 @@ fn run_scheduler() -> (bool, bool, bool) {
 /// The console's `tasks` (ADR-199): the same advised run the boot suite proves, started at the
 /// operator's word, so the resident advisor is consulted during the machine's life and not only
 /// during its boot.
+///
+/// Interrupts are off for the whole run, as they are during the boot suite: the tasks' frames
+/// already clear IF, and this closes the kernel-side window where a task's CR3 is loaded and the
+/// desktop's pump could otherwise run from IRQ0.
 pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
-    let (all_exited, own_magic, advised) = run_advised_scheduler();
+    let (all_exited, own_magic, advised) =
+        x86_64::instructions::interrupts::without_interrupts(run_advised_scheduler);
     kernel_core::shell::TaskRun {
         tasks: NTASK,
         all_exited,

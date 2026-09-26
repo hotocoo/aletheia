@@ -33,7 +33,7 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-09-23, latest (THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
+**As of:** 2026-09-26, latest (THE SCHEDULER IS ADVISED WHILE THE MACHINE RUNS — ADR-199, see the dated section below; waves ADR-174..198 are recorded there too. Before it: THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
 advisor (`lethe=12`) and the resident governor on real timer interrupts (`lethed=15`) boot on all three CPUs, 4-7 ms each,
 with a live census gated on every target; conformance 383 -> **397**; attack surface measured against Linux and the boot
 gap attributed, each its own CI job. Before it: THE BROWSER WINDOW'S OWN KEYS — ADR-164. While the browser window holds focus,
