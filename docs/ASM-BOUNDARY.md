@@ -52,6 +52,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel-riscv64/src/smp.rs` | 6 | secondary hart start via SBI HSM, IPI via CLINT/SSIP |
 | `kernel-riscv64/src/trap.rs` | 5 | stvec vector stubs, scause/seepage-free save/restore frames |
 | `kernel-riscv64/src/usermode.rs` | 13 | U-mode transition sret frames, syscall trampolines; the console's `tasks` run (ADR-199): `csrrw sie, zero` to mask every interrupt source for the run, `csrw sie` to restore it; `SYS_WRITE_CONSOLE` (ADR-204): `csrs sstatus, SUM` so S-mode may read the program's page for exactly the copy, `csrc sstatus, SUM` after |
+| `userland/src/sys.rs` | 3 | the program side of the syscall ABI (ADR-205): one trap instruction per CPU (`svc #0`, `ecall`, `int 0x80`) with the number and two arguments in the registers the kernel reads |
 | `kernel-riscv64/src/virtio.rs` | 1 | MMIO notify write with fence |
 | `kernel-riscv64/src/vm.rs` | 6 | satp load, sfence.vma shootdowns, fence.i |
 | `kernel-x86_64/src/hal.rs` | 2 | port-mapped I/O (in/out), cli/sti/hlt |

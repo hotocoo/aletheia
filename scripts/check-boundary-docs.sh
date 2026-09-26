@@ -28,7 +28,7 @@ if [ "$fail" = 1 ]; then exit 1; fi
 
 echo "== [1] assembly/Rust boundary inventory"
 tree_asm=$(grep -rnE '(^|[^a-zA-Z_])(global_asm|naked_asm|asm)!' --include='*.rs' \
-      kernel/src kernel-core/src kernel-x86_64/src kernel-riscv64/src \
+      kernel/src kernel-core/src kernel-x86_64/src kernel-riscv64/src userland/src \
   | awk -F: '{ l=$2; sub(/^[ \t]+/, "", l); if (l !~ /^\/\//) print $1 }' \
   | sort | uniq -c | awk '{print $2" "$1}' | sort)
 doc_asm=$(grep -E '^\| .[^|]*. \| [0-9]+ \|' "$ASM_DOC" \

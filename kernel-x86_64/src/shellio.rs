@@ -270,7 +270,12 @@ fn mount_or_format<D: BlockDevice>(dev: &mut D) -> Option<Filesystem> {
     };
     // A namespace this boot created starts with `hello` (ADR-201); an older one is left alone.
     if kernel_core::persist::formatted_this_boot() {
-        match shell::seed_namespace(&mut fs, dev, crate::usermode::PROGRAM_TARGET) {
+        match shell::seed_namespace(
+            &mut fs,
+            dev,
+            crate::usermode::PROGRAM_TARGET,
+            crate::usermode::USERLAND_HELLO,
+        ) {
             Ok(()) => {
                 kprintln!("[console] new namespace: seeded the programs `hello`, `trap` and `spin`")
             }

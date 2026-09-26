@@ -1,0 +1,22 @@
+[package]
+name = "aletheia-userland"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "hello"
+path = "src/hello.rs"
+test = false
+bench = false
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+debug = false
+strip = true
+codegen-units = 1
+lto = true
+
+[profile.dev]
+panic = "abort"

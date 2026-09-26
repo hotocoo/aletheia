@@ -1878,6 +1878,10 @@ static mut PROGRAM_GRANT: Option<kernel_core::progout::Grant> = None;
 /// What the running program has written (ADR-204).
 static mut PROGRAM_OUT: kernel_core::progout::OutputSink = kernel_core::progout::OutputSink::new();
 
+/// `hello`, built from Rust source in `userland/` for this CPU and checked in (ADR-205);
+/// `scripts/check-userland.sh` requires it to be exactly what the source builds.
+pub const USERLAND_HELLO: &[u8] = include_bytes!("../../userland/bin/x86_64/hello.elf");
+
 /// Timer slices a console-started program gets before it is abandoned (ADR-201, ADR-203).
 const PROGRAM_SLICES: u32 = 64;
 /// Returns to the kernel a program gets in all, syscalls included (ADR-204): what abandons a
@@ -2980,6 +2984,17 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             ran.as_ref()
                 .is_some_and(|r| r.output == kernel_core::elf::HELLO_LINE && r.dropped == 0),
             "write: a program's line reaches the console through SYS_WRITE_CONSOLE"
+        );
+        // A program written in Rust (ADR-205): the seeded `hello`, compiled from userland/ for this
+        // CPU, is judged and runs exactly as the hand-assembled one does.
+        let rust = judge(USERLAND_HELLO, t)
+            .ok()
+            .and_then(|p| run_program_contained(&p, PROGRAM_SLICES));
+        check!(
+            rust.is_some_and(|r| r.exited
+                && r.status == HELLO_STATUS
+                && r.output == kernel_core::elf::HELLO_LINE),
+            "run: hello built from Rust source in userland/ runs, prints its line and exits with 55"
         );
         let cv = t.code_va;
         let write = |addr: u64, len: u64| {
