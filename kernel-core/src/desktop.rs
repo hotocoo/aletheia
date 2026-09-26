@@ -102,6 +102,32 @@ pub const DESKTOP_RID: u32 = 11;
 /// The scanout: the framebuffer console's geometry, the same one `compose_suite` proves.
 pub const W: u32 = virtiogpu::CONSOLE_FB_WIDTH;
 pub const H: u32 = virtiogpu::CONSOLE_FB_HEIGHT;
+
+/// Backing pages a desktop of `w` x `h` BGRA pixels needs (ADR-192).
+pub const fn pages_for(w: u32, h: u32) -> usize {
+    (w as usize * h as usize * 4).div_ceil(crate::dma::PAGE)
+}
+
+/// The desktop's size, chosen at boot (ADR-192): the display's best EDID mode when there is one,
+/// no smaller than the historic 640x240 layout needs, no larger than the GPU resource and the
+/// compositor allow, and only if the machine can back it with at most a quarter of its free
+/// frames. Anything else is the fixed 640x240 desktop, and the caller can say why.
+pub fn choose_geometry(best: Option<(u32, u32)>, free_frames: usize) -> (u32, u32) {
+    match best {
+        Some((w, h))
+            if w >= W
+                && h >= H
+                && w <= virtiogpu::MAX_RESOURCE_EXTENT_PX
+                && h <= virtiogpu::MAX_RESOURCE_EXTENT_PX
+                && (w as u64 * h as u64) <= virtiogpu::MAX_RESOURCE_AREA_PX
+                && (w as usize * h as usize) <= crate::compositor::MAX_SURFACE_PIXELS
+                && pages_for(w, h) <= free_frames / 4 =>
+        {
+            (w, h)
+        }
+        _ => (W, H),
+    }
+}
 /// Backing pages the caller must hand over (identity-mapped frames it owns).
 pub const PAGES: usize = virtiogpu::CONSOLE_FB_PAGES;
 
@@ -232,16 +258,23 @@ const TASKBAR_BUTTONS: u32 = 5;
 /// The chrome's fixed measurements, handed to the persona policy. These are the SAME numbers the
 /// pre-persona constants encode, so `ShellPersona::Aletheia` reproduces the historic layout and
 /// every GUI proof recorded before personas existed keeps its meaning.
-const CHROME: persona::ChromeMetrics = persona::ChromeMetrics {
-    surface_w: W,
-    surface_h: H,
-    panel_h: TASKBAR_H,
-    launcher_w: TASKBAR_MENU_W,
-    button_w: TASKBAR_BUTTON_W,
-    button_count: TASKBAR_BUTTONS,
-    workspace_w: TASKBAR_WS_W,
-    workspace_count: MAX_WORKSPACES as u32,
-};
+#[cfg(test)]
+const CHROME: persona::ChromeMetrics = chrome_for(W, H);
+
+/// The chrome's measurements for a desktop of `w` x `h` (ADR-192): the panel spans the real width
+/// and sits on the real bottom edge; every other measurement is the historic one.
+const fn chrome_for(w: u32, h: u32) -> persona::ChromeMetrics {
+    persona::ChromeMetrics {
+        surface_w: w,
+        surface_h: h,
+        panel_h: TASKBAR_H,
+        launcher_w: TASKBAR_MENU_W,
+        button_w: TASKBAR_BUTTON_W,
+        button_count: TASKBAR_BUTTONS,
+        workspace_w: TASKBAR_WS_W,
+        workspace_count: MAX_WORKSPACES as u32,
+    }
+}
 /// Cycle the desktop's shell persona. Alt+P is free on every persona and is deliberately NOT a
 /// window or workspace accelerator, so changing the convention can never also move a window.
 const KEY_P: u16 = 25;
@@ -365,6 +398,9 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     wm: WindowManager,
     gpu: VirtioGpu<H, T>,
     pages: Vec<usize>,
+    /// The desktop's size in pixels, chosen at boot (ADR-192).
+    w: u32,
+    h: u32,
     posted: u64,
     term: TextGrid,
     packed: Vec<u8>,
@@ -590,8 +626,8 @@ const TASKBAR_APPS: [u32; TASKBAR_BUTTONS as usize] = [WINDOW, MONITOR, FILES, H
 /// Resolve a taskbar x-coordinate to either the desktop launcher or one managed application under
 /// the active persona's chrome layout. Keeping the hit map pure makes the launcher boundary
 /// testable without a live compositor, for every persona.
-fn taskbar_target(chrome: &ChromeLayout, x: u32) -> Option<u32> {
-    match chrome.hit(CHROME, x) {
+fn taskbar_target(chrome: &ChromeLayout, metrics: persona::ChromeMetrics, x: u32) -> Option<u32> {
+    match chrome.hit(metrics, x) {
         ChromeHit::Launcher => Some(MENU),
         ChromeHit::Button(n) => TASKBAR_APPS.get(n as usize).copied(),
         _ => None,
@@ -600,8 +636,12 @@ fn taskbar_target(chrome: &ChromeLayout, x: u32) -> Option<u32> {
 
 /// Resolve the taskbar's workspace strip to the user-facing workspace number. This is separate
 /// from `taskbar_target` because workspaces are desktop state, not managed application windows.
-fn taskbar_workspace_target(chrome: &ChromeLayout, x: u32) -> Option<u8> {
-    match chrome.hit(CHROME, x) {
+fn taskbar_workspace_target(
+    chrome: &ChromeLayout,
+    metrics: persona::ChromeMetrics,
+    x: u32,
+) -> Option<u8> {
+    match chrome.hit(metrics, x) {
         ChromeHit::Workspace(n) => Some(n),
         _ => None,
     }
@@ -611,8 +651,8 @@ fn taskbar_workspace_target(chrome: &ChromeLayout, x: u32) -> Option<u8> {
 /// ordinary taskbar chrome; 1 is the launcher, 2..=4 are the managed application buttons and
 /// 10..=13 are workspaces 1..=4. The id is presentation-only and never becomes WM authority, and
 /// it is persona-independent: the same affordance keeps the same id wherever the persona puts it.
-fn taskbar_hover_target(chrome: &ChromeLayout, x: u32) -> u8 {
-    match chrome.hit(CHROME, x) {
+fn taskbar_hover_target(chrome: &ChromeLayout, metrics: persona::ChromeMetrics, x: u32) -> u8 {
+    match chrome.hit(metrics, x) {
         ChromeHit::Launcher => 1,
         ChromeHit::Button(n) => 2 + n as u8,
         ChromeHit::Workspace(n) => 9 + n,
@@ -726,11 +766,16 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         kb: VirtioInput<H, T>,
         mut tab: VirtioInput<H, T>,
         pages: Vec<usize>,
+        (w, h): (u32, u32),
     ) -> Result<Self, &'static str> {
-        if pages.len() != PAGES {
+        if w < W || h < H {
+            return Err("the desktop is smaller than its layout needs");
+        }
+        if pages.len() != pages_for(w, h) {
             return Err("the desktop's backing store is not the scanout's page count");
         }
-        gpu.create_resource_2d(DESKTOP_RID, W, H)
+        let chrome_m = chrome_for(w, h);
+        gpu.create_resource_2d(DESKTOP_RID, w, h)
             .map_err(|_| "the desktop's GPU resource was refused")?;
         gpu.attach_backing(DESKTOP_RID, &pages)
             .map_err(|_| "the desktop's backing pages were refused")?;
@@ -741,7 +786,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let (tw, th) = term.pixel_size();
         let mon = TextGrid::new(MON_COLS, MON_ROWS);
         let (mw, mh) = mon.pixel_size();
-        let mut comp = Compositor::new(0x0D3A_1D05, W, H);
+        let mut comp = Compositor::new(0x0D3A_1D05, w, h);
         let sess = comp
             .open_input_session()
             .map_err(|_| "the desktop's input session was refused")?;
@@ -751,27 +796,17 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         // whatever the previous framebuffer contents happened to be.  The geometry stays within
         // the compositor's per-surface ceiling (the scanout is 640x240 = 153,600 pixels).
         let tok_panel = comp
-            .mint_surface(PANEL, W, H)
+            .mint_surface(PANEL, w, h)
             .map_err(|_| "the desktop's panel surface was refused")?;
-        let _ = comp.fill_rect(
-            PANEL,
-            tok_panel,
-            Rect {
-                x: 0,
-                y: 0,
-                w: W,
-                h: H,
-            },
-            true,
-        );
+        let _ = comp.fill_rect(PANEL, tok_panel, Rect { x: 0, y: 0, w, h }, true);
         let _ = comp.fill_rect(
             PANEL,
             tok_panel,
             Rect {
                 x: 8,
                 y: 8,
-                w: W.saturating_sub(16),
-                h: H.saturating_sub(16),
+                w: w.saturating_sub(16),
+                h: h.saturating_sub(16),
             },
             false,
         );
@@ -861,7 +896,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             TASKBAR,
             tok_taskbar,
             TASKBAR_X,
-            ShellPersona::default().layout(CHROME).panel_y,
+            ShellPersona::default().layout(chrome_m).panel_y,
         )
         .map_err(|_| "the taskbar placement was refused")?;
         let mut taskbar_packed = Vec::new();
@@ -886,8 +921,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let tok_switcher = comp
             .mint_surface(SWITCHER, switcher_w, switcher_h)
             .map_err(|_| "the window switcher surface was refused")?;
-        let switcher_x = ((W.saturating_sub(switcher_w)) / 2) as i32;
-        let switcher_y = ((H.saturating_sub(switcher_h)) / 2) as i32;
+        let switcher_x = ((w.saturating_sub(switcher_w)) / 2) as i32;
+        let switcher_y = ((h.saturating_sub(switcher_h)) / 2) as i32;
         comp.attach(SWITCHER, tok_switcher, switcher_x, switcher_y)
             .map_err(|_| "the window switcher placement was refused")?;
         let mut switcher_packed = Vec::new();
@@ -899,7 +934,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         comp.set_focus(sess, WINDOW)
             .map_err(|_| "focusing the terminal window was refused")?;
         let _ = wm.toggle_minimize(&mut comp, sess, HELP);
-        comp.move_cursor(sess, W / 2, H / 2)
+        comp.move_cursor(sess, w / 2, h / 2)
             .map_err(|_| "placing the cursor was refused")?;
         comp.set_cursor_shape(sess, CursorShape::Arrow)
             .map_err(|_| "setting the desktop cursor shape was refused")?;
@@ -913,7 +948,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         if x_min != 0 || y_min != 0 || x_max != y_max {
             return Err("the desktop's pointer axes do not match the qualified range");
         }
-        let mut pt_dec = PointerDecoder::new(W, H);
+        let mut pt_dec = PointerDecoder::new(w, h);
         pt_dec.set_axis(x_max, y_max);
 
         let mut d = Desktop {
@@ -926,6 +961,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             wm,
             gpu,
             pages,
+            w,
+            h,
             posted: 0,
             term,
             packed,
@@ -968,10 +1005,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             chrome_focus: WINDOW,
             keyboard_resize: false,
             term_input: VecDeque::with_capacity(TERM_INPUT_CAP),
-            pointer: (W / 2, H / 2),
+            pointer: (w / 2, h / 2),
             last_title_click: None,
             persona: ShellPersona::default(),
-            chrome: ShellPersona::default().layout(CHROME),
+            chrome: ShellPersona::default().layout(chrome_m),
         };
         d.show_frame()?;
         Ok(d)
@@ -995,7 +1032,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
     /// Compose one frame through the real raster; hand it to the device ONLY if it changed.
     fn show_frame(&mut self) -> Result<u64, &'static str> {
-        let mut surf = Surface::new(&self.pages, W, H)
+        let mut surf = Surface::new(&self.pages, self.w, self.h)
             .map_err(|_| "the backing pages did not form a raster")?;
         let mut sink = ComposeSink::new(&mut surf).with_wallpaper(PANEL, WALLPAPER);
         let st = self.comp.compose_frame(&mut sink);
@@ -1008,10 +1045,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         // SAFETY: the device is live and ours; the rect is the resource's own full extent.
         unsafe {
             self.gpu
-                .transfer_to_host_2d(DESKTOP_RID, GpuRect::covering(W, H))
+                .transfer_to_host_2d(DESKTOP_RID, GpuRect::covering(self.w, self.h))
                 .map_err(|_| "the desktop frame's TRANSFER was refused")?;
             self.gpu
-                .resource_flush(DESKTOP_RID, GpuRect::covering(W, H))
+                .resource_flush(DESKTOP_RID, GpuRect::covering(self.w, self.h))
                 .map_err(|_| "the desktop frame's FLUSH was refused")?;
         }
         Ok(st.pixels_blitted)
@@ -1137,7 +1174,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
                         && (lx as u32) < tw
                         && (ly as u32) < th
                     {
-                        taskbar_hover_target(&self.chrome, lx as u32)
+                        taskbar_hover_target(&self.chrome, chrome_for(self.w, self.h), lx as u32)
                     } else {
                         0
                     }
@@ -1280,11 +1317,13 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             return false;
         }
         let lx = lx as u32;
-        if let Some(workspace) = taskbar_workspace_target(&self.chrome, lx) {
+        if let Some(workspace) =
+            taskbar_workspace_target(&self.chrome, chrome_for(self.w, self.h), lx)
+        {
             self.switch_workspace(workspace);
             return true;
         }
-        let Some(target) = taskbar_target(&self.chrome, lx) else {
+        let Some(target) = taskbar_target(&self.chrome, chrome_for(self.w, self.h), lx) else {
             return false;
         };
         if target == MENU {
@@ -1691,7 +1730,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Adopt `persona` and reposition the panel. Returns the persona now in force.
     pub fn set_persona(&mut self, persona: ShellPersona) -> ShellPersona {
         self.persona = persona;
-        self.chrome = persona.layout(CHROME);
+        self.chrome = persona.layout(chrome_for(self.w, self.h));
         let _ = self
             .comp
             .move_surface(TASKBAR, self.taskbar_token, TASKBAR_X, self.chrome.panel_y);
@@ -1838,7 +1877,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             // The hand appears over an AFFORDANCE, and the persona decides where those are. This
             // asks the same layout the hit map and the painter ask, so the cursor cannot promise
             // a button that is not there.
-            let over_affordance = lx >= 0 && self.chrome.hit(CHROME, lx as u32) != ChromeHit::None;
+            let over_affordance = lx >= 0
+                && self.chrome.hit(chrome_for(self.w, self.h), lx as u32) != ChromeHit::None;
             if over_affordance
                 && ly >= crate::textgrid::TITLE_H as i32
                 && lx < tw as i32
@@ -2941,21 +2981,33 @@ mod tests {
             let chrome = persona.layout(super::CHROME);
             let label = persona.label();
             assert_eq!(
-                taskbar_target(&chrome, chrome.launcher_x),
+                taskbar_target(&chrome, super::CHROME, chrome.launcher_x),
                 Some(super::MENU),
                 "{label}"
             );
             assert_eq!(
-                taskbar_target(&chrome, chrome.launcher_x + super::TASKBAR_MENU_W - 1),
+                taskbar_target(
+                    &chrome,
+                    super::CHROME,
+                    chrome.launcher_x + super::TASKBAR_MENU_W - 1
+                ),
                 Some(super::MENU),
                 "{label}"
             );
             for (n, expected) in super::TASKBAR_APPS.iter().enumerate() {
                 let x = chrome.buttons_x + n as u32 * super::TASKBAR_BUTTON_W;
-                assert_eq!(taskbar_target(&chrome, x), Some(*expected), "{label}");
+                assert_eq!(
+                    taskbar_target(&chrome, super::CHROME, x),
+                    Some(*expected),
+                    "{label}"
+                );
             }
             let past = chrome.buttons_x + super::TASKBAR_BUTTON_W * super::TASKBAR_BUTTONS;
-            assert_eq!(taskbar_target(&chrome, past), None, "{label}");
+            assert_eq!(
+                taskbar_target(&chrome, super::CHROME, past),
+                None,
+                "{label}"
+            );
         }
     }
 
@@ -2967,12 +3019,16 @@ mod tests {
             for workspace in 1..=super::MAX_WORKSPACES {
                 let start = chrome.workspaces_x + (workspace as u32 - 1) * super::TASKBAR_WS_W;
                 assert_eq!(
-                    taskbar_workspace_target(&chrome, start),
+                    taskbar_workspace_target(&chrome, super::CHROME, start),
                     Some(workspace),
                     "{label}"
                 );
                 assert_eq!(
-                    taskbar_workspace_target(&chrome, start + super::TASKBAR_WS_W - 1),
+                    taskbar_workspace_target(
+                        &chrome,
+                        super::CHROME,
+                        start + super::TASKBAR_WS_W - 1
+                    ),
                     Some(workspace),
                     "{label}"
                 );
@@ -2980,6 +3036,7 @@ mod tests {
             assert_eq!(
                 taskbar_workspace_target(
                     &chrome,
+                    super::CHROME,
                     chrome.workspaces_x + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32
                 ),
                 None,
@@ -2996,18 +3053,22 @@ mod tests {
             // The id belongs to the affordance, not to the pixel: moving the cluster must not
             // renumber it, or the keyboard strip and the pointer strip would disagree.
             assert_eq!(
-                taskbar_hover_target(&chrome, chrome.launcher_x),
+                taskbar_hover_target(&chrome, super::CHROME, chrome.launcher_x),
                 1,
                 "{label}"
             );
             for n in 0..super::TASKBAR_BUTTONS {
                 let x = chrome.buttons_x + n * super::TASKBAR_BUTTON_W;
-                assert_eq!(taskbar_hover_target(&chrome, x), 2 + n as u8, "{label}");
+                assert_eq!(
+                    taskbar_hover_target(&chrome, super::CHROME, x),
+                    2 + n as u8,
+                    "{label}"
+                );
             }
             for workspace in 1..=super::MAX_WORKSPACES {
                 let start = chrome.workspaces_x + (workspace as u32 - 1) * super::TASKBAR_WS_W;
                 assert_eq!(
-                    taskbar_hover_target(&chrome, start),
+                    taskbar_hover_target(&chrome, super::CHROME, start),
                     9 + workspace,
                     "{label}"
                 );
@@ -3024,7 +3085,11 @@ mod tests {
                 let in_workspaces = x >= chrome.workspaces_x
                     && x < chrome.workspaces_x + super::TASKBAR_WS_W * super::MAX_WORKSPACES as u32;
                 if !in_launcher && !in_buttons && !in_workspaces {
-                    assert_eq!(taskbar_hover_target(&chrome, x), 0, "{label} at x={x}");
+                    assert_eq!(
+                        taskbar_hover_target(&chrome, super::CHROME, x),
+                        0,
+                        "{label} at x={x}"
+                    );
                 }
             }
         }

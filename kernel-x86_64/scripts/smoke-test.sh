@@ -88,7 +88,7 @@ boot_once() {
     -device virtio-blk-pci,drive=blk1,disable-legacy=on,iommu_platform=on \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on \
     -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
-    -device virtio-gpu-pci,disable-legacy=on,iommu_platform=on \
+    -device virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=640,yres=240 \
     -device virtio-keyboard-pci,iommu_platform=on \
     -device virtio-tablet-pci,iommu_platform=on \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \

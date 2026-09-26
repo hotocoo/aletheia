@@ -418,9 +418,10 @@ pub fn dmar_suite(
     n += 1;
     const NAME_6: &str = "each window domain translates exactly its granted set - no more, no less";
     for ((sid, tree), g) in trees.iter().zip(grants.iter()) {
-        let got = vtd::leaf_spans(&mut mem, *tree, agaw);
-        let mut want = g.spans.clone();
-        want.sort_unstable();
+        // Compared as MERGED address ranges: a grant may be one multi-page run (ADR-192's backing
+        // runs) while the tree holds one leaf per page, and both describe the same set.
+        let got = merged_spans(vtd::leaf_spans(&mut mem, *tree, agaw));
+        let want = merged_spans(g.spans.clone());
         let audit = vtd::audit_tree(&mut mem, *tree, agaw, image);
         if audit.image_violations != 0 {
             bail!(format_args!("sid {:#06x}: image leaf present", sid), NAME_6);
@@ -826,4 +827,17 @@ pub fn dmar_suite(
     kprintln!("[dmar] ALL {} VT-D INVARIANTS HOLD", n);
     kprintln!("[dmar] translation REMAINS ON: every DMA this machine issues from here to halt walks the per-device window tables");
     Ok(n as u32)
+}
+
+/// Sort `(start, end)` spans and merge the ones that touch or overlap (ADR-192).
+fn merged_spans(mut v: alloc::vec::Vec<(usize, usize)>) -> alloc::vec::Vec<(usize, usize)> {
+    v.sort_unstable();
+    let mut out: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::with_capacity(v.len());
+    for (s, e) in v {
+        match out.last_mut() {
+            Some((_, pe)) if s <= *pe => *pe = (*pe).max(e),
+            _ => out.push((s, e)),
+        }
+    }
+    out
 }

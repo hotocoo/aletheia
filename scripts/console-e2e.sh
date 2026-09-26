@@ -189,7 +189,7 @@ mmio_leg() {
     -global virtio-mmio.force-legacy=false
     -drive "if=none,format=raw,file=$img,id=blk0" -device virtio-blk-device,drive=blk0
     -drive "if=none,format=raw,file=$pimg,id=blk1" -device virtio-blk-device,drive=blk1
-    -device virtio-gpu-device
+    -device virtio-gpu-device,xres=640,yres=240
     -device virtio-keyboard-device -device virtio-tablet-device
     -netdev user,id=n0 -device virtio-net-device,netdev=n0
     -device virtio-rng-device)

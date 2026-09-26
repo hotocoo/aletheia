@@ -66,7 +66,7 @@ OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
-  -device virtio-gpu-device \
+  -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE=$?
 
@@ -175,7 +175,7 @@ OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
-  -device virtio-gpu-device \
+  -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE2=$?
 echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
@@ -195,7 +195,7 @@ OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -device virtio-gpu-device \
+  -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE3=$?
 echo "$OUT3" | grep -E "\[vault\]" || true

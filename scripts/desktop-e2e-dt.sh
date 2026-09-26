@@ -32,13 +32,13 @@ run_target() {
     -global virtio-mmio.force-legacy=false
     -drive "if=none,format=raw,file=$img,id=blk0" -device virtio-blk-device,drive=blk0
     -drive "if=none,format=raw,file=$pciimg,id=pciblk0" -device virtio-blk-pci,disable-legacy=on,drive=pciblk0
-    -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device
+    -device virtio-gpu-device,xres=640,yres=240 -device virtio-keyboard-device -device virtio-tablet-device
     -kernel "$elf" -chardev "socket,id=ser0,path=$ser,server=on,wait=off" -serial chardev:ser0
     -qmp "unix:$qmp,server,nowait")
   if [ "$arch" = aarch64 ]; then
     dtbraw="$dir/target/desktop-e2e-dtb-raw.bin"; dtb="$dir/target/desktop-e2e-dtb.bin"
     "$qemu" -machine "$machine" -global arm-smmuv3.stage=2 -cpu "$cpu" -smp 4 -m 128M \
-      -device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device \
+      -device virtio-gpu-device,xres=640,yres=240 -device virtio-keyboard-device -device virtio-tablet-device \
       -machine dumpdtb="$dtbraw" >/dev/null 2>&1
     set -- $(od -An -tu1 -j4 -N4 "$dtbraw")
     local tsz=$(( $1 << 24 | $2 << 16 | $3 << 8 | $4 )); head -c "$tsz" "$dtbraw" > "$dtb"

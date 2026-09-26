@@ -62,7 +62,9 @@ pub const MAX_SURFACES: usize = 16;
 /// Damage rects tracked per surface before coalescing to whole-surface damage.
 pub const MAX_DAMAGE_RECTS: usize = 32;
 /// Largest surface the model accepts, in pixels (a 1024x768 1-bit plane).
-pub const MAX_SURFACE_PIXELS: usize = 1 << 20;
+pub const MAX_SURFACE_PIXELS: usize = 4 << 20;
+// ADR-192: 4 Mpx, the same bound the GPU driver puts on a resource (`MAX_RESOURCE_AREA_PX`), so a
+// desktop the display can show is a surface the compositor can hold; 1 bit per pixel = 512 KiB.
 
 /// Why the compositor refused. Every variant names what was involved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1744,7 +1746,7 @@ pub fn compositor_suite(
     check!(
         matches!(comp2.mint_surface(1, 0, 8), Err(CompFault::BadGeometry(1)))
             && matches!(
-                comp2.mint_surface(1, 2048, 2048),
+                comp2.mint_surface(1, 2048, 2048 + 1),
                 Err(CompFault::BadGeometry(1))
             ),
         "compositor: zero-sized and oversized surfaces are refused at mint"

@@ -15,7 +15,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::vec::Vec;
-use kernel_core::desktop::{Desktop as CoreDesktop, PAGES};
+use kernel_core::desktop::Desktop as CoreDesktop;
 use kernel_core::virtioblk::MmioTransport;
 
 use crate::virtio::{Gpu, Input, RiscvVirtio};
@@ -27,16 +27,37 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Bring the desktop up over this machine's own frames. Returns how many windows came up.
 pub fn install(gpu: Gpu, kb: Input, tab: Input) -> Result<usize, &'static str> {
-    let mut pages: Vec<usize> = Vec::with_capacity(PAGES);
-    for _ in 0..PAGES {
+    // The desktop runs at the display's best mode when this machine can back it (ADR-192).
+    let best = kernel_core::edid::resident::facts()
+        .and_then(|f| f.best)
+        .map(|m| (m.width, m.height));
+    let geom = kernel_core::desktop::choose_geometry(best, crate::frames::free_count());
+    let need = kernel_core::desktop::pages_for(geom.0, geom.1);
+    crate::kprintln!(
+        "[desktop] {}x{} ({} backing pages; display best {:?})",
+        geom.0,
+        geom.1,
+        need,
+        best
+    );
+    let mut pages: Vec<usize> = Vec::with_capacity(need);
+    for _ in 0..need {
         match crate::frames::alloc_zeroed() {
             Some(f) => pages.push(f.addr()),
             None => return Err("the frame allocator could not cover the desktop's backing store"),
         }
     }
+    // Ascending order: the surface and the device read the pages in the SAME order, so sorting
+    // changes nothing but how many runs the backing needs (ADR-192).
+    pages.sort_unstable();
+    crate::kprintln!(
+        "[desktop] backing in {} contiguous run(s)",
+        kernel_core::virtiogpu::backing_runs(&pages).len()
+    );
     // SAFETY: the GPU and both input devices were brought up by this boot and are exclusively
     // ours here; the pages are identity-mapped frames this kernel owns for the machine's life.
-    let d = unsafe { Desktop::install(gpu, kb, tab, pages)? };
+    let d = unsafe { Desktop::install(gpu, kb, tab, pages, geom)? };
+    kernel_core::edid::resident::set_running(geom.0, geom.1);
     let windows = d.window_count();
     // SAFETY: single-threaded boot with interrupts disabled; this is the only writer the static
     // has until the timer trap starts pumping.

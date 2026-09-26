@@ -197,7 +197,12 @@ impl crate::compositor::Raster for ComposeSink<'_, '_> {
     fn put_from(&mut self, surface: u32, x: u32, y: u32, ink: bool) {
         let photo = match self.wallpaper {
             Some((id, bgr)) if id == surface && !ink => {
-                let i = (y as usize * self.surf.width as usize + x as usize) * 3;
+                // The photograph is 640x240; a larger desktop samples it nearest-neighbour
+                // (ADR-192), so it fills any screen rather than the top-left corner of one.
+                let (pw, ph) = (WALLPAPER_W as usize, WALLPAPER_H as usize);
+                let sx = x as usize * pw / self.surf.width.max(1) as usize;
+                let sy = y as usize * ph / self.surf.height.max(1) as usize;
+                let i = (sy.min(ph - 1) * pw + sx.min(pw - 1)) * 3;
                 bgr.get(i..i + 3).map(|p| [p[0], p[1], p[2], 0xFF])
             }
             _ => None,
@@ -213,6 +218,10 @@ impl crate::compositor::Raster for ComposeSink<'_, '_> {
         }
     }
 }
+
+/// The wallpaper photograph's own size (ADR-175): what `put_from` samples from.
+pub const WALLPAPER_W: u32 = 640;
+pub const WALLPAPER_H: u32 = 240;
 
 /// The text console state machine: a cursor over a grid of 8x16 cells, with wrap, scroll,
 /// backspace, and the fail-closed rule for control bytes. Pure layout logic — every pixel goes

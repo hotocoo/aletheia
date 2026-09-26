@@ -31,8 +31,11 @@ from laya_server import to_laya  # noqa: E402  (the sidecar's own conversion)
 
 
 def load_rows(path):
+    """Corpus rows the console would really ask: a choice with fewer than two options is never
+    asked (ADR-188), so it is not a training example either."""
     with open(path) as f:
-        return [json.loads(l) for l in f if l.strip()]
+        rows = [json.loads(l) for l in f if l.strip()]
+    return [r for r in rows if len(r["question"].get("options") or []) >= 2]
 
 
 def split_groups(rows, holdout, seed):

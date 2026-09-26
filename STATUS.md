@@ -1271,6 +1271,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — the desktop runs at the display's best mode; System 1 v2 (ADR-192, ADR-193)
+
+- The desktop's size is chosen at boot from the EDID best fit (with memory and driver bounds):
+  live at 2560x1440 with the photograph filling the screen and the taskbar on the real bottom edge.
+  Backing pages coalesce into DMA runs (3,600 pages = 1 run); the compositor's surface ceiling is
+  4 Mpx; gates pin their monitor at 640x240. UI scaling (text and windows at high resolution) is
+  not done yet.
+- System 1 v2: held-out 90.4% (v1 83.8%); console bench 6/8 alone with 0 wrong-and-sure; dual path
+  8/8, better than System 2 alone. Ships on v0.4.0.
+
 ### 2026-09-26 — the display says what it can show (ADR-191)
 
 - EDID: the GPU driver accepts `VIRTIO_GPU_F_EDID`, reads the monitor's EDID and parses every

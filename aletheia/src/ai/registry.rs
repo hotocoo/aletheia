@@ -397,7 +397,19 @@ pub fn catalog_in(root: &Path) -> Vec<ModelEntry> {
                 let mut m = m;
                 // A manifest that names its file is found by that name in the cache, whatever the
                 // format: a System-1 checkpoint is not a GGUF, and `discover` only lists GGUFs.
-                if let Some(p) = super::runtime::cached_file(root, &m.repo, &m.file) {
+                // A published archive unpacks into the snapshot named by its digest (ADR-187), so
+                // that snapshot is THE pinned one; any other snapshot is an older version.
+                let pinned_snapshot = (m.archive_sha256.len() == 64)
+                    .then(|| {
+                        root.join(super::runtime::ref_to_cache_dirname(&m.repo))
+                            .join("snapshots")
+                            .join(&m.archive_sha256[..12])
+                            .join(&m.file)
+                    })
+                    .filter(|p| p.exists());
+                if let Some(p) =
+                    pinned_snapshot.or_else(|| super::runtime::cached_file(root, &m.repo, &m.file))
+                {
                     m.size_bytes = std::fs::metadata(&p).map(|x| x.len()).unwrap_or(0);
                     m.present = true;
                     m.path = Some(p);

@@ -113,7 +113,7 @@ run_target() {
   rootbin="$dir/target/capvault-root.bin"
   printf 'aletheia-capvault-root-0123456789abcdef' | head -c 32 > "$rootbin"
   # The desktop's devices AND the network's, on one machine: the window path needs both.
-  local -a devices=(-device virtio-gpu-device -device virtio-keyboard-device -device virtio-tablet-device
+  local -a devices=(-device virtio-gpu-device,xres=640,yres=240 -device virtio-keyboard-device -device virtio-tablet-device
     -drive "if=none,format=raw,file=$pciimg,id=pciblk0" -device virtio-blk-pci,disable-legacy=on,drive=pciblk0
     -netdev user,id=n0 -device virtio-net-device,netdev=n0 -device virtio-rng-device)
   args=("$qemu" -machine "$machine" -cpu "$cpu" -smp 4 -m 128M -display none -S
@@ -167,7 +167,7 @@ run_target() {
       -drive "if=pflash,format=raw,unit=1,file=$work/vars.fd"
       -drive "format=raw,file=$img"
       -drive "if=none,format=raw,file=$work/scratch.img,id=blk0" -device virtio-blk-pci,drive=blk0
-      -device virtio-gpu-pci,disable-legacy=on -device virtio-keyboard-pci -device virtio-tablet-pci
+      -device virtio-gpu-pci,disable-legacy=on,xres=640,yres=240 -device virtio-keyboard-pci -device virtio-tablet-pci
       -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -device virtio-rng-pci,disable-legacy=on
       -chardev "socket,id=ser0,path=$ser,server=on,wait=off" -serial chardev:ser0
       -qmp "unix:$qmp,server,nowait")

@@ -20,7 +20,7 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::vec::Vec;
-use kernel_core::desktop::{Desktop as CoreDesktop, PAGES};
+use kernel_core::desktop::Desktop as CoreDesktop;
 use kernel_core::virtiopci::PciTransport;
 
 use crate::virtio::{Gpu, InputDev, X86Virtio};
@@ -49,16 +49,36 @@ pub fn install(
     kb: InputDev,
     tab: InputDev,
 ) -> Result<Vec<kernel_core::dma::Grant>, &'static str> {
-    let mut pages: Vec<usize> = Vec::with_capacity(PAGES);
-    for _ in 0..PAGES {
+    // The desktop runs at the display's best mode when this machine can back it (ADR-192).
+    let best = kernel_core::edid::resident::facts()
+        .and_then(|f| f.best)
+        .map(|m| (m.width, m.height));
+    let geom = kernel_core::desktop::choose_geometry(best, crate::frames::free_count());
+    let need = kernel_core::desktop::pages_for(geom.0, geom.1);
+    crate::kprintln!(
+        "[desktop] {}x{} ({} backing pages; display best {:?})",
+        geom.0,
+        geom.1,
+        need,
+        best
+    );
+    let mut pages: Vec<usize> = Vec::with_capacity(need);
+    for _ in 0..need {
         match crate::frames::alloc_zeroed() {
             Some(f) => pages.push(f.addr()),
             None => return Err("the frame allocator could not cover the desktop's backing store"),
         }
     }
+    // Ascending order: the surface and the device read the pages in the SAME order, so sorting
+    // changes nothing but how many runs the backing needs (ADR-192).
+    pages.sort_unstable();
+    crate::kprintln!(
+        "[desktop] backing in {} contiguous run(s)",
+        kernel_core::virtiogpu::backing_runs(&pages).len()
+    );
     // SAFETY: the GPU and both input functions were brought up by the boot and are exclusively
     // ours here; the pages are identity-mapped frames this kernel owns for the machine's life.
-    let d = unsafe { Desktop::install(gpu, kb.dev, tab.dev, pages)? };
+    let d = unsafe { Desktop::install(gpu, kb.dev, tab.dev, pages, geom)? };
     let grants = d.gpu_grants();
     // SAFETY: single-threaded boot with IF=0; this is the only writer the static ever has until
     // IRQ0 takes over, and IRQ0 cannot run mid-instruction.

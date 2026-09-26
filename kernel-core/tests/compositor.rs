@@ -442,11 +442,11 @@ fn geometry_and_capacity_are_bounded() {
         Err(CompFault::BadGeometry(1))
     ));
     assert!(matches!(
-        comp.mint_surface(1, 1024, 1024 + 1),
+        comp.mint_surface(1, 2048, 2048 + 1),
         Err(CompFault::BadGeometry(1))
     ));
     // Exactly at the cap is accepted.
-    assert!(comp.mint_surface(1, 1024, 1024).is_ok());
+    assert!(comp.mint_surface(1, 2048, 2048).is_ok());
     // The surface table caps at MAX_SURFACES.
     let mut comp2 = platform();
     for id in 0..MAX_SURFACES as u32 {

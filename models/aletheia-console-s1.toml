@@ -1,7 +1,8 @@
 # System 1 for Aletheia's console (ADR-187): the `laya` backend's base checkpoint fine-tuned on a
 # corpus generated from the kernel's own command table (`scripts/system1/corpus.py`, committed as
-# docs/evidence/system1/console-corpus.jsonl) by `scripts/system1/laya_finetune.py`: top 8 encoder
-# layers + decision head, 5 epochs, temperatures refitted on held-out paraphrase groups.
+# docs/evidence/system1/console-corpus.jsonl) by `scripts/system1/laya_finetune.py`: v2 (ADR-193) =
+# 6,643 examples, top 12 encoder layers + decision head, 5 epochs, temperatures refitted on
+# held-out paraphrase groups. v1 (ADR-187) remains the asset of release v0.3.0.
 #
 # Not on any hub: it ships as a GitHub release asset. `aletheiad model pull aletheia-console-s1`
 # downloads it, refuses it unless the archive's SHA-256 matches, and unpacks it into the local
@@ -11,11 +12,11 @@
 
 [model]
 id          = "aletheia-console-s1"
-name        = "Aletheia console System 1 (fine-tuned from Laya, 2026-09-26)"
+name        = "Aletheia console System 1 v2 (fine-tuned from Laya, 2026-09-26)"
 role        = "system1"
 repo        = "aletheia/system1-console"
 file        = "model.safetensors"
-sha256      = "4169c663136b018c8df9defd7f3e280232563e3229b38fcdf885888def03e5c8"
+sha256      = "35c94f7808b059489a9ec78e25c5bd5b66193009b03cd09e6fb466920e3f98ad"
 size_bytes  = 842609220
 serve_id    = "aletheia-console-s1"
 default     = true
@@ -27,5 +28,5 @@ endpoint    = "http://127.0.0.1:8091"
 confidence  = 0.9
 
 [provision]
-url            = "https://github.com/hotocoo/aletheia/releases/download/v0.3.0/aletheia-console-s1.tar"
-archive_sha256 = "9e591d851b454e47bd183bd1e487697c3ae23603eef6ffe82855c67932944038"
+url            = "https://github.com/hotocoo/aletheia/releases/download/v0.4.0/aletheia-console-s1-v2.tar"
+archive_sha256 = "93d0b80bb6367c5838004dc90b4ac1ed6f20d6599c4afcc7a4258a8d1b969cc4"

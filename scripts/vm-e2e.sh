@@ -80,7 +80,7 @@ qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -g
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
-  -device virtio-gpu-device \
+  -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device \
   -machine dumpdtb="$DTBRAW" >/dev/null 2>&1
 [ -s "$DTBRAW" ] || { echo "FAIL: device-tree dump"; exit 3; }
@@ -102,7 +102,7 @@ OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
   -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
-  -device virtio-gpu-device \
+  -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE=$?
 
@@ -223,7 +223,7 @@ OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
   -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
-  -device virtio-gpu-device \
+  -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE2=$?
 echo "$OUT2" | grep -E "PERSISTENT MEDIUM" || true
@@ -245,7 +245,7 @@ OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
-  -device virtio-gpu-device \
+  -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device)"
 CODE3=$?
 echo "$OUT3" | grep -E "\[vault\]" || true

@@ -113,9 +113,8 @@ fn risk_of(name: &str) -> Risk {
         "oc" => Risk::Destructive,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
-        | "history" | "echo" | "clear" | "input" | "date" | "display" | "power" | "boot" | "caps" | "net" => {
-            Risk::Safe
-        }
+        | "history" | "echo" | "clear" | "input" | "date" | "display" | "power" | "boot"
+        | "caps" | "net" => Risk::Safe,
         // Unknown to this file: fail closed. An unclassified command is refused by the validator
         // below rather than being planned as harmless.
         _ => Risk::Destructive,

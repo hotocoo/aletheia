@@ -215,6 +215,23 @@ pub struct Scanout {
     pub enabled: bool,
 }
 
+/// Coalesce backing frames into `(address, length)` runs: each maximal stretch of frames that
+/// follow one another in memory, in the order given, is one entry (ADR-192).
+pub fn backing_runs(frames: &[usize]) -> Vec<(u64, u32)> {
+    let mut runs: Vec<(u64, u32)> = Vec::new();
+    for &f in frames {
+        match runs.last_mut() {
+            Some((a, l))
+                if *a as usize + *l as usize == f && (*l as usize) < (u32::MAX as usize - PAGE) =>
+            {
+                *l += PAGE as u32
+            }
+            _ => runs.push((f as u64, PAGE as u32)),
+        }
+    }
+    runs
+}
+
 /// May a 2D resource of this geometry be created? Zero displays nothing; past either bound the
 /// backing could exceed what this kernel is willing to owe a device.
 pub fn validate_create(width: u32, height: u32) -> Result<(), GpuError> {
@@ -794,15 +811,25 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
         if attached {
             return Err(self.refused("backing already attached"));
         }
-        if frames.is_empty() || frames.len() > MAX_BACKING_ENTRIES {
+        if frames.is_empty() {
             return Err(self.refused("a backing entry count outside the bound"));
         }
-        // Register every frame and KEEP ITS HANDLE: detach must be able to revoke. A failure
+        // Adjacent frames become ONE run (ADR-192): a 2560x1440 desktop is 3,600 pages, and one
+        // entry and one DMA region per page would pass neither the command page nor the DMA
+        // registry. The bound is on RUNS; a store too fragmented to fit is refused by name.
+        let entries = backing_runs(frames);
+        if entries.len() > MAX_BACKING_ENTRIES {
+            return Err(self.refused("a backing entry count outside the bound"));
+        }
+        // Register every run and KEEP ITS HANDLE: detach must be able to revoke. A failure
         // mid-battery revokes what this call already claimed, so a refused attach leaves nothing
         // registered — the same no-partial-state rule the chain publisher follows.
-        let mut handles: Vec<crate::dma::Handle> = Vec::with_capacity(frames.len());
-        for f in frames {
-            match self.ctrl.register_buffer_h(*f, PAGE, "virtio-gpu.backing") {
+        let mut handles: Vec<crate::dma::Handle> = Vec::with_capacity(entries.len());
+        for (addr, len) in &entries {
+            match self
+                .ctrl
+                .register_buffer_h(*addr as usize, *len as usize, "virtio-gpu.backing")
+            {
                 Ok(h) => handles.push(h),
                 Err(_) => {
                     for h in handles.drain(..) {
@@ -812,7 +839,6 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
                 }
             }
         }
-        let entries: Vec<(u64, u32)> = frames.iter().map(|f| (*f as u64, PAGE as u32)).collect();
         let buf = core::slice::from_raw_parts_mut(self.cmd_buf as *mut u8, PAGE);
         let len = match encode_attach_backing(buf, rid, &entries) {
             Some(l) => l,
@@ -1254,7 +1280,7 @@ pub fn console_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     };
     check!(
         "fbconsole: 150 backing pages attach in ONE command and all register",
-        attached && dev.live_dma_regions() == 3 + CONSOLE_FB_PAGES
+        attached && dev.live_dma_regions() == 3 + backing_runs(&pages).len()
     );
 
     // 3 — RENDER, then read our own memory back: the ink-pixel count of cell (0,0) must equal
@@ -1390,7 +1416,7 @@ pub fn compose_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     check!(
         "compose: the composed frame's resource exists with its backing attached and scanout bound",
         linked
-            && dev.live_dma_regions() == 3 + PAGES
+            && dev.live_dma_regions() == 3 + backing_runs(&pages).len()
             && surf.is_ok()
             && tok_a.is_ok()
             && tok_b.is_ok()

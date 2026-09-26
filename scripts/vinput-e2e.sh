@@ -92,7 +92,7 @@ qemu-system-x86_64 -machine q35 -m 256 -cpu qemu64,+smep -display none -S "${QEM
   -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE_PATH" \
   -drive if=pflash,format=raw,unit=1,file="$VARS" \
   -drive format=raw,file="$IMG" \
-  -device virtio-gpu-pci,disable-legacy=on \
+  -device virtio-gpu-pci,disable-legacy=on,xres=640,yres=240 \
   -device virtio-keyboard-pci \
   -device virtio-tablet-pci \
   -chardev "socket,id=ser0,path=$SER,server=on,wait=off" \
