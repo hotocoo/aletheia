@@ -1271,6 +1271,13 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — windows open where the screen is (ADR-195); v0.4.0 released
+
+- Windows open at the same fraction of the screen they held at 640x240, kept inside the work area
+  above the taskbar (historic coordinates untouched at 640x240).
+- v0.4.0 published: boot-verified VMware package plus `aletheia-console-s1-v2.tar` (System 1 v2),
+  installed from GitHub by `aletheiad model pull aletheia-console-s1` with its digest checked.
+
 ### 2026-09-26 — the UI scales with the display (ADR-194)
 
 - Integer UI scale from the display height (1080p/1440p 2x, 2160p 4x): the desktop lays out at a

@@ -118,6 +118,31 @@ pub const fn ui_scale(w: u32, h: u32) -> u32 {
     s
 }
 
+/// Where a window's historic 640x240 position lands on a `w` x `h` logical desktop (ADR-195): the
+/// same fraction of the screen, so the layout spreads over a large display instead of clustering
+/// in its top-left corner, and is EXACTLY the historic coordinate at 640x240.
+pub const fn place(x: i32, y: i32, w: u32, h: u32) -> (i32, i32) {
+    (
+        (x as i64 * w as i64 / W as i64) as i32,
+        (y as i64 * h as i64 / H as i64) as i32,
+    )
+}
+
+/// [`place`], then kept inside the work area — the screen above the taskbar — for a window of
+/// `win_w` x `win_h`. At 640x240 the historic coordinate is returned untouched (the recorded
+/// layout, and every gate that clicks it, predate the rule).
+pub const fn place_window(x: i32, y: i32, win: (u32, u32), w: u32, h: u32) -> (i32, i32) {
+    if w == W && h == H {
+        return (x, y);
+    }
+    let (px, py) = place(x, y, w, h);
+    let max_x = w as i32 - win.0 as i32;
+    let max_y = h as i32 - TASKBAR_H as i32 - win.1 as i32;
+    let cx = if px > max_x { max_x } else { px };
+    let cy = if py > max_y { max_y } else { py };
+    (if cx < 0 { 0 } else { cx }, if cy < 0 { 0 } else { cy })
+}
+
 /// Backing pages a desktop of `w` x `h` BGRA pixels needs (ADR-192).
 pub const fn pages_for(w: u32, h: u32) -> usize {
     (w as usize * h as usize * 4).div_ceil(crate::dma::PAGE)
@@ -839,10 +864,24 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
         let mut wm = WindowManager::new();
         let tok_win = wm
-            .open(&mut comp, WINDOW, tw, th, WINDOW_X, WINDOW_Y)
+            .open(
+                &mut comp,
+                WINDOW,
+                tw,
+                th,
+                place_window(WINDOW_X, WINDOW_Y, (tw, th), w, h).0,
+                place_window(WINDOW_X, WINDOW_Y, (tw, th), w, h).1,
+            )
             .map_err(|_| "the terminal window was refused")?;
         let tok_mon = wm
-            .open(&mut comp, MONITOR, mw, mh, MON_X, MON_Y)
+            .open(
+                &mut comp,
+                MONITOR,
+                mw,
+                mh,
+                place_window(MON_X, MON_Y, (mw, mh), w, h).0,
+                place_window(MON_X, MON_Y, (mw, mh), w, h).1,
+            )
             .map_err(|_| "the monitor window was refused")?;
         let mut packed = Vec::new();
         term.render_packed_with_cursor(TITLE, &mut packed);
@@ -855,7 +894,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let mut help = TextGrid::new(HELP_COLS, HELP_ROWS);
         let (hw, hh) = help.pixel_size();
         let tok_help = wm
-            .open(&mut comp, HELP, hw, hh, HELP_X, HELP_Y)
+            .open(
+                &mut comp,
+                HELP,
+                hw,
+                hh,
+                place_window(HELP_X, HELP_Y, (hw, hh), w, h).0,
+                place_window(HELP_X, HELP_Y, (hw, hh), w, h).1,
+            )
             .map_err(|_| "the shortcuts window was refused")?;
         // Keep the reference as explicit rows so the help surface cannot silently clip newly
         // added shortcuts. The grid is sized to fit this complete reference on the 640x240
@@ -893,7 +939,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let mut browser = TextGrid::new(BROWSER_COLS, BROWSER_ROWS);
         let (bw, bh) = browser.pixel_size();
         let tok_browser = wm
-            .open(&mut comp, BROWSER, bw, bh, BROWSER_X, BROWSER_Y)
+            .open(
+                &mut comp,
+                BROWSER,
+                bw,
+                bh,
+                place_window(BROWSER_X, BROWSER_Y, (bw, bh), w, h).0,
+                place_window(BROWSER_X, BROWSER_Y, (bw, bh), w, h).1,
+            )
             .map_err(|_| "the browser window was refused")?;
         browser.write(b"url> \n(type an https:// URL and press Enter; trust hosts at the console)");
         let mut browser_packed = Vec::new();
@@ -903,7 +956,14 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let mut files = TextGrid::new(FILES_COLS, FILES_ROWS);
         let (fw, fh) = files.pixel_size();
         let tok_files = wm
-            .open(&mut comp, FILES, fw, fh, FILES_X, FILES_Y)
+            .open(
+                &mut comp,
+                FILES,
+                fw,
+                fh,
+                place_window(FILES_X, FILES_Y, (fw, fh), w, h).0,
+                place_window(FILES_X, FILES_Y, (fw, fh), w, h).1,
+            )
             .map_err(|_| "the files window was refused")?;
         let panel = FilePanel::new(FILES_VISIBLE);
         panel.render(&mut files);
@@ -1708,6 +1768,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             }
             _ => return,
         };
+        let (x, y) = place_window(x, y, (w, h), self.w, self.h);
         let Ok(token) = self.wm.open(&mut self.comp, id, w, h, x, y) else {
             return;
         };

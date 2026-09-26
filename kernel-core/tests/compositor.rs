@@ -624,3 +624,29 @@ fn the_ui_scale_keeps_text_legible_and_the_layout_whole() {
         "past the 4 Mpx bound"
     );
 }
+
+#[test]
+fn window_placement_is_historic_at_640x240_and_proportional_beyond() {
+    use kernel_core::desktop::{place, H, W};
+    for (x, y) in [(300, 60), (20, 140), (0, 0), (639, 239)] {
+        assert_eq!(place(x, y, W, H), (x, y));
+    }
+    assert_eq!(place(300, 60, 1280, 720), (600, 180));
+    assert_eq!(place(20, 140, 960, 540), (30, 315));
+}
+
+#[test]
+fn a_placed_window_stays_above_the_taskbar_and_on_screen() {
+    use kernel_core::desktop::{place_window, H, W};
+    assert_eq!(
+        place_window(20, 210, (256, 90), W, H),
+        (20, 210),
+        "historic at 640x240"
+    );
+    let (x, y) = place_window(20, 210, (256, 90), 1280, 720);
+    assert!(x >= 0 && x + 256 <= 1280);
+    let panel = 2 * kernel_core::textgrid::CELL as i32 + kernel_core::textgrid::TITLE_H as i32;
+    assert!(y >= 0 && y + 90 <= 720 - panel, "{y}: under the taskbar");
+    let (x, y) = place_window(639, 239, (400, 200), 960, 540);
+    assert!(x + 400 <= 960 && y + 200 <= 540);
+}
