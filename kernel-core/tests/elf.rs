@@ -1,7 +1,9 @@
 //! The ELF judgement (ADR-201): the seeded program is accepted on its own CPU and every other
 //! shape is refused by name.
 
-use kernel_core::elf::{build, hello_code, judge, Machine, Refusal, Target, HELLO_STATUS};
+use kernel_core::elf::{
+    build, hello_code, judge, trap_code, Machine, Refusal, Target, HELLO_STATUS,
+};
 
 const A64: Target = Target {
     machine: Machine::Aarch64,
@@ -29,6 +31,10 @@ fn the_seeded_program_is_accepted_on_its_own_cpu() {
         assert_eq!(p.entry, t.code_va + 120);
         assert_eq!(p.code.len(), img.len(), "the segment is the whole file");
         assert_eq!(&p.code[120..], hello_code(t.machine));
+        assert!(
+            judge(&build(t, trap_code(t.machine)), t).is_ok(),
+            "trap judged"
+        );
     }
     assert_eq!(HELLO_STATUS, (1..=10).sum::<u64>());
 }

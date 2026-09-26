@@ -37,6 +37,17 @@ pub enum TerminationReason {
     Policy,
 }
 
+impl TerminationReason {
+    /// A stable short name for the console (ADR-202).
+    pub const fn name(self) -> &'static str {
+        match self {
+            TerminationReason::Fault(kind) => crate::faultclass::kind_name(kind),
+            TerminationReason::Exited => "exited",
+            TerminationReason::Policy => "policy",
+        }
+    }
+}
+
 /// What the kernel should do about a fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SupervisorAction {
@@ -49,6 +60,8 @@ pub enum SupervisorAction {
 /// Tracks which tasks are dead, and why.
 pub struct Supervisor {
     dead: Vec<(TaskId, TerminationReason)>,
+    /// Records given back by [`Supervisor::reap`]: still counted as terminated, no longer held.
+    reaped: usize,
     escalations: usize,
 }
 
@@ -56,6 +69,7 @@ impl Supervisor {
     pub const fn new() -> Self {
         Supervisor {
             dead: Vec::new(),
+            reaped: 0,
             escalations: 0,
         }
     }
@@ -102,9 +116,24 @@ impl Supervisor {
         self.dead.iter().find(|(t, _)| *t == task).map(|(_, r)| *r)
     }
 
-    /// How many tasks have been terminated.
+    /// How many tasks have been terminated, reaped or not.
     pub fn terminated(&self) -> usize {
+        self.dead.len() + self.reaped
+    }
+
+    /// Death records still held (terminated minus reaped).
+    pub fn held(&self) -> usize {
         self.dead.len()
+    }
+
+    /// Give back `task`'s death record once its owner has read it (ADR-202), so a console that runs
+    /// a faulting program again and again holds no record per run. The count still includes it.
+    /// Returns the reason, or `None` if the task was never terminated.
+    pub fn reap(&mut self, task: TaskId) -> Option<TerminationReason> {
+        let at = self.dead.iter().position(|(t, _)| *t == task)?;
+        let (_, reason) = self.dead.swap_remove(at);
+        self.reaped += 1;
+        Some(reason)
     }
 
     /// How many faults were escalated instead of contained. Separate on purpose: see the module docs.
@@ -122,6 +151,21 @@ impl Default for Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reaped_death_is_still_counted_and_no_longer_held() {
+        let mut s = Supervisor::new();
+        let kind = FaultKind::UserNotMapped;
+        assert_eq!(
+            s.on_fault(Some(TaskId(7)), kind, FaultVerdict::KillTask),
+            SupervisorAction::TaskTerminated(TerminationReason::Fault(kind))
+        );
+        assert_eq!(s.reap(TaskId(7)), Some(TerminationReason::Fault(kind)));
+        assert_eq!(s.terminated(), 1);
+        assert!(s.may_run(TaskId(7)), "the record is gone");
+        assert_eq!(s.reap(TaskId(7)), None);
+        assert!(s.dead.is_empty());
+    }
     use crate::faultclass::{classify, from_x86_error_code, verdict};
 
     fn user_write_fault() -> (FaultKind, FaultVerdict) {

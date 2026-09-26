@@ -498,15 +498,20 @@ extern "C" fn _user_trap_rust(frame: *mut TrapFrame) {
             }
         }
         12 | 13 | 15 => el0_page_fault(stval as usize), // instruction / load / store page fault
+        // Every other exception taken FROM U-mode was raised by the task's own instruction - an
+        // illegal instruction, a breakpoint, a misaligned or faulting access - so it costs that task
+        // and never the machine (ADR-202).
         _ => {
             let sepc = unsafe { (*frame).sepc };
-            kprintln!(
-                "[usermode] FATAL U-mode trap scause={:#x} stval={:#x} sepc={:#x}",
-                scause,
-                stval,
-                sepc
-            );
-            crate::exit::exit(102);
+            if !supervise_user_exception(scause, sepc) {
+                kprintln!(
+                    "[usermode] FATAL U-mode trap scause={:#x} stval={:#x} sepc={:#x}",
+                    scause,
+                    stval,
+                    sepc
+                );
+                crate::exit::exit(102);
+            }
         }
     }
 }
@@ -627,6 +632,46 @@ pub fn supervisor() -> &'static kernel_core::supervisor::Supervisor {
 
 /// Ask the supervisor about an UNEXPECTED user fault. Returns true if the task was terminated and the
 /// caller may abandon it and continue; false means escalate (the caller then exits).
+/// A non-paging exception from U-mode, to the supervisor (ADR-202): built the way x86-64's `#UD` is.
+/// Returns false only on escalation, which the caller makes fatal.
+fn supervise_user_exception(scause: u64, sepc: u64) -> bool {
+    use kernel_core::faultclass::{classify, kind_name, verdict, Fault};
+    use kernel_core::sched::TaskId;
+    use kernel_core::supervisor::SupervisorAction;
+    let f = Fault {
+        present: true,
+        write: false,
+        user: true,
+        exec: true,
+        reserved_bit: false,
+        from_kernel: false,
+        unrecognized: None,
+    };
+    let kind = classify(&f);
+    // SAFETY: single-threaded; only this dispatcher mutates the supervisor.
+    let (action, id) = unsafe {
+        let id = TaskId(*core::ptr::addr_of!(CURRENT_TASK));
+        (
+            (*core::ptr::addr_of_mut!(SUPERVISOR)).on_fault(Some(id), kind, verdict(kind)),
+            id,
+        )
+    };
+    match action {
+        SupervisorAction::TaskTerminated(reason) => {
+            kprintln!(
+                "[usermode] U-mode exception scause={:#x} at {:#x} -> {} : task {} TERMINATED ({:?}); system continues",
+                scause,
+                sepc,
+                kind_name(kind),
+                id.0,
+                reason
+            );
+            true
+        }
+        SupervisorAction::Escalate(_) => false,
+    }
+}
+
 fn supervise_user_fault(fault_va: usize) -> bool {
     use kernel_core::faultclass::{classify, kind_name, verdict, Fault};
     use kernel_core::sched::TaskId;
@@ -1190,6 +1235,13 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
         return None;
     }
 
+    // A fresh supervisor id per run, so a fault is charged to THIS program and its record can be
+    // reaped below (ADR-202). SAFETY: single-threaded; the run owns this counter while it runs.
+    let task = unsafe {
+        *addr_of_mut!(CURRENT_TASK) += 1;
+        *addr_of!(CURRENT_TASK)
+    };
+    let dead_before = supervisor().terminated();
     let mut run = kernel_core::shell::ProgramRun::default();
     while run.slices < PROGRAM_SLICES {
         let Some(id) = policy.schedule_next() else {
@@ -1215,6 +1267,15 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
             let s = &*addr_of!(SCHED);
             (s.last_magic, s.exited)
         };
+        if supervisor().terminated() != dead_before {
+            // The supervisor terminated it for a fault: the slice was its last (ADR-202).
+            policy.finish(id);
+            resident::observe_outcome(JobId(2), UserId(0), Outcome::Failed);
+            // SAFETY: single-threaded; the run owns this id's record and gives it back here.
+            let reason = unsafe { (*addr_of_mut!(SUPERVISOR)).reap(TaskId(task)) };
+            run.terminated = Some(reason.map_or("fault", |r| r.name()));
+            break;
+        }
         if exited {
             policy.finish(id);
             resident::observe_outcome(JobId(2), UserId(0), Outcome::Finished);
@@ -1223,7 +1284,7 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
             break;
         }
     }
-    if !run.exited {
+    if !run.exited && run.terminated.is_none() {
         resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
     }
     teardown(code, stack);
@@ -2134,6 +2195,49 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         crossed && grown == 0,
         "ipc: a thousand round trips between two address spaces all cross intact, and the heap does not move"
     );
+    // Programs from the namespace's format, contained (ADR-201, ADR-202): `hello` exits with its
+    // status; `trap` executes an undefined instruction and costs exactly that task; sixteen more
+    // faulting runs hold no death record and give back every frame and live heap byte.
+    {
+        use kernel_core::elf::{build, hello_code, judge, trap_code, HELLO_STATUS};
+        let t = PROGRAM_TARGET;
+        let hello = build(t, hello_code(t.machine));
+        let trap = build(t, trap_code(t.machine));
+        let ran = judge(&hello, t).ok().and_then(|p| run_program(&p));
+        check!(
+            ran.is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
+            "run: a program image from the namespace format runs in user mode and exits with its status (55)"
+        );
+        let before = supervisor().terminated();
+        let trapped = judge(&trap, t).ok().and_then(|p| run_program(&p));
+        check!(
+            trapped.is_some_and(|r| r.terminated.is_some() && !r.exited)
+                && supervisor().terminated() == before + 1,
+            "run: a program whose first instruction is undefined is TERMINATED by the supervisor and the machine continues"
+        );
+        let (held, frames0, heap0) = (
+            supervisor().held(),
+            frames::free_count(),
+            crate::heap::live_bytes(),
+        );
+        let mut contained = 0;
+        for _ in 0..16 {
+            if judge(&trap, t)
+                .ok()
+                .and_then(|p| run_program(&p))
+                .is_some_and(|r| r.terminated.is_some())
+            {
+                contained += 1;
+            }
+        }
+        check!(
+            contained == 16
+                && supervisor().held() == held
+                && frames::free_count() == frames0
+                && crate::heap::live_bytes() == heap0,
+            "run: sixteen faulting runs are all contained, hold no death record, and give back every frame and heap byte"
+        );
+    }
 
     Ok(n)
 }

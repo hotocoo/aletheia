@@ -209,6 +209,41 @@ isr_gp_entry:
     call    x86_general_protection
     jmp     resume_return
 
+// ---- the other ring-3 exceptions (ADR-202) -------------------------------------------------------
+// A ring-3 task can raise more than #UD, #GP and #PF: a divide by zero (#DE), `icebp` (#DB), an x87
+// or SIMD fault (#NM, #MF, #XM), a bad segment load (#TS, #NP, #SS), an alignment check (#AC). Each
+// is the task's own fault. Vectors WITHOUT an error code save the frame (which also fails closed on a
+// ring-0 arrival); vectors WITH one test the saved CS the CPU pushed after the error code, and a
+// ring-0 arrival is the kernel's own bug: fatal.
+.macro ring3_noerr name, vec
+.global \name
+\name:
+    save_frame
+    mov     edi, \vec
+    and     rsp, -16
+    call    x86_ring3_exception
+    jmp     resume_return
+.endm
+.macro ring3_err name, vec
+.global \name
+\name:
+    test    byte ptr [rsp + 16], 3   // saved CS (after the error code and RIP): its RPL
+    jz      from_ring0_fatal
+    mov     edi, \vec
+    and     rsp, -16
+    call    x86_ring3_exception
+    jmp     resume_return
+.endm
+ring3_noerr isr_de_entry, 0
+ring3_noerr isr_db_entry, 1
+ring3_noerr isr_nm_entry, 7
+ring3_err   isr_ts_entry, 10
+ring3_err   isr_np_entry, 11
+ring3_err   isr_ss_entry, 12
+ring3_noerr isr_mf_entry, 16
+ring3_err   isr_ac_entry, 17
+ring3_noerr isr_xm_entry, 19
+
 // A trap arrived from ring 0 (should be impossible: the kernel runs IF=0). Fail closed.
 from_ring0_fatal:
     mov     edi, 111
@@ -379,6 +414,15 @@ extern "sysv64" {
     static stub_process_info_exit_end: u8;
     static isr_ud_entry: u8;
     static isr_gp_entry: u8;
+    static isr_de_entry: u8;
+    static isr_db_entry: u8;
+    static isr_nm_entry: u8;
+    static isr_ts_entry: u8;
+    static isr_np_entry: u8;
+    static isr_ss_entry: u8;
+    static isr_mf_entry: u8;
+    static isr_ac_entry: u8;
+    static isr_xm_entry: u8;
     static stub_ud_start: u8;
     static stub_ud_end: u8;
     static stub_gp_start: u8;
@@ -794,6 +838,67 @@ pub extern "sysv64" fn x86_undefined_opcode(rip: u64) {
             reason
         );
     });
+}
+
+/// Every other ring-3 exception (ADR-202): the task's own instruction raised `vector`, so the
+/// task is terminated by the policy `#UD` gets.
+#[no_mangle]
+pub extern "sysv64" fn x86_ring3_exception(vector: u64) {
+    use kernel_core::faultclass::{classify, kind_name, verdict, Fault};
+    let f = Fault {
+        present: true,
+        write: false,
+        user: true,
+        exec: true,
+        reserved_bit: false,
+        from_kernel: false,
+        unrecognized: None,
+    };
+    let kind = classify(&f);
+    supervise_ring3_fault(kind, verdict(kind), |id, reason| {
+        kprintln!(
+            "[usermode] ring-3 exception vector {} -> {} : task {} TERMINATED ({:?}); system continues",
+            vector,
+            kind_name(kind),
+            id,
+            reason
+        );
+    });
+}
+
+/// Point every exception a ring-3 task can raise at its containment entry, for exactly as long as
+/// `f` runs, then hand them back to the fatal handlers (ADR-202). Interrupts are off throughout.
+fn with_ring3_traps<R>(f: impl FnOnce() -> R) -> R {
+    // SAFETY: each address is a raw entry above that saves or checks the frame and unwinds to the
+    // scheduler; installed and restored single-core with IF=0.
+    unsafe {
+        idt::install_ring3_fault_traps(
+            addr_of!(isr_ud_entry) as u64,
+            addr_of!(isr_gp_entry) as u64,
+        );
+        idt::install_ring3_extra_traps(&idt::Ring3Traps {
+            de: addr_of!(isr_de_entry) as u64,
+            db: addr_of!(isr_db_entry) as u64,
+            nm: addr_of!(isr_nm_entry) as u64,
+            ts: addr_of!(isr_ts_entry) as u64,
+            np: addr_of!(isr_np_entry) as u64,
+            ss: addr_of!(isr_ss_entry) as u64,
+            mf: addr_of!(isr_mf_entry) as u64,
+            ac: addr_of!(isr_ac_entry) as u64,
+            xm: addr_of!(isr_xm_entry) as u64,
+        });
+    }
+    let r = f();
+    idt::restore_fatal_traps();
+    r
+}
+
+/// [`run_program`] with the ring-3 exception entries installed; what the boot suite calls, since
+/// the suite already runs with interrupts off.
+fn run_program_contained(
+    program: &kernel_core::elf::Placement,
+) -> Option<kernel_core::shell::ProgramRun> {
+    with_ring3_traps(|| run_program(program))
 }
 
 /// `#GP` dispatch (ALET-P1-011). A ring-3 task executed a privileged instruction. Same policy, third
@@ -1757,7 +1862,9 @@ pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
 pub fn run_program_live(
     program: &kernel_core::elf::Placement,
 ) -> Option<kernel_core::shell::ProgramRun> {
-    x86_64::instructions::interrupts::without_interrupts(|| run_program(program))
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        with_ring3_traps(|| run_program(program))
+    })
 }
 
 fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::shell::ProgramRun> {
@@ -1808,6 +1915,13 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
         return None;
     }
 
+    // A fresh supervisor id per run, so a fault is charged to THIS program and its record can be
+    // reaped below (ADR-202). SAFETY: single-threaded; the run owns this counter while it runs.
+    let task = unsafe {
+        *addr_of_mut!(CURRENT_TASK) += 1;
+        *addr_of!(CURRENT_TASK)
+    };
+    let dead_before = supervisor().terminated();
     let mut run = kernel_core::shell::ProgramRun::default();
     while run.slices < PROGRAM_SLICES {
         let Some(id) = policy.schedule_next() else {
@@ -1827,6 +1941,15 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
             let s = &*addr_of!(SCHED);
             (s.last_magic, s.exited)
         };
+        if supervisor().terminated() != dead_before {
+            // The supervisor terminated it for a fault: the slice was its last (ADR-202).
+            policy.finish(id);
+            resident::observe_outcome(JobId(2), UserId(0), Outcome::Failed);
+            // SAFETY: single-threaded; the run owns this id's record and gives it back here.
+            let reason = unsafe { (*addr_of_mut!(SUPERVISOR)).reap(TaskId(task)) };
+            run.terminated = Some(reason.map_or("fault", |r| r.name()));
+            break;
+        }
         if exited {
             policy.finish(id);
             resident::observe_outcome(JobId(2), UserId(0), Outcome::Finished);
@@ -1835,7 +1958,7 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
             break;
         }
     }
-    if !run.exited {
+    if !run.exited && run.terminated.is_none() {
         resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
     }
     cleanup_tasks(&roots, &mut code, &mut stack);
@@ -2765,6 +2888,60 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         crossed && grown == 0,
         "ipc: a thousand round trips between two address spaces all cross intact, and the heap does not move"
     );
+    // Programs from the namespace's format, contained (ADR-201, ADR-202): `hello` exits with its
+    // status; `trap` executes an undefined instruction and costs exactly that task; sixteen more
+    // faulting runs hold no death record and give back every frame and live heap byte.
+    {
+        use kernel_core::elf::{build, hello_code, judge, trap_code, HELLO_STATUS};
+        let t = PROGRAM_TARGET;
+        let hello = build(t, hello_code(t.machine));
+        let trap = build(t, trap_code(t.machine));
+        let ran = judge(&hello, t)
+            .ok()
+            .and_then(|p| run_program_contained(&p));
+        check!(
+            ran.is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
+            "run: a program image from the namespace format runs in user mode and exits with its status (55)"
+        );
+        let before = supervisor().terminated();
+        let trapped = judge(&trap, t).ok().and_then(|p| run_program_contained(&p));
+        check!(
+            trapped.is_some_and(|r| r.terminated.is_some() && !r.exited)
+                && supervisor().terminated() == before + 1,
+            "run: a program whose first instruction is undefined is TERMINATED by the supervisor and the machine continues"
+        );
+        // A divide by zero (#DE, vector 0) - a vector the ring-3 suite never needed before.
+        let de = build(t, &[0x48, 0x31, 0xc9, 0x48, 0xf7, 0xf1, 0xeb, 0xfe]);
+        let before_de = supervisor().terminated();
+        let divided = judge(&de, t).ok().and_then(|p| run_program_contained(&p));
+        check!(
+            divided.is_some_and(|r| r.terminated.is_some())
+                && supervisor().terminated() == before_de + 1,
+            "run: a ring-3 DIVIDE BY ZERO (#DE) is terminated by the supervisor, not fatal"
+        );
+        let (held, frames0, heap0) = (
+            supervisor().held(),
+            frames::free_count(),
+            crate::heap::live_bytes(),
+        );
+        let mut contained = 0;
+        for _ in 0..16 {
+            if judge(&trap, t)
+                .ok()
+                .and_then(|p| run_program_contained(&p))
+                .is_some_and(|r| r.terminated.is_some())
+            {
+                contained += 1;
+            }
+        }
+        check!(
+            contained == 16
+                && supervisor().held() == held
+                && frames::free_count() == frames0
+                && crate::heap::live_bytes() == heap0,
+            "run: sixteen faulting runs are all contained, hold no death record, and give back every frame and heap byte"
+        );
+    }
 
     Ok(n)
 }

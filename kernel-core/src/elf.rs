@@ -258,5 +258,18 @@ pub fn hello_code(machine: Machine) -> &'static [u8] {
     }
 }
 
+/// The program every machine seeds as `trap` (ADR-202): its first instruction is architecturally
+/// undefined, so running it must cost exactly one task and never the machine.
+pub fn trap_code(machine: Machine) -> &'static [u8] {
+    match machine {
+        // udf #0; b .
+        Machine::Aarch64 => &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14],
+        // an all-zero word is defined to be illegal; j .
+        Machine::Riscv64 => &[0x00, 0x00, 0x00, 0x00, 0x6f, 0x00, 0x00, 0x00],
+        // ud2; jmp .
+        Machine::X86_64 => &[0x0f, 0x0b, 0xeb, 0xfe],
+    }
+}
+
 /// The status `hello` exits with.
 pub const HELLO_STATUS: u64 = 55;

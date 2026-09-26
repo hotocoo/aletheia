@@ -838,6 +838,8 @@ pub struct ProgramRun {
     pub exited: bool,
     /// What it passed to `SYS_EXIT`.
     pub status: u64,
+    /// The supervisor terminated it for a fault (ADR-202): the kind, by name.
+    pub terminated: Option<&'static str>,
 }
 
 /// The machine's network device as the console reports it (ADR-185): addresses and the driver's
@@ -1519,8 +1521,9 @@ fn split_first(line: &str) -> (&str, &str) {
     }
 }
 
-/// What a freshly formatted namespace starts with (ADR-201): the program `hello` for this CPU, so a
-/// new machine has something to `run` without a cross toolchain. Only ever called on the format
+/// What a freshly formatted namespace starts with (ADR-201, ADR-202): the programs `hello` (exits
+/// with 55) and `trap` (executes an undefined instruction) for this CPU, so a new machine has
+/// something to `run`, and something that must be contained, without a cross toolchain. Only ever called on the format
 /// path, so an object the operator removed is never brought back.
 pub fn seed_namespace<D: BlockDevice>(
     fs: &mut Filesystem,
@@ -1528,7 +1531,9 @@ pub fn seed_namespace<D: BlockDevice>(
     target: crate::elf::Target,
 ) -> Result<(), crate::fs::FsError> {
     let hello = crate::elf::build(target, crate::elf::hello_code(target.machine));
-    fs.create(dev, "hello", &hello)
+    fs.create(dev, "hello", &hello)?;
+    let trap = crate::elf::build(target, crate::elf::trap_code(target.machine));
+    fs.create(dev, "trap", &trap)
 }
 
 /// `run NAME` (ADR-201): judge the object's bytes as a program for this CPU, refuse by name what
@@ -1569,7 +1574,15 @@ fn run_program(host: &dyn ShellHost, name: &str, bytes: &[u8], out: &mut dyn FnM
         after.elevated - before.elevated,
         after.abstain - before.abstain
     );
-    if run.exited {
+    if let Some(kind) = run.terminated {
+        outf!(
+            out,
+            "run: {} TERMINATED ({}) after {} slice(s); the machine continues",
+            name,
+            kind,
+            run.slices
+        );
+    } else if run.exited {
         outf!(
             out,
             "run: {} exited with status {} after {} slice(s)",

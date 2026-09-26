@@ -90,6 +90,7 @@ pub fn init() {
             .set_handler_fn(general_protection);
         idt.page_fault.set_handler_fn(page_fault);
         idt.double_fault.set_handler_fn(double_fault);
+        install_fatal_extras(idt);
         idt[TIMER_VECTOR].set_handler_fn(timer);
         idt[SERIAL_VECTOR].set_handler_fn(serial);
         idt[KEYBOARD_VECTOR].set_handler_fn(keyboard);
@@ -331,6 +332,72 @@ pub unsafe fn install_ring3_fault_traps(ud_entry: u64, gp_entry: u64) {
         .set_handler_addr(VirtAddr::new(gp_entry));
 }
 
+/// Entry points for the exceptions beyond `#UD`/`#GP`/`#PF` a ring-3 task can raise (ADR-202).
+pub struct Ring3Traps {
+    pub de: u64,
+    pub db: u64,
+    pub nm: u64,
+    pub ts: u64,
+    pub np: u64,
+    pub ss: u64,
+    pub mf: u64,
+    pub ac: u64,
+    pub xm: u64,
+}
+
+/// Route [`Ring3Traps`] to their containment entries; [`restore_fatal_traps`] undoes it.
+///
+/// # Safety
+/// Each address must be a valid raw interrupt entry point, installed single-core with IF=0.
+pub unsafe fn install_ring3_extra_traps(t: &Ring3Traps) {
+    let idt = IDT.get_mut();
+    idt.divide_error.set_handler_addr(VirtAddr::new(t.de));
+    idt.debug.set_handler_addr(VirtAddr::new(t.db));
+    idt.device_not_available
+        .set_handler_addr(VirtAddr::new(t.nm));
+    idt.invalid_tss.set_handler_addr(VirtAddr::new(t.ts));
+    idt.segment_not_present
+        .set_handler_addr(VirtAddr::new(t.np));
+    idt.stack_segment_fault
+        .set_handler_addr(VirtAddr::new(t.ss));
+    idt.x87_floating_point.set_handler_addr(VirtAddr::new(t.mf));
+    idt.alignment_check.set_handler_addr(VirtAddr::new(t.ac));
+    idt.simd_floating_point
+        .set_handler_addr(VirtAddr::new(t.xm));
+}
+
+/// The kernel's own `#DE`, `#DB`, `#NM`, `#TS`, `#NP`, `#SS`, `#MF`, `#AC` and `#XM` are bugs: each
+/// reports and exits (107) rather than leaving the vector empty, where it would double-fault.
+fn install_fatal_extras(idt: &mut InterruptDescriptorTable) {
+    idt.divide_error.set_handler_fn(fatal_noerr);
+    idt.debug.set_handler_fn(fatal_noerr);
+    idt.device_not_available.set_handler_fn(fatal_noerr);
+    idt.invalid_tss.set_handler_fn(fatal_err);
+    idt.segment_not_present.set_handler_fn(fatal_err);
+    idt.stack_segment_fault.set_handler_fn(fatal_err);
+    idt.x87_floating_point.set_handler_fn(fatal_noerr);
+    idt.alignment_check.set_handler_fn(fatal_err);
+    idt.simd_floating_point.set_handler_fn(fatal_noerr);
+}
+
+extern "x86-interrupt" fn fatal_noerr(frame: InterruptStackFrame) {
+    fatal(
+        "kernel exception",
+        107,
+        frame.instruction_pointer.as_u64(),
+        None,
+    );
+}
+
+extern "x86-interrupt" fn fatal_err(frame: InterruptStackFrame, err: u64) {
+    fatal(
+        "kernel exception",
+        107,
+        frame.instruction_pointer.as_u64(),
+        Some(("err", err)),
+    );
+}
+
 /// Give `#UD` and `#GP` back to the fatal handlers installed by [`init`].
 ///
 /// Called the moment the adversarial trials are over. Leaving the ring-3 entries installed for the
@@ -344,6 +411,7 @@ pub fn restore_fatal_traps() {
         idt.invalid_opcode.set_handler_fn(invalid_opcode);
         idt.general_protection_fault
             .set_handler_fn(general_protection);
+        install_fatal_extras(idt);
     }
 }
 

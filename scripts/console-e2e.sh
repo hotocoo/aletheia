@@ -158,6 +158,12 @@ check_session() {
     [ "$(grep -c "run: hello exited with status 55 after 1 slice(s)" <<<"$log")" -ge 2 ] \
       || { echo "  FAIL [$label/first] run hello did not exit with status 55 twice"; bad=1; }
     grep -q "run: hello admitted: advisor said" <<<"$log" || { echo "  FAIL [$label/first] run did not report the advisor's answer"; bad=1; }
+    # And a program that executes an undefined instruction costs that task, never the machine
+    # (ADR-202): twice, each terminated by the supervisor, and `hello` still runs afterwards.
+    [ "$(grep -c "run: trap TERMINATED (user-permission) after 1 slice(s); the machine continues" <<<"$log")" -ge 2 ] \
+      || { echo "  FAIL [$label/first] run trap was not contained twice"; bad=1; }
+    [ "$(grep -c "run: hello exited with status 55 after 1 slice(s)" <<<"$log")" -ge 3 ] \
+      || { echo "  FAIL [$label/first] hello did not run again after trap was contained"; bad=1; }
     grep -q "run refused: manifesto: not an ELF image" <<<"$log" || { echo "  FAIL [$label/first] run did not refuse a text object by name"; bad=1; }
     # Every frame a run takes it gives back: the two `mem` readings around the runs agree.
     local fr; fr="$(grep -o '^frames: [0-9]* free' <<<"$log" | tail -2 | sort -u | wc -l | tr -d ' ')"
@@ -231,7 +237,7 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run hello" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
@@ -309,7 +315,7 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run hello" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?

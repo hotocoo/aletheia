@@ -443,8 +443,10 @@ click()
 chunk, (_pf, _df, _rf, _cf, focusf, _qf) = run_input()
 check(focusf == 'surface 8', 'files: a press on the panel window focuses it (%r)' % (focusf,))
 
-# A new namespace is seeded with the program `hello` (ADR-201), which lists first; the object
-# this gate wrote is the next row.
+# A new namespace is seeded with the programs `hello` and `trap` (ADR-201, ADR-202), which list
+# first; the object this gate wrote is the third row.
+press(['down'])
+run_input()
 press(['down'])
 run_input()
 mark = len(log_text())

@@ -948,6 +948,7 @@ impl ShellHost for ProgramHost {
             slices: 1,
             exited: true,
             status: kernel_core::elf::HELLO_STATUS,
+            terminated: None,
         })
     }
 }
