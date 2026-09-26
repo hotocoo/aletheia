@@ -1271,6 +1271,13 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — the console names its authority and its wire (ADR-185)
+
+- Three report-only commands on every CPU: `caps` (the console's capabilities by subject and
+  action, live or revoked; tokens never printed), `net` (MAC, static address, gateway and the
+  driver's counters) and `boot` (the recorded suite timing). `console=57` on all three CPUs; heap
+  storm still 0 B per reporting command; console e2e and console fuzz PASS on all three.
+
 ### 2026-09-26 — the console reaches the clock and the calendar (ADR-184)
 
 - Three new console commands on every CPU: `date` (the RTC, UTC), `power` (the resident Lethe

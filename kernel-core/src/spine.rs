@@ -103,10 +103,9 @@ impl Constraints {
 /// One capability's record. Crate-visible rather than module-private because [`crate::capstore`]
 /// serializes exactly these fields and re-verifies them on load — a persisted registry is an input,
 /// and an input that is trusted because it came from disk is not a capability system. `subject` is
-/// carried for auditability; the minimal kernel `evaluate` path does not read it.
+/// carried for auditability (`for_each_offered` names it); the `evaluate` path does not read it.
 #[derive(Clone, Debug)]
 pub(crate) struct StoredCapability {
-    #[allow(dead_code)]
     pub(crate) subject: String,
     pub(crate) action: String,
     pub(crate) scope: Scope,
@@ -392,6 +391,17 @@ impl CapEngine {
     /// every capability it carries, so [`crate::capstore::load`] has to be able to ask.
     pub fn now(&self) -> u64 {
         self.now
+    }
+
+    /// Walk the capabilities in `offered` this engine minted: subject, action, and whether the
+    /// token is still live. Tokens themselves are never handed out - naming a capability is not
+    /// holding it (ADR-185's `caps`).
+    pub fn for_each_offered(&self, offered: &[CapToken], f: &mut dyn FnMut(&str, &str, bool)) {
+        for t in offered {
+            if let Some(c) = self.registry.get(&t.0) {
+                f(&c.subject, &c.action, !self.revoked.contains(&t.0));
+            }
+        }
     }
 
     /// How many live (non-revoked) capabilities the registry holds. Evidence for a save/load

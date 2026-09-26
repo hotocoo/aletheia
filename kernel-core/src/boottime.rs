@@ -20,6 +20,8 @@ static LAPS: AtomicU32 = AtomicU32::new(0);
 static SLOWEST_NS: AtomicU64 = AtomicU64::new(0);
 static SLOWEST_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static SLOWEST_LEN: AtomicU64 = AtomicU64::new(0);
+/// `total_ms` of the last [`summary`], or `u64::MAX` before one was taken (ADR-185's `boot`).
+static RECORDED_MS: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// The stopwatch's reading after the suites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,21 +65,41 @@ pub fn lap<H: Hal>(family: &'static str) -> u64 {
 pub fn summary<H: Hal>() -> Summary {
     let now = H::timer_ticks();
     let total_ns = H::ticks_to_ns(now.saturating_sub(START.load(Ordering::SeqCst)));
-    let ptr = SLOWEST_PTR.load(Ordering::SeqCst);
-    let len = SLOWEST_LEN.load(Ordering::SeqCst) as usize;
-    let slowest: &'static str = if ptr.is_null() {
-        "none"
-    } else {
-        // SAFETY: `ptr`/`len` were taken from a `&'static str` in `lap` and never modified; a
-        // 'static str's bytes stay valid UTF-8 at that address for the program's lifetime.
-        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len)) }
-    };
+    let slowest = slowest_family();
+    RECORDED_MS.store(total_ns / 1_000_000, Ordering::SeqCst);
     Summary {
         laps: LAPS.load(Ordering::SeqCst),
         total_ms: total_ns / 1_000_000,
         slowest,
         slowest_ms: SLOWEST_NS.load(Ordering::SeqCst) / 1_000_000,
     }
+}
+
+/// The name of the longest lap's family, or `"none"`.
+fn slowest_family() -> &'static str {
+    let ptr = SLOWEST_PTR.load(Ordering::SeqCst);
+    let len = SLOWEST_LEN.load(Ordering::SeqCst) as usize;
+    if ptr.is_null() {
+        return "none";
+    }
+    // SAFETY: `ptr`/`len` were taken from a `&'static str` in `lap` and never modified; a
+    // 'static str's bytes stay valid UTF-8 at that address for the program's lifetime.
+    unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len)) }
+}
+
+/// The boot's reading as it was taken, without a clock: what the console's `boot` prints. `None`
+/// until the boot called [`summary`].
+pub fn recorded() -> Option<Summary> {
+    let total_ms = RECORDED_MS.load(Ordering::SeqCst);
+    if total_ms == u64::MAX {
+        return None;
+    }
+    Some(Summary {
+        laps: LAPS.load(Ordering::SeqCst),
+        total_ms,
+        slowest: slowest_family(),
+        slowest_ms: SLOWEST_NS.load(Ordering::SeqCst) / 1_000_000,
+    })
 }
 
 #[cfg(test)]

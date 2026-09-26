@@ -49,6 +49,27 @@ pub unsafe fn keep_entropy(dev: Rng) {
     (*core::ptr::addr_of_mut!(RNG)) = Some(dev);
 }
 
+/// The device's addresses and counters for the console's `net` (ADR-185), `None` without a NIC.
+pub fn facts() -> Option<kernel_core::shell::NetFacts> {
+    // SAFETY: the console's main thread is the only context that touches `NET`/`NEXT_PORT`
+    // after boot (module header); this is a read between keystrokes.
+    let (dev, next_port) = unsafe {
+        (
+            (*core::ptr::addr_of!(NET)).as_ref()?,
+            *core::ptr::addr_of!(NEXT_PORT),
+        )
+    };
+    Some(kernel_core::shell::NetFacts {
+        mac: dev.mac(),
+        ip: GUEST_IP,
+        gateway: kernel_core::virtionet::GATEWAY_IP,
+        dropped: dev.dropped(),
+        arp_requests: dev.arp_wire_requests(),
+        dma_regions: dev.dma_regions(),
+        next_port,
+    })
+}
+
 /// Open a TCP connection to `ip:port`, send `request`, and copy the peer's answer into `reply`.
 ///
 /// Every bound here is this machine's, not the peer's: the local port, the initial sequence

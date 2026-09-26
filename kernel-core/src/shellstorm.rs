@@ -32,8 +32,8 @@ const BLOCKS: usize = 96;
 /// Report-only commands: everything they print, they format; nothing they print, they own.
 /// `oc off` and a refused `oc` belong here too (ADR-184): the power governor is driven by console
 /// lines, and a line that moves a clock must cost the heap no more than one that reads it.
-const REPORTING: [&str; 8] = [
-    "help", "ver", "mem", "ls", "history", "date", "power", "oc 1",
+const REPORTING: [&str; 11] = [
+    "help", "ver", "mem", "ls", "history", "date", "power", "oc 1", "boot", "caps", "net",
 ];
 
 /// The boot suite (ADR-089). `used_bytes` reports the CALLER's own heap watermark.

@@ -46,6 +46,12 @@ impl Host {
 }
 
 impl ShellHost for Host {
+    fn net_facts(&self) -> Option<shell::NetFacts> {
+        crate::netstatic::facts()
+    }
+    fn capabilities(&self, f: &mut dyn FnMut(&str, &str, bool)) {
+        self.authority.for_each_offered(&self.offered, f);
+    }
     fn wall_clock(
         &self,
     ) -> Result<kernel_core::clock::UnixSeconds, kernel_core::clock::ClockRefusal> {

@@ -810,6 +810,23 @@ pub struct InputFacts {
     pub browser_first_len: u8,
 }
 
+/// The machine's network device as the console reports it (ADR-185): addresses and the driver's
+/// own counters, copied - nothing here is a handle to the device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetFacts {
+    pub mac: [u8; 6],
+    pub ip: [u8; 4],
+    pub gateway: [u8; 4],
+    /// Frames received that were not the answer being waited for.
+    pub dropped: u64,
+    /// Broadcast ARP requests put on the wire since init.
+    pub arp_requests: u32,
+    /// DMA regions the device's queues registered.
+    pub dma_regions: usize,
+    /// The local port the next conversation will use.
+    pub next_port: u16,
+}
+
 /// The facts a command may ask of the running target. Everything here is already established by the
 /// boot the console runs after; the trait exists so the dispatcher never names an architecture.
 pub trait ShellHost {
@@ -927,6 +944,13 @@ pub trait ShellHost {
     fn frame_bytes(&self) -> usize {
         4096
     }
+    /// The network device the console dials with, `None` on a machine without one (ADR-185).
+    fn net_facts(&self) -> Option<NetFacts> {
+        None
+    }
+    /// Walk the capabilities this console offers: subject, action, still live (ADR-185). Defaulted
+    /// to naming none - a stand that binds no authority has none to show.
+    fn capabilities(&self, _f: &mut dyn FnMut(&str, &str, bool)) {}
     /// The wall clock, UTC seconds since the epoch (ADR-148's reading, ADR-184's command).
     /// Defaulted to a named absence: a stand with no clock says so rather than printing 1970.
     fn wall_clock(&self) -> Result<crate::clock::UnixSeconds, crate::clock::ClockRefusal> {
@@ -954,13 +978,16 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("ver", "what this system is, and what it is not"),
     ("arch", "active target backend and privilege level"),
     ("uptime", "time since boot"),
+    ("boot", "where boot time went: suites timed, total, the slowest"),
     ("date", "the wall clock, in UTC"),
     ("mem", "physical memory, in frames and bytes"),
     ("faults", "supervisor containment and escalation counters"),
+    ("caps", "the capabilities this console holds (names, never tokens)"),
     (
         "input",
         "the machine's input session: cursor, focus, counters",
     ),
+    ("net", "the network device: addresses and driver counters"),
     (
         "tcp ADDR PORT TEXT",
         "open a TCP connection, send TEXT, print what comes back",
@@ -1512,6 +1539,73 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     );
                 }
                 Err(e) => outf!(out, "date: no wall clock ({:?})", e),
+            }
+        }
+        "boot" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            match crate::boottime::recorded() {
+                Some(b) => outf!(
+                    out,
+                    "boot: {} suite(s) timed, {} ms total, slowest {} at {} ms",
+                    b.laps,
+                    b.total_ms,
+                    b.slowest,
+                    b.slowest_ms
+                ),
+                None => out("boot: no suite summary was recorded on this machine"),
+            }
+        }
+        "caps" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            let mut n = 0usize;
+            host.capabilities(&mut |subject, action, live| {
+                n += 1;
+                outf!(
+                    out,
+                    "  {:<16} {:<20} {}",
+                    subject,
+                    action,
+                    if live { "live" } else { "REVOKED" }
+                );
+            });
+            if n == 0 {
+                out("caps: this console offers no capabilities");
+            } else {
+                outf!(
+                    out,
+                    "{} capability(ies) offered; tokens are never printed",
+                    n
+                );
+            }
+        }
+        "net" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            match host.net_facts() {
+                Some(f) => {
+                    let m = f.mac;
+                    outf!(
+                        out,
+                        "net: mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, address {}.{}.{}.{}, gateway {}.{}.{}.{} (static)",
+                        m[0], m[1], m[2], m[3], m[4], m[5],
+                        f.ip[0], f.ip[1], f.ip[2], f.ip[3],
+                        f.gateway[0], f.gateway[1], f.gateway[2], f.gateway[3]
+                    );
+                    outf!(
+                        out,
+                        "  {} frame(s) dropped, {} ARP request(s) sent, {} DMA region(s), next local port {}",
+                        f.dropped,
+                        f.arp_requests,
+                        f.dma_regions,
+                        f.next_port
+                    );
+                }
+                None => out("net: this machine has no network device"),
             }
         }
         "faults" => {
@@ -3034,6 +3128,22 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
     check!(
         "console: date prints the wall clock in UTC, or names why there is none",
         log.contains(" UTC (unix ") || log.contains("date: no wall clock (")
+    );
+    // ADR-185: where boot time went, what authority this console holds, and the NIC it dials with.
+    let (log, _) = transcript("boot\r", host, &mut fs, dev);
+    check!(
+        "console: boot reports the recorded suite timing, or that none was recorded",
+        log.contains("suite(s) timed") || log.contains("no suite summary was recorded")
+    );
+    let (log, _) = transcript("caps\r", host, &mut fs, dev);
+    check!(
+        "console: caps names the console's capabilities and never prints a token",
+        log.contains("tokens are never printed") || log.contains("offers no capabilities")
+    );
+    let (log, _) = transcript("net\r", host, &mut fs, dev);
+    check!(
+        "console: net reports the network device's addresses, or that there is none",
+        log.contains("net: mac ") || log.contains("no network device")
     );
     let (log, _) = transcript("power\r", host, &mut fs, dev);
     let governed = log.contains("governor: ") && log.contains("domain 0: ");
