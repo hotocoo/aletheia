@@ -2,7 +2,7 @@
 //! shape is refused by name.
 
 use kernel_core::elf::{
-    build, hello_code, judge, trap_code, Machine, Refusal, Target, HELLO_STATUS,
+    build, hello_code, judge, trap_code, Machine, Refusal, Target, HELLO_LINE, HELLO_STATUS,
 };
 
 const A64: Target = Target {
@@ -37,6 +37,12 @@ fn the_seeded_program_is_accepted_on_its_own_cpu() {
         );
     }
     assert_eq!(HELLO_STATUS, (1..=10).sum::<u64>());
+    for m in [Machine::Aarch64, Machine::Riscv64, Machine::X86_64] {
+        assert!(
+            hello_code(m).ends_with(HELLO_LINE),
+            "hello carries its line"
+        );
+    }
 }
 
 #[test]

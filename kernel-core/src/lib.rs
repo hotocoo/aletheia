@@ -80,6 +80,7 @@ pub mod persona;
 pub mod pm;
 pub mod policy;
 pub mod priosched;
+pub mod progout;
 pub mod ptreclaim;
 pub mod reclaim;
 pub mod reentry;

@@ -157,6 +157,9 @@ check_session() {
     # 1..10 in user mode and exits with 55, twice; text and missing objects are refused by name.
     [ "$(grep -Ec "run: hello exited with status 55 after [0-9]+ slice\(s\)" <<<"$log")" -ge 2 ] \
       || { echo "  FAIL [$label/first] run hello did not exit with status 55 twice"; bad=1; }
+    # And a program speaks (ADR-204): `hello` writes its line through SYS_WRITE_CONSOLE.
+    grep -q "run: hello said:" <<<"$log" && grep -q "^hello from user mode" <<<"$log" \
+      || { echo "  FAIL [$label/first] hello's line did not reach the console"; bad=1; }
     grep -q "run: hello admitted: advisor said" <<<"$log" || { echo "  FAIL [$label/first] run did not report the advisor's answer"; bad=1; }
     # And a program that executes an undefined instruction costs that task, never the machine
     # (ADR-202): twice, each terminated by the supervisor, and `hello` still runs afterwards.

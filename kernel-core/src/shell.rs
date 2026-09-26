@@ -830,7 +830,7 @@ pub struct TaskRun {
 }
 
 /// One console-started program run (ADR-201), as the target reports it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProgramRun {
     /// Slices the program was dispatched for.
     pub slices: u32,
@@ -840,6 +840,10 @@ pub struct ProgramRun {
     pub status: u64,
     /// The supervisor terminated it for a fault (ADR-202): the kind, by name.
     pub terminated: Option<&'static str>,
+    /// What it wrote to the console (ADR-204), as kept by the run's output sink.
+    pub output: Vec<u8>,
+    /// Bytes it wrote that the sink had no room for.
+    pub dropped: u64,
 }
 
 /// The machine's network device as the console reports it (ADR-185): addresses and the driver's
@@ -1576,6 +1580,18 @@ fn run_program(host: &dyn ShellHost, name: &str, bytes: &[u8], out: &mut dyn FnM
         after.elevated - before.elevated,
         after.abstain - before.abstain
     );
+    if !run.output.is_empty() {
+        outf!(out, "run: {} said:", name);
+        crate::filepanel::print_safely(&run.output, out);
+    }
+    if run.dropped > 0 {
+        outf!(
+            out,
+            "run: {} wrote {} more byte(s) than the console keeps (not shown)",
+            name,
+            run.dropped
+        );
+    }
     if let Some(kind) = run.terminated {
         outf!(
             out,

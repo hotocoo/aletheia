@@ -449,7 +449,17 @@ fn open_name<D: BlockDevice>(
 /// panel must be safe to point at a binary: bytes that would move the cursor, change the colour,
 /// or reprogram the terminal are shown rather than executed.
 fn print_preview(bytes: &[u8], out: &mut dyn FnMut(&str)) {
-    let shown = bytes.len().min(PREVIEW_BYTES);
+    print_safely(&bytes[..bytes.len().min(PREVIEW_BYTES)], out);
+    if bytes.len() > PREVIEW_BYTES {
+        out("files: the rest is not shown\r\n");
+    }
+}
+
+/// Print `bytes` with anything unprintable shown as a dot and a newline as a line break: bytes that
+/// would move the cursor, change the colour or reprogram the terminal are shown, never executed.
+/// Shared with `run`, which prints what a program wrote (ADR-204).
+pub fn print_safely(bytes: &[u8], out: &mut dyn FnMut(&str)) {
+    let shown = bytes.len();
     let mut buf = [0u8; 64];
     let mut n = 0usize;
     let flush = |buf: &[u8], out: &mut dyn FnMut(&str)| {
@@ -480,9 +490,6 @@ fn print_preview(bytes: &[u8], out: &mut dyn FnMut(&str)) {
     }
     flush(&buf[..n], out);
     out("\r\n");
-    if shown < bytes.len() {
-        out("files: the rest is not shown\r\n");
-    }
 }
 
 /// The file-panel contract, proved on every CPU at boot.

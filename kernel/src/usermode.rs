@@ -37,7 +37,8 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND, SYS_YIELD,
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND,
+    SYS_WRITE_CONSOLE, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's `vm.rs` performs the real page mapping into each address space.
@@ -190,7 +191,7 @@ extern "C" {
 /// `regs[N]` at `N*8`, `sp` at 248, `elr` at 256, `spsr` at 264.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct TrapFrame {
+pub(crate) struct TrapFrame {
     regs: [u64; 31], // x0..x30
     sp: u64,         // SP_EL0
     elr: u64,        // ELR_EL1 (resume PC)
@@ -330,11 +331,33 @@ static mut TCBS: [Tcb; NTASK] = [Tcb::new(); NTASK];
 /// `SYS_EMIT` runs the one-shot capability check (records an event on Allow); `SYS_YIELD`/
 /// `SYS_EXIT` report to the scheduler (carrying the task's register-magic as `arg`).
 #[no_mangle]
-pub extern "C" fn el0_trap(num: u64, arg: u64) -> u64 {
+pub extern "C" fn el0_trap(num: u64, arg: u64, frame: *mut TrapFrame) -> u64 {
     if Syscall::decode(num).is_none() {
         return u64::MAX;
     }
     match num {
+        SYS_WRITE_CONSOLE => {
+            // SAFETY: `frame` is the register file `el0_sync_entry` saved and passed in x2; x1 is
+            // the length. The grant and sink belong to the program running now (single-threaded).
+            // The result goes back in the saved x0: this entry path returns nothing to EL0 itself.
+            unsafe {
+                let len = (*frame).regs[1];
+                let kept = kernel_core::progout::serve_write(
+                    (*addr_of!(PROGRAM_GRANT)).as_ref(),
+                    &mut *addr_of_mut!(PROGRAM_OUT),
+                    arg,
+                    len,
+                    USER_CODE_VA as u64,
+                    USER_STACK_TOP as u64,
+                    // SAFETY: the range lies inside the program's window, which IS its two mapped
+                    // pages (asserted at `PROGRAM_WINDOW`), and this trap runs in its address space
+                    // (TTBR0 is switched back only after the slice returns).
+                    |r| core::slice::from_raw_parts(r.addr() as *const u8, r.len()),
+                );
+                (*frame).regs[0] = kept;
+                kept
+            }
+        }
         SYS_EMIT => {
             let t = match current() {
                 Some(t) => t,
@@ -1457,6 +1480,15 @@ pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
     }
 }
 
+/// The window a program's `SYS_WRITE_CONSOLE` range is checked against is exactly its code page and
+/// its stack page, contiguous: the check is sufficient only because the window IS the mapping.
+const PROGRAM_WINDOW: () =
+    assert!(USER_STACK_VA == USER_CODE_VA + 0x1000 && USER_STACK_TOP == USER_CODE_VA + 0x2000);
+/// The running program's `console.output` grant (ADR-204); `None` whenever no `run` is in progress.
+static mut PROGRAM_GRANT: Option<kernel_core::progout::Grant> = None;
+/// What the running program has written (ADR-204).
+static mut PROGRAM_OUT: kernel_core::progout::OutputSink = kernel_core::progout::OutputSink::new();
+
 /// Slices a console-started program gets before it is abandoned (ADR-201).
 const PROGRAM_SLICES: u32 = 64;
 /// The boot suite's spinner budget: the same proof (preempted every slice, abandoned at the
@@ -1552,6 +1584,13 @@ fn run_program(
     };
     let dead_before = supervisor().terminated();
     let mut run = kernel_core::shell::ProgramRun::default();
+    #[allow(clippy::let_unit_value)]
+    let () = PROGRAM_WINDOW;
+    // SAFETY: single-threaded; the grant and sink exist for exactly this run.
+    unsafe {
+        *addr_of_mut!(PROGRAM_GRANT) = Some(kernel_core::progout::Grant::new(task ^ 0xA11E_7A0A));
+        (*addr_of_mut!(PROGRAM_OUT)).reset();
+    }
     // The GIC and the timer: the interactive console's own when it is live (its distributor is on);
     // otherwise this run brings them up and puts them back down, as the preemption suite does.
     let own_gic = gicd_r32(GICD_CTLR) & 1 == 0;
@@ -1602,6 +1641,13 @@ fn run_program(
     // rate on the next tick. A GIC this run brought up goes back down, timer included.
     if own_gic {
         gic_teardown();
+    }
+    // SAFETY: single-threaded; the run is over, so its grant goes and its output is handed back.
+    unsafe {
+        *addr_of_mut!(PROGRAM_GRANT) = None;
+        let out = &*addr_of!(PROGRAM_OUT);
+        run.output = out.bytes().to_vec();
+        run.dropped = out.dropped();
     }
     cleanup_tasks(&roots, &mut code, &mut stack);
     Some(run)
@@ -2498,8 +2544,40 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             .ok()
             .and_then(|p| run_program(&p, PROGRAM_SLICES));
         check!(
-            ran.is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
+            ran.as_ref().is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
             "run: a program image from the namespace format runs in user mode and exits with its status (55)"
+        );
+        // Programs speak (ADR-204): `hello`'s line reaches the console; a write outside the
+        // program's two pages, straddling their end, or past the copy budget is refused with nothing
+        // kept; a flood keeps exactly the sink's bound and counts the rest.
+        check!(
+            ran.as_ref()
+                .is_some_and(|r| r.output == kernel_core::elf::HELLO_LINE && r.dropped == 0),
+            "write: a program's line reaches the console through SYS_WRITE_CONSOLE"
+        );
+        let cv = t.code_va;
+        let write = |addr: u64, len: u64| {
+            let img = build(t, &kernel_core::elf::writer_code(t.machine, addr, len));
+            judge(&img, t)
+                .ok()
+                .and_then(|p| run_program(&p, PROGRAM_SLICES))
+        };
+        let refused = [(cv - 0x1000, 8), (cv + 0x2000 - 4, 8), (cv, 65_537)]
+            .iter()
+            .all(|&(a, l)| {
+                write(a, l).is_some_and(|r| r.exited && r.status == u64::MAX && r.output.is_empty())
+            });
+        check!(
+            refused,
+            "write: a range outside the program's pages, straddling their end, or past the copy budget is refused and nothing is kept"
+        );
+        let flood = write(cv, 200);
+        check!(
+            flood.is_some_and(|r| r.exited
+                && r.status == 56
+                && r.output.len() == kernel_core::progout::CAPACITY
+                && r.dropped == 144),
+            "write: a flood keeps exactly the console's 256-byte bound and counts the other 144 bytes"
         );
         let before = supervisor().terminated();
         let trapped = judge(&trap, t)

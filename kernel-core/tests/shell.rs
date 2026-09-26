@@ -949,6 +949,8 @@ impl ShellHost for ProgramHost {
             exited: true,
             status: kernel_core::elf::HELLO_STATUS,
             terminated: None,
+            output: b"hi\x1b[2J\n".to_vec(),
+            dropped: 3,
         })
     }
 }
@@ -998,6 +1000,13 @@ fn run_places_a_judged_program_and_refuses_everything_else_by_name() {
     assert!(log.contains("run: hello admitted: advisor said"), "{log}");
     assert!(
         log.contains("run: hello exited with status 55 after 1 slice(s)"),
+        "{log}"
+    );
+    // What the program wrote is shown, with its escape byte rendered as a dot, never executed.
+    assert!(log.contains("run: hello said:\r\nhi.[2J\r\n"), "{log:?}");
+    assert!(!log.contains('\x1b'), "{log:?}");
+    assert!(
+        log.contains("run: hello wrote 3 more byte(s) than the console keeps (not shown)"),
         "{log}"
     );
     assert!(

@@ -27,6 +27,9 @@ pub const SYS_FS_LIST: u64 = 10;
 /// Terminate a task owned by the caller's capability domain. Reserved until task handles are public.
 pub const SYS_PROCESS_KILL: u64 = 11;
 
+/// Write bytes to the console that started the program (ADR-204): pointer and length, bounded by
+/// the run's output sink. Returns the bytes kept, or `u64::MAX` when refused.
+pub const SYS_WRITE_CONSOLE: u64 = 12;
 /// Upper 32 bits of [`SYS_PROCESS_INFO`] response.
 pub const PROCESS_INFO_TERMINATED_SHIFT: u32 = 32;
 
@@ -57,6 +60,7 @@ pub enum Syscall {
     FsWrite,
     FsList,
     ProcessKill,
+    WriteConsole,
 }
 
 impl Syscall {
@@ -74,6 +78,7 @@ impl Syscall {
             SYS_FS_WRITE => Some(Self::FsWrite),
             SYS_FS_LIST => Some(Self::FsList),
             SYS_PROCESS_KILL => Some(Self::ProcessKill),
+            SYS_WRITE_CONSOLE => Some(Self::WriteConsole),
             _ => None,
         }
     }
@@ -92,6 +97,7 @@ impl Syscall {
             Self::FsWrite => SYS_FS_WRITE,
             Self::FsList => SYS_FS_LIST,
             Self::ProcessKill => SYS_PROCESS_KILL,
+            Self::WriteConsole => SYS_WRITE_CONSOLE,
         }
     }
 
@@ -106,6 +112,7 @@ impl Syscall {
             Self::FsWrite => Some("fs.write"),
             Self::FsList => Some("fs.inspect"),
             Self::ProcessKill => Some("process.kill"),
+            Self::WriteConsole => Some("console.output"),
             Self::Yield | Self::Exit | Self::Regcheck => None,
         }
     }
@@ -129,6 +136,7 @@ mod tests {
             Syscall::FsWrite,
             Syscall::FsList,
             Syscall::ProcessKill,
+            Syscall::WriteConsole,
         ] {
             assert_eq!(Syscall::decode(syscall.number()), Some(syscall));
         }
@@ -136,7 +144,7 @@ mod tests {
 
     #[test]
     fn unknown_numbers_fail_closed() {
-        for number in [0, 12, 99, u64::MAX] {
+        for number in [0, 13, 99, u64::MAX] {
             assert_eq!(Syscall::decode(number), None);
         }
     }
@@ -148,6 +156,7 @@ mod tests {
         assert_eq!(Syscall::FsWrite.capability(), Some("fs.write"));
         assert_eq!(Syscall::FsList.capability(), Some("fs.inspect"));
         assert_eq!(Syscall::ProcessKill.capability(), Some("process.kill"));
+        assert_eq!(Syscall::WriteConsole.capability(), Some("console.output"));
         assert_eq!(Syscall::Yield.capability(), None);
     }
 
