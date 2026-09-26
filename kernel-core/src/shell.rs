@@ -1521,9 +1521,9 @@ fn split_first(line: &str) -> (&str, &str) {
     }
 }
 
-/// What a freshly formatted namespace starts with (ADR-201, ADR-202): the programs `hello` (exits
-/// with 55) and `trap` (executes an undefined instruction) for this CPU, so a new machine has
-/// something to `run`, and something that must be contained, without a cross toolchain. Only ever called on the format
+/// What a freshly formatted namespace starts with (ADR-201..203): the programs `hello` (exits with
+/// 55), `trap` (executes an undefined instruction) and `spin` (never yields) for this CPU, so a new
+/// machine has something to `run`, and two things that must be contained, without a toolchain. Only ever called on the format
 /// path, so an object the operator removed is never brought back.
 pub fn seed_namespace<D: BlockDevice>(
     fs: &mut Filesystem,
@@ -1533,7 +1533,9 @@ pub fn seed_namespace<D: BlockDevice>(
     let hello = crate::elf::build(target, crate::elf::hello_code(target.machine));
     fs.create(dev, "hello", &hello)?;
     let trap = crate::elf::build(target, crate::elf::trap_code(target.machine));
-    fs.create(dev, "trap", &trap)
+    fs.create(dev, "trap", &trap)?;
+    let spin = crate::elf::build(target, crate::elf::spin_code(target.machine));
+    fs.create(dev, "spin", &spin)
 }
 
 /// `run NAME` (ADR-201): judge the object's bytes as a program for this CPU, refuse by name what
@@ -1593,7 +1595,7 @@ fn run_program(host: &dyn ShellHost, name: &str, bytes: &[u8], out: &mut dyn FnM
     } else {
         outf!(
             out,
-            "run: {} FAILED: did not exit within {} slice(s); abandoned",
+            "run: {} did not exit within {} slice(s): preempted and abandoned; the machine continues",
             name,
             run.slices
         );

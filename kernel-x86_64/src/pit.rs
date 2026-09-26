@@ -45,7 +45,16 @@ pub fn init_at_hz(freq_hz: u32) {
     program(freq_hz.max(1));
 }
 
+/// Whether [`quiesce`] stopped the counter and nothing has reprogrammed it since (ADR-203).
+static QUIESCED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether channel 0 is stopped (see [`quiesce`]).
+pub fn is_quiesced() -> bool {
+    QUIESCED.load(Ordering::Relaxed)
+}
+
 fn program(freq_hz: u32) {
+    QUIESCED.store(false, Ordering::Relaxed);
     let divisor = (PIT_BASE_HZ / freq_hz).clamp(1, u16::MAX as u32) as u16;
     unsafe {
         // Channel 0, access lobyte/hibyte, mode 3 (square wave generator), binary.
@@ -66,8 +75,8 @@ fn program(freq_hz: u32) {
 /// Mode 0 (interrupt on terminal count) does not reload: the counter runs down once and then sits
 /// there. So this is not "a slower tick", it is the last tick. Anything that needs a periodic
 /// timer again calls [`init`], which reprograms mode 3 from scratch.
-#[cfg(feature = "interactive")]
 pub fn quiesce() {
+    QUIESCED.store(true, Ordering::Relaxed);
     unsafe {
         // Channel 0, access lobyte/hibyte, mode 0 (one-shot), binary.
         Port::<u8>::new(COMMAND).write(0x30u8);

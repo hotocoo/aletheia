@@ -622,6 +622,12 @@ fn gicd_w32(off: usize, v: u32) {
     unsafe { core::ptr::write_volatile((GICD_BASE + off) as *mut u32, v) };
 }
 #[inline]
+fn gicd_r32(off: usize) -> u32 {
+    // SAFETY: GICD is a valid Device-mapped MMIO register at a fixed platform address; a read of
+    // GICD_CTLR has no side effect.
+    unsafe { core::ptr::read_volatile((GICD_BASE + off) as *const u32) }
+}
+#[inline]
 fn gicc_w32(off: usize, v: u32) {
     // SAFETY: GICC is a valid Device-mapped MMIO register at a fixed platform address.
     unsafe { core::ptr::write_volatile((GICC_BASE + off) as *mut u32, v) };
@@ -1504,6 +1510,9 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
             frame: TrapFrame::new_entry(program.entry as usize, USER_STACK_TOP, 0, 0),
             done: false,
         };
+        // Preemptible (ADR-203): IRQs are open at EL0, so the timer ends a slice the program
+        // never yields; the kernel side stays masked by the caller's fence.
+        (*addr_of_mut!(TCBS))[0].frame.spsr = SPSR_EL0T_IRQ;
     }
 
     let mut policy = PriorityScheduler::default();
@@ -1537,6 +1546,14 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
     };
     let dead_before = supervisor().terminated();
     let mut run = kernel_core::shell::ProgramRun::default();
+    // The GIC and the timer: the interactive console's own when it is live (its distributor is on);
+    // otherwise this run brings them up and puts them back down, as the preemption suite does.
+    let own_gic = gicd_r32(GICD_CTLR) & 1 == 0;
+    if own_gic {
+        gic_init();
+    }
+    // A fresh deadline, so a tick already pending does not end the first slice before it starts.
+    timer_arm();
     while run.slices < PROGRAM_SLICES {
         let Some(id) = policy.schedule_next() else {
             break;
@@ -1574,6 +1591,11 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
     }
     if !run.exited && run.terminated.is_none() {
         resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
+    }
+    // The live desktop is pumped from this same timer: left armed, its handler re-arms at its own
+    // rate on the next tick. A GIC this run brought up goes back down, timer included.
+    if own_gic {
+        gic_teardown();
     }
     cleanup_tasks(&roots, &mut code, &mut stack);
     Some(run)
@@ -2462,7 +2484,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // status; `trap` executes an undefined instruction and costs exactly that task; sixteen more
     // faulting runs hold no death record and give back every frame and live heap byte.
     {
-        use kernel_core::elf::{build, hello_code, judge, trap_code, HELLO_STATUS};
+        use kernel_core::elf::{build, hello_code, judge, spin_code, trap_code, HELLO_STATUS};
         let t = PROGRAM_TARGET;
         let hello = build(t, hello_code(t.machine));
         let trap = build(t, trap_code(t.machine));
@@ -2477,6 +2499,18 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             trapped.is_some_and(|r| r.terminated.is_some() && !r.exited)
                 && supervisor().terminated() == before + 1,
             "run: a program whose first instruction is undefined is TERMINATED by the supervisor and the machine continues"
+        );
+        // A program that never yields (ADR-203): the timer ends every slice, the budget ends it.
+        let spin = build(t, spin_code(t.machine));
+        let spun = judge(&spin, t).ok().and_then(|p| run_program(&p));
+        check!(
+            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.slices == PROGRAM_SLICES),
+            "run: a program that never yields is preempted by the timer every slice and abandoned at its budget"
+        );
+        let after_spin = judge(&hello, t).ok().and_then(|p| run_program(&p));
+        check!(
+            after_spin.is_some_and(|r| r.exited && r.status == HELLO_STATUS),
+            "run: after an abandoned spinner, a program still runs and exits with its status"
         );
         let (held, frames0, heap0) = (
             supervisor().held(),

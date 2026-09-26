@@ -43,6 +43,29 @@ pub fn init() {
     }
 }
 
+/// Run `f` with the PIT ticking and IRQ0 unmasked on the master PIC, restoring both afterwards
+/// (ADR-203): a console `run` needs the tick to end a slice its program never yields, whether or
+/// not a desktop is keeping it. A console-only machine stopped the counter (`pit::quiesce`); it is
+/// restarted for the run and stopped again after. The mask is read-modify-write, like the others.
+pub fn with_timer_unmasked<R>(f: impl FnOnce() -> R) -> R {
+    let stopped = crate::pit::is_quiesced();
+    if stopped {
+        crate::pit::init();
+    }
+    // SAFETY: the master PIC's data port; only bit 0 (IRQ0) is changed, and put back.
+    let was = unsafe { Port::<u8>::new(PIC1_DATA).read() };
+    unsafe { Port::<u8>::new(PIC1_DATA).write(was & !1) };
+    let r = f();
+    unsafe {
+        let cur = Port::<u8>::new(PIC1_DATA).read();
+        Port::<u8>::new(PIC1_DATA).write((cur & !1) | (was & 1));
+    }
+    if stopped {
+        crate::pit::quiesce();
+    }
+    r
+}
+
 /// Mask IRQ0 (the PIT) on the master PIC (REQ-CON-002).
 ///
 /// The boot leaves the PIT free-running for the ring-3 preemption suite. By the time a human is at

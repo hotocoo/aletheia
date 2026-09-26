@@ -1177,10 +1177,13 @@ pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
 pub fn run_program_live(
     program: &kernel_core::elf::Placement,
 ) -> Option<kernel_core::shell::ProgramRun> {
-    fenced(|| run_program(program))
+    fenced(|| run_program(program, true))
 }
 
-fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::shell::ProgramRun> {
+fn run_program(
+    program: &kernel_core::elf::Placement,
+    live: bool,
+) -> Option<kernel_core::shell::ProgramRun> {
     use crate::hal::{ActiveHal, Hal};
     use kernel_core::mlsched::resident;
     use kernel_core::priosched::{Priority, PriorityScheduler};
@@ -1243,6 +1246,10 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
     };
     let dead_before = supervisor().terminated();
     let mut run = kernel_core::shell::ProgramRun::default();
+    // Preemptible (ADR-203): the S-timer is the only source enabled while the program runs, so a
+    // slice the program never yields ends at the deadline; a fresh one, so none is already pending.
+    timer_arm();
+    stie_enable();
     while run.slices < PROGRAM_SLICES {
         let Some(id) = policy.schedule_next() else {
             break;
@@ -1284,8 +1291,14 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
             break;
         }
     }
+    stie_disable();
     if !run.exited && run.terminated.is_none() {
         resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
+    }
+    // The live desktop is pumped from this same timer: left set, its handler re-arms at its own rate.
+    // A run outside the live console (the boot suite) leaves the deadline off, as it found it.
+    if !live {
+        timer_disable();
     }
     teardown(code, stack);
     Some(run)
@@ -2199,21 +2212,33 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // status; `trap` executes an undefined instruction and costs exactly that task; sixteen more
     // faulting runs hold no death record and give back every frame and live heap byte.
     {
-        use kernel_core::elf::{build, hello_code, judge, trap_code, HELLO_STATUS};
+        use kernel_core::elf::{build, hello_code, judge, spin_code, trap_code, HELLO_STATUS};
         let t = PROGRAM_TARGET;
         let hello = build(t, hello_code(t.machine));
         let trap = build(t, trap_code(t.machine));
-        let ran = judge(&hello, t).ok().and_then(|p| run_program(&p));
+        let ran = judge(&hello, t).ok().and_then(|p| run_program(&p, false));
         check!(
             ran.is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
             "run: a program image from the namespace format runs in user mode and exits with its status (55)"
         );
         let before = supervisor().terminated();
-        let trapped = judge(&trap, t).ok().and_then(|p| run_program(&p));
+        let trapped = judge(&trap, t).ok().and_then(|p| run_program(&p, false));
         check!(
             trapped.is_some_and(|r| r.terminated.is_some() && !r.exited)
                 && supervisor().terminated() == before + 1,
             "run: a program whose first instruction is undefined is TERMINATED by the supervisor and the machine continues"
+        );
+        // A program that never yields (ADR-203): the timer ends every slice, the budget ends it.
+        let spin = build(t, spin_code(t.machine));
+        let spun = judge(&spin, t).ok().and_then(|p| run_program(&p, false));
+        check!(
+            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.slices == PROGRAM_SLICES),
+            "run: a program that never yields is preempted by the timer every slice and abandoned at its budget"
+        );
+        let after_spin = judge(&hello, t).ok().and_then(|p| run_program(&p, false));
+        check!(
+            after_spin.is_some_and(|r| r.exited && r.status == HELLO_STATUS),
+            "run: after an abandoned spinner, a program still runs and exits with its status"
         );
         let (held, frames0, heap0) = (
             supervisor().held(),
@@ -2224,7 +2249,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         for _ in 0..16 {
             if judge(&trap, t)
                 .ok()
-                .and_then(|p| run_program(&p))
+                .and_then(|p| run_program(&p, false))
                 .is_some_and(|r| r.terminated.is_some())
             {
                 contained += 1;

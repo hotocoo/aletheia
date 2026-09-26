@@ -271,5 +271,15 @@ pub fn trap_code(machine: Machine) -> &'static [u8] {
     }
 }
 
+/// The program every machine seeds as `spin` (ADR-203): a branch to itself. It never yields and
+/// never exits, so only the timer can end its slice, and only the slice budget can end it.
+pub fn spin_code(machine: Machine) -> &'static [u8] {
+    match machine {
+        Machine::Aarch64 => &[0x00, 0x00, 0x00, 0x14], // b .
+        Machine::Riscv64 => &[0x6f, 0x00, 0x00, 0x00], // j .
+        Machine::X86_64 => &[0xeb, 0xfe],              // jmp .
+    }
+}
+
 /// The status `hello` exits with.
 pub const HELLO_STATUS: u64 = 55;

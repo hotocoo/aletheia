@@ -1863,7 +1863,13 @@ pub fn run_program_live(
     program: &kernel_core::elf::Placement,
 ) -> Option<kernel_core::shell::ProgramRun> {
     x86_64::instructions::interrupts::without_interrupts(|| {
-        with_ring3_traps(|| run_program(program))
+        // IRQ0 ends a ring-3 slice only through the preemption entry; the desktop's plain handler
+        // goes back the moment the run is over (ADR-203).
+        // SAFETY: `isr_timer_entry` is the raw preemption entry the boot suite proves; IF=0.
+        unsafe { idt::install_preemption_timer(addr_of!(isr_timer_entry) as u64) };
+        let run = crate::pic::with_timer_unmasked(|| with_ring3_traps(|| run_program(program)));
+        idt::restore_timer();
+        run
     })
 }
 
@@ -1887,7 +1893,9 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
     // SAFETY: single-threaded; slot 0's TCB is initialised before its first resume.
     unsafe {
         (*addr_of_mut!(TCBS))[0] = Tcb {
-            frame: TrapFrame::new_user(program.entry, USER_STACK_TOP, RFLAGS_COOP),
+            // Preemptible (ADR-203): IF is set in ring 3, so the PIT ends a slice the program never
+            // yields; the kernel side stays IF=0.
+            frame: TrapFrame::new_user(program.entry, USER_STACK_TOP, RFLAGS_IF),
             done: false,
         };
     }
@@ -2892,7 +2900,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     // status; `trap` executes an undefined instruction and costs exactly that task; sixteen more
     // faulting runs hold no death record and give back every frame and live heap byte.
     {
-        use kernel_core::elf::{build, hello_code, judge, trap_code, HELLO_STATUS};
+        use kernel_core::elf::{build, hello_code, judge, spin_code, trap_code, HELLO_STATUS};
         let t = PROGRAM_TARGET;
         let hello = build(t, hello_code(t.machine));
         let trap = build(t, trap_code(t.machine));
@@ -2918,6 +2926,20 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             divided.is_some_and(|r| r.terminated.is_some())
                 && supervisor().terminated() == before_de + 1,
             "run: a ring-3 DIVIDE BY ZERO (#DE) is terminated by the supervisor, not fatal"
+        );
+        // A program that never yields (ADR-203): the timer ends every slice, the budget ends it.
+        let spin = build(t, spin_code(t.machine));
+        let spun = judge(&spin, t).ok().and_then(|p| run_program_contained(&p));
+        check!(
+            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.slices == PROGRAM_SLICES),
+            "run: a program that never yields is preempted by the timer every slice and abandoned at its budget"
+        );
+        let after_spin = judge(&hello, t)
+            .ok()
+            .and_then(|p| run_program_contained(&p));
+        check!(
+            after_spin.is_some_and(|r| r.exited && r.status == HELLO_STATUS),
+            "run: after an abandoned spinner, a program still runs and exits with its status"
         );
         let (held, frames0, heap0) = (
             supervisor().held(),

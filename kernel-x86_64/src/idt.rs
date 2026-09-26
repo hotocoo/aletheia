@@ -415,6 +415,15 @@ pub fn restore_fatal_traps() {
     }
 }
 
+/// Point IRQ0 at the ring-3 preemption entry for one console `run` (ADR-203); [`restore_timer`]
+/// hands it back.
+///
+/// # Safety
+/// `timer_entry` must be the raw preemption entry, installed single-core with IF=0.
+pub unsafe fn install_preemption_timer(timer_entry: u64) {
+    IDT.get_mut()[TIMER_VECTOR].set_handler_addr(VirtAddr::new(timer_entry));
+}
+
 /// Give IRQ0 back to the plain [`timer`] handler installed by [`init`] (ADR-080).
 ///
 /// The ring-3 suite points the timer vector at its register-exact preemption entry, which ends by
