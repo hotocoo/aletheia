@@ -16,3 +16,4 @@ aletheia/target/
 .understand-anything/
 .audit-tmp/
 .codegraph/
+__pycache__/
