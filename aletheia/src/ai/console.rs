@@ -432,6 +432,24 @@ pub const CASES: &[ConsoleCase] = &[
         context: "  objects on this machine: manifesto (30 bytes), poem (12 bytes)\n",
     },
     ConsoleCase {
+        natural: "start the user-mode tasks through the scheduler now",
+        literal: "tasks",
+        expect: "tasks",
+        approved: false,
+        console_says: "every task ran in its own address space",
+        context:
+            "  objects on this machine: manifesto (30 bytes), poem (12 bytes), hello (311 bytes)\n",
+    },
+    ConsoleCase {
+        natural: "run the program hello and hand it the words to the world",
+        literal: "run hello to the world",
+        expect: "run hello to the world",
+        approved: true,
+        console_says: "hello from user mode: to the world",
+        context:
+            "  objects on this machine: manifesto (30 bytes), poem (12 bytes), hello (311 bytes)\n",
+    },
+    ConsoleCase {
         natural: "remove the object called notes",
         literal: "rm notes",
         expect: "rm notes",

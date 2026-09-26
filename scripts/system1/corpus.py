@@ -84,7 +84,25 @@ def bare_words(request):
     return [w for w in (t.strip(PUNCT) for t in request.split()) if w]
 
 
+def hygienic(request, cmd):
+    """A request a person would type (ADR-209). The paraphraser sometimes echoes its own prompt
+    (`... -- run the program in object ...`), leaves reasoning debris (`So it should be: "memo`) or
+    an unbalanced quote; a row like that teaches the model the prompt, not the operator."""
+    low = request.lower()
+    if " -- " in request or request.count('"') % 2:
+        return False
+    if cmd["doc"].lower() in low:
+        return False
+    placeholders = [t for t in cmd["usage"].split()[1:] if t.strip("[]").isupper()]
+    return not any(p in request for p in placeholders)
+
+
+HYGIENE = False
+
+
 def keeps(request, cmd, vals):
+    if HYGIENE and not hygienic(request, cmd):
+        return False
     words = bare_words(request)
     for a, v in vals.items():
         if a == "text" and cmd["free_form_last"] and cmd["args"][-1] == "text":
@@ -105,11 +123,30 @@ def main():
     ap.add_argument("--seed", type=int, default=186)
     ap.add_argument("--only", default="", help="comma-separated commands to (re)generate")
     ap.add_argument("--append", action="store_true", help="append to --out; groups continue after its last")
+    ap.add_argument("--scrub", action="store_true",
+                    help="drop existing --out rows whose request fails the hygiene rule, then exit")
+    ap.add_argument("--hygiene", action="store_true",
+                    help="apply the hygiene rule to new rows too (ADR-209: measured to cost coverage)")
     a = ap.parse_args()
     rng = random.Random(a.seed)
 
-    global SCHEMA
+    global SCHEMA, HYGIENE
+    HYGIENE = a.hygiene
     SCHEMA = json.loads(subprocess.check_output([a.aletheiad, "console", "system1-schema"]))
+    if a.scrub:
+        by_name = {c["name"]: c for c in SCHEMA["commands"]}
+        with open(a.out) as f:
+            old = [json.loads(l) for l in f if l.strip()]
+        # Every row of one request shares its `state`; the command row names the command.
+        cmd_of = {(r["group"], r["state"]): r["answer"] for r in old if r.get("kind") in (None, "command")}
+        keep = [r for r in old
+                if (c := by_name.get(cmd_of.get((r["group"], r["state"]), ""))) is None
+                or hygienic(r["state"], c)]
+        with open(a.out, "w") as f:
+            for r in keep:
+                f.write(json.dumps(r) + "\n")
+        print("[corpus] scrub: kept %d of %d rows" % (len(keep), len(old)), file=sys.stderr)
+        return
     rows, stats = [], {}
     gid = 0
     if a.append:

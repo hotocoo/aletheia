@@ -1104,8 +1104,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "the resident risk advisor: what it is, and what it has done since boot",
     ),
     (
-        "run NAME [ARGS]",
-        "run the program in object NAME as a user-mode task, handed ARGS, admitted through the resident risk advisor",
+        "run NAME [TEXT]",
+        "run the program in object NAME as a user-mode task, handed TEXT as its arguments, admitted through the resident risk advisor",
     ),
     (
         "tasks",
@@ -2109,7 +2109,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
             let (name, args) = split_first(rest);
             if name.is_empty() {
-                out("usage: run NAME [ARGS]");
+                out("usage: run NAME [TEXT]");
             } else if args.len() > crate::elf::MAX_ARGS {
                 outf!(
                     out,
