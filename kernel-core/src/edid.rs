@@ -149,8 +149,7 @@ impl Edid {
     /// Every mode, largest first, then highest refresh — the order a settings list shows.
     pub fn sorted(&self) -> [Mode; MAX_MODES] {
         let mut out = self.modes;
-        out[..self.n]
-            .sort_unstable_by(|a, b| (b.area(), b.refresh_mhz).cmp(&(a.area(), a.refresh_mhz)));
+        out[..self.n].sort_unstable_by_key(|m| core::cmp::Reverse((m.area(), m.refresh_mhz)));
         out
     }
 }
@@ -428,7 +427,7 @@ mod tests {
         d[3] = (280 & 0xFF) as u8;
         d[4] = (((1920 >> 8) as u8) << 4) | (280 >> 8) as u8;
         d[6] = 45;
-        d[7] = (((1080 >> 8) as u8) << 4) | 0;
+        d[7] = ((1080 >> 8) as u8) << 4;
         let s: u8 = b[..127].iter().fold(0u8, |a, &x| a.wrapping_add(x));
         b[127] = 0u8.wrapping_sub(s);
         let p = parse(&b).unwrap().preferred().unwrap();

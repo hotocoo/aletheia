@@ -1,5 +1,5 @@
 //! Redirects, followed under the navigation's own policy (ADR-190).
-use kernel_core::browser::{parse_url, redirect_target, Navigator, MAX_REDIRECTS};
+use kernel_core::browser::{parse_url, redirect_target, Navigator};
 use kernel_core::fs::Filesystem;
 use kernel_core::shell::{execute, ShellAction, ShellHost};
 use kernel_core::storage::MemBlockDevice;
@@ -137,5 +137,4 @@ fn a_location_resolves_to_https_on_the_same_host_or_is_refused() {
             core::str::from_utf8(bad)
         );
     }
-    assert!(MAX_REDIRECTS >= 1);
 }
