@@ -34,6 +34,25 @@ pub fn resolve_in_cache(cache_root: &Path, model_ref: &str) -> Option<PathBuf> {
 /// whichever is bigger, which is a different set of weights from the one whose checksum, context and
 /// sampling parameters this OS pinned — so `model use` would report one model and the provider would
 /// load another, with nothing anywhere saying they differed.
+/// The file a manifest names, found by exact name in any snapshot of `model_ref`'s cache directory,
+/// whatever its format (ADR-186). `None` when either is empty or the file is not there.
+pub fn cached_file(cache_root: &Path, model_ref: &str, file: &str) -> Option<PathBuf> {
+    if model_ref.is_empty() || file.is_empty() {
+        return None;
+    }
+    let snaps = cache_root
+        .join(ref_to_cache_dirname(model_ref))
+        .join("snapshots");
+    let mut snaps: Vec<PathBuf> = std::fs::read_dir(&snaps)
+        .ok()?
+        .flatten()
+        .map(|d| d.path())
+        .collect();
+    // Deterministic: the same machine names the same snapshot every time.
+    snaps.sort();
+    snaps.into_iter().map(|s| s.join(file)).find(|p| p.exists())
+}
+
 pub fn resolve_in_cache_file(cache_root: &Path, model_ref: &str, file: &str) -> Option<PathBuf> {
     let snaps = cache_root
         .join(ref_to_cache_dirname(model_ref))

@@ -32,6 +32,8 @@
 pub mod agent;
 pub mod bench;
 pub mod console;
+pub mod decision;
+pub mod dual;
 pub mod llama;
 pub mod registry;
 pub mod runtime;
@@ -161,6 +163,35 @@ pub mod config {
                 Some(e) => format!("{} ({})", e.id, e.name),
                 None => format!("{} (unregistered)", self.model_ref),
             }
+        }
+    }
+
+    /// What fills System 1 on this machine (ADR-186): the model, and where its sidecar answers.
+    #[derive(Debug, Clone)]
+    pub struct System1Config {
+        pub entry: ModelEntry,
+        pub endpoint: String,
+    }
+
+    impl System1Config {
+        /// Resolution mirrors System 2's: `ALETHEIA_SYSTEM1` for one invocation, else the
+        /// persisted System-1 selection, else the registry's System-1 default; `SYSTEM1_ENDPOINT`
+        /// overrides where it answers. `None` when no System-1 model is characterized, or when
+        /// `AI_PROVIDER` is not `local` — the deterministic machine has no models at all.
+        pub fn resolve(data_dir: Option<&Path>) -> Option<Self> {
+            let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+            if get("AI_PROVIDER").is_some_and(|p| p != "local") {
+                return None;
+            }
+            let entry = get("ALETHEIA_SYSTEM1")
+                .and_then(|id| registry::find(&id))
+                .filter(|e| e.role == registry::Role::System1)
+                .or_else(|| {
+                    data_dir.and_then(|d| registry::load_selection_for(d, registry::Role::System1))
+                })
+                .or_else(registry::default_system1)?;
+            let endpoint = get("SYSTEM1_ENDPOINT").unwrap_or_else(|| entry.endpoint.clone());
+            Some(System1Config { entry, endpoint })
         }
     }
 

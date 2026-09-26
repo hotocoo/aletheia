@@ -1,0 +1,29 @@
+# System 1's CURRENT occupant (ADR-186) - a temporary one. Laya is a non-autoregressive decision
+# model: typed questions in, calibrated answers out, one forward pass. It fills the `system1` role
+# until a checkpoint trained for Aletheia's console replaces it; replacing it is a new manifest and
+# `aletheiad model use <id>`, never an edit to the source.
+#
+# Serve it with the backend's sidecar (`backend` below names the script):
+#   python3 scripts/system1/laya_server.py <dir of model.safetensors> --serve-id laya --port 8091
+
+[model]
+id          = "laya"
+name        = "Laya (ModernBERT-large, English root checkpoint)"
+role        = "system1"
+repo        = "convaiinnovations/laya"
+file        = "model.safetensors"
+sha256      = "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c"
+size_bytes  = 842609210
+serve_id    = "laya"
+default     = true
+# `unfit`: present and serving, but MEASURED unfit to front the console (ADR-186, `aletheiad
+# console bench`, 2026-09-26): 1/8 console cases right, 4 of them wrong at confidence >= 0.94. A
+# System-1 model fronts the console only when its status is `ready`; `--interpreter dual` forces it.
+status      = "unfit"
+
+[runtime]
+backend     = "laya"
+endpoint    = "http://127.0.0.1:8091"
+# The escalation threshold. NOT YET MEASURED for the console (ADR-186 says so); the console bench
+# reports accuracy and escalation at this value so it can be moved on evidence.
+confidence  = 0.9

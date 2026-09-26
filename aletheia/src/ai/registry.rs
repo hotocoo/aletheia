@@ -30,9 +30,45 @@
 //! what it does not understand is a smaller thing to trust than a general one.
 use std::path::{Path, PathBuf};
 
+/// Which of the two thinking systems a model serves (ADR-186).
+///
+/// **System 2** is the deliberate one: a language model that reads a request and PROPOSES a plan
+/// token by token — slow, general, and the only arm that can write free text. **System 1** is the
+/// fast one: a non-autoregressive decision model that answers TYPED questions (pick one of these,
+/// yes or no, a level on a scale) with a calibrated confidence in one forward pass. Neither holds
+/// authority; both feed the same validator. Which model fills which role is a manifest fact, never a
+/// name in the source, so either occupant can be replaced without an edit here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    System1,
+    System2,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::System1 => "system1",
+            Role::System2 => "system2",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Role> {
+        match s {
+            "system1" => Some(Role::System1),
+            "system2" => Some(Role::System2),
+            _ => None,
+        }
+    }
+}
+
 /// One model this machine can run, or one Aletheia has characterized and is waiting for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelEntry {
+    /// The thinking system this model serves. Absent from a manifest = System 2, which is what
+    /// every model before ADR-186 was; a discovered GGUF is System 2 by construction.
+    pub role: Role,
+    /// System 1 only: the calibrated confidence below which an answer is not trusted and the request
+    /// escalates to System 2. A measured manifest fact; the default is a guess and `pinned` says so.
+    pub confidence: f32,
     /// Short id the operator types: `aletheiad model use <id>`. Derived from the repo name for a
     /// discovered model; a manifest may declare a shorter alias.
     pub id: String,
@@ -77,12 +113,24 @@ impl ModelEntry {
     pub fn is_provisionable(&self) -> bool {
         !self.repo.is_empty() && !self.file.is_empty()
     }
+    /// May this model take a role's front line unasked? `unfit` is a MEASURED statement: present,
+    /// runnable, and shown by a bench to be wrong too often while sure (ADR-186).
+    pub fn is_fit(&self) -> bool {
+        self.status == "ready"
+    }
     /// Is the model declared finished?
     pub fn is_ready(&self) -> bool {
         self.status != "pretraining"
     }
     /// One short phrase for `model list`.
     pub fn tag(&self) -> &'static str {
+        if self.status == "unfit" {
+            return if self.present {
+                "present, measured unfit"
+            } else {
+                "measured unfit"
+            };
+        }
         match (self.present, self.is_ready(), self.pinned) {
             (_, false, _) => "not yet trained",
             (true, _, true) => "present, pinned",
@@ -92,10 +140,15 @@ impl ModelEntry {
     }
 }
 
+/// The escalation threshold a System-1 model gets before anyone has measured one.
+pub const DEFAULT_CONFIDENCE: f32 = 0.9;
+
 /// Sensible parameters for a model nobody has characterized. Every field here is a GUESS, which is
 /// why `pinned` is false and why `model list` says so.
 fn defaults() -> ModelEntry {
     ModelEntry {
+        role: Role::System2,
+        confidence: DEFAULT_CONFIDENCE,
         id: String::new(),
         name: String::new(),
         repo: String::new(),
@@ -269,6 +322,7 @@ const MANIFESTS: &[&str] = &[
     include_str!("../../../models/lfm2.5.toml"),
     include_str!("../../../models/minicpm.toml"),
     include_str!("../../../models/aletheia-lm.toml"),
+    include_str!("../../../models/laya.toml"),
 ];
 
 /// The parsed manifests.
@@ -310,6 +364,8 @@ pub fn catalog_in(root: &Path) -> Vec<ModelEntry> {
                 d.temperature = m.temperature;
                 d.top_p = m.top_p;
                 d.structured_output = m.structured_output.clone();
+                d.role = m.role;
+                d.confidence = m.confidence;
                 d.pinned = true;
                 // The manifest pinned a specific quant and the cache holds it: prefer that file over
                 // the largest one, so the checksum being verified is the checksum that was pinned.
@@ -329,7 +385,14 @@ pub fn catalog_in(root: &Path) -> Vec<ModelEntry> {
                 // path its manifest names — that is how this OS's own model becomes runnable the
                 // moment its weights land, with no edit to any source or manifest.
                 let mut m = m;
-                if !m.path_env.is_empty() {
+                // A manifest that names its file is found by that name in the cache, whatever the
+                // format: a System-1 checkpoint is not a GGUF, and `discover` only lists GGUFs.
+                if let Some(p) = super::runtime::cached_file(root, &m.repo, &m.file) {
+                    m.size_bytes = std::fs::metadata(&p).map(|x| x.len()).unwrap_or(0);
+                    m.present = true;
+                    m.path = Some(p);
+                }
+                if !m.present && !m.path_env.is_empty() {
                     if let Some(p) = std::env::var(&m.path_env).ok().filter(|v| !v.is_empty()) {
                         let p = PathBuf::from(p);
                         if p.exists() {
@@ -392,31 +455,62 @@ pub fn default_entry() -> Option<ModelEntry> {
 }
 
 pub fn default_of(all: &[ModelEntry]) -> Option<ModelEntry> {
-    all.iter()
-        .find(|e| e.default && e.present)
-        .or_else(|| all.iter().find(|e| e.present && e.is_ready()))
-        .or_else(|| all.iter().find(|e| e.default))
-        .or_else(|| all.first())
+    default_of_role(all, Role::System2)
+}
+
+/// The same preference order, inside one role: a System-1 model is never the System-2 default, and
+/// the other way round, however the catalog happens to be ordered.
+pub fn default_of_role(all: &[ModelEntry], role: Role) -> Option<ModelEntry> {
+    let of = || all.iter().filter(move |e| e.role == role);
+    of().find(|e| e.default && e.present)
+        .or_else(|| of().find(|e| e.present && e.is_ready()))
+        .or_else(|| of().find(|e| e.default))
+        .or_else(|| of().next())
         .cloned()
+}
+
+/// What fills System 1 when nobody has chosen, or `None` when no System-1 model is characterized.
+pub fn default_system1() -> Option<ModelEntry> {
+    default_of_role(&catalog(), Role::System1)
 }
 
 /// Where a machine's selection lives, under the data directory the Core already owns.
 pub fn selection_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("ai").join("selected-model")
+    selection_path_for(data_dir, Role::System2)
+}
+
+/// One selection per role. System 2 keeps the file it always had, so a machine that chose a model
+/// before ADR-186 still runs it.
+pub fn selection_path_for(data_dir: &Path, role: Role) -> PathBuf {
+    data_dir.join("ai").join(match role {
+        Role::System2 => "selected-model",
+        Role::System1 => "selected-system1",
+    })
 }
 
 /// The persisted selection, if there is one AND it still names a model this machine knows about. An
 /// id that no longer resolves — a model deleted from the cache — reads as "no selection" rather than
 /// as an error the whole daemon dies of.
 pub fn load_selection(data_dir: &Path) -> Option<ModelEntry> {
-    let id = std::fs::read_to_string(selection_path(data_dir)).ok()?;
-    find(id.trim())
+    load_selection_for(data_dir, Role::System2)
+}
+
+/// The persisted selection for one role; an id that now names a model of the OTHER role reads as
+/// no selection, never as a System-1 model quietly serving System 2.
+pub fn load_selection_for(data_dir: &Path, role: Role) -> Option<ModelEntry> {
+    let id = std::fs::read_to_string(selection_path_for(data_dir, role)).ok()?;
+    find(id.trim()).filter(|e| e.role == role)
 }
 
 /// Persist a selection. Fails loudly: an operator who ran `model use` and got no error is entitled
 /// to assume the next boot runs what they chose.
 pub fn save_selection(data_dir: &Path, id: &str) -> std::io::Result<()> {
-    let p = selection_path(data_dir);
+    save_selection_for(data_dir, Role::System2, id)
+}
+
+/// Persist a selection for one role.
+pub fn save_selection_for(data_dir: &Path, role: Role, id: &str) -> std::io::Result<()> {
+    let p = selection_path_for(data_dir, role);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -484,6 +578,10 @@ fn parse(src: &str) -> Option<ModelEntry> {
             "temperature" => e.temperature = val.parse().unwrap_or(0.0),
             "top_p" => e.top_p = val.parse().unwrap_or(1.0),
             "structured_output" => e.structured_output = val.into(),
+            // An unknown role is a manifest this build cannot honour: refuse the entry rather than
+            // guess which system it was meant for.
+            "role" => e.role = Role::parse(val)?,
+            "confidence" => e.confidence = val.parse().unwrap_or(DEFAULT_CONFIDENCE),
             _ => {}
         }
     }
@@ -668,7 +766,17 @@ mod tests {
 
     #[test]
     fn exactly_one_manifest_is_marked_default_and_it_is_davidau_neo_max() {
-        let defaults: Vec<ModelEntry> = manifests().into_iter().filter(|e| e.default).collect();
+        // One default PER ROLE (ADR-186): System 2's is the one named here; System 1 may have its
+        // own, and at most one.
+        let s1 = manifests()
+            .into_iter()
+            .filter(|e| e.default && e.role == Role::System1)
+            .count();
+        assert!(s1 <= 1, "at most one System-1 default, found {s1}");
+        let defaults: Vec<ModelEntry> = manifests()
+            .into_iter()
+            .filter(|e| e.default && e.role == Role::System2)
+            .collect();
         assert_eq!(defaults.len(), 1, "exactly one model may be the default");
         assert_eq!(defaults[0].id, "davidau-neo-max");
         assert_eq!(defaults[0].sha256.len(), 64);

@@ -568,6 +568,102 @@ pub fn bench(cfg: &super::config::AiConfig) -> Result<ConsoleReport, String> {
     })
 }
 
+/// One case through System 1 alone (ADR-186).
+#[derive(Debug, Clone)]
+pub struct System1Row {
+    pub expect: &'static str,
+    /// The line System 1 planned, or why it could not plan one at all.
+    pub planned: Result<String, String>,
+    /// The weakest confidence among its answers, when it answered.
+    pub confidence: Option<f32>,
+    pub elapsed_ms: u128,
+}
+
+impl System1Row {
+    pub fn correct(&self) -> bool {
+        self.planned.as_deref() == Ok(self.expect)
+    }
+}
+
+/// The System-1 arm: every case's natural request through System 1 with NO threshold, so the
+/// report can say both how often it is right and how often it is right-and-sure. The threshold is
+/// then applied in [`render_system1`]: what matters most is WRONG-but-sure, the answers that would
+/// be typed without System 2 ever being asked.
+pub fn bench_system1(p: Box<dyn super::decision::DecisionProvider>) -> Vec<System1Row> {
+    let dual = super::dual::DualProcess::new(p, Box::new(DeterministicConsole), 0.0);
+    CASES
+        .iter()
+        .map(|case| {
+            let started = std::time::Instant::now();
+            let got = dual.system1_plan(case.natural, case.context);
+            let elapsed_ms = started.elapsed().as_millis();
+            let (planned, confidence) = match got {
+                Ok((plan, c)) => (
+                    console_ops::render_plan(&plan, true)
+                        .map(|l| l.join(" ; "))
+                        .map_err(|r| r.to_string()),
+                    Some(c),
+                ),
+                Err(e) => (Err(e), None),
+            };
+            System1Row {
+                expect: case.expect,
+                planned,
+                confidence,
+                elapsed_ms,
+            }
+        })
+        .collect()
+}
+
+/// Render the System-1 arm at `threshold`.
+pub fn render_system1(label: &str, threshold: f32, rows: &[System1Row]) -> String {
+    let mut s = format!("system1:  {label}, escalation threshold {threshold:.2}\n");
+    s.push_str(&format!(
+        "{:<34} {:>6} {:>6}   {}\n",
+        "expected console line", "ms", "conf", "verdict"
+    ));
+    let (mut right, mut sure_right, mut sure_wrong) = (0, 0, 0);
+    for r in rows {
+        let sure = r.confidence.is_some_and(|c| c >= threshold);
+        let verdict = match (r.correct(), sure) {
+            (true, true) => {
+                sure_right += 1;
+                "ok, answered"
+            }
+            (true, false) => "ok, but escalates",
+            (false, true) => {
+                sure_wrong += 1;
+                "WRONG AND SURE"
+            }
+            (false, false) => "wrong, escalates",
+        };
+        if r.correct() {
+            right += 1;
+        }
+        s.push_str(&format!(
+            "{:<34} {:>6} {:>6}   {}\n",
+            r.expect,
+            r.elapsed_ms,
+            r.confidence
+                .map(|c| format!("{c:.2}"))
+                .unwrap_or("-".into()),
+            verdict
+        ));
+        match &r.planned {
+            Ok(l) if !r.correct() => s.push_str(&format!("    planned: {l}\n")),
+            Err(e) => s.push_str(&format!("    {e}\n")),
+            _ => {}
+        }
+    }
+    s.push_str(&format!(
+        "\n{right}/{} right; {sure_right} answered by system1 alone; {sure_wrong} wrong-and-sure; {} escalate to system2\n",
+        rows.len(),
+        rows.len() - sure_right - sure_wrong
+    ));
+    s
+}
+
 /// Render a console-bench report the way `bench::render` renders the Core's.
 pub fn render(r: &ConsoleReport) -> String {
     let mut s = String::new();

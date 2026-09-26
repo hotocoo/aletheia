@@ -163,6 +163,18 @@ This benchmark covers the hosted Core's **six operations**. It does **not** driv
 (`kernel-core/src/shell.rs`), which runs in kernel space with no inference engine underneath it and
 has its own gate, `scripts/console-e2e.sh`.
 
+### System 1 and System 2
+
+The registry holds two roles (ADR-186). **System 2** is the language model above: it plans by
+writing. **System 1** is a non-autoregressive decision model: typed questions in (which command,
+which object, which part of the request is the text), calibrated answers out, one forward pass. The
+console asks System 1 first and hands the request to System 2 whenever any answer is under the
+manifest's threshold or an argument is not a typed decision, and it always says which one answered.
+Which model fills each role is a manifest fact (`role`, `confidence`, `status`), switched with the
+same `aletheiad model use <id>`; the current System-1 occupant (`models/laya.toml`) is temporary and
+was measured unfit for the console (1/8, 4 wrong-and-sure), so it is gated off until a checkpoint
+trained on Aletheia's own command table measures fit. `aletheiad console bench` has the System-1 arm.
+
 ## The machine learning that runs *inside* the kernel
 
 Two different things in this repository are called a model, and conflating them is the easiest way to

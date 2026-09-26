@@ -394,7 +394,7 @@ pub fn endpoint_host_port(endpoint: &str) -> (String, u16) {
 
 /// Minimal blocking HTTP/1.1 request over TCP. Returns `(status, body)`. `Connection: close` lets
 /// us read the whole body to EOF without chunked-transfer handling.
-fn http(
+pub(crate) fn http(
     host: &str,
     port: u16,
     method: &str,

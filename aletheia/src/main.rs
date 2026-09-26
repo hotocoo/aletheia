@@ -228,6 +228,57 @@ fn console_interpreter(
     dir: &std::path::Path,
     args: &[String],
 ) -> Box<dyn aletheia::ai::provider::ModelProvider> {
+    let system2 = console_system2(dir, args);
+    let forced = arg_value(args, "--interpreter").unwrap_or_else(|| "auto".into());
+    if forced == "deterministic" || forced == "model" {
+        return system2;
+    }
+    let force_dual = forced == "dual";
+    // System 1 first when one is really serving; otherwise System 2 alone, and it is SAID.
+    use aletheia::ai::decision::DecisionProvider;
+    if let Some(s1) = aletheia::ai::config::System1Config::resolve(Some(dir)) {
+        let p = aletheia::ai::decision::HttpDecisionProvider::from_entry(&s1.entry, &s1.endpoint);
+        if !s1.entry.is_fit() && !force_dual {
+            eprintln!(
+                "interpreter: system1 {} is `{}` for the console — system2 only (--interpreter dual forces it)",
+                s1.entry.id, s1.entry.status
+            );
+            return system2;
+        }
+        if p.healthy() {
+            eprintln!(
+                "interpreter: system1 {} at {} first (escalates below {:.2}), then {}",
+                s1.entry.id,
+                s1.endpoint,
+                s1.entry.confidence,
+                system2.name()
+            );
+            let dual =
+                aletheia::ai::dual::DualProcess::new(Box::new(p), system2, s1.entry.confidence)
+                    .on_route(|r| match r {
+                        aletheia::ai::dual::Route::System1 { confidence } => {
+                            eprintln!("route: system1 (confidence {confidence:.2})")
+                        }
+                        aletheia::ai::dual::Route::System2 { because } => {
+                            eprintln!("route: system2 ({because})")
+                        }
+                    });
+            return Box::new(dual);
+        }
+        eprintln!(
+            "interpreter: system1 {} not serving at {} — system2 only",
+            s1.entry.id, s1.endpoint
+        );
+    }
+    system2
+}
+
+/// System 2 for the console: the language model when one is really there, the deterministic arm
+/// otherwise.
+fn console_system2(
+    dir: &std::path::Path,
+    args: &[String],
+) -> Box<dyn aletheia::ai::provider::ModelProvider> {
     let forced = arg_value(args, "--interpreter").unwrap_or_else(|| "auto".into());
     if forced == "deterministic" {
         eprintln!("interpreter: deterministic-console (forced)");
@@ -608,6 +659,23 @@ fn console_agent(dir: &std::path::Path, request: &str, args: &[String]) {
 }
 
 fn console_bench(dir: &std::path::Path) {
+    if let Some(s1) = aletheia::ai::config::System1Config::resolve(Some(dir)) {
+        use aletheia::ai::decision::DecisionProvider;
+        let p = aletheia::ai::decision::HttpDecisionProvider::from_entry(&s1.entry, &s1.endpoint);
+        if p.healthy() {
+            let rows = aletheia::ai::console::bench_system1(Box::new(p));
+            print!(
+                "{}",
+                aletheia::ai::console::render_system1(&s1.entry.id, s1.entry.confidence, &rows)
+            );
+            println!();
+        } else {
+            println!(
+                "system1:  {} not serving at {} — arm skipped\n",
+                s1.entry.id, s1.endpoint
+            );
+        }
+    }
     let cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
     match aletheia::ai::console::bench(&cfg) {
         Ok(report) => {
@@ -663,6 +731,7 @@ fn model_list(dir: &std::path::Path) {
     let selected = aletheia::ai::config::AiConfig::resolve(Some(dir))
         .entry
         .map(|e| e.id);
+    let selected1 = aletheia::ai::config::System1Config::resolve(Some(dir)).map(|s| s.entry.id);
     let all = aletheia::ai::registry::catalog();
     if all.is_empty() {
         println!(
@@ -674,9 +743,12 @@ fn model_list(dir: &std::path::Path) {
         );
         return;
     }
-    println!("   {:<26} {:<10} {:>9}  state", "id", "quant", "size");
+    println!(
+        "   {:<26} {:<8} {:<10} {:>9}  state",
+        "id", "role", "quant", "size"
+    );
     for e in &all {
-        let mark = if Some(&e.id) == selected.as_ref() {
+        let mark = if Some(&e.id) == selected.as_ref() || Some(&e.id) == selected1.as_ref() {
             "*"
         } else {
             " "
@@ -703,8 +775,9 @@ fn model_list(dir: &std::path::Path) {
             e.id.clone()
         };
         println!(
-            "{mark}  {:<26} {:<10} {:>9}  {}{}",
+            "{mark}  {:<26} {:<8} {:<10} {:>9}  {}{}",
             shown,
+            e.role.as_str(),
             if e.quant.is_empty() { "-" } else { &e.quant },
             size,
             e.tag(),
@@ -725,19 +798,48 @@ fn model_use(dir: &std::path::Path, id: &str) {
         eprintln!("no model `{id}` is registered — try `aletheiad model list`");
         std::process::exit(1);
     };
-    if let Err(e) = aletheia::ai::registry::save_selection(dir, &entry.id) {
+    // The entry's own role decides which system it fills: one verb, and a System-1 model can never
+    // be selected into System 2's place by typing its name (ADR-186).
+    if let Err(e) = aletheia::ai::registry::save_selection_for(dir, entry.role, &entry.id) {
         eprintln!(
             "could not persist the selection under {}: {e}",
             dir.display()
         );
         std::process::exit(1);
     }
-    println!("selected {} ({})", entry.id, entry.name);
+    println!(
+        "selected {} ({}) for {}",
+        entry.id,
+        entry.name,
+        entry.role.as_str()
+    );
     model_status(dir);
 }
 
 /// What this machine is running, and whether it can actually run it.
 fn model_status(dir: &std::path::Path) {
+    match aletheia::ai::config::System1Config::resolve(Some(dir)) {
+        Some(s1) => {
+            let p =
+                aletheia::ai::decision::HttpDecisionProvider::from_entry(&s1.entry, &s1.endpoint);
+            use aletheia::ai::decision::DecisionProvider;
+            println!(
+                "system1:   {} ({}) at {} — {}, escalates below {:.2}",
+                s1.entry.id,
+                s1.entry.name,
+                s1.endpoint,
+                if p.healthy() {
+                    "serving"
+                } else if s1.entry.present {
+                    "weights present, NOT serving"
+                } else {
+                    "weights NOT on this machine"
+                },
+                s1.entry.confidence
+            );
+        }
+        None => println!("system1:   none characterized (every request goes to system2)"),
+    }
     let cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
     println!("model:     {}", cfg.label());
     println!("backend:   {} at {}", cfg.backend, cfg.endpoint);

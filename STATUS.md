@@ -1271,6 +1271,18 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — two thinking systems, as registry roles (ADR-186)
+
+- The model registry now has roles: `system2` (the language model, as before) and `system1` (a
+  non-autoregressive decision model answering typed questions with calibrated confidence). Per-role
+  defaults and selections; `model use` routes by the entry's role; `model list` shows it.
+- `ai/decision.rs` (Aletheia's own `/v1/decide` wire, identity-checked like System 2) and
+  `ai/dual.rs` (System 1 first, escalating to System 2 below the manifest threshold or on any
+  argument it cannot type, the route always reported). `console bench` gains a System-1 arm.
+- Current occupant `models/laya.toml` (temporary). Measured base checkpoint: 1/8 console cases,
+  4 wrong-and-sure at 0.90, so its manifest says `unfit` and the console stays on System 2 until a
+  checkpoint trained on Aletheia's command table measures fit. aletheia suite 271/271.
+
 ### 2026-09-26 — the console names its authority and its wire (ADR-185)
 
 - Three report-only commands on every CPU: `caps` (the console's capabilities by subject and
