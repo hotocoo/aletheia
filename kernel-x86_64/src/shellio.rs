@@ -116,7 +116,7 @@ impl ShellHost for Host {
     /// one-instruction interrupt shadow, so the pair cannot lose an interrupt that arrives between
     /// them — this is the canonical idle idiom for exactly that reason.
     fn heap_bytes(&self) -> Option<(usize, usize)> {
-        Some((crate::heap::used_bytes(), crate::heap::free_bytes()))
+        Some((crate::heap::live_bytes(), crate::heap::free_bytes()))
     }
     fn idle(&self) {
         // Check-then-sleep with interrupts masked, so input that arrived after the loop's last

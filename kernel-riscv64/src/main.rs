@@ -1763,6 +1763,27 @@ pub extern "C" fn kmain() -> ! {
                 }
                 Err(e) => kprintln!("[gpu] display info error: {:?}", e),
             }
+            // The freeing heap's contract (ADR-198), over a scratch region lent from the heap.
+            {
+                let scratch = alloc::vec![0u8; 256 * 1024 + 4096];
+                let base = (scratch.as_ptr() as usize).div_ceil(4096) * 4096;
+                // SAFETY: `scratch` is ours and outlives the suite; nothing else touches it.
+                match unsafe {
+                    kernel_core::kheap::kheap_suite(base, 256 * 1024, |n, passed, name| {
+                        if passed {
+                            kprintln!("  [pass {:>2}] {}", n, name);
+                        } else {
+                            kprintln!("  [FAIL {:>2}] {}", n, name);
+                        }
+                    })
+                } {
+                    Ok(n) => kprintln!("[kheap] ALL {} HEAP INVARIANTS HOLD", n),
+                    Err((idx, name)) => {
+                        kprintln!("[kheap] FAILED at heap invariant {}: {}", idx, name);
+                        ActiveHal::exit(1090 + idx as i32);
+                    }
+                }
+            }
             // The display's own statement of its modes (ADR-191): EDID, parsed and kept for the
             // console's `display`, after the reader's contract is proved on this CPU.
             match kernel_core::edid::edid_suite(|n, passed, name| {

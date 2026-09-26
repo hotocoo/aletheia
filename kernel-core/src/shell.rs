@@ -1658,7 +1658,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 host.input_dropped()
             );
             if let Some((used, free)) = host.heap_bytes() {
-                outf!(out, "heap: {} B used, {} B free (never freed)", used, free);
+                outf!(out, "heap: {} B used, {} B free", used, free);
             }
         }
         "date" => {

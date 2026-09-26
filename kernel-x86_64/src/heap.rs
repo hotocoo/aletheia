@@ -1,4 +1,5 @@
-//! Kernel heap: a bump allocator over a fixed 16 MiB static region (12 until ADR-154).
+//! Kernel heap over a fixed 16 MiB static region (12 until ADR-154); since ADR-198 it FREES
+//! (`kernel_core::kheap`) — it was a bump allocator before.
 //!
 //! Deliberately a STATIC array, not a region carved from the UEFI memory map: the `.efi` image
 //! (including this BSS array) is loaded into conventional RAM and identity-mapped by firmware, so
@@ -11,7 +12,6 @@
 
 use crate::cell::Racy;
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// 8 -> 12 MiB with ADR-084: this heap NEVER frees, so every suite's surfaces and every
 /// resident window's pixels stay resident for the life of the boot. The window-manager suite
@@ -21,57 +21,48 @@ const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 static HEAP_AREA: Racy<[u8; HEAP_SIZE]> = Racy::new([0u8; HEAP_SIZE]);
 
-struct Bump {
-    next: AtomicUsize, // 0 = uninitialized; lazily anchored to the heap base on first alloc.
+/// The kernel heap (ADR-198): `kernel_core::kheap` behind one spin lock taken with interrupts
+/// off, because IRQ0 (the desktop's pump) allocates and must never spin on a lock its CPU holds.
+static HEAP: kernel_core::sync::SpinLock<kernel_core::kheap::Heap> =
+    kernel_core::sync::SpinLock::new(kernel_core::kheap::Heap::empty());
+
+fn with_heap<R>(f: impl FnOnce(&mut kernel_core::kheap::Heap) -> R) -> R {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut h = HEAP.lock();
+        // SAFETY: reads a static's address; no exclusive borrow of HEAP_AREA is ever taken.
+        let base = unsafe { HEAP_AREA.get().as_ptr() as usize };
+        h.init(base, base + HEAP_SIZE);
+        f(&mut h)
+    })
 }
 
-unsafe impl GlobalAlloc for Bump {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let base = HEAP_AREA.get().as_ptr() as usize;
-        let end = base + HEAP_SIZE;
-        loop {
-            let cur = self.next.load(Ordering::Relaxed);
-            let start = if cur == 0 { base } else { cur };
-            let aligned = (start + layout.align() - 1) & !(layout.align() - 1);
-            let new_next = match aligned.checked_add(layout.size()) {
-                Some(n) => n,
-                None => return core::ptr::null_mut(),
-            };
-            if new_next > end {
-                return core::ptr::null_mut(); // out of heap => fail closed
-            }
-            if self
-                .next
-                .compare_exchange(cur, new_next, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                return aligned as *mut u8;
-            }
-        }
-    }
+struct Kernel;
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Bump allocator: memory is reclaimed only at reboot.
+unsafe impl GlobalAlloc for Kernel {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: Layout's alignment is a power of two; the region is the heap's own.
+        with_heap(|h| unsafe { h.alloc(layout.size(), layout.align()) }) as *mut u8
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: GlobalAlloc's contract: `ptr` came from `alloc` with this layout.
+        with_heap(|h| unsafe { h.dealloc(ptr as usize, layout.size(), layout.align()) });
     }
 }
 
 #[global_allocator]
-static ALLOCATOR: Bump = Bump {
-    next: AtomicUsize::new(0),
-};
+static ALLOCATOR: Kernel = Kernel;
 
+/// Bytes ever handed out; never decreases (the storms' watermark, ADR-198).
 pub fn used_bytes() -> usize {
-    // SAFETY: reads a static; no exclusive borrow of HEAP_AREA is ever taken.
-    let base = unsafe { HEAP_AREA.get().as_ptr() as usize };
-    let cur = ALLOCATOR.next.load(Ordering::Relaxed);
-    if cur == 0 {
-        0
-    } else {
-        cur - base
-    }
+    with_heap(|h| h.gross_bytes() as usize)
 }
 
-/// Bytes still available - the margin every later allocation lives in (ADR-154).
+/// Bytes held by live allocations right now.
+pub fn live_bytes() -> usize {
+    with_heap(|h| h.live_bytes())
+}
+
+/// Bytes available to the next allocation.
 pub fn free_bytes() -> usize {
-    HEAP_SIZE.saturating_sub(used_bytes())
+    with_heap(|h| h.free_bytes())
 }

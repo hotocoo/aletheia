@@ -42,7 +42,8 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel/src/usermode.rs` | 9 | EL0 transition eret frames, syscall entry/return, context switch |
 | `kernel/src/virtio.rs` | 1 | MMIO notify write with device-memory fence |
 | `kernel/src/vm.rs` | 13 | TTBR0 load, TLBI shootdown variants, DSB/ISB barriers, descriptor walks |
-| `kernel/src/heap.rs` | 1 | the `heaptrace` diagnostic feature only (ADR-182): one read of x29 to start the frame-record walk; compiled out of every gate build |
+| `kernel/src/heap.rs` | 4 | the `heaptrace` diagnostic feature (ADR-182): one read of x29 to start the frame-record walk, compiled out of gate builds; the freeing heap's interrupt mask (ADR-198): `mrs daif` + `msr daifset, #2` to save-and-mask, `msr daifclr, #2` to restore, so the timer interrupt never spins on a lock its own CPU holds |
+| `kernel-riscv64/src/heap.rs` | 2 | the freeing heap's interrupt mask (ADR-198): `csrrci sstatus, 2` to save-and-mask SIE, `csrsi sstatus, 2` to restore |
 | `kernel-riscv64/src/arch.rs` | 1 | csrrw/csrr system-register access |
 | `kernel-riscv64/src/conirq.rs` | 7 | PLIC claim/complete sequencing for console interrupts, plus the S-mode timer the live desktop is pumped from (ADR-085): the `time` CSR read and the `sie.STIE` enable; and the console idle's `wfi`, issued with `sstatus.SIE` clear after the ring is checked empty (ADR-180) |
 | `kernel-riscv64/src/exit.rs` | 1 | QEMU test-finish exit path |

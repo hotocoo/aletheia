@@ -107,7 +107,7 @@ impl ShellHost for Host {
     /// is still enabled at the prompt is not something this comment has checked — so the UART is the
     /// only wake source this relies on.
     fn heap_bytes(&self) -> Option<(usize, usize)> {
-        Some((crate::heap::used_bytes(), crate::heap::free_bytes()))
+        Some((crate::heap::live_bytes(), crate::heap::free_bytes()))
     }
     fn idle(&self) {
         // Check-then-sleep with interrupts masked, so input that arrived after the loop's last

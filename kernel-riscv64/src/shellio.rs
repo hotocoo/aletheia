@@ -102,7 +102,7 @@ impl ShellHost for Host {
     /// permitted to return spuriously, which the surrounding `loop` already handles: a spurious wake
     /// simply asks the ring again.
     fn heap_bytes(&self) -> Option<(usize, usize)> {
-        Some((crate::heap::used_bytes(), crate::heap::free_bytes()))
+        Some((crate::heap::live_bytes(), crate::heap::free_bytes()))
     }
     fn idle(&self) {
         // Check-then-sleep with interrupts masked, so input that arrived after the loop's last
