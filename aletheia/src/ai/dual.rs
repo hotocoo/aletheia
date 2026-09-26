@@ -242,8 +242,10 @@ impl DualProcess {
     }
 
     fn choose(&self, state: &str, q: Question) -> Result<(String, f32), String> {
-        if matches!(&q, Question::Choice { options, .. } if options.is_empty()) {
-            return Err("nothing to choose from".into());
+        // One candidate is not a decision: a model asked to pick from one option can only say yes,
+        // and a confidence over a single option means nothing. The request escalates.
+        if matches!(&q, Question::Choice { options, .. } if options.len() < 2) {
+            return Err("fewer than two candidates is not a choice".into());
         }
         match self.ask(state, q)? {
             Answer::Choice { label, confidence } => Ok((label, confidence)),
@@ -464,6 +466,21 @@ mod tests {
         let d = DualProcess::new(Box::new(one), Box::new(DeterministicConsole), 0.9);
         let _ = plan_lines(&d, "op", "follow the link", BRIEF, false);
         assert!(matches!(d.last_route(), Some(Route::System2 { .. })));
+    }
+
+    #[test]
+    fn a_single_candidate_is_never_asked_and_escalates() {
+        // `echo hello`: the only suffix is `hello`, and one option is not a choice (the storm found
+        // the backend crashing on exactly this, ADR-188).
+        let one = s1(0.99, &["echo"]);
+        let d = DualProcess::new(Box::new(one), Box::new(DeterministicConsole), 0.9);
+        let _ = plan_lines(&d, "op", "echo hello", BRIEF, false);
+        match d.last_route() {
+            Some(Route::System2 { because }) => {
+                assert!(because.contains("two candidates"), "{because}")
+            }
+            r => panic!("{r:?}"),
+        }
     }
 
     #[test]

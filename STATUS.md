@@ -1271,6 +1271,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — System 1 under storm (ADR-188)
+
+- `aletheiad console system1-storm` + `scripts/system1-storm-e2e.sh`: 1,000 seeded hostile requests,
+  four concurrent storms, and wire abuse at the sidecar. PASS: 0 unsafe lines, 0 System-1 errors,
+  p50 27.6 ms / p99 56.9 ms sequential, every abuse probe refused with the right status.
+- Found and fixed: a one-option choice crashed the backend (now never asked; the sidecar refuses it
+  with 400 and turns any other backend exception into a logged 500), and neighbouring storm seeds
+  were identical (now splitmix64).
+
 ### 2026-09-26 — System 1, trained on the console (ADR-187)
 
 - `aletheiad console system1-schema` / `system1-questions` export the exact questions the console

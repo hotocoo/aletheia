@@ -29,8 +29,8 @@ MAX_BODY = 256 * 1024  # a console request and its options are a few KB; anythin
 def to_laya(q):
     if q.get("type") == "choice":
         opts = q.get("options") or []
-        if not opts:
-            raise ValueError("a choice needs options")
+        if len(opts) < 2:
+            raise ValueError("a choice needs at least two options")
         return {
             "type": "choice",
             "instructions": str(q.get("instructions", "")),
@@ -91,7 +91,11 @@ def main():
                 res = agent.predict(state, qs)["answers"]
                 self._send(200, {"answers": [from_laya(res["q%d" % i]) for i in range(len(qs))]})
             except (ValueError, KeyError, TypeError) as e:
+                print("[system1] refused a request: %s" % e, file=sys.stderr, flush=True)
                 self._send(400, {"error": str(e)})
+            except Exception as e:  # the backend failed on an input it accepted: say so, keep serving
+                print("[system1] backend failed: %s: %s" % (type(e).__name__, e), file=sys.stderr, flush=True)
+                self._send(500, {"error": "%s: %s" % (type(e).__name__, e)})
 
         def log_message(self, *_):
             pass

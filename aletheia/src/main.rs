@@ -96,6 +96,7 @@ fn console_cmd(args: &[String]) {
         Some("bench") => console_bench(dirp),
         Some("system1-schema") => println!("{}", aletheia::ai::dual::schema()),
         Some("system1-questions") => system1_questions(),
+        Some("system1-storm") => system1_storm(dirp, args),
         Some("plan") => {
             let request = console_request(args);
             if request.trim().is_empty() {
@@ -688,6 +689,43 @@ fn system1_questions() {
             Err(e) => serde_json::json!({"error": e.to_string()}),
         };
         println!("{out}");
+    }
+}
+
+/// `console system1-storm [--requests N] [--seed S]` (ADR-188): a seeded hostile stream through
+/// System 1 with the control arm behind it. Exit 0 only when no unsafe line came back and the
+/// sidecar still answers at the end; 2 when no System 1 is serving (nothing was measured).
+fn system1_storm(dir: &std::path::Path, args: &[String]) {
+    use aletheia::ai::decision::DecisionProvider;
+    let n: usize = arg_value(args, "--requests")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+    let seed: u64 = arg_value(args, "--seed")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(188);
+    let Some(s1) = aletheia::ai::config::System1Config::resolve(Some(dir)) else {
+        eprintln!("storm refused: no System-1 model is characterized");
+        std::process::exit(2);
+    };
+    let p = aletheia::ai::decision::HttpDecisionProvider::from_entry(&s1.entry, &s1.endpoint);
+    if !p.healthy() {
+        eprintln!(
+            "storm refused: {} is not serving at {}",
+            s1.entry.id, s1.endpoint
+        );
+        std::process::exit(2);
+    }
+    let rep = aletheia::ai::console::storm_system1(Box::new(p), s1.entry.confidence, n, seed);
+    println!("system1:  {} at {}, seed {seed}", s1.entry.id, s1.endpoint);
+    println!("{}", rep.render());
+    let after = aletheia::ai::decision::HttpDecisionProvider::from_entry(&s1.entry, &s1.endpoint);
+    let alive = after.healthy();
+    println!(
+        "sidecar after the storm: {}",
+        if alive { "serving" } else { "NOT SERVING" }
+    );
+    if rep.unsafe_lines > 0 || !alive {
+        std::process::exit(1);
     }
 }
 
