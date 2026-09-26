@@ -171,9 +171,13 @@ which object, which part of the request is the text), calibrated answers out, on
 console asks System 1 first and hands the request to System 2 whenever any answer is under the
 manifest's threshold or an argument is not a typed decision, and it always says which one answered.
 Which model fills each role is a manifest fact (`role`, `confidence`, `status`), switched with the
-same `aletheiad model use <id>`; the current System-1 occupant (`models/laya.toml`) is temporary and
-was measured unfit for the console (1/8, 4 wrong-and-sure), so it is gated off until a checkpoint
-trained on Aletheia's own command table measures fit. `aletheiad console bench` has the System-1 arm.
+same `aletheiad model use <id>`. The base occupant (`models/laya.toml`) measured unfit for the
+console (1/8, 4 wrong-and-sure). The shipped System 1 (`models/aletheia-console-s1.toml`, ADR-187)
+is that checkpoint fine-tuned on a corpus generated from the kernel's own command table: 5/8 alone
+with 0 wrong-and-sure, and with System 2 7/8 in 24% less time than System 2 alone. It is a release
+asset: `aletheiad model pull aletheia-console-s1` (digest-checked), then
+`python3 scripts/system1/laya_server.py <dir> --serve-id aletheia-console-s1`.
+`aletheiad console bench` has the System-1 and dual arms.
 
 ## The machine learning that runs *inside* the kernel
 

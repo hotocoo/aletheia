@@ -1,0 +1,30 @@
+# System 1 for Aletheia's console (ADR-187): the `laya` backend's base checkpoint fine-tuned on a
+# corpus generated from the kernel's own command table (`scripts/system1/corpus.py`, committed as
+# docs/evidence/system1/console-corpus.jsonl) by `scripts/system1/laya_finetune.py`: top 8 encoder
+# layers + decision head, 5 epochs, temperatures refitted on held-out paraphrase groups.
+#
+# Not on any hub: it ships as a GitHub release asset. `aletheiad model pull aletheia-console-s1`
+# downloads it, refuses it unless the archive's SHA-256 matches, and unpacks it into the local
+# model cache under `repo`, where the registry finds it. Serve it with the backend's sidecar:
+#   python3 scripts/system1/laya_server.py <dir of model.safetensors> --serve-id aletheia-console-s1
+
+[model]
+id          = "aletheia-console-s1"
+name        = "Aletheia console System 1 (fine-tuned from Laya, 2026-09-26)"
+role        = "system1"
+repo        = "aletheia/system1-console"
+file        = "model.safetensors"
+sha256      = "4169c663136b018c8df9defd7f3e280232563e3229b38fcdf885888def03e5c8"
+size_bytes  = 842609220
+serve_id    = "aletheia-console-s1"
+default     = true
+status      = "ready"
+
+[runtime]
+backend     = "laya"
+endpoint    = "http://127.0.0.1:8091"
+confidence  = 0.9
+
+[provision]
+url            = "https://github.com/hotocoo/aletheia/releases/download/v0.3.0/aletheia-console-s1.tar"
+archive_sha256 = "9e591d851b454e47bd183bd1e487697c3ae23603eef6ffe82855c67932944038"

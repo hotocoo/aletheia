@@ -15,7 +15,7 @@ file        = "model.safetensors"
 sha256      = "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c"
 size_bytes  = 842609210
 serve_id    = "laya"
-default     = true
+default     = false
 # `unfit`: present and serving, but MEASURED unfit to front the console (ADR-186, `aletheiad
 # console bench`, 2026-09-26): 1/8 console cases right, 4 of them wrong at confidence >= 0.94. A
 # System-1 model fronts the console only when its status is `ready`; `--interpreter dual` forces it.

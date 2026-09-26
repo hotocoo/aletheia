@@ -106,12 +106,17 @@ pub struct ModelEntry {
     pub path: Option<PathBuf>,
     /// Did a manifest characterize it, or are its parameters defaults?
     pub pinned: bool,
+    /// A published archive of the model (a GitHub release asset, ADR-187) — for a model that is not
+    /// on any hub. `model pull` fetches it, checks `archive_sha256`, and unpacks it into the cache
+    /// layout under `repo`, where discovery already looks.
+    pub url: String,
+    pub archive_sha256: String,
 }
 
 impl ModelEntry {
     /// Can its weights be fetched at all? A model with no repo is produced locally.
     pub fn is_provisionable(&self) -> bool {
-        !self.repo.is_empty() && !self.file.is_empty()
+        (!self.repo.is_empty() && !self.file.is_empty()) || !self.url.is_empty()
     }
     /// May this model take a role's front line unasked? `unfit` is a MEASURED statement: present,
     /// runnable, and shown by a bench to be wrong too often while sure (ADR-186).
@@ -175,6 +180,8 @@ fn defaults() -> ModelEntry {
         present: false,
         path: None,
         pinned: false,
+        url: String::new(),
+        archive_sha256: String::new(),
     }
 }
 
@@ -323,6 +330,7 @@ const MANIFESTS: &[&str] = &[
     include_str!("../../../models/minicpm.toml"),
     include_str!("../../../models/aletheia-lm.toml"),
     include_str!("../../../models/laya.toml"),
+    include_str!("../../../models/aletheia-console-s1.toml"),
 ];
 
 /// The parsed manifests.
@@ -366,6 +374,8 @@ pub fn catalog_in(root: &Path) -> Vec<ModelEntry> {
                 d.structured_output = m.structured_output.clone();
                 d.role = m.role;
                 d.confidence = m.confidence;
+                d.url = m.url.clone();
+                d.archive_sha256 = m.archive_sha256.clone();
                 d.pinned = true;
                 // The manifest pinned a specific quant and the cache holds it: prefer that file over
                 // the largest one, so the checksum being verified is the checksum that was pinned.
@@ -582,6 +592,8 @@ fn parse(src: &str) -> Option<ModelEntry> {
             // guess which system it was meant for.
             "role" => e.role = Role::parse(val)?,
             "confidence" => e.confidence = val.parse().unwrap_or(DEFAULT_CONFIDENCE),
+            "url" => e.url = val.into(),
+            "archive_sha256" => e.archive_sha256 = val.into(),
             _ => {}
         }
     }

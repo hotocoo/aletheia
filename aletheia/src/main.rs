@@ -94,6 +94,8 @@ fn console_cmd(args: &[String]) {
         Some("cases") => console_cases(),
         Some("agent-cases") => console_agent_cases(),
         Some("bench") => console_bench(dirp),
+        Some("system1-schema") => println!("{}", aletheia::ai::dual::schema()),
+        Some("system1-questions") => system1_questions(),
         Some("plan") => {
             let request = console_request(args);
             if request.trim().is_empty() {
@@ -658,7 +660,39 @@ fn console_agent(dir: &std::path::Path, request: &str, args: &[String]) {
     }
 }
 
+/// `console system1-questions`: JSON lines `{request, context, command}` on stdin, and for each
+/// one the exact wire request System 1 would be sent for it — `{state, questions, args}` — on
+/// stdout. A trainer builds its examples from THIS, so it cannot drift from what is served (ADR-187).
+fn system1_questions() {
+    use std::io::BufRead;
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { break };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let out = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(v) => {
+                let request = v["request"].as_str().unwrap_or_default();
+                let context = v["context"].as_str().unwrap_or_default();
+                let command = v["command"].as_str().unwrap_or_default();
+                match aletheia::ai::dual::questions_for(request, context, command) {
+                    Some(qs) => {
+                        let (args, qs): (Vec<String>, Vec<_>) = qs.into_iter().unzip();
+                        let mut wire = aletheia::ai::decision::request_json(request, &qs);
+                        wire["args"] = serde_json::json!(args);
+                        wire
+                    }
+                    None => serde_json::json!({"error": format!("no command `{command}`")}),
+                }
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}),
+        };
+        println!("{out}");
+    }
+}
+
 fn console_bench(dir: &std::path::Path) {
+    let mut s1_rows: Option<(f32, Vec<aletheia::ai::console::System1Row>)> = None;
     if let Some(s1) = aletheia::ai::config::System1Config::resolve(Some(dir)) {
         use aletheia::ai::decision::DecisionProvider;
         let p = aletheia::ai::decision::HttpDecisionProvider::from_entry(&s1.entry, &s1.endpoint);
@@ -669,6 +703,7 @@ fn console_bench(dir: &std::path::Path) {
                 aletheia::ai::console::render_system1(&s1.entry.id, s1.entry.confidence, &rows)
             );
             println!();
+            s1_rows = Some((s1.entry.confidence, rows));
         } else {
             println!(
                 "system1:  {} not serving at {} — arm skipped\n",
@@ -680,6 +715,12 @@ fn console_bench(dir: &std::path::Path) {
     match aletheia::ai::console::bench(&cfg) {
         Ok(report) => {
             print!("{}", aletheia::ai::console::render(&report));
+            if let Some((t, rows)) = &s1_rows {
+                println!(
+                    "\n{}",
+                    aletheia::ai::console::render_dual(*t, rows, &report.model)
+                );
+            }
             if report.passed() != report.total() {
                 std::process::exit(1);
             }
@@ -709,6 +750,30 @@ fn model_cmd(args: &[String]) {
             }
         },
         Some("bench") => model_bench(dirp),
+        // `model pull <id>`: one named model, whichever role it fills, from its hub or its
+        // published archive (ADR-187).
+        Some("pull") if args.get(3).is_some() => {
+            let id = &args[3];
+            let Some(e) = aletheia::ai::registry::find(id) else {
+                eprintln!("no model `{id}` is registered — try `aletheiad model list`");
+                std::process::exit(1);
+            };
+            let got = if e.url.is_empty() {
+                let mut cfg = aletheia::ai::config::AiConfig::resolve(Some(dirp));
+                cfg.model_ref = e.repo.clone();
+                cfg.entry = Some(e.clone());
+                aletheia::ai::runtime::ensure_model(&cfg)
+            } else {
+                aletheia::ai::runtime::pull_archive(&e, &aletheia::ai::registry::hf_hub_root())
+            };
+            match got {
+                Ok(p) => println!("{} ready: {}", e.id, p.display()),
+                Err(err) => {
+                    eprintln!("provisioning {} failed: {err}", e.id);
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("pull") => {
             let cfg = aletheia::ai::config::AiConfig::resolve(Some(dirp));
             println!("provisioning {}...", cfg.label());

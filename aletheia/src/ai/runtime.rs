@@ -169,6 +169,70 @@ pub fn verify_integrity(cfg: &AiConfig) -> Integrity {
     }
 }
 
+/// Provision a model published as an archive (ADR-187): download `entry.url`, refuse it unless its
+/// SHA-256 is `entry.archive_sha256`, and unpack it into `cache_root` in the hub cache's own layout
+/// (`models--<repo>/snapshots/<archive digest>/`), so the registry finds it the way it finds any
+/// cached model. An archive with no pinned digest is refused: an unverified download is not a model.
+pub fn pull_archive(
+    entry: &super::registry::ModelEntry,
+    cache_root: &Path,
+) -> Result<PathBuf, String> {
+    if entry.url.is_empty() {
+        return Err(format!("{} has no archive url", entry.id));
+    }
+    if entry.archive_sha256.len() != 64 {
+        return Err(format!(
+            "{} pins no archive_sha256 — refusing an unverified download",
+            entry.id
+        ));
+    }
+    if entry.repo.is_empty() || entry.file.is_empty() {
+        return Err(format!("{} names no repo/file to unpack under", entry.id));
+    }
+    if let Some(p) = cached_file(cache_root, &entry.repo, &entry.file) {
+        return Ok(p);
+    }
+    let snap = cache_root
+        .join(ref_to_cache_dirname(&entry.repo))
+        .join("snapshots")
+        .join(&entry.archive_sha256[..12]);
+    std::fs::create_dir_all(&snap).map_err(|e| e.to_string())?;
+    let archive = snap.with_extension("download");
+    let ok = std::process::Command::new("curl")
+        .args(["-fL", "--retry", "3", "-o"])
+        .arg(&archive)
+        .arg(&entry.url)
+        .status()
+        .map_err(|e| format!("curl: {e}"))?
+        .success();
+    if !ok {
+        let _ = std::fs::remove_file(&archive);
+        return Err(format!("download failed: {}", entry.url));
+    }
+    let found = sha256_file(&archive)?;
+    if !found.eq_ignore_ascii_case(&entry.archive_sha256) {
+        let _ = std::fs::remove_file(&archive);
+        return Err(format!(
+            "archive MISMATCH: expected {}, found {found} — nothing was unpacked",
+            entry.archive_sha256
+        ));
+    }
+    let ok = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&snap)
+        .status()
+        .map_err(|e| format!("tar: {e}"))?
+        .success();
+    let _ = std::fs::remove_file(&archive);
+    if !ok {
+        return Err("unpacking the archive failed".into());
+    }
+    cached_file(cache_root, &entry.repo, &entry.file)
+        .ok_or_else(|| format!("the archive holds no {}", entry.file))
+}
+
 /// SHA-256 of a file, streamed in fixed-size chunks.
 fn sha256_file(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};

@@ -1271,6 +1271,20 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — System 1, trained on the console (ADR-187)
+
+- `aletheiad console system1-schema` / `system1-questions` export the exact questions the console
+  asks; `scripts/system1/corpus.py` generates a corpus from the kernel's command table by System-2
+  paraphrase (4,751 examples, 47 commands, 0 of the 8 bench requests in it);
+  `scripts/system1/laya_finetune.py` trains the backend (top 8 layers + head, 5 epochs, 18 min on
+  MPS, temperatures refitted on held-out groups).
+- Held-out test 83.8% (command 88%, name 98%); at 0.90, 64% answered at 98.0% accuracy. Console
+  bench: 5/8 with 0 wrong-and-sure (base: 1/8, 4 wrong-and-sure); with System 2, 7/8 in 37.2 s vs
+  48.8 s for System 2 alone.
+- Ships as release asset `aletheia-console-s1.tar` (807 MiB), manifest
+  `models/aletheia-console-s1.toml` (`ready`, System-1 default); `aletheiad model pull <id>` verifies
+  the archive digest and unpacks it into the model cache. Release notes list model assets per tag.
+
 ### 2026-09-26 — two thinking systems, as registry roles (ADR-186)
 
 - The model registry now has roles: `system2` (the language model, as before) and `system1` (a

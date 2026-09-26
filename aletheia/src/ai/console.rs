@@ -664,6 +664,27 @@ pub fn render_system1(label: &str, threshold: f32, rows: &[System1Row]) -> Strin
     s
 }
 
+/// What the two systems do together, derived from the two arms: System 1's answer where it was
+/// sure, System 2's (after System 1's time) where it was not.
+pub fn render_dual(threshold: f32, s1: &[System1Row], s2: &[CaseRow]) -> String {
+    let (mut right, mut by1, mut ms_dual, mut ms_s2) = (0usize, 0usize, 0u128, 0u128);
+    for (a, b) in s1.iter().zip(s2) {
+        ms_s2 += b.elapsed_ms;
+        if a.confidence.is_some_and(|c| c >= threshold) {
+            by1 += 1;
+            ms_dual += a.elapsed_ms;
+            right += usize::from(a.correct());
+        } else {
+            ms_dual += a.elapsed_ms + b.elapsed_ms;
+            right += usize::from(b.outcome.is_ok());
+        }
+    }
+    format!(
+        "dual:     {right}/{} right; system1 answered {by1} alone; {ms_dual} ms in total vs {ms_s2} ms for system2 alone",
+        s1.len().min(s2.len())
+    )
+}
+
 /// Render a console-bench report the way `bench::render` renders the Core's.
 pub fn render(r: &ConsoleReport) -> String {
     let mut s = String::new();

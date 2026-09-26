@@ -243,6 +243,27 @@ SHA_CHECK() { if command -v sha256sum >/dev/null 2>&1; then sha256sum -c --quiet
   cat "$OUT/$NAME.zip.sha256"
   echo '```'
   echo
+  # Model assets this version publishes (ADR-187): every manifest whose archive url names this tag.
+  # Nothing here names a model; the manifests do.
+  "$PY" - "$ROOT/models" "$VERSION" <<'PYMODELS'
+import os, re, sys
+root, version = sys.argv[1], sys.argv[2]
+rows = []
+for f in sorted(os.listdir(root)):
+    if not f.endswith(".toml"):
+        continue
+    kv = dict(re.findall(r'^\s*([a-z_0-9]+)\s*=\s*"([^"]*)"', open(os.path.join(root, f)).read(), re.M))
+    if "/releases/download/%s/" % version in kv.get("url", ""):
+        rows.append(kv)
+if rows:
+    print("## Model assets\n")
+    print("Uploaded to this release from a locally verified build (not built by this workflow):\n")
+    for kv in rows:
+        print("- `%s` - %s (%s). Install: `aletheiad model pull %s` (refused unless the archive's "
+              "SHA-256 is `%s`)." % (kv["url"].rsplit("/", 1)[1], kv.get("name", ""), kv.get("role", "system2"),
+                                     kv["id"], kv.get("archive_sha256", "?")))
+    print()
+PYMODELS
   echo "Maturity: nothing here is production-ready — read \`docs/MATURITY.md\` before quoting a claim."
 } > "$OUT/RELEASE-NOTES.md"
 cp "$STAGE/SHA256SUMS" "$OUT/SHA256SUMS"

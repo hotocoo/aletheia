@@ -104,3 +104,59 @@ fn an_unfit_model_is_listed_but_never_fit() {
         }
     }
 }
+
+fn archive_entry(tag: &str) -> (registry::ModelEntry, std::path::PathBuf) {
+    let src = scratch(&format!("{tag}-src"));
+    std::fs::write(src.join("model.safetensors"), b"weights").unwrap();
+    std::fs::write(src.join("rl_agent_config.json"), b"{}").unwrap();
+    let tar = src.join("ckpt.tar");
+    assert!(std::process::Command::new("tar")
+        .arg("-cf")
+        .arg(&tar)
+        .arg("-C")
+        .arg(&src)
+        .args(["model.safetensors", "rl_agent_config.json"])
+        .status()
+        .unwrap()
+        .success());
+    let digest = {
+        use sha2::{Digest, Sha256};
+        aletheia::crypto::hex(&Sha256::digest(std::fs::read(&tar).unwrap()))
+    };
+    let mut e = registry::manifests()
+        .into_iter()
+        .next()
+        .expect("a manifest");
+    e.id = format!("archive-{tag}");
+    e.repo = "aletheia/test-archive".into();
+    e.file = "model.safetensors".into();
+    e.url = format!("file://{}", tar.display());
+    e.archive_sha256 = digest;
+    (e, scratch(&format!("{tag}-cache")))
+}
+
+#[test]
+fn a_published_archive_is_verified_then_unpacked_where_discovery_looks() {
+    let (e, cache) = archive_entry("ok");
+    let p = aletheia::ai::runtime::pull_archive(&e, &cache).expect("pull");
+    assert_eq!(std::fs::read(&p).unwrap(), b"weights");
+    assert_eq!(
+        aletheia::ai::runtime::cached_file(&cache, &e.repo, &e.file),
+        Some(p.clone())
+    );
+    assert!(p.with_file_name("rl_agent_config.json").exists());
+    // A second pull is a no-op that names the same file.
+    assert_eq!(aletheia::ai::runtime::pull_archive(&e, &cache).unwrap(), p);
+}
+
+#[test]
+fn an_archive_that_does_not_match_its_pin_unpacks_nothing() {
+    let (mut e, cache) = archive_entry("bad");
+    e.archive_sha256 = "0".repeat(64);
+    let err = aletheia::ai::runtime::pull_archive(&e, &cache).unwrap_err();
+    assert!(err.contains("MISMATCH"), "{err}");
+    assert!(aletheia::ai::runtime::cached_file(&cache, &e.repo, &e.file).is_none());
+    e.archive_sha256.clear();
+    let err = aletheia::ai::runtime::pull_archive(&e, &cache).unwrap_err();
+    assert!(err.contains("unverified"), "{err}");
+}
