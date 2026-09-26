@@ -103,6 +103,21 @@ pub const DESKTOP_RID: u32 = 11;
 pub const W: u32 = virtiogpu::CONSOLE_FB_WIDTH;
 pub const H: u32 = virtiogpu::CONSOLE_FB_HEIGHT;
 
+/// The UI scale for a `w` x `h` display (ADR-194): the console font is 8x8, so one integer step
+/// per 540 lines keeps text between 16 and 24 device pixels tall on common displays (1080p and
+/// 1440p are 2x, 2160p is 4x), never so large that the logical desktop falls below the 640x240
+/// layout.
+pub const fn ui_scale(w: u32, h: u32) -> u32 {
+    let mut s = h / 540;
+    if s == 0 {
+        s = 1;
+    }
+    while s > 1 && (w / s < W || h / s < H) {
+        s -= 1;
+    }
+    s
+}
+
 /// Backing pages a desktop of `w` x `h` BGRA pixels needs (ADR-192).
 pub const fn pages_for(w: u32, h: u32) -> usize {
     (w as usize * h as usize * 4).div_ceil(crate::dma::PAGE)
@@ -398,9 +413,13 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     wm: WindowManager,
     gpu: VirtioGpu<H, T>,
     pages: Vec<usize>,
-    /// The desktop's size in pixels, chosen at boot (ADR-192).
+    /// The desktop's LOGICAL size (ADR-192, ADR-194): the framebuffer divided by `scale`.
     w: u32,
     h: u32,
+    /// The framebuffer's device size and the UI scale.
+    fb_w: u32,
+    fb_h: u32,
+    scale: u32,
     posted: u64,
     term: TextGrid,
     packed: Vec<u8>,
@@ -774,13 +793,18 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         if pages.len() != pages_for(w, h) {
             return Err("the desktop's backing store is not the scanout's page count");
         }
-        let chrome_m = chrome_for(w, h);
         gpu.create_resource_2d(DESKTOP_RID, w, h)
             .map_err(|_| "the desktop's GPU resource was refused")?;
         gpu.attach_backing(DESKTOP_RID, &pages)
             .map_err(|_| "the desktop's backing pages were refused")?;
         gpu.set_scanout(0, DESKTOP_RID)
             .map_err(|_| "the desktop's scanout bind was refused")?;
+        // From here on the desktop is LOGICAL (ADR-194): layout, compositor, pointer and chrome
+        // work in w/scale x h/scale, and the sink writes each logical pixel as a scale-sided block.
+        let (fb_w, fb_h) = (w, h);
+        let scale = ui_scale(w, h);
+        let (w, h) = (w / scale, h / scale);
+        let chrome_m = chrome_for(w, h);
 
         let term = TextGrid::new(TERM_COLS, TERM_ROWS);
         let (tw, th) = term.pixel_size();
@@ -887,7 +911,8 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         files.render_packed(FILES_TITLE, &mut files_packed);
         comp.fill_packed(FILES, tok_files, &files_packed)
             .map_err(|_| "the files window's first paint was refused")?;
-        let taskbar = TextGrid::new(TASKBAR_COLS, TASKBAR_ROWS);
+        // The panel spans the real (logical) width once the screen is wider than its 100 cells.
+        let taskbar = TextGrid::new((w / crate::textgrid::CELL).max(TASKBAR_COLS), TASKBAR_ROWS);
         let (tbw, tbh) = taskbar.pixel_size();
         let tok_taskbar = comp
             .mint_surface(TASKBAR, tbw, tbh)
@@ -963,6 +988,9 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             pages,
             w,
             h,
+            fb_w,
+            fb_h,
+            scale,
             posted: 0,
             term,
             packed,
@@ -1032,9 +1060,11 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
 
     /// Compose one frame through the real raster; hand it to the device ONLY if it changed.
     fn show_frame(&mut self) -> Result<u64, &'static str> {
-        let mut surf = Surface::new(&self.pages, self.w, self.h)
+        let mut surf = Surface::new(&self.pages, self.fb_w, self.fb_h)
             .map_err(|_| "the backing pages did not form a raster")?;
-        let mut sink = ComposeSink::new(&mut surf).with_wallpaper(PANEL, WALLPAPER);
+        let mut sink = ComposeSink::new(&mut surf)
+            .with_wallpaper(PANEL, WALLPAPER)
+            .with_scale(self.scale);
         let st = self.comp.compose_frame(&mut sink);
         if sink.refusals() != 0 {
             return Err("the real raster refused a put the model's bounds allowed");
@@ -1045,10 +1075,10 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         // SAFETY: the device is live and ours; the rect is the resource's own full extent.
         unsafe {
             self.gpu
-                .transfer_to_host_2d(DESKTOP_RID, GpuRect::covering(self.w, self.h))
+                .transfer_to_host_2d(DESKTOP_RID, GpuRect::covering(self.fb_w, self.fb_h))
                 .map_err(|_| "the desktop frame's TRANSFER was refused")?;
             self.gpu
-                .resource_flush(DESKTOP_RID, GpuRect::covering(self.w, self.h))
+                .resource_flush(DESKTOP_RID, GpuRect::covering(self.fb_w, self.fb_h))
                 .map_err(|_| "the desktop frame's FLUSH was refused")?;
         }
         Ok(st.pixels_blitted)

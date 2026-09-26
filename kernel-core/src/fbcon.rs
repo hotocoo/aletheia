@@ -154,9 +154,32 @@ pub struct ComposeSink<'s, 'p> {
     /// A surface whose PAPER pixels show a photograph instead of [`BG`]: (surface id, packed BGR
     /// rows at the scanout's width). Ink pixels stay [`FG`], so every readback is unchanged.
     wallpaper: Option<(u32, &'static [u8])>,
+    /// Device pixels per logical pixel on each axis (ADR-194): the compositor lays out a logical
+    /// desktop and every pixel it puts becomes a `scale` x `scale` block. 1 = no scaling.
+    scale: u32,
 }
 
 impl<'s, 'p> ComposeSink<'s, 'p> {
+    /// Scale every put by an integer factor (ADR-194). The surface must be at least the logical
+    /// scanout times `scale` on each axis.
+    pub fn with_scale(mut self, scale: u32) -> Self {
+        self.scale = scale.max(1);
+        self
+    }
+
+    /// Write one logical pixel as a scale x scale block.
+    fn block(&mut self, x: u32, y: u32, c: [u8; 4]) {
+        let s = self.scale;
+        for dy in 0..s {
+            for dx in 0..s {
+                if self.surf.set_bgra(x * s + dx, y * s + dy, c).is_err() {
+                    self.refused += 1;
+                    return;
+                }
+            }
+        }
+    }
+
     /// Sink into `surf`, whose geometry must equal the compositor's scanout.
     pub fn new(surf: &'s mut Surface<'p>) -> Self {
         ComposeSink {
@@ -164,6 +187,7 @@ impl<'s, 'p> ComposeSink<'s, 'p> {
             puts: 0,
             refused: 0,
             wallpaper: None,
+            scale: 1,
         }
     }
 
@@ -189,8 +213,12 @@ impl<'s, 'p> ComposeSink<'s, 'p> {
 impl crate::compositor::Raster for ComposeSink<'_, '_> {
     fn put(&mut self, x: u32, y: u32, ink: bool) {
         self.puts += 1;
-        if self.surf.set(x, y, ink).is_err() {
-            self.refused += 1;
+        if self.scale == 1 {
+            if self.surf.set(x, y, ink).is_err() {
+                self.refused += 1;
+            }
+        } else {
+            self.block(x, y, if ink { FG } else { BG });
         }
     }
 
@@ -200,8 +228,9 @@ impl crate::compositor::Raster for ComposeSink<'_, '_> {
                 // The photograph is 640x240; a larger desktop samples it nearest-neighbour
                 // (ADR-192), so it fills any screen rather than the top-left corner of one.
                 let (pw, ph) = (WALLPAPER_W as usize, WALLPAPER_H as usize);
-                let sx = x as usize * pw / self.surf.width.max(1) as usize;
-                let sy = y as usize * ph / self.surf.height.max(1) as usize;
+                let (lw, lh) = (self.surf.width / self.scale, self.surf.height / self.scale);
+                let sx = x as usize * pw / lw.max(1) as usize;
+                let sy = y as usize * ph / lh.max(1) as usize;
                 let i = (sy.min(ph - 1) * pw + sx.min(pw - 1)) * 3;
                 bgr.get(i..i + 3).map(|p| [p[0], p[1], p[2], 0xFF])
             }
@@ -210,8 +239,12 @@ impl crate::compositor::Raster for ComposeSink<'_, '_> {
         match photo {
             Some(c) => {
                 self.puts += 1;
-                if self.surf.set_bgra(x, y, c).is_err() {
-                    self.refused += 1;
+                if self.scale == 1 {
+                    if self.surf.set_bgra(x, y, c).is_err() {
+                        self.refused += 1;
+                    }
+                } else {
+                    self.block(x, y, c);
                 }
             }
             None => self.put(x, y, ink),

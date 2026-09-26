@@ -594,3 +594,33 @@ fn the_boot_suite_passes_on_the_host() {
         "the suite must keep proving all its invariants, got {n}"
     );
 }
+
+#[test]
+fn the_ui_scale_keeps_text_legible_and_the_layout_whole() {
+    use kernel_core::desktop::{choose_geometry, ui_scale, H, W};
+    for (w, h, s) in [
+        (640, 240, 1),
+        (1024, 768, 1),
+        (1280, 800, 1),
+        (1920, 1080, 2),
+        (2560, 1440, 2),
+        (3840, 2160, 4),
+        (1280, 1080, 2),
+    ] {
+        assert_eq!(ui_scale(w, h), s, "{w}x{h}");
+        assert!(
+            w / s >= W && h / s >= H,
+            "{w}x{h}: logical desktop below the layout"
+        );
+    }
+    // A display the machine cannot back, or one smaller than the layout, is the fixed desktop.
+    assert_eq!(choose_geometry(Some((2560, 1440)), 100), (W, H));
+    assert_eq!(choose_geometry(Some((320, 200)), 1 << 20), (W, H));
+    assert_eq!(choose_geometry(None, 1 << 20), (W, H));
+    assert_eq!(choose_geometry(Some((2560, 1440)), 1 << 20), (2560, 1440));
+    assert_eq!(
+        choose_geometry(Some((3840, 2160)), 1 << 20),
+        (W, H),
+        "past the 4 Mpx bound"
+    );
+}
