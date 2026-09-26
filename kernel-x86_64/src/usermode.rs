@@ -897,8 +897,9 @@ fn with_ring3_traps<R>(f: impl FnOnce() -> R) -> R {
 /// the suite already runs with interrupts off.
 fn run_program_contained(
     program: &kernel_core::elf::Placement,
+    budget: u32,
 ) -> Option<kernel_core::shell::ProgramRun> {
-    with_ring3_traps(|| run_program(program))
+    with_ring3_traps(|| run_program(program, budget))
 }
 
 /// `#GP` dispatch (ALET-P1-011). A ring-3 task executed a privileged instruction. Same policy, third
@@ -1849,6 +1850,9 @@ pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
 
 /// Slices a console-started program gets before it is abandoned (ADR-201).
 const PROGRAM_SLICES: u32 = 64;
+/// The boot suite's spinner budget: the same proof (preempted every slice, abandoned at the
+/// budget) without spending 64 real slices of every boot on it.
+const BOOT_SPIN_SLICES: u32 = 4;
 
 /// Where this target places a program: ring-3 code at [`USER_CODE_VA`] (ADR-201).
 pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
@@ -1867,13 +1871,18 @@ pub fn run_program_live(
         // goes back the moment the run is over (ADR-203).
         // SAFETY: `isr_timer_entry` is the raw preemption entry the boot suite proves; IF=0.
         unsafe { idt::install_preemption_timer(addr_of!(isr_timer_entry) as u64) };
-        let run = crate::pic::with_timer_unmasked(|| with_ring3_traps(|| run_program(program)));
+        let run = crate::pic::with_timer_unmasked(|| {
+            with_ring3_traps(|| run_program(program, PROGRAM_SLICES))
+        });
         idt::restore_timer();
         run
     })
 }
 
-fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::shell::ProgramRun> {
+fn run_program(
+    program: &kernel_core::elf::Placement,
+    budget: u32,
+) -> Option<kernel_core::shell::ProgramRun> {
     use crate::hal::{ActiveHal, Hal};
     use kernel_core::mlsched::resident;
     use kernel_core::priosched::{Priority, PriorityScheduler};
@@ -1931,7 +1940,7 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
     };
     let dead_before = supervisor().terminated();
     let mut run = kernel_core::shell::ProgramRun::default();
-    while run.slices < PROGRAM_SLICES {
+    while run.slices < budget {
         let Some(id) = policy.schedule_next() else {
             break;
         };
@@ -2906,13 +2915,15 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         let trap = build(t, trap_code(t.machine));
         let ran = judge(&hello, t)
             .ok()
-            .and_then(|p| run_program_contained(&p));
+            .and_then(|p| run_program_contained(&p, PROGRAM_SLICES));
         check!(
             ran.is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
             "run: a program image from the namespace format runs in user mode and exits with its status (55)"
         );
         let before = supervisor().terminated();
-        let trapped = judge(&trap, t).ok().and_then(|p| run_program_contained(&p));
+        let trapped = judge(&trap, t)
+            .ok()
+            .and_then(|p| run_program_contained(&p, PROGRAM_SLICES));
         check!(
             trapped.is_some_and(|r| r.terminated.is_some() && !r.exited)
                 && supervisor().terminated() == before + 1,
@@ -2921,7 +2932,9 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         // A divide by zero (#DE, vector 0) - a vector the ring-3 suite never needed before.
         let de = build(t, &[0x48, 0x31, 0xc9, 0x48, 0xf7, 0xf1, 0xeb, 0xfe]);
         let before_de = supervisor().terminated();
-        let divided = judge(&de, t).ok().and_then(|p| run_program_contained(&p));
+        let divided = judge(&de, t)
+            .ok()
+            .and_then(|p| run_program_contained(&p, PROGRAM_SLICES));
         check!(
             divided.is_some_and(|r| r.terminated.is_some())
                 && supervisor().terminated() == before_de + 1,
@@ -2929,14 +2942,16 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         // A program that never yields (ADR-203): the timer ends every slice, the budget ends it.
         let spin = build(t, spin_code(t.machine));
-        let spun = judge(&spin, t).ok().and_then(|p| run_program_contained(&p));
+        let spun = judge(&spin, t)
+            .ok()
+            .and_then(|p| run_program_contained(&p, BOOT_SPIN_SLICES));
         check!(
-            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.slices == PROGRAM_SLICES),
+            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.slices == BOOT_SPIN_SLICES),
             "run: a program that never yields is preempted by the timer every slice and abandoned at its budget"
         );
         let after_spin = judge(&hello, t)
             .ok()
-            .and_then(|p| run_program_contained(&p));
+            .and_then(|p| run_program_contained(&p, PROGRAM_SLICES));
         check!(
             after_spin.is_some_and(|r| r.exited && r.status == HELLO_STATUS),
             "run: after an abandoned spinner, a program still runs and exits with its status"
@@ -2950,7 +2965,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         for _ in 0..16 {
             if judge(&trap, t)
                 .ok()
-                .and_then(|p| run_program_contained(&p))
+                .and_then(|p| run_program_contained(&p, PROGRAM_SLICES))
                 .is_some_and(|r| r.terminated.is_some())
             {
                 contained += 1;

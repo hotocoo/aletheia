@@ -32,7 +32,9 @@ forever and the console never answered again.
 ## Proof
 
 * Boot, every target (`usermode` 38/38/46): `spin` is preempted every slice and abandoned at the
-  budget; `hello` then still exits with 55.
+  budget; `hello` then still exits with 55. The boot suite gives the spinner a 4-slice budget
+  (`BOOT_SPIN_SLICES`): the same proof, and the `usermode` lap stays at 130-144 ms instead of the
+  719/504/220 ms that 64 real slices cost the first landing.
 * Live, `scripts/console-e2e.sh`, all three CPUs (desktop live on aarch64/riscv64, console-only on
   x86-64): `run spin` is abandoned and the console answers the next command; `hello` exits with 55
   after it; the free frame count is unchanged across all runs.

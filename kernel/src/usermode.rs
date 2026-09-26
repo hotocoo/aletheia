@@ -1459,6 +1459,9 @@ pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
 
 /// Slices a console-started program gets before it is abandoned (ADR-201).
 const PROGRAM_SLICES: u32 = 64;
+/// The boot suite's spinner budget: the same proof (preempted every slice, abandoned at the
+/// budget) without spending 64 real slices of every boot on it.
+const BOOT_SPIN_SLICES: u32 = 4;
 
 /// Where this target places a program: EL0 code at [`USER_CODE_VA`] (ADR-201).
 pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
@@ -1473,12 +1476,15 @@ pub fn run_program_live(
     program: &kernel_core::elf::Placement,
 ) -> Option<kernel_core::shell::ProgramRun> {
     let were_enabled = crate::heap::irq_save();
-    let run = run_program(program);
+    let run = run_program(program, PROGRAM_SLICES);
     crate::heap::irq_restore(were_enabled);
     run
 }
 
-fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::shell::ProgramRun> {
+fn run_program(
+    program: &kernel_core::elf::Placement,
+    budget: u32,
+) -> Option<kernel_core::shell::ProgramRun> {
     use crate::hal::{ActiveHal, Hal};
     use kernel_core::mlsched::resident;
     use kernel_core::taskfeat::{JobId, Outcome, TaskSubmission, UserId};
@@ -1554,7 +1560,7 @@ fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::she
     }
     // A fresh deadline, so a tick already pending does not end the first slice before it starts.
     timer_arm();
-    while run.slices < PROGRAM_SLICES {
+    while run.slices < budget {
         let Some(id) = policy.schedule_next() else {
             break;
         };
@@ -2488,13 +2494,17 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         let t = PROGRAM_TARGET;
         let hello = build(t, hello_code(t.machine));
         let trap = build(t, trap_code(t.machine));
-        let ran = judge(&hello, t).ok().and_then(|p| run_program(&p));
+        let ran = judge(&hello, t)
+            .ok()
+            .and_then(|p| run_program(&p, PROGRAM_SLICES));
         check!(
             ran.is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
             "run: a program image from the namespace format runs in user mode and exits with its status (55)"
         );
         let before = supervisor().terminated();
-        let trapped = judge(&trap, t).ok().and_then(|p| run_program(&p));
+        let trapped = judge(&trap, t)
+            .ok()
+            .and_then(|p| run_program(&p, PROGRAM_SLICES));
         check!(
             trapped.is_some_and(|r| r.terminated.is_some() && !r.exited)
                 && supervisor().terminated() == before + 1,
@@ -2502,12 +2512,16 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         );
         // A program that never yields (ADR-203): the timer ends every slice, the budget ends it.
         let spin = build(t, spin_code(t.machine));
-        let spun = judge(&spin, t).ok().and_then(|p| run_program(&p));
+        let spun = judge(&spin, t)
+            .ok()
+            .and_then(|p| run_program(&p, BOOT_SPIN_SLICES));
         check!(
-            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.slices == PROGRAM_SLICES),
+            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.slices == BOOT_SPIN_SLICES),
             "run: a program that never yields is preempted by the timer every slice and abandoned at its budget"
         );
-        let after_spin = judge(&hello, t).ok().and_then(|p| run_program(&p));
+        let after_spin = judge(&hello, t)
+            .ok()
+            .and_then(|p| run_program(&p, PROGRAM_SLICES));
         check!(
             after_spin.is_some_and(|r| r.exited && r.status == HELLO_STATUS),
             "run: after an abandoned spinner, a program still runs and exits with its status"
@@ -2521,7 +2535,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         for _ in 0..16 {
             if judge(&trap, t)
                 .ok()
-                .and_then(|p| run_program(&p))
+                .and_then(|p| run_program(&p, PROGRAM_SLICES))
                 .is_some_and(|r| r.terminated.is_some())
             {
                 contained += 1;
