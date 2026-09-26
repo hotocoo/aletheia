@@ -53,9 +53,11 @@ pub struct ReadRequest {
     pub name_len: usize,
     /// The name lies in the stack page (else in the code page).
     pub name_in_stack: bool,
-    /// Offset of the buffer in the stack page.
+    /// Offset of the buffer in the page `buf_in_data` names.
     pub buf_off: usize,
     pub buf_len: usize,
+    /// The buffer lies in the data page (ADR-210), else in the stack page.
+    pub buf_in_data: bool,
 }
 
 /// Admit `SYS_FS_READ(name, name_len, buf, buf_len)` or refuse it (`None`), touching no memory.
@@ -63,17 +65,15 @@ pub struct ReadRequest {
 /// are not adjacent, a straddling name would have to be stitched: refused) and be at most
 /// [`crate::fs::MAX_NAME`] bytes; the buffer must lie inside the STACK page only - written through
 /// its frame, a buffer in the read+execute code page would rewrite the program's text.
-#[allow(clippy::too_many_arguments)]
 pub fn admit_read(
     grant: Option<&Grant>,
     name: u64,
     name_len: u64,
     buf: u64,
     buf_len: u64,
-    code_va: u64,
-    stack_va: u64,
-    stack_top: u64,
+    w: Window,
 ) -> Option<ReadRequest> {
+    let (code_va, stack_va, stack_top) = (w.code_va, w.stack_va, w.stack_top);
     if !grant.is_some_and(|g| g.allows(FS_READ)) {
         return None;
     }
@@ -89,13 +89,19 @@ pub fn admit_read(
     } else {
         return None;
     };
-    UserSlice::validate(buf, buf_len, stack_va, stack_top).ok()?;
+    // The buffer goes in the stack page or the data page - never the read+execute code page, where
+    // a write through its frame would rewrite the program's own text.
+    let buf_in_data = UserSlice::validate(buf, buf_len, stack_top, w.data_top).is_ok();
+    if !buf_in_data {
+        UserSlice::validate(buf, buf_len, stack_va, stack_top).ok()?;
+    }
     Some(ReadRequest {
         name_off: (name - page) as usize,
         name_len,
         name_in_stack,
-        buf_off: (buf - stack_va) as usize,
+        buf_off: (buf - if buf_in_data { stack_top } else { stack_va }) as usize,
         buf_len,
+        buf_in_data,
     })
 }
 
@@ -108,6 +114,7 @@ pub fn serve_read(
     services: &mut dyn ProgramServices,
     code_page: &[u8],
     stack_page: &mut [u8],
+    data_page: &mut [u8],
 ) -> u64 {
     let mut name = [0u8; crate::fs::MAX_NAME];
     let src = if req.name_in_stack {
@@ -122,7 +129,12 @@ pub fn serve_read(
     let Ok(name) = core::str::from_utf8(&name[..req.name_len]) else {
         return u64::MAX;
     };
-    let Some(buf) = stack_page.get_mut(req.buf_off..req.buf_off + req.buf_len) else {
+    let target = if req.buf_in_data {
+        data_page
+    } else {
+        stack_page
+    };
+    let Some(buf) = target.get_mut(req.buf_off..req.buf_off + req.buf_len) else {
         return u64::MAX;
     };
     match services.read_object(name, buf) {
@@ -164,6 +176,24 @@ impl ProgramServices for NoServices {
 /// pages), otherwise hand the range to `read` - the target's copy, in the task's address space -
 /// and keep what fits. Returns the bytes kept, or `u64::MAX` when refused; nothing is appended on a
 /// refusal.
+/// The three pages a program has (ADR-210): code, stack, then data. `data_top` is the end of the
+/// data page when the program declared one, else the stack top - a program without a data segment
+/// has no third page and no address there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    pub code_va: u64,
+    pub stack_va: u64,
+    pub stack_top: u64,
+    pub data_top: u64,
+}
+
+impl Window {
+    /// The whole span a program may name: its code page through its last mapped page.
+    pub fn end(self) -> u64 {
+        self.data_top
+    }
+}
+
 pub fn serve_write<'a>(
     grant: Option<&Grant>,
     sink: &mut OutputSink,
@@ -240,11 +270,23 @@ mod tests {
 
     static PAGE: [u8; 64] = [b'a'; 64];
 
+    /// A program's three pages: code at 0x1000, stack at 0x2000, data at 0x3000.
+    const W: Window = Window {
+        code_va: 0x1000,
+        stack_va: 0x2000,
+        stack_top: 0x3000,
+        data_top: 0x4000,
+    };
+    /// The same program without a data segment: its last page is its stack.
+    const W_NODATA: Window = Window {
+        data_top: 0x3000,
+        ..W
+    };
+
     #[test]
-    fn a_read_is_admitted_only_with_the_grant_a_one_page_name_and_a_stack_buffer() {
+    fn a_read_is_admitted_only_with_the_grant_a_one_page_name_and_a_writable_buffer() {
         let g = Grant::new(9);
-        let (code, stack, top) = (0x1000u64, 0x2000u64, 0x3000u64);
-        let ok = admit_read(Some(&g), 0x1080, 5, 0x2100, 64, code, stack, top);
+        let ok = admit_read(Some(&g), 0x1080, 5, 0x2100, 64, W);
         assert_eq!(
             ok,
             Some(ReadRequest {
@@ -252,46 +294,48 @@ mod tests {
                 name_len: 5,
                 name_in_stack: false,
                 buf_off: 0x100,
-                buf_len: 64
+                buf_len: 64,
+                buf_in_data: false
             })
         );
         assert!(
-            admit_read(Some(&g), 0x2ff0, 5, 0x2000, 16, code, stack, top)
+            admit_read(Some(&g), 0x2ff0, 5, 0x2000, 16, W)
                 .unwrap()
                 .name_in_stack
         );
+        // The buffer may lie in the data page, and its offset is then that page's (ADR-210); a
+        // program with no data page has no address there.
+        let into_data = admit_read(Some(&g), 0x1080, 5, 0x3040, 16, W).unwrap();
+        assert!(into_data.buf_in_data && into_data.buf_off == 0x40);
+        assert_eq!(admit_read(Some(&g), 0x1080, 5, 0x3040, 16, W_NODATA), None);
+        assert_eq!(admit_read(None, 0x1080, 5, 0x2100, 64, W), None, "no grant");
         assert_eq!(
-            admit_read(None, 0x1080, 5, 0x2100, 64, code, stack, top),
-            None,
-            "no grant"
-        );
-        assert_eq!(
-            admit_read(Some(&g), 0x1ffe, 4, 0x2100, 64, code, stack, top),
+            admit_read(Some(&g), 0x1ffe, 4, 0x2100, 64, W),
             None,
             "name straddles the pages"
         );
         assert_eq!(
-            admit_read(Some(&g), 0x1080, 5, 0x1100, 64, code, stack, top),
+            admit_read(Some(&g), 0x1080, 5, 0x1100, 64, W),
             None,
             "buffer in the code page"
         );
         assert_eq!(
-            admit_read(Some(&g), 0x1080, 5, 0x2ff0, 64, code, stack, top),
+            admit_read(Some(&g), 0x1080, 5, 0x2ff0, 64, W),
             None,
             "buffer past the stack top"
         );
         assert_eq!(
-            admit_read(Some(&g), 0x1080, 0, 0x2100, 64, code, stack, top),
+            admit_read(Some(&g), 0x1080, 0, 0x2100, 64, W),
             None,
             "empty name"
         );
         assert_eq!(
-            admit_read(Some(&g), 0x1080, 41, 0x2100, 64, code, stack, top),
+            admit_read(Some(&g), 0x1080, 41, 0x2100, 64, W),
             None,
             "name past MAX_NAME"
         );
         assert_eq!(
-            admit_read(Some(&g), 0x0800, 5, 0x2100, 64, code, stack, top),
+            admit_read(Some(&g), 0x0800, 5, 0x2100, 64, W),
             None,
             "name outside"
         );
@@ -315,19 +359,33 @@ mod tests {
         let mut code = [0u8; 4096];
         code[0x80..0x84].copy_from_slice(b"note");
         let mut stack = [0u8; 4096];
+        let mut data = [0u8; 4096];
         let req = ReadRequest {
             name_off: 0x80,
             name_len: 4,
             name_in_stack: false,
             buf_off: 0x200,
             buf_len: 4,
+            buf_in_data: false,
         };
         assert_eq!(
-            serve_read(&req, &mut One, &code, &mut stack),
+            serve_read(&req, &mut One, &code, &mut stack, &mut data),
             10,
             "full length"
         );
         assert_eq!(&stack[0x200..0x204], b"just", "cut to the buffer");
+        // The same read, landing in the data page instead (ADR-210).
+        let into_data = ReadRequest {
+            buf_off: 0x40,
+            buf_len: 16,
+            buf_in_data: true,
+            ..req
+        };
+        assert_eq!(
+            serve_read(&into_data, &mut One, &code, &mut stack, &mut data),
+            10
+        );
+        assert_eq!(&data[0x40..0x4a], b"just words");
         // The name may live in the stack page, where the object also lands.
         stack[0x10..0x14].copy_from_slice(b"note");
         let req = ReadRequest {
@@ -336,8 +394,9 @@ mod tests {
             name_in_stack: true,
             buf_off: 0x10,
             buf_len: 16,
+            buf_in_data: false,
         };
-        assert_eq!(serve_read(&req, &mut One, &code, &mut stack), 10);
+        assert_eq!(serve_read(&req, &mut One, &code, &mut stack, &mut data), 10);
         assert_eq!(&stack[0x10..0x1a], b"just words");
         // Unknown and non-UTF-8 names are refused.
         code[0x80..0x84].copy_from_slice(b"nope");
@@ -347,12 +406,19 @@ mod tests {
             name_in_stack: false,
             buf_off: 0,
             buf_len: 4,
+            buf_in_data: false,
         };
-        assert_eq!(serve_read(&req, &mut One, &code, &mut stack), u64::MAX);
-        code[0x80] = 0xff;
-        assert_eq!(serve_read(&req, &mut One, &code, &mut stack), u64::MAX);
         assert_eq!(
-            serve_read(&req, &mut NoServices, &code, &mut stack),
+            serve_read(&req, &mut One, &code, &mut stack, &mut data),
+            u64::MAX
+        );
+        code[0x80] = 0xff;
+        assert_eq!(
+            serve_read(&req, &mut One, &code, &mut stack, &mut data),
+            u64::MAX
+        );
+        assert_eq!(
+            serve_read(&req, &mut NoServices, &code, &mut stack, &mut data),
             u64::MAX
         );
     }

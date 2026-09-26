@@ -247,9 +247,10 @@ fn mount_or_format<D: BlockDevice>(dev: &mut D) -> Option<Filesystem> {
             crate::usermode::PROGRAM_TARGET,
             crate::usermode::USERLAND_HELLO,
             crate::usermode::USERLAND_SHOW,
+            crate::usermode::USERLAND_COUNTER,
         ) {
             Ok(()) => {
-                kprintln!("[console] new namespace: seeded the programs `hello`, `show`, `trap` and `spin`")
+                kprintln!("[console] new namespace: seeded the programs `hello`, `show`, `counter`, `trap` and `spin`")
             }
             Err(e) => kprintln!("[console] could not seed the namespace's programs: {:?}", e),
         }

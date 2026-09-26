@@ -17,6 +17,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "counter"
+path = "src/counter.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "probe"
 path = "src/probe.rs"
 test = false

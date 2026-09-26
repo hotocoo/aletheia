@@ -8,14 +8,17 @@ use kernel_core::elf::{
 const A64: Target = Target {
     machine: Machine::Aarch64,
     code_va: 0x5000_0000,
+    data_va: 0x5000_2000,
 };
 const RV: Target = Target {
     machine: Machine::Riscv64,
     code_va: 0x5000_0000,
+    data_va: 0x5000_2000,
 };
 const X86: Target = Target {
     machine: Machine::X86_64,
     code_va: 0x4000_0000,
+    data_va: 0x4000_2000,
 };
 
 fn put(b: &mut [u8], off: usize, v: &[u8]) {
@@ -95,8 +98,14 @@ fn every_malformed_shape_is_refused_by_name() {
         with(&|b| put(b, 68, &7u32.to_le_bytes())),
         Err(Refusal::WritableAndExecutable)
     );
+    // Read+write only: the image declares a data segment and no code at all (ADR-210).
     assert_eq!(
         with(&|b| put(b, 68, &6u32.to_le_bytes())),
+        Err(Refusal::SegmentCount)
+    );
+    // Read only, neither writable nor executable: not a segment this machine can run.
+    assert_eq!(
+        with(&|b| put(b, 68, &4u32.to_le_bytes())),
         Err(Refusal::NotExecutableSegment)
     );
     assert_eq!(
@@ -126,6 +135,75 @@ fn every_malformed_shape_is_refused_by_name() {
         with(&|b| put(b, 24, &0x5000_1000u64.to_le_bytes())),
         Err(Refusal::EntryOutside)
     );
+}
+
+/// A program may also declare ONE writable page (ADR-210): at the target's data address, readable,
+/// never executable, at most a page, with `.bss` past its file bytes. Anything else is refused.
+#[test]
+fn a_writable_data_segment_is_accepted_only_where_the_target_puts_one() {
+    fn with_data(
+        t: Target,
+        code: &[u8],
+        dvaddr: u64,
+        filesz: u64,
+        memsz: u64,
+        flags: u32,
+    ) -> Vec<u8> {
+        // `build`'s image, then a second program header spliced in and the data bytes appended.
+        let mut img = build(t, code);
+        let phoff = 64usize;
+        let mut ph = vec![0u8; 56];
+        ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+        ph[4..8].copy_from_slice(&flags.to_le_bytes());
+        ph[16..24].copy_from_slice(&dvaddr.to_le_bytes());
+        ph[24..32].copy_from_slice(&dvaddr.to_le_bytes());
+        ph[32..40].copy_from_slice(&filesz.to_le_bytes());
+        ph[40..48].copy_from_slice(&memsz.to_le_bytes());
+        // p_align 1: this synthetic image does not pad the data to a page boundary, and the judge
+        // only demands offset/address congruence when a segment claims an alignment.
+        ph[48..56].copy_from_slice(&1u64.to_le_bytes());
+        img.splice(phoff + 56..phoff + 56, ph);
+        let data_off = img.len() as u64;
+        img.extend(core::iter::repeat_n(0xab, filesz as usize));
+        img[56..58].copy_from_slice(&2u16.to_le_bytes()); // e_phnum
+        let second = phoff + 56;
+        img[second + 8..second + 16].copy_from_slice(&data_off.to_le_bytes()); // p_offset
+        let first = phoff;
+        let text = data_off;
+        img[first + 32..first + 40].copy_from_slice(&text.to_le_bytes()); // p_filesz
+        img[first + 40..first + 48].copy_from_slice(&text.to_le_bytes()); // p_memsz
+        img[24..32].copy_from_slice(&(t.code_va + 176).to_le_bytes()); // e_entry, past both headers
+        img
+    }
+    let code = hello_code(Machine::Aarch64);
+    let good = with_data(A64, code, A64.data_va, 8, 64, 6);
+    let p = judge(&good, A64).expect("data segment judged");
+    assert_eq!(p.data, &[0xab; 8]);
+    assert_eq!(p.data_memsz, 64, "the .bss past the file bytes is declared");
+    assert_eq!(p.vaddr, A64.code_va);
+
+    for (dvaddr, filesz, memsz, flags, want) in [
+        (
+            A64.data_va,
+            8u64,
+            64u64,
+            7u32,
+            Refusal::WritableAndExecutable,
+        ),
+        (A64.code_va, 8, 64, 6, Refusal::WrongAddress),
+        (A64.data_va + 8, 8, 64, 6, Refusal::WrongAddress),
+        (A64.data_va, 8, 8192, 6, Refusal::TooLarge),
+        (A64.data_va, 64, 8, 6, Refusal::TooLarge),
+    ] {
+        assert_eq!(
+            judge(&with_data(A64, code, dvaddr, filesz, memsz, flags), A64).map(|_| ()),
+            Err(want),
+            "{dvaddr:#x} {filesz} {memsz} {flags:#x}"
+        );
+    }
+    let bare = build(A64, code);
+    let plain = judge(&bare, A64).unwrap();
+    assert!(plain.data.is_empty() && plain.data_memsz == 0);
 }
 
 /// Seeded mutation campaign in the shape of `hostile_page.rs`: flip, truncate and splice the

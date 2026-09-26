@@ -348,9 +348,7 @@ pub extern "C" fn el0_trap(num: u64, arg: u64, frame: *mut TrapFrame) -> u64 {
                     f.regs[1],
                     f.regs[2],
                     f.regs[3],
-                    USER_CODE_VA as u64,
-                    USER_STACK_VA as u64,
-                    USER_STACK_TOP as u64,
+                    *addr_of!(PROGRAM_WINDOW_NOW),
                 ) {
                     Some(req) => {
                         *addr_of_mut!(PENDING_READ) = Some(req);
@@ -375,7 +373,7 @@ pub extern "C" fn el0_trap(num: u64, arg: u64, frame: *mut TrapFrame) -> u64 {
                     arg,
                     len,
                     USER_CODE_VA as u64,
-                    USER_STACK_TOP as u64,
+                    (*addr_of!(PROGRAM_WINDOW_NOW)).end(),
                     // SAFETY: the range lies inside the program's window, which IS its two mapped
                     // pages (asserted at `PROGRAM_WINDOW`), and this trap runs in its address space
                     // (TTBR0 is switched back only after the slice returns).
@@ -1507,12 +1505,19 @@ pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
     }
 }
 
-/// The window a program's `SYS_WRITE_CONSOLE` range is checked against is exactly its code page and
-/// its stack page, contiguous: the check is sufficient only because the window IS the mapping.
+/// The window a program's ranges are checked against is exactly the pages it has, contiguous: the
+/// check is sufficient only because the window IS the mapping (ADR-204, widened by ADR-210).
 const PROGRAM_WINDOW: () =
     assert!(USER_STACK_VA == USER_CODE_VA + 0x1000 && USER_STACK_TOP == USER_CODE_VA + 0x2000);
 /// The running program's `console.output` grant (ADR-204); `None` whenever no `run` is in progress.
 static mut PROGRAM_GRANT: Option<kernel_core::progout::Grant> = None;
+/// The running program's pages (ADR-210): its data page exists only if it declared one.
+static mut PROGRAM_WINDOW_NOW: kernel_core::progout::Window = kernel_core::progout::Window {
+    code_va: USER_CODE_VA as u64,
+    stack_va: USER_STACK_VA as u64,
+    stack_top: USER_STACK_TOP as u64,
+    data_top: USER_STACK_TOP as u64,
+};
 /// A `SYS_FS_READ` the handler admitted, for the run loop to serve (ADR-207).
 static mut PENDING_READ: Option<kernel_core::progout::ReadRequest> = None;
 /// What the running program has written (ADR-204).
@@ -1525,6 +1530,8 @@ pub const USERLAND_HELLO: &[u8] = include_bytes!("../../userland/bin/aarch64/hel
 pub const USERLAND_SHOW: &[u8] = include_bytes!("../../userland/bin/aarch64/show.elf");
 /// `probe`, from `userland/` (ADR-207): the boot suite's probe of `SYS_FS_READ`; never seeded.
 const USERLAND_PROBE: &[u8] = include_bytes!("../../userland/bin/aarch64/probe.elf");
+/// `counter`, from `userland/` (ADR-210): seeded, a program with real mutable globals.
+pub const USERLAND_COUNTER: &[u8] = include_bytes!("../../userland/bin/aarch64/counter.elf");
 
 /// The run storms (ADR-202's faulting runs, ADR-204's writes, ADR-207's reads) prove bounds under
 /// load; like `kmain`'s storms (ADR-163) they run in the gate image only, so an interactive boot
@@ -1544,6 +1551,7 @@ const BOOT_SPIN_SLICES: u32 = 4;
 pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
     machine: kernel_core::elf::Machine::Aarch64,
     code_va: USER_CODE_VA as u64,
+    data_va: USER_STACK_TOP as u64,
 };
 
 /// The console's `run NAME` (ADR-201): one EL0 task in its own address space, its code page the
@@ -1587,6 +1595,38 @@ fn run_program(
     roots[0] = vm::build_identity()?;
     code[0] = map_user_code(roots[0], program.vaddr as usize, &words);
     stack[0] = map_user_stack(roots[0], USER_STACK_VA);
+    // The writable page, if the program declared one (ADR-210): a third mapped page above the
+    // stack, zero past the bytes the image carries, so `.bss` starts zeroed.
+    let mut data: Option<frames::PhysFrame> = None;
+    if program.data_memsz > 0 {
+        data = map_user_stack(roots[0], USER_STACK_TOP);
+        match data {
+            Some(f) if !program.data.is_empty() => {
+                // SAFETY: `f` is the zeroed page this run just mapped, identity-mapped and
+                // kernel-writable; the judge bounds `data` at one page.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        program.data.as_ptr(),
+                        f.addr() as *mut u8,
+                        program.data.len(),
+                    )
+                };
+            }
+            Some(_) => {}
+            None => {
+                cleanup_tasks(&roots, &mut code, &mut stack);
+                return None;
+            }
+        }
+    }
+    // SAFETY: single-threaded; the window belongs to the program about to run.
+    unsafe {
+        (*addr_of_mut!(PROGRAM_WINDOW_NOW)).data_top = if data.is_some() {
+            (USER_STACK_TOP + frames::FRAME_SIZE) as u64
+        } else {
+            USER_STACK_TOP as u64
+        };
+    }
     if code[0].is_none() || stack[0].is_none() || args.len() > kernel_core::elf::MAX_ARGS {
         cleanup_tasks(&roots, &mut code, &mut stack);
         return None;
@@ -1714,12 +1754,20 @@ fn run_program(
             if let (Some(c), Some(st)) = (code[0], stack[0]) {
                 // SAFETY: `c` and `st` are this run's own identity-mapped frames, one page each, and
                 // nothing else touches them while the program is off the CPU.
+                let mut empty = [0u8; 0];
                 let result = unsafe {
                     kernel_core::progout::serve_read(
                         &req,
                         services,
                         core::slice::from_raw_parts(c.addr() as *const u8, frames::FRAME_SIZE),
                         core::slice::from_raw_parts_mut(st.addr() as *mut u8, frames::FRAME_SIZE),
+                        match data {
+                            Some(d) => core::slice::from_raw_parts_mut(
+                                d.addr() as *mut u8,
+                                frames::FRAME_SIZE,
+                            ),
+                            None => &mut empty,
+                        },
                     )
                 };
                 // SAFETY: single-threaded; slot 0 is this program's saved context.
@@ -1743,6 +1791,9 @@ fn run_program(
         let out = &*addr_of!(PROGRAM_OUT);
         run.output = out.bytes().to_vec();
         run.dropped = out.dropped();
+    }
+    if let Some(f) = data {
+        drop_user_page(roots[0], USER_STACK_TOP, f);
     }
     cleanup_tasks(&roots, &mut code, &mut stack);
     Some(run)
@@ -2734,6 +2785,21 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                     && bare
                         .is_some_and(|r| r.exited && r.status == u64::MAX && r.output.is_empty()),
                 "read: `show` prints an object; a run handed no namespace is refused"
+            );
+            // A program with real mutable globals (ADR-210): its `.data` arrives as the image
+            // declared it (40), its `.bss` arrives zeroed, both are writable, and a read of the
+            // namespace lands in a global buffer on the writable page.
+            let counted = run(USERLAND_COUNTER, b"", &mut svc);
+            check!(
+                counted.is_some_and(|r| r.exited && r.status == 55 && r.output.is_empty()),
+                "data: a program's .data arrives as declared and its .bss arrives zeroed, both writable"
+            );
+            let into_globals = run(USERLAND_COUNTER, b"note", &mut svc);
+            check!(
+                into_globals.is_some_and(|r| r.exited
+                    && r.status == 65
+                    && r.output == b"counter read: just words\n"),
+                "data: an object read by a program lands in a buffer on its writable page"
             );
             let refused = [
                 &b"codebuf"[..],

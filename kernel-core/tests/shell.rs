@@ -912,6 +912,7 @@ fn tasks_needs_the_schedule_capability() {
 const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
     machine: kernel_core::elf::Machine::Aarch64,
     code_va: 0x5000_0000,
+    data_va: 0x5000_2000,
 };
 
 /// A host that places programs for aarch64 and "runs" them by recording what it was given.
@@ -991,6 +992,7 @@ fn run_places_a_judged_program_and_refuses_everything_else_by_name() {
         Target {
             machine: Machine::Riscv64,
             code_va: 0x5000_0000,
+            data_va: 0x5000_2000,
         },
         hello_code(Machine::Riscv64),
     );

@@ -38,6 +38,9 @@ impl Machine {
 pub struct Target {
     pub machine: Machine,
     pub code_va: u64,
+    /// Where a program's writable data page goes (ADR-210), above its stack page: the three pages
+    /// stay contiguous, so one range check still covers a program's whole address space.
+    pub data_va: u64,
 }
 
 /// A program the target can place: the segment's bytes from the file, where they go, and where
@@ -47,6 +50,11 @@ pub struct Placement<'a> {
     pub code: &'a [u8],
     pub vaddr: u64,
     pub entry: u64,
+    /// The writable segment's file bytes (ADR-210), empty when the program has no data segment.
+    /// Bytes past `data.len()` up to `data_memsz` are zero (`.bss`).
+    pub data: &'a [u8],
+    /// How many bytes of the data page the program declared, `data.len()` included.
+    pub data_memsz: u64,
 }
 
 /// Why bytes are not a program this machine runs. Each renders to a line an operator can act on.
@@ -159,22 +167,31 @@ pub fn judge(bytes: &[u8], target: Target) -> Result<Placement<'_>, Refusal> {
         return Err(bad);
     }
 
+    // One executable segment, and at most one writable one (ADR-210). A third, or two of either,
+    // is refused: the machine gives a program exactly these pages.
     let mut load = None;
+    let mut data = None;
     for i in 0..phnum {
         let ph = phoff + i * PHDR;
         if u32_at(bytes, ph).ok_or(bad)? != PT_LOAD {
             continue;
         }
-        if load.is_some() {
+        let flags = u32_at(bytes, ph + 4).ok_or(bad)?;
+        if flags & PF_W != 0 && flags & PF_X != 0 {
+            return Err(Refusal::WritableAndExecutable);
+        }
+        let slot = if flags & PF_W != 0 {
+            &mut data
+        } else {
+            &mut load
+        };
+        if slot.is_some() {
             return Err(Refusal::SegmentCount);
         }
-        load = Some(ph);
+        *slot = Some(ph);
     }
     let ph = load.ok_or(Refusal::SegmentCount)?;
     let flags = u32_at(bytes, ph + 4).ok_or(bad)?;
-    if flags & PF_W != 0 && flags & PF_X != 0 {
-        return Err(Refusal::WritableAndExecutable);
-    }
     if flags & PF_X == 0 || flags & PF_R == 0 {
         return Err(Refusal::NotExecutableSegment);
     }
@@ -197,7 +214,40 @@ pub fn judge(bytes: &[u8], target: Target) -> Result<Placement<'_>, Refusal> {
     if entry < vaddr || entry >= vaddr + filesz {
         return Err(Refusal::EntryOutside);
     }
-    Ok(Placement { code, vaddr, entry })
+    // The writable segment, if the program declared one: readable, not executable, at the target's
+    // data address, at most one page, its file bytes inside the file.
+    let (data, data_memsz) = match data {
+        None => (&bytes[..0], 0),
+        Some(ph) => {
+            let flags = u32_at(bytes, ph + 4).ok_or(bad)?;
+            if flags & PF_R == 0 || flags & PF_X != 0 {
+                return Err(Refusal::NotExecutableSegment);
+            }
+            let offset = u64_at(bytes, ph + 8).ok_or(bad)?;
+            let dvaddr = u64_at(bytes, ph + 16).ok_or(bad)?;
+            let filesz = u64_at(bytes, ph + 32).ok_or(bad)?;
+            let memsz = u64_at(bytes, ph + 40).ok_or(bad)?;
+            let align = u64_at(bytes, ph + 48).ok_or(bad)?;
+            if dvaddr != target.data_va || (align > 1 && offset % align != dvaddr % align) {
+                return Err(Refusal::WrongAddress);
+            }
+            if memsz > PAGE || filesz > memsz {
+                return Err(Refusal::TooLarge);
+            }
+            let start = usize::try_from(offset).map_err(|_| Refusal::OutsideFile)?;
+            let end = start
+                .checked_add(filesz as usize)
+                .ok_or(Refusal::OutsideFile)?;
+            (bytes.get(start..end).ok_or(Refusal::OutsideFile)?, memsz)
+        }
+    };
+    Ok(Placement {
+        code,
+        vaddr,
+        entry,
+        data,
+        data_memsz,
+    })
 }
 
 /// The smallest image [`judge`] accepts: header, one program header, then `code`, all in one
@@ -232,6 +282,9 @@ pub fn build(target: Target, code: &[u8]) -> Vec<u8> {
     b.extend_from_slice(code);
     b
 }
+
+/// Is `machine`'s hand-assembled code, as `build` lays it out, entered at this offset?
+pub const BUILD_ENTRY_OFFSET: u64 = (EHDR + PHDR) as u64;
 
 /// The program every machine seeds as `hello` (ADR-201, ADR-204): write [`HELLO_LINE`] to the
 /// console with `SYS_WRITE_CONSOLE`, sum 1..=10 in user mode, then exit with the sum, so the exit
