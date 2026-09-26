@@ -341,6 +341,10 @@ pub fn loop_writer_code(machine: Machine, count: u64, len: u64) -> Vec<u8> {
     code
 }
 
+/// Longest argument string `run` hands a program (ADR-206): it lives at the top of the program's
+/// stack page, so it must leave the page almost whole for the stack itself.
+pub const MAX_ARGS: usize = 256;
+
 /// What `hello` writes.
 pub const HELLO_LINE: &[u8] = b"hello from user mode\n";
 

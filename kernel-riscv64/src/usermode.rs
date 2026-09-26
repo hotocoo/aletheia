@@ -1227,12 +1227,14 @@ pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
 /// under [`fenced`]. Every frame it takes is given back.
 pub fn run_program_live(
     program: &kernel_core::elf::Placement,
+    args: &[u8],
 ) -> Option<kernel_core::shell::ProgramRun> {
-    fenced(|| run_program(program, true, PROGRAM_SLICES))
+    fenced(|| run_program(program, args, true, PROGRAM_SLICES))
 }
 
 fn run_program(
     program: &kernel_core::elf::Placement,
+    args: &[u8],
     live: bool,
     budget: u32,
 ) -> Option<kernel_core::shell::ProgramRun> {
@@ -1261,11 +1263,27 @@ fn run_program(
         }
         vm::destroy_space(root);
     };
-    if code.is_none() || stack.is_none() {
+    if code.is_none() || stack.is_none() || args.len() > kernel_core::elf::MAX_ARGS {
         teardown(code, stack);
         return None;
     }
-    let mut frame = make_frame(program.entry as usize, USER_STACK_TOP, 0, 0, 0);
+    // The arguments sit at the top of the stack page, 16-aligned, and the stack starts below them
+    // (ADR-206); the program is entered with their address and length in a0 and a1.
+    let args_at = (args.len() + 15) & !15;
+    let args_va = USER_STACK_TOP - args_at;
+    if let Some(f) = stack {
+        // SAFETY: `f` is the zeroed stack frame this run just allocated, identity-mapped and
+        // kernel-writable; the copy stays inside its last `args_at` bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                args.as_ptr(),
+                (f.addr() + frames::FRAME_SIZE - args_at) as *mut u8,
+                args.len(),
+            )
+        };
+    }
+    let mut frame = make_frame(program.entry as usize, args_va, args_va as u64, 0, 0);
+    frame.regs[11] = args.len() as u64; // a1
 
     let mut policy = PriorityScheduler::default();
     let now_secs = ActiveHal::ticks_to_ns(ActiveHal::timer_ticks()) / 1_000_000_000;
@@ -2289,7 +2307,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         let trap = build(t, trap_code(t.machine));
         let ran = judge(&hello, t)
             .ok()
-            .and_then(|p| run_program(&p, false, PROGRAM_SLICES));
+            .and_then(|p| run_program(&p, b"", false, PROGRAM_SLICES));
         check!(
             ran.as_ref().is_some_and(|r| r.exited && r.status == HELLO_STATUS && r.terminated.is_none()),
             "run: a program image from the namespace format runs in user mode and exits with its status (55)"
@@ -2306,19 +2324,36 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         // CPU, is judged and runs exactly as the hand-assembled one does.
         let rust = judge(USERLAND_HELLO, t)
             .ok()
-            .and_then(|p| run_program(&p, false, PROGRAM_SLICES));
+            .and_then(|p| run_program(&p, b"", false, PROGRAM_SLICES));
         check!(
             rust.is_some_and(|r| r.exited
                 && r.status == HELLO_STATUS
                 && r.output == kernel_core::elf::HELLO_LINE),
             "run: hello built from Rust source in userland/ runs, prints its line and exits with 55"
         );
+        // Arguments (ADR-206): handed at entry, greeted back; one byte past the bound is refused
+        // before anything runs.
+        let greeted = judge(USERLAND_HELLO, t)
+            .ok()
+            .and_then(|p| run_program(&p, b"World", false, PROGRAM_SLICES));
+        check!(
+            greeted.is_some_and(|r| r.exited && r.output == b"hello from user mode: World\n"),
+            "run: a program is handed its arguments at entry and reads them from its own stack page"
+        );
+        let too_many = [b'a'; kernel_core::elf::MAX_ARGS + 1];
+        check!(
+            judge(USERLAND_HELLO, t)
+                .ok()
+                .and_then(|p| run_program(&p, &too_many, false, PROGRAM_SLICES))
+                .is_none(),
+            "run: arguments past the bound are refused before the program starts"
+        );
         let cv = t.code_va;
         let write = |addr: u64, len: u64| {
             let img = build(t, &kernel_core::elf::writer_code(t.machine, addr, len));
             judge(&img, t)
                 .ok()
-                .and_then(|p| run_program(&p, false, PROGRAM_SLICES))
+                .and_then(|p| run_program(&p, b"", false, PROGRAM_SLICES))
         };
         let refused = [(cv - 0x1000, 8), (cv + 0x2000 - 4, 8), (cv, 65_537)]
             .iter()
@@ -2344,7 +2379,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             let before = crate::heap::used_bytes();
             let r = judge(&img, t)
                 .ok()
-                .and_then(|p| run_program(&p, false, PROGRAM_SLICES));
+                .and_then(|p| run_program(&p, b"", false, PROGRAM_SLICES));
             (crate::heap::used_bytes() - before, r)
         };
         let (few, few_run) = gross(16);
@@ -2366,7 +2401,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         let before = supervisor().terminated();
         let trapped = judge(&trap, t)
             .ok()
-            .and_then(|p| run_program(&p, false, PROGRAM_SLICES));
+            .and_then(|p| run_program(&p, b"", false, PROGRAM_SLICES));
         check!(
             trapped.is_some_and(|r| r.terminated.is_some() && !r.exited)
                 && supervisor().terminated() == before + 1,
@@ -2376,14 +2411,14 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         let spin = build(t, spin_code(t.machine));
         let spun = judge(&spin, t)
             .ok()
-            .and_then(|p| run_program(&p, false, BOOT_SPIN_SLICES));
+            .and_then(|p| run_program(&p, b"", false, BOOT_SPIN_SLICES));
         check!(
             spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.preempted == BOOT_SPIN_SLICES),
             "run: a program that never yields is preempted by the timer every slice and abandoned at its budget"
         );
         let after_spin = judge(&hello, t)
             .ok()
-            .and_then(|p| run_program(&p, false, PROGRAM_SLICES));
+            .and_then(|p| run_program(&p, b"", false, PROGRAM_SLICES));
         check!(
             after_spin.is_some_and(|r| r.exited && r.status == HELLO_STATUS),
             "run: after an abandoned spinner, a program still runs and exits with its status"
@@ -2397,7 +2432,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         for _ in 0..16 {
             if judge(&trap, t)
                 .ok()
-                .and_then(|p| run_program(&p, false, PROGRAM_SLICES))
+                .and_then(|p| run_program(&p, b"", false, PROGRAM_SLICES))
                 .is_some_and(|r| r.terminated.is_some())
             {
                 contained += 1;

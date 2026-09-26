@@ -915,7 +915,10 @@ const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
 };
 
 /// A host that places programs for aarch64 and "runs" them by recording what it was given.
-struct ProgramHost(std::cell::Cell<Option<(u64, u64, usize)>>);
+struct ProgramHost(
+    std::cell::Cell<Option<(u64, u64, usize)>>,
+    std::cell::RefCell<Vec<Vec<u8>>>,
+);
 
 impl ShellHost for ProgramHost {
     fn arch(&self) -> &str {
@@ -942,8 +945,10 @@ impl ShellHost for ProgramHost {
     fn run_program(
         &self,
         p: &kernel_core::elf::Placement,
+        args: &[u8],
     ) -> Option<kernel_core::shell::ProgramRun> {
         self.0.set(Some((p.vaddr, p.entry, p.code.len())));
+        self.1.borrow_mut().push(args.to_vec());
         Some(kernel_core::shell::ProgramRun {
             slices: 1,
             preempted: 0,
@@ -984,7 +989,7 @@ fn run_places_a_judged_program_and_refuses_everything_else_by_name() {
         },
         hello_code(Machine::Riscv64),
     );
-    let host = ProgramHost(std::cell::Cell::new(None));
+    let host = ProgramHost(std::cell::Cell::new(None), Default::default());
     let log = run_with_objects(
         &host,
         &[
@@ -992,7 +997,13 @@ fn run_places_a_judged_program_and_refuses_everything_else_by_name() {
             ("other", riscv),
             ("note", b"just words".to_vec()),
         ],
-        "run hello\rrun other\rrun note\rrun nosuch\r",
+        "run hello\rrun other\rrun note\rrun nosuch\rrun hello to the  world\r",
+    );
+    // Arguments are handed over as typed after the name (ADR-206), and none when there are none.
+    assert_eq!(host.1.borrow().first().map(Vec::as_slice), Some(&b""[..]));
+    assert_eq!(
+        host.1.borrow().last().map(Vec::as_slice),
+        Some(&b"to the  world"[..])
     );
     assert_eq!(
         host.0.get(),

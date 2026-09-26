@@ -993,8 +993,9 @@ pub trait ShellHost {
     fn program_target(&self) -> Option<crate::elf::Target> {
         None
     }
-    /// Run a judged program as one user-mode task through the advised scheduler (ADR-201).
-    fn run_program(&self, _program: &crate::elf::Placement) -> Option<ProgramRun> {
+    /// Run a judged program as one user-mode task through the advised scheduler (ADR-201), handing
+    /// it `args` (at most [`crate::elf::MAX_ARGS`] bytes) at entry (ADR-206).
+    fn run_program(&self, _program: &crate::elf::Placement, _args: &[u8]) -> Option<ProgramRun> {
         None
     }
     /// Run this target's user-mode tasks through the advised scheduler now (ADR-199). `None` = this
@@ -1097,8 +1098,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "the resident risk advisor: what it is, and what it has done since boot",
     ),
     (
-        "run NAME",
-        "run the program in object NAME as a user-mode task, admitted through the resident risk advisor",
+        "run NAME [ARGS]",
+        "run the program in object NAME as a user-mode task, handed ARGS, admitted through the resident risk advisor",
     ),
     (
         "tasks",
@@ -1550,7 +1551,13 @@ pub fn seed_namespace<D: BlockDevice>(
 /// `run NAME` (ADR-201): judge the object's bytes as a program for this CPU, refuse by name what
 /// cannot be placed, and otherwise run it as one user-mode task admitted through the resident
 /// advisor, reporting that admission's verdict and the program's exit status.
-fn run_program(host: &dyn ShellHost, name: &str, bytes: &[u8], out: &mut dyn FnMut(&str)) {
+fn run_program(
+    host: &dyn ShellHost,
+    name: &str,
+    args: &[u8],
+    bytes: &[u8],
+    out: &mut dyn FnMut(&str),
+) {
     let Some(target) = host.program_target() else {
         out("run: this machine cannot start a program from the console");
         return;
@@ -1572,7 +1579,7 @@ fn run_program(host: &dyn ShellHost, name: &str, bytes: &[u8], out: &mut dyn FnM
         }
     };
     let before = crate::mlsched::resident::stats().unwrap_or_default();
-    let Some(run) = host.run_program(&program) else {
+    let Some(run) = host.run_program(&program, args) else {
         out("run: this machine cannot start a program from the console");
         return;
     };
@@ -2091,11 +2098,19 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             if !authorize(host, ShellAction::Schedule, out) {
                 return Outcome::Continue;
             }
-            if rest.is_empty() {
-                out("usage: run NAME");
+            let (name, args) = split_first(rest);
+            if name.is_empty() {
+                out("usage: run NAME [ARGS]");
+            } else if args.len() > crate::elf::MAX_ARGS {
+                outf!(
+                    out,
+                    "run refused: {} bytes of arguments; a program is handed at most {}",
+                    args.len(),
+                    crate::elf::MAX_ARGS
+                );
             } else {
-                match fs.read(dev, rest) {
-                    Ok(bytes) => run_program(host, rest, &bytes, out),
+                match fs.read(dev, name) {
+                    Ok(bytes) => run_program(host, name, args.as_bytes(), &bytes, out),
                     Err(e) => out(&fs_error(e)),
                 }
             }
