@@ -1279,8 +1279,9 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
   `scripts/system1/laya_finetune.py` trains the backend (top 8 layers + head, 5 epochs, 18 min on
   MPS, temperatures refitted on held-out groups).
 - Held-out test 83.8% (command 88%, name 98%); at 0.90, 64% answered at 98.0% accuracy. Console
-  bench: 5/8 with 0 wrong-and-sure (base: 1/8, 4 wrong-and-sure); with System 2, 7/8 in 37.2 s vs
-  48.8 s for System 2 alone.
+  bench: 5/8 with 0 wrong-and-sure (base: 1/8, 4 wrong-and-sure); with System 2, 7/8 (same as
+  System 2 alone) and faster only where System 2 is slow: 12.1 s vs 16.1 s on the measured server,
+  ~5% projected at ADR-174's 583 ms median (conditions in the ADR).
 - Ships as release asset `aletheia-console-s1.tar` (807 MiB), manifest
   `models/aletheia-console-s1.toml` (`ready`, System-1 default); `aletheiad model pull <id>` verifies
   the archive digest and unpacks it into the model cache. Release notes list model assets per tag.

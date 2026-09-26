@@ -5,6 +5,7 @@
 #
 # Serve it with the backend's sidecar (`backend` below names the script):
 #   python3 scripts/system1/laya_server.py <dir of model.safetensors> --serve-id laya --port 8091
+#   (the sidecar needs the backend's package: pip install laya)
 
 [model]
 id          = "laya"

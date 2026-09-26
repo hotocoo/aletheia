@@ -199,7 +199,7 @@ pub fn pull_archive(
     std::fs::create_dir_all(&snap).map_err(|e| e.to_string())?;
     let archive = snap.with_extension("download");
     let ok = std::process::Command::new("curl")
-        .args(["-fL", "--retry", "3", "-o"])
+        .args(["-fsSL", "--retry", "3", "-o"])
         .arg(&archive)
         .arg(&entry.url)
         .status()
@@ -231,6 +231,21 @@ pub fn pull_archive(
     }
     cached_file(cache_root, &entry.repo, &entry.file)
         .ok_or_else(|| format!("the archive holds no {}", entry.file))
+}
+
+/// Verify one file against a pinned SHA-256 — the same four outcomes as [`verify_integrity`].
+pub fn verify_file(path: &Path, expected: &str) -> Integrity {
+    if expected.is_empty() {
+        return Integrity::Unpinned;
+    }
+    match sha256_file(path) {
+        Err(e) => Integrity::Unreadable(e),
+        Ok(found) if found.eq_ignore_ascii_case(expected) => Integrity::Verified,
+        Ok(found) => Integrity::Mismatch {
+            expected: expected.to_string(),
+            found,
+        },
+    }
 }
 
 /// SHA-256 of a file, streamed in fixed-size chunks.

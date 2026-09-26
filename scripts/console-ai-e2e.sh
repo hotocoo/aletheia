@@ -144,6 +144,8 @@ refresh_brief() {
 run_arm() {
   # $1 = target label, $2 = arm (deterministic|model), then the QEMU argv
   local label="$1" arm="$2"; shift 2
+  local route_log; route_log="$(mktemp)"
+  local s1_answered=0
   local bad=0
   hr; echo "==> $label / $arm arm"; hr
 
@@ -170,15 +172,19 @@ run_arm() {
   local natural literal expect approved says request planned rc
   while IFS=$'\t' read -r natural literal expect approved says; do
     [ -z "${natural:-}" ] && continue
-    if [ "$arm" = "model" ]; then request="$natural"; else request="$literal"; fi
+    if [ "$arm" = "deterministic" ]; then request="$literal"; else request="$natural"; fi
     local -a plan_argv=("$ALETHEIAD" console plan --interpreter "$arm" --context-file "$brief")
     [ "$approved" = "true" ] && plan_argv+=(--approve)
-    planned="$("${plan_argv[@]}" "$request" 2>/dev/null)"; rc=$?
+    planned="$("${plan_argv[@]}" "$request" 2>"$route_log")"; rc=$?
     if [ "$rc" -ne 0 ] || [ -z "$planned" ]; then
       echo "  FAIL [$label/$arm] no plan for: $request"; bad=1; continue
     fi
     echo "--> \"$request\""
     echo "    planned: $planned"
+    if [ "$arm" = "dual" ]; then
+      grep '^route:' "$route_log" | sed 's/^/    /'
+      grep -q '^route: system1' "$route_log" && s1_answered=$((s1_answered + 1))
+    fi
     # A plan is one or more lines; type each and assert against the LAST reply, which is the one the
     # case describes.
     while IFS= read -r cmd; do
@@ -300,7 +306,12 @@ run_arm() {
     session_close
   fi
 
-  rm -f "$brief" "$SESSION_LOG"
+  # A dual arm in which System 1 never answered is the model arm under another name.
+  if [ "$arm" = "dual" ] && [ "$s1_answered" -eq 0 ]; then
+    echo "  FAIL [$label/$arm] System 1 answered no request itself - every one escalated"; bad=1
+  fi
+  [ "$arm" = "dual" ] && echo "--> System 1 answered $s1_answered request(s) itself; the rest escalated to System 2"
+  rm -f "$brief" "$SESSION_LOG" "$route_log"
   [ "$bad" -eq 0 ] || fail=1
   return $bad
 }
@@ -315,6 +326,13 @@ model_available() {
   # 2 = refused before measuring (nothing serving, or serving something else). 0 or 1 both mean a
   # model answered; whether it scored perfectly is the benchmark's business, not this gate's.
   [ "$rc" -ne 2 ]
+}
+
+# The DUAL arm (ADR-186/187): System 1 first, System 2 on escalation. It needs both serving - the
+# System-1 sidecar (`aletheiad model status` says `serving`) and the model arm's backend - and
+# SKIPs, by name, otherwise.
+system1_available() {
+  "$ALETHEIAD" model status 2>/dev/null | grep '^system1: .* — serving' >/dev/null
 }
 
 hr; echo "==> building the hosted planner and the interactive kernel"; hr
@@ -351,6 +369,15 @@ if model_available; then
 else
   RESULTS+=("aarch64 / model         : SKIP (no backend is serving the selected model)")
   echo "SKIP: the model arm needs the selected model actually being served — see \`aletheiad model status\`"
+fi
+
+fresh_disks
+if model_available && system1_available; then
+  run_arm "aarch64" dual "${QEMU[@]}"
+  RESULTS+=("aarch64 / dual          : $([ $? -eq 0 ] && echo PASS || echo FAIL)")
+else
+  RESULTS+=("aarch64 / dual          : SKIP (needs a serving System 1 and a serving System 2)")
+  echo "SKIP: the dual arm needs System 1 AND System 2 served — see \`aletheiad model status\`"
 fi
 
 hr; printf '%s\n' "${RESULTS[@]}"; hr

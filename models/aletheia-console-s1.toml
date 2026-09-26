@@ -7,6 +7,7 @@
 # downloads it, refuses it unless the archive's SHA-256 matches, and unpacks it into the local
 # model cache under `repo`, where the registry finds it. Serve it with the backend's sidecar:
 #   python3 scripts/system1/laya_server.py <dir of model.safetensors> --serve-id aletheia-console-s1
+#   (the sidecar needs the backend's package: pip install laya)
 
 [model]
 id          = "aletheia-console-s1"

@@ -60,4 +60,7 @@ Aletheia's command table measures fit. Training that checkpoint is the next wave
   the integer forests of `mlrisk` (admission risk) and `lethe` (power). The console's System 1 is a
   host sidecar, as System 2's llama-server is.
 * The sidecar is started by the operator; no lifecycle management yet.
+* Which argument names are objects (`name`, `src`, `dst`) or numbers (`n`, `port`, `khz`,
+  `domain`) is a classification in `ai/dual.rs`, not something the kernel's table states; a new
+  argument name is NOT a typed decision until it is classified, so it escalates (fails closed).
 * The threshold 0.90 is not a measured optimum; the bench exists so it can be moved on evidence.

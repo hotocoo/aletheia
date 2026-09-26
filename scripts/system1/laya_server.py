@@ -11,6 +11,8 @@ it, and nothing in Aletheia's Rust names this one. Binds 127.0.0.1 only; bodies 
 
     python3 scripts/system1/laya_server.py CHECKPOINT_DIR --serve-id ID [--port 8091] [--device cpu|mps|cuda]
 
+Requires the backend's Python package: `pip install laya` (brings torch, transformers, safetensors).
+
 CHECKPOINT_DIR is the directory holding `model.safetensors` (the manifest's file) and the
 checkpoint's config; `aletheiad model status` prints where the registry found it.
 """

@@ -902,6 +902,17 @@ fn model_status(dir: &std::path::Path) {
                 },
                 s1.entry.confidence
             );
+            if let Some(path) = s1
+                .entry
+                .path
+                .as_ref()
+                .filter(|_| !s1.entry.sha256.is_empty())
+            {
+                println!(
+                    "           integrity: {}",
+                    aletheia::ai::runtime::verify_file(path, &s1.entry.sha256).describe()
+                );
+            }
         }
         None => println!("system1:   none characterized (every request goes to system2)"),
     }
