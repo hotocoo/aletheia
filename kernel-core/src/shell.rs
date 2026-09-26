@@ -715,6 +715,8 @@ pub enum ShellAction {
     Reboot,
     /// Stop the machine.
     Halt,
+    /// Pin a clock domain, the overclock band included (ADR-184).
+    Overclock,
 }
 
 impl ShellAction {
@@ -726,6 +728,7 @@ impl ShellAction {
             ShellAction::Flush => "console.flush",
             ShellAction::Reboot => "system.reboot",
             ShellAction::Halt => "system.halt",
+            ShellAction::Overclock => "system.overclock",
         }
     }
 
@@ -924,6 +927,11 @@ pub trait ShellHost {
     fn frame_bytes(&self) -> usize {
         4096
     }
+    /// The wall clock, UTC seconds since the epoch (ADR-148's reading, ADR-184's command).
+    /// Defaulted to a named absence: a stand with no clock says so rather than printing 1970.
+    fn wall_clock(&self) -> Result<crate::clock::UnixSeconds, crate::clock::ClockRefusal> {
+        Err(crate::clock::ClockRefusal::Absent)
+    }
     /// Restart the machine. Returns only on FAILURE — a target with no reset path returns `false`
     /// and the console says so, rather than pretending to reboot and hanging.
     fn reboot(&self) -> bool {
@@ -946,6 +954,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("ver", "what this system is, and what it is not"),
     ("arch", "active target backend and privilege level"),
     ("uptime", "time since boot"),
+    ("date", "the wall clock, in UTC"),
     ("mem", "physical memory, in frames and bytes"),
     ("faults", "supervisor containment and escalation counters"),
     (
@@ -993,6 +1002,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "mlstat",
         "the resident risk advisor: what it is, and what it has done since boot",
+    ),
+    (
+        "power",
+        "the resident power governor: every clock domain, its points, heat and holds",
+    ),
+    (
+        "oc KHZ [DOMAIN]",
+        "hold a clock domain (default 0) at operating point KHZ, overclock band included; `oc off` releases it",
     ),
     ("lsblk", "the console's block device geometry"),
     ("df", "filesystem space, in blocks"),
@@ -1045,6 +1062,125 @@ fn storage_error(e: StorageError) -> &'static str {
         StorageError::BadBlockSize => "a buffer was not one block",
         StorageError::TooLarge => "the transaction is too large for the journal",
         StorageError::Device => "the device reported a failure",
+    }
+}
+
+/// `power` (ADR-184): the resident governor, read as one copy so printing holds no lock.
+fn report_power(out: &mut dyn FnMut(&str)) {
+    let Some(f) = crate::lethed::resident::facts() else {
+        if crate::lethed::resident::active() {
+            out("power: the watch is busy this instant; ask again");
+        } else {
+            out("power: no power governor was commissioned on this machine");
+        }
+        return;
+    };
+    outf!(
+        out,
+        "governor: {} domain(s), advisor {}, last tick {}",
+        f.n,
+        if f.advisor_loaded { "loaded" } else { "ABSENT" },
+        f.last_tick.unwrap_or(0)
+    );
+    for d in &f.domains[..f.n] {
+        outf!(
+            out,
+            "domain {}: {} kHz (nominal {}, envelope {}), demand {}%, {}{}{}",
+            d.id,
+            d.current_khz,
+            d.nominal_khz,
+            d.envelope_khz,
+            d.demand_pct,
+            match d.idle {
+                None | Some(crate::pm::IdleState::C0) => "running",
+                Some(crate::pm::IdleState::C1) => "parked C1",
+                Some(crate::pm::IdleState::C2) => "parked C2",
+            },
+            if d.held { ", HELD by operator" } else { "" },
+            if d.cooldown.is_some() {
+                ", COOLING"
+            } else {
+                ""
+            }
+        );
+        let mut line = crate::linebuf::LineBuf::<{ crate::linebuf::LINE_MAX }>::new();
+        let _ = core::fmt::Write::write_str(&mut line, "  points kHz:");
+        for p in &d.points[..d.n_points] {
+            let band = if *p > d.nominal_khz { "+" } else { "" };
+            let here = if *p == d.current_khz { "*" } else { "" };
+            let _ = core::fmt::Write::write_fmt(&mut line, format_args!(" {}{}{}", p, band, here));
+        }
+        out(line.as_str());
+        outf!(
+            out,
+            "  trip {} mC, cooldown {} tick(s) left",
+            d.trip_mc,
+            d.cooldown.unwrap_or(0)
+        );
+    }
+    let c = f.census;
+    outf!(
+        out,
+        "ticks: {} offered, {} admitted, {} consulted, {} warm-up, {} cooling, {} held",
+        c.offered,
+        c.admitted,
+        c.consulted_steps,
+        c.warmup_steps,
+        c.cooldown_holds,
+        c.operator_holds
+    );
+    outf!(
+        out,
+        "holds ended by heat {}, contract refusals {}, lock contended {}",
+        c.holds_dropped_by_heat,
+        c.pm_refusals,
+        crate::lethed::resident::contended()
+    );
+    out("points marked + are the overclock band (grant-only); * is the current point");
+}
+
+/// `oc KHZ [DOMAIN]` / `oc off [DOMAIN]` (ADR-184): an operator hold through the power contract.
+fn overclock(rest: &str, out: &mut dyn FnMut(&str)) {
+    let (what, tail) = split_first(rest);
+    let (dom_text, extra) = split_first(tail);
+    if what.is_empty() || !extra.is_empty() {
+        out("usage: oc KHZ [DOMAIN] | oc off [DOMAIN]");
+        return;
+    }
+    let domain = if dom_text.is_empty() {
+        0
+    } else {
+        match dom_text.parse::<u32>() {
+            Ok(d) => d,
+            Err(_) => {
+                out("usage: oc KHZ [DOMAIN] (DOMAIN is a number; `power` lists them)");
+                return;
+            }
+        }
+    };
+    if what == "off" {
+        match crate::lethed::resident::release(domain) {
+            Ok(()) => outf!(
+                out,
+                "domain {}: released to the governor at nominal",
+                domain
+            ),
+            Err(e) => outf!(out, "oc refused: {:?}", e),
+        }
+        return;
+    }
+    let Ok(khz) = what.parse::<u32>() else {
+        out("usage: oc KHZ [DOMAIN] (KHZ is one of the points `power` lists)");
+        return;
+    };
+    match crate::lethed::resident::hold(domain, khz) {
+        Ok(()) => outf!(
+            out,
+            "domain {}: held at {} kHz; heat still wins, `oc off` releases",
+            domain,
+            khz
+        ),
+        Err(e) => outf!(out, "oc refused: {:?}", e),
     }
 }
 
@@ -1356,6 +1492,28 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 outf!(out, "heap: {} B used, {} B free (never freed)", used, free);
             }
         }
+        "date" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            match host.wall_clock() {
+                Ok(t) => {
+                    let (y, mo, d, h, mi, se) = crate::clock::civil_from_unix(t);
+                    outf!(
+                        out,
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC (unix {})",
+                        y,
+                        mo,
+                        d,
+                        h,
+                        mi,
+                        se,
+                        t
+                    );
+                }
+                Err(e) => outf!(out, "date: no wall clock ({:?})", e),
+            }
+        }
         "faults" => {
             if !authorize(host, ShellAction::Inspect, out) {
                 return Outcome::Continue;
@@ -1482,6 +1640,18 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             report_risk_advisor(out);
+        }
+        "power" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            report_power(out);
+        }
+        "oc" => {
+            if !authorize(host, ShellAction::Overclock, out) {
+                return Outcome::Continue;
+            }
+            overclock(rest, out);
         }
         "tcp" => {
             // A network conversation is a WRITE to the world, not an inspection of this machine:
@@ -2856,6 +3026,47 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
             && (log.contains("RESIDENT")
                 || log.contains("none installed")
                 || log.contains("REFUSED"))
+    );
+
+    // ADR-184: the machine's clock, its power governor, and the operator's hold on it. Each answers
+    // with the live fact or a named absence — never a zero dressed as a reading.
+    let (log, _) = transcript("date\r", host, &mut fs, dev);
+    check!(
+        "console: date prints the wall clock in UTC, or names why there is none",
+        log.contains(" UTC (unix ") || log.contains("date: no wall clock (")
+    );
+    let (log, _) = transcript("power\r", host, &mut fs, dev);
+    let governed = log.contains("governor: ") && log.contains("domain 0: ");
+    check!(
+        "console: power reads the resident governor, or says none was commissioned",
+        governed || log.contains("no power governor was commissioned")
+    );
+    // The point comes from the machine's own ladder, never from this file: the top of domain 0.
+    let top = crate::lethed::resident::facts()
+        .filter(|f| f.n > 0 && f.domains[0].n_points > 0)
+        .map(|f| f.domains[0].points[f.domains[0].n_points - 1])
+        .unwrap_or(0);
+    let mut cmd = crate::linebuf::LineBuf::<{ crate::linebuf::LINE_MAX }>::new();
+    let _ = core::fmt::Write::write_fmt(&mut cmd, format_args!("oc {}\r", top));
+    let mut held = crate::linebuf::LineBuf::<{ crate::linebuf::LINE_MAX }>::new();
+    let _ = core::fmt::Write::write_fmt(&mut held, format_args!("held at {} kHz", top));
+    let (off_ladder, _) = transcript("oc 1\r", host, &mut fs, dev);
+    let (up, _) = transcript(cmd.as_str(), host, &mut fs, dev);
+    let (seen, _) = transcript("power\r", host, &mut fs, dev);
+    let (down, _) = transcript("oc off\r", host, &mut fs, dev);
+    let (after, _) = transcript("power\r", host, &mut fs, dev);
+    check!(
+        "console: oc holds a point in the band, power shows it, oc off gives it back",
+        if governed {
+            off_ladder.contains("oc refused: Contract(NotAnOperatingPoint")
+                && ((up.contains(held.as_str())
+                    && seen.contains("HELD by operator")
+                    && down.contains("released to the governor")
+                    && !after.contains("HELD by operator"))
+                    || up.contains("oc refused: Contract(Cooldown"))
+        } else {
+            up.contains("oc refused: NotCommissioned")
+        }
     );
 
     // 3. Backspace removes the last byte, so a typo is correctable rather than fatal.

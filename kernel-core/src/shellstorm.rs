@@ -30,7 +30,11 @@ const COMMANDS: u32 = 256;
 const BLOCKS: usize = 96;
 
 /// Report-only commands: everything they print, they format; nothing they print, they own.
-const REPORTING: [&str; 5] = ["help", "ver", "mem", "ls", "history"];
+/// `oc off` and a refused `oc` belong here too (ADR-184): the power governor is driven by console
+/// lines, and a line that moves a clock must cost the heap no more than one that reads it.
+const REPORTING: [&str; 8] = [
+    "help", "ver", "mem", "ls", "history", "date", "power", "oc 1",
+];
 
 /// The boot suite (ADR-089). `used_bytes` reports the CALLER's own heap watermark.
 pub fn storm_suite<H: ShellHost>(
@@ -59,13 +63,24 @@ pub fn storm_suite<H: ShellHost>(
     // has one; a Copy value on the stack, so it costs the heap nothing per command.
     let mut nav = crate::browser::Navigator::new();
 
-    // 1 — A COMMAND THAT ONLY REPORTS COSTS NOTHING.
+    // 1 — A COMMAND THAT ONLY REPORTS COSTS NOTHING. Every eighth line is also an operator hold at
+    //     the top of the machine's own ladder and its release — the point read, not written here.
     {
+        let top = crate::lethed::resident::facts()
+            .filter(|f| f.n > 0 && f.domains[0].n_points > 0)
+            .map(|f| f.domains[0].points[f.domains[0].n_points - 1])
+            .unwrap_or(0);
+        let mut hold = crate::linebuf::LineBuf::<{ crate::linebuf::LINE_MAX }>::new();
+        let _ = core::fmt::Write::write_fmt(&mut hold, format_args!("oc {}", top));
         let mut sink = |_: &str| {};
         let mut round = |fs: &mut Filesystem, dev: &mut MemBlockDevice| {
             for i in 0..COMMANDS {
                 let cmd = REPORTING[(i as usize) % REPORTING.len()];
                 let _ = shell::execute(cmd, host, fs, dev, &[], &mut nav, &mut sink);
+                if i % 8 == 7 {
+                    let _ = shell::execute(hold.as_str(), host, fs, dev, &[], &mut nav, &mut sink);
+                    let _ = shell::execute("oc off", host, fs, dev, &[], &mut nav, &mut sink);
+                }
             }
         };
         round(&mut fs, &mut dev); // warm-up: first-touch growth is paid once per boot

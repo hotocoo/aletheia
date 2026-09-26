@@ -108,9 +108,12 @@ fn risk_of(name: &str) -> Risk {
         // `resolve` too: a DNS query announces this machine to a server (ADR-176).
         "write" | "append" | "touch" | "cp" | "mv" | "rm" | "reboot" | "halt" | "tcp" | "tls"
         | "https" | "resolve" | "nameserver" => Risk::Destructive,
+        // `oc` moves silicon — into the overclock band when asked — so a human answers for it
+        // (ADR-184), exactly as for anything else that changes what the machine is doing.
+        "oc" => Risk::Destructive,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
-        | "history" | "echo" | "clear" | "input" => Risk::Safe,
+        | "history" | "echo" | "clear" | "input" | "date" | "power" => Risk::Safe,
         // Unknown to this file: fail closed. An unclassified command is refused by the validator
         // below rather than being planned as harmless.
         _ => Risk::Destructive,
@@ -309,6 +312,9 @@ mod tests {
                     | "https"
                     | "resolve"
                     | "nameserver"
+                    | "oc"
+                    | "date"
+                    | "power"
                     | "trust"
                     | "go"
                     | "back"

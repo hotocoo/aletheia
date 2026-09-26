@@ -148,6 +148,11 @@ pub struct Census {
     pub consulted_steps: u64,
     /// Refusals the power contract named while advice was applied. Zero by construction.
     pub pm_refusals: u64,
+    /// Admitted ticks where an operator hold (`oc`, ADR-184) kept the governor's hands off.
+    pub operator_holds: u64,
+    /// Operator holds the thermal ceiling ended. Heat does not merely pause a hold, it ends it:
+    /// after a trip the domain comes back under the governor and the operator asks again.
+    pub holds_dropped_by_heat: u64,
 }
 
 impl Census {
@@ -236,6 +241,9 @@ pub struct ResidentGovernor {
     /// this reaches `DEMAND_WIN`, because a feature derived from a half-full window describes a
     /// machine that never existed.
     fresh: [usize; MAX_DOMAINS],
+    /// Domains an operator has pinned at a point of their choosing (ADR-184). The governor still
+    /// measures and observes them, but does not move them — and a thermal trip releases them.
+    held: [bool; MAX_DOMAINS],
     n: usize,
     cadence: Cadence,
     last_tick: Option<u64>,
@@ -251,6 +259,7 @@ impl ResidentGovernor {
             ids: [0; MAX_DOMAINS],
             meters: [DemandMeter::new(); MAX_DOMAINS],
             fresh: [0; MAX_DOMAINS],
+            held: [false; MAX_DOMAINS],
             n: 0,
             cadence,
             last_tick: None,
@@ -272,8 +281,26 @@ impl ResidentGovernor {
         self.ids[self.n] = id;
         self.meters[self.n] = DemandMeter::new();
         self.fresh[self.n] = 0;
+        self.held[self.n] = false;
         self.n += 1;
         true
+    }
+
+    /// Hold (or release) an attached domain: while held, admitted ticks observe it but never act
+    /// on it. Returns `false` for a domain that is not on the watch.
+    pub fn set_hold(&mut self, id: u32, hold: bool) -> bool {
+        match self.slot_of(id) {
+            Some(s) => {
+                self.held[s] = hold;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Is this domain under an operator hold?
+    pub fn is_held(&self, id: u32) -> bool {
+        self.slot_of(id).map(|s| self.held[s]).unwrap_or(false)
     }
 
     /// Domains on the watch.
@@ -287,6 +314,12 @@ impl ResidentGovernor {
 
     pub fn census(&self) -> Census {
         self.census
+    }
+
+    /// The last admitted tick — the governor's own clock, and the `now` anything acting beside it
+    /// must use so a cooldown means the same thing to both.
+    pub fn last_tick(&self) -> Option<u64> {
+        self.last_tick
     }
 
     /// Re-entries refused since construction. Nonzero means a nested tick really happened, which
@@ -397,9 +430,15 @@ impl ResidentGovernor {
         pm.report_temperature(id, temp_mc, now);
 
         let cooling = pm.cooldown_remaining(id, now).is_some();
+        if cooling && self.held[slot] {
+            // The trip already clamped the silicon; the hold it clamped is over, not paused.
+            self.held[slot] = false;
+            self.census.holds_dropped_by_heat = self.census.holds_dropped_by_heat.saturating_add(1);
+        }
+        let held = self.held[slot];
         self.fresh[slot] = self.fresh[slot].saturating_add(1);
         let warm = self.fresh[slot] >= DEMAND_WIN;
-        let consulted = warm && !cooling;
+        let consulted = warm && !cooling && !held;
 
         if !warm {
             self.census.warmup_steps = self.census.warmup_steps.saturating_add(1);
@@ -407,8 +446,19 @@ impl ResidentGovernor {
         if cooling {
             self.census.cooldown_holds = self.census.cooldown_holds.saturating_add(1);
         }
+        if held {
+            self.census.operator_holds = self.census.operator_holds.saturating_add(1);
+        }
 
-        let report = if cooling {
+        let report = if held {
+            // The operator chose this point; the governor keeps the history true and nothing else.
+            let current_idx = pm.point_index(id).unwrap_or(0);
+            self.obs.observe(id, pct, temp_mc, current_idx, now);
+            GovernReport {
+                steps: 1,
+                ..GovernReport::default()
+            }
+        } else if cooling {
             // The ceiling holds. Observe so the history stays true, but take no action on a
             // domain the thermal contract just clamped — and park it if it is genuinely idle,
             // which is the one act that can only help while cooling.
@@ -455,6 +505,151 @@ impl ResidentGovernor {
     }
 }
 
+/// Ladder points a console readout carries per domain. Every target registers four; eight is a
+/// bound, not a hope, and a longer ladder is reported truncated rather than overflowed.
+pub const FACT_POINTS: usize = 8;
+
+/// One domain as the console sees it (ADR-184). Copied out under the watch's lock so printing it
+/// holds nothing, and fixed-size so reading it allocates nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DomainFacts {
+    pub id: u32,
+    pub current_khz: u32,
+    pub nominal_khz: u32,
+    pub envelope_khz: u32,
+    pub demand_pct: u8,
+    /// `None` = running (C0).
+    pub idle: Option<IdleState>,
+    /// Ticks of latched thermal cooldown left, `None` when not cooling.
+    pub cooldown: Option<u64>,
+    pub trip_mc: i32,
+    pub held: bool,
+    pub points: [u32; FACT_POINTS],
+    pub n_points: usize,
+}
+
+/// The whole watch, as one copy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PowerFacts {
+    pub census: Census,
+    pub advisor_loaded: bool,
+    pub last_tick: Option<u64>,
+    pub domains: [DomainFacts; MAX_DOMAINS],
+    pub n: usize,
+}
+
+/// Why an operator hold was not taken. Every refusal names its reason; the contract's own fault
+/// is passed through untouched, so `oc` says exactly what the power contract said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldRefusal {
+    /// No watch was ever commissioned on this machine.
+    NotCommissioned,
+    /// The timer path holds the watch this instant; the console never waits on it.
+    Busy,
+    /// The domain is not on the watch.
+    NotOnWatch(u32),
+    /// The power contract refused (not a ladder point, cooldown, above the grant, ...).
+    Contract(crate::pm::PmFault),
+}
+
+/// Read one watch into [`PowerFacts`].
+pub fn facts_of(pm: &PmEngine, gov: &ResidentGovernor, advisor_loaded: bool) -> PowerFacts {
+    let now = gov.last_tick().unwrap_or(0);
+    let mut f = PowerFacts {
+        census: gov.census(),
+        advisor_loaded,
+        last_tick: gov.last_tick(),
+        ..PowerFacts::default()
+    };
+    for slot in 0..gov.n {
+        let id = gov.ids[slot];
+        let mut d = DomainFacts {
+            id,
+            current_khz: pm.current_khz(id).unwrap_or(0),
+            nominal_khz: pm.nominal_khz(id).unwrap_or(0),
+            envelope_khz: pm.envelope_khz(id).unwrap_or(0),
+            demand_pct: pm.demand(id).unwrap_or(0),
+            idle: pm.idle_state(id),
+            cooldown: pm.cooldown_remaining(id, now),
+            trip_mc: pm.trip_temp_mc(id).unwrap_or(0),
+            held: gov.held[slot],
+            ..DomainFacts::default()
+        };
+        for (i, p) in d.points.iter_mut().enumerate() {
+            match pm.point_khz(id, i) {
+                Some(k) => {
+                    *p = k;
+                    d.n_points = i + 1;
+                }
+                None => break,
+            }
+        }
+        f.domains[slot] = d;
+        f.n = slot + 1;
+    }
+    f
+}
+
+/// Take an operator hold: move `domain` to `khz` and keep the governor's hands off it until
+/// [`release_hold`] or a thermal trip (ADR-184).
+///
+/// The overclock band stays grant-only. The hold asks the contract through the same
+/// `request_point` every caller uses, offering the console's grant — minted once per domain at the
+/// top of its ladder, which the contract itself refuses past the envelope. `grants` is that
+/// once-per-domain cache, so a thousand `oc` lines mint one grant, not a thousand.
+pub fn take_hold(
+    pm: &mut PmEngine,
+    gov: &mut ResidentGovernor,
+    grants: &mut [Option<(u32, u64)>; MAX_DOMAINS],
+    domain: u32,
+    khz: u32,
+) -> Result<(), HoldRefusal> {
+    if gov.slot_of(domain).is_none() {
+        return Err(HoldRefusal::NotOnWatch(domain));
+    }
+    let now = gov.last_tick().unwrap_or(0);
+    let token = match grants.iter().flatten().find(|(d, _)| *d == domain) {
+        Some((_, t)) => *t,
+        None => {
+            let top = pm
+                .ladder_len(domain)
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|i| pm.point_khz(domain, i))
+                .ok_or(HoldRefusal::NotOnWatch(domain))?;
+            let t = pm
+                .mint_grant(domain, top, "console")
+                .map_err(HoldRefusal::Contract)?;
+            if let Some(free) = grants.iter_mut().find(|g| g.is_none()) {
+                *free = Some((domain, t));
+            }
+            t
+        }
+    };
+    pm.request_point(domain, khz, &[token], now)
+        .map_err(HoldRefusal::Contract)?;
+    gov.set_hold(domain, true);
+    Ok(())
+}
+
+/// Release an operator hold: the domain returns to nominal and to the governor.
+pub fn release_hold(
+    pm: &mut PmEngine,
+    gov: &mut ResidentGovernor,
+    domain: u32,
+) -> Result<(), HoldRefusal> {
+    if gov.slot_of(domain).is_none() {
+        return Err(HoldRefusal::NotOnWatch(domain));
+    }
+    let now = gov.last_tick().unwrap_or(0);
+    let nominal = pm
+        .nominal_khz(domain)
+        .ok_or(HoldRefusal::NotOnWatch(domain))?;
+    pm.request_point(domain, nominal, &[], now)
+        .map_err(HoldRefusal::Contract)?;
+    gov.set_hold(domain, false);
+    Ok(())
+}
+
 /// The machine-wide watch — one governor, behind one lock, for the machine's whole uptime.
 ///
 /// ADR-166 built and proved the watch; this is what lets a real timer interrupt *stand* it. The
@@ -469,9 +664,9 @@ impl ResidentGovernor {
 /// * **An uncommissioned watch does nothing at all.** Before [`commission`] the handler's call is
 ///   a no-op, so wiring the interrupt first and the governor second is safe in either order.
 pub mod resident {
-    use super::{Cadence, Census, ResidentGovernor, TickOutcome};
+    use super::{Cadence, Census, HoldRefusal, PowerFacts, ResidentGovernor, TickOutcome};
     use crate::lethe::Advisor;
-    use crate::pm::PmEngine;
+    use crate::pm::{PmEngine, MAX_DOMAINS};
     use crate::sync::SpinLock;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -479,6 +674,8 @@ pub mod resident {
         pm: PmEngine,
         gov: ResidentGovernor,
         advisor: Option<Advisor<'static>>,
+        /// The console's elevation grant per domain, minted on first `oc` (ADR-184).
+        grants: [Option<(u32, u64)>; MAX_DOMAINS],
     }
 
     static WATCH: SpinLock<Option<Watch>> = SpinLock::new(None);
@@ -507,6 +704,7 @@ pub mod resident {
             pm,
             gov,
             advisor: Advisor::load(advisor_bytes).ok(),
+            grants: [None; MAX_DOMAINS],
         });
         true
     }
@@ -529,7 +727,9 @@ pub mod resident {
         let w = slot.as_mut()?;
         // The borrow has to be split: `tick` takes the engine mutably and the advisor by shared
         // reference, and they live in the same struct.
-        let Watch { pm, gov, advisor } = w;
+        let Watch {
+            pm, gov, advisor, ..
+        } = w;
         Some(gov.tick(pm, advisor.as_ref(), now, |_| temp_mc))
     }
 
@@ -571,6 +771,31 @@ pub mod resident {
     /// is a fact about the machine, not a fault in it.
     pub fn contended() -> u64 {
         CONTENDED.load(Ordering::Relaxed)
+    }
+
+    /// The watch as one copy, or `None` if it is not standing or is busy this instant.
+    pub fn facts() -> Option<PowerFacts> {
+        let slot = WATCH.try_lock()?;
+        let w = slot.as_ref()?;
+        Some(super::facts_of(&w.pm, &w.gov, w.advisor.is_some()))
+    }
+
+    /// Take an operator hold at `khz` (see [`super::take_hold`]).
+    pub fn hold(domain: u32, khz: u32) -> Result<(), HoldRefusal> {
+        let mut slot = WATCH.try_lock().ok_or(HoldRefusal::Busy)?;
+        let w = slot.as_mut().ok_or(HoldRefusal::NotCommissioned)?;
+        let Watch {
+            pm, gov, grants, ..
+        } = w;
+        super::take_hold(pm, gov, grants, domain, khz)
+    }
+
+    /// Release an operator hold (see [`super::release_hold`]).
+    pub fn release(domain: u32) -> Result<(), HoldRefusal> {
+        let mut slot = WATCH.try_lock().ok_or(HoldRefusal::Busy)?;
+        let w = slot.as_mut().ok_or(HoldRefusal::NotCommissioned)?;
+        let Watch { pm, gov, .. } = w;
+        super::release_hold(pm, gov, domain)
     }
 }
 

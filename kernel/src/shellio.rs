@@ -46,6 +46,12 @@ impl Host {
 }
 
 impl ShellHost for Host {
+    fn wall_clock(
+        &self,
+    ) -> Result<kernel_core::clock::UnixSeconds, kernel_core::clock::ClockRefusal> {
+        use kernel_core::clock::WallClock;
+        crate::rtc::Pl031::new().read_utc()
+    }
     fn arch(&self) -> &str {
         ActiveHal::arch_name()
     }

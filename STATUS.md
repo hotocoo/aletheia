@@ -1271,6 +1271,17 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — the console reaches the clock and the calendar (ADR-184)
+
+- Three new console commands on every CPU: `date` (the RTC, UTC), `power` (the resident Lethe
+  governor: every domain's clock, ladder, demand, idle, heat and holds, plus the tick census) and
+  `oc KHZ [DOMAIN]` / `oc off` (an operator hold through the power contract's grant-only overclock
+  band; capability `system.overclock`; heat ends a hold). `console=54` on all three CPUs; the heap
+  storm still requires 0 B over 256 commands with the new verbs in it; console e2e and 1,500-line
+  console fuzz PASS on aarch64, riscv64, x86-64.
+- Non-claim unchanged: QEMU has no DVFS actuator; `oc` moves the contract's modeled point and
+  writes no hardware register.
+
 ### 2026-09-26 — pull the plug (ADR-183)
 
 - New gate `scripts/crash-e2e.sh`: on one persistent disk, 12 times per CPU, the running machine is

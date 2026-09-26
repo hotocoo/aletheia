@@ -463,3 +463,162 @@ fn an_explicit_resync_forgets_every_window() {
     g.resync();
     assert!(!g.is_warm(0) && !g.is_warm(1));
 }
+
+// ---------------------------------------------------------------------------------------------
+// ADR-184: the operator's hold (`oc`). The overclock band stays grant-only, the governor keeps its
+// hands off a held domain, heat ends a hold, and a thousand holds mint one grant.
+// ---------------------------------------------------------------------------------------------
+
+use kernel_core::lethed::{facts_of, release_hold, take_hold, HoldRefusal};
+use kernel_core::pm::PmFault;
+
+fn busy_ticks(
+    g: &mut ResidentGovernor,
+    pm: &mut PmEngine,
+    advisor: Option<&Advisor>,
+    now: &mut u64,
+    n: usize,
+    temp: i32,
+) {
+    for _ in 0..n {
+        *now += 1;
+        g.account(0, 100, 0);
+        g.tick(pm, advisor, *now, |_| temp);
+    }
+}
+
+#[test]
+fn a_hold_reaches_the_overclock_band_and_the_governor_leaves_it_there() {
+    let advisor = Advisor::load(kernel_core::lethe::BUNDLED_ADVISOR).ok();
+    let mut pm = engine(1);
+    let mut g = watch(1, Cadence::default());
+    let mut grants = [None; MAX_DOMAINS];
+    let mut now = 0;
+    busy_ticks(
+        &mut g,
+        &mut pm,
+        advisor.as_ref(),
+        &mut now,
+        DEMAND_WIN + 2,
+        40_000,
+    );
+
+    take_hold(&mut pm, &mut g, &mut grants, 0, 2_400_000).expect("a ladder point in the band");
+    assert_eq!(pm.current_khz(0), Some(2_400_000));
+    let consulted_before = g.census().consulted_steps;
+    // Idle AND busy: the governor would park an idle domain and never raise past nominal on its
+    // own; a held domain stays exactly where the operator put it either way.
+    for i in 0..300 {
+        now += 1;
+        g.account(
+            0,
+            if i % 2 == 0 { 100 } else { 0 },
+            if i % 2 == 0 { 0 } else { 100 },
+        );
+        g.tick(&mut pm, advisor.as_ref(), now, |_| 40_000);
+        assert_eq!(
+            pm.current_khz(0),
+            Some(2_400_000),
+            "tick {i} moved a held domain"
+        );
+    }
+    let c = g.census();
+    assert_eq!(c.operator_holds, 300);
+    assert_eq!(
+        c.consulted_steps, consulted_before,
+        "a held domain is never advised"
+    );
+    assert!(c.balances());
+
+    release_hold(&mut pm, &mut g, 0).expect("release");
+    assert_eq!(
+        pm.current_khz(0),
+        Some(1_800_000),
+        "release returns to nominal"
+    );
+    assert!(!g.is_held(0));
+}
+
+#[test]
+fn heat_ends_a_hold_and_the_band_stays_shut_through_the_cooldown() {
+    let mut pm = engine(1);
+    let mut g = watch(1, Cadence::default());
+    let mut grants = [None; MAX_DOMAINS];
+    let mut now = 0;
+    busy_ticks(&mut g, &mut pm, None, &mut now, 4, 40_000);
+    take_hold(&mut pm, &mut g, &mut grants, 0, 2_400_000).unwrap();
+
+    busy_ticks(&mut g, &mut pm, None, &mut now, 1, 120_000);
+    assert_eq!(
+        pm.point_index(0),
+        Some(0),
+        "the trip clamps the held domain"
+    );
+    assert!(!g.is_held(0), "the hold is over, not paused");
+    assert_eq!(g.census().holds_dropped_by_heat, 1);
+
+    let e = take_hold(&mut pm, &mut g, &mut grants, 0, 2_400_000).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            HoldRefusal::Contract(PmFault::Cooldown { domain: 0, .. })
+        ),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn a_hold_is_refused_off_the_ladder_and_off_the_watch() {
+    let mut pm = engine(1);
+    let mut g = watch(1, Cadence::default());
+    let mut grants = [None; MAX_DOMAINS];
+    assert!(matches!(
+        take_hold(&mut pm, &mut g, &mut grants, 0, 2_000_000),
+        Err(HoldRefusal::Contract(PmFault::NotAnOperatingPoint { .. }))
+    ));
+    assert_eq!(
+        take_hold(&mut pm, &mut g, &mut grants, 7, 600_000),
+        Err(HoldRefusal::NotOnWatch(7))
+    );
+    assert_eq!(
+        release_hold(&mut pm, &mut g, 7),
+        Err(HoldRefusal::NotOnWatch(7))
+    );
+    assert!(!g.is_held(0), "a refused hold holds nothing");
+}
+
+#[test]
+fn a_thousand_holds_mint_one_grant() {
+    // MAX_GRANTS is 64: minting per `oc` would be refused NoSpace long before a thousand.
+    let mut pm = engine(1);
+    let mut g = watch(1, Cadence::default());
+    let mut grants = [None; MAX_DOMAINS];
+    for i in 0..1000 {
+        let khz = if i % 2 == 0 { 2_400_000 } else { 600_000 };
+        take_hold(&mut pm, &mut g, &mut grants, 0, khz).unwrap_or_else(|e| panic!("{i}: {e:?}"));
+    }
+    assert_eq!(grants.iter().flatten().count(), 1);
+    let mints = pm.audit().iter().filter(|r| r.kind == "mint").count();
+    assert!(mints <= 1);
+}
+
+#[test]
+fn the_facts_copy_says_what_the_contract_holds() {
+    let mut pm = engine(2);
+    let mut g = watch(2, Cadence::default());
+    let mut grants = [None; MAX_DOMAINS];
+    take_hold(&mut pm, &mut g, &mut grants, 1, 2_400_000).unwrap();
+    let f = facts_of(&pm, &g, false);
+    assert_eq!(f.n, 2);
+    assert!(!f.advisor_loaded);
+    assert_eq!(f.domains[0].current_khz, pm.current_khz(0).unwrap());
+    assert!(!f.domains[0].held);
+    assert!(f.domains[1].held);
+    assert_eq!(f.domains[1].current_khz, 2_400_000);
+    assert_eq!(f.domains[1].nominal_khz, 1_800_000);
+    assert_eq!(f.domains[1].envelope_khz, 2_400_000);
+    assert_eq!(
+        &f.domains[1].points[..f.domains[1].n_points],
+        &[600_000, 1_200_000, 1_800_000, 2_400_000]
+    );
+}

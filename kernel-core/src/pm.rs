@@ -817,6 +817,16 @@ impl PmEngine {
             .map(|d| (d.nominal_idx, d.nominal_idx + 1))
     }
 
+    /// The clock of ladder point `idx`, in kHz — `None` past the ladder's top.
+    pub fn point_khz(&self, domain: u32, idx: usize) -> Option<u32> {
+        self.domain(domain)?.ladder.get(idx).map(|p| p.khz)
+    }
+
+    /// Points on the domain's ladder, governor range and overclock band together.
+    pub fn ladder_len(&self, domain: u32) -> Option<usize> {
+        self.domain(domain).map(|d| d.ladder.len())
+    }
+
     /// The domain's thermal trip point, in milli-degrees C.
     pub fn trip_temp_mc(&self, domain: u32) -> Option<i32> {
         self.domain(domain).map(|d| d.trip_temp_mc)
