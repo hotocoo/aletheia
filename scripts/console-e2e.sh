@@ -169,7 +169,7 @@ check_session() {
       || { echo "  FAIL [$label/first] hello did not run again after trap was contained"; bad=1; }
     # A program that never yields is preempted by the timer and abandoned at its budget (ADR-203),
     # under the live desktop, and the console answers the next command.
-    grep -q "run: spin did not exit within 64 slice(s): preempted and abandoned; the machine continues" <<<"$log" \
+    grep -Eq "run: spin did not exit: abandoned after [0-9]+ slice\(s\), 64 of them ended by the timer; the machine continues" <<<"$log" \
       || { echo "  FAIL [$label/first] run spin was not preempted and abandoned"; bad=1; }
     grep -q "run refused: manifesto: not an ELF image" <<<"$log" || { echo "  FAIL [$label/first] run did not refuse a text object by name"; bad=1; }
     # Every frame a run takes it gives back: the two `mem` readings around the runs agree.

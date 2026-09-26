@@ -1276,7 +1276,9 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - `SYS_WRITE_CONSOLE` (capability `console.output`, minted per `run`): the range is checked against
   the program's two pages, copied into a 256-byte sink that counts overflow, and shown through the
   byte filter. `run hello` prints `hello from user mode` on all three CPUs; bad ranges refused at
-  boot (aarch64 writes the result into the saved x0; its EL0 entry returned none). `usermode` 41/41/49.
+  boot (aarch64 writes the result into the saved x0; its EL0 entry returned none); 1,024 writes
+  allocate exactly what 16 do. The run budget now counts timer slices only (a syscall had spent
+  one). `usermode` 42/42/50.
 
 ### 2026-09-26 — a program that never yields is preempted (ADR-203)
 

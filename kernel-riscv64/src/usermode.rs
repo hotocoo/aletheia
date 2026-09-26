@@ -1203,8 +1203,11 @@ static mut PROGRAM_GRANT: Option<kernel_core::progout::Grant> = None;
 /// What the running program has written (ADR-204).
 static mut PROGRAM_OUT: kernel_core::progout::OutputSink = kernel_core::progout::OutputSink::new();
 
-/// Slices a console-started program gets before it is abandoned (ADR-201).
+/// Timer slices a console-started program gets before it is abandoned (ADR-201, ADR-203).
 const PROGRAM_SLICES: u32 = 64;
+/// Returns to the kernel a program gets in all, syscalls included (ADR-204): what abandons a
+/// program that traps forever without ever being preempted.
+const PROGRAM_DISPATCHES: u32 = 65_536;
 /// The boot suite's spinner budget: the same proof (preempted every slice, abandoned at the
 /// budget) without spending 64 real slices of every boot on it.
 const BOOT_SPIN_SLICES: u32 = 4;
@@ -1300,7 +1303,9 @@ fn run_program(
     // slice the program never yields ends at the deadline; a fresh one, so none is already pending.
     timer_arm();
     stie_enable();
-    while run.slices < budget {
+    // The budget is timer slices; a syscall returns here without spending one, so a separate cap
+    // bounds a program that does nothing but trap (ADR-204).
+    while run.preempted < budget && run.slices < PROGRAM_DISPATCHES {
         let Some(id) = policy.schedule_next() else {
             break;
         };
@@ -1311,6 +1316,7 @@ fn run_program(
             let s = &mut *addr_of_mut!(SCHED);
             s.exited = false;
             s.last_magic = 0;
+            s.preempted = false;
         }
         // SAFETY: `root` replicates the kernel identity map; switching for the slice is safe.
         unsafe {
@@ -1320,6 +1326,10 @@ fn run_program(
         }
         resident::observe_schedule();
         run.slices += 1;
+        // SAFETY: single-threaded; the slice is over.
+        if unsafe { (*addr_of!(SCHED)).preempted } {
+            run.preempted += 1;
+        }
         let (status, exited) = unsafe {
             let s = &*addr_of!(SCHED);
             (s.last_magic, s.exited)
@@ -2312,6 +2322,32 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                 && r.dropped == 144),
             "write: a flood keeps exactly the console's 256-byte bound and counts the other 144 bytes"
         );
+        // The write path allocates nothing per call (ADR-086 storm discipline): the gross heap
+        // watermark moves exactly as much across 1024 writes as across 16.
+        let gross = |count: u64| {
+            let img = build(t, &kernel_core::elf::loop_writer_code(t.machine, count, 16));
+            let before = crate::heap::used_bytes();
+            let r = judge(&img, t)
+                .ok()
+                .and_then(|p| run_program(&p, false, PROGRAM_SLICES));
+            (crate::heap::used_bytes() - before, r)
+        };
+        let (few, few_run) = gross(16);
+        let (many, many_run) = gross(1024);
+        crate::kprintln!(
+            "[usermode] write storm: 16 writes moved the gross heap {} B, 1024 writes {} B ({:?} / {:?} slices)",
+            few,
+            many,
+            few_run.as_ref().map(|r| (r.slices, r.dropped)),
+            many_run.as_ref().map(|r| (r.slices, r.dropped))
+        );
+        check!(
+            few == many
+                && few_run.is_some_and(|r| r.exited && r.output.len() == 256 && r.dropped == 0)
+                && many_run
+                    .is_some_and(|r| r.exited && r.output.len() == 256 && r.dropped == 1008 * 16),
+            "write: 1024 writes allocate exactly what 16 do - nothing per call"
+        );
         let before = supervisor().terminated();
         let trapped = judge(&trap, t)
             .ok()
@@ -2327,7 +2363,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             .ok()
             .and_then(|p| run_program(&p, false, BOOT_SPIN_SLICES));
         check!(
-            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.slices == BOOT_SPIN_SLICES),
+            spun.is_some_and(|r| !r.exited && r.terminated.is_none() && r.preempted == BOOT_SPIN_SLICES),
             "run: a program that never yields is preempted by the timer every slice and abandoned at its budget"
         );
         let after_spin = judge(&hello, t)

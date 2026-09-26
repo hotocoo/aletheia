@@ -832,8 +832,12 @@ pub struct TaskRun {
 /// One console-started program run (ADR-201), as the target reports it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProgramRun {
-    /// Slices the program was dispatched for.
+    /// Slices the program was dispatched for: one per return to the kernel (a syscall, a
+    /// preemption, the fault or exit that ended it).
     pub slices: u32,
+    /// Of those, the ones the timer ended (ADR-203/204): the budget a program spends by not
+    /// yielding. A syscall ends a slice without spending it.
+    pub preempted: u32,
     /// The program reached `SYS_EXIT`.
     pub exited: bool,
     /// What it passed to `SYS_EXIT`.
@@ -1611,9 +1615,10 @@ fn run_program(host: &dyn ShellHost, name: &str, bytes: &[u8], out: &mut dyn FnM
     } else {
         outf!(
             out,
-            "run: {} did not exit within {} slice(s): preempted and abandoned; the machine continues",
+            "run: {} did not exit: abandoned after {} slice(s), {} of them ended by the timer; the machine continues",
             name,
-            run.slices
+            run.slices,
+            run.preempted
         );
     }
 }

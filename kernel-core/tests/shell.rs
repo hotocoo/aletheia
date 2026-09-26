@@ -946,6 +946,7 @@ impl ShellHost for ProgramHost {
         self.0.set(Some((p.vaddr, p.entry, p.code.len())));
         Some(kernel_core::shell::ProgramRun {
             slices: 1,
+            preempted: 0,
             exited: true,
             status: kernel_core::elf::HELLO_STATUS,
             terminated: None,

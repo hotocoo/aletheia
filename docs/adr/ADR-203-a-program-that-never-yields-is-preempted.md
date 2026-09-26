@@ -16,7 +16,7 @@ forever and the console never answered again.
   S-timer as the only `sie` source while it runs, x86-64 RFLAGS.IF in ring 3. The kernel side stays
   masked by the ADR-199 fence, so an interrupt is only ever taken from the program.
 * The timer ends every slice the program does not end itself; at the 64-slice budget the run is
-  abandoned (`did not exit within 64 slice(s): preempted and abandoned; the machine continues`),
+  abandoned (ADR-204 made the budget count only timer-ended slices, so syscalls do not spend it),
   its outcome fed back to the advisor as an eviction, its frames returned.
 * The timer is shared with the live desktop's pump, and each target hands it back:
   * aarch64: the run brings the GIC and generic timer up only if the console has not (GICD_CTLR),

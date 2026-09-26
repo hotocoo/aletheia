@@ -28,15 +28,21 @@ copying lands"; nothing copied from a program's memory into the kernel at all.
   byte filter (`filepanel::print_safely`, now shared: unprintable bytes shown as dots, never
   executed) and says how many bytes it did not show.
 * The seeded `hello` now writes `hello from user mode` before summing and exiting with 55.
+* **The budget is timer slices.** Every trap returns to the run loop, so under ADR-203's budget a
+  program could make at most 64 syscalls. A run now spends its 64 only on slices the timer ended
+  (`ProgramRun::preempted`); a separate cap of 65,536 returns to the kernel abandons a program that
+  traps forever without being preempted.
 
 ## Proof
 
 * Host: `progout` (the bound and the count; a write with no grant, outside, straddling,
   overflowing or past the copy budget refused with nothing kept), `run` rendering an escape byte as
   a dot in `tests/shell.rs`, `syscall` table round trip.
-* Boot, every target (`usermode` 41/41/49): `hello`'s line arrives; writes outside the pages,
+* Boot, every target (`usermode` 42/42/50): `hello`'s line arrives; writes outside the pages,
   straddling their end, and past the copy budget return `u64::MAX` and keep nothing; a 400-byte
-  flood keeps 256 and counts 144.
+  flood keeps 256 and counts 144; the gross heap watermark moves by exactly the same bytes across
+  1,024 writes as across 16 (3,744-4,000 B, all per-run), so the write path allocates nothing per
+  call.
 * Live, `scripts/console-e2e.sh`, all three CPUs: `run hello` prints `hello from user mode`.
 
 ## Non-claims
