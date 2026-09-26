@@ -111,6 +111,8 @@ fn risk_of(name: &str) -> Risk {
         // `oc` moves silicon — into the overclock band when asked — so a human answers for it
         // (ADR-184), exactly as for anything else that changes what the machine is doing.
         "oc" => Risk::Destructive,
+        // `resolution` tears the desktop down and rebuilds it: its windows' contents reset.
+        "resolution" => Risk::Destructive,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
         | "history" | "echo" | "clear" | "input" | "date" | "display" | "power" | "boot"
@@ -314,6 +316,7 @@ mod tests {
                     | "resolve"
                     | "nameserver"
                     | "oc"
+                    | "resolution"
                     | "date"
                     | "display"
                     | "power"

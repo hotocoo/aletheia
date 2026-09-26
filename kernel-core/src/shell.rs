@@ -717,6 +717,8 @@ pub enum ShellAction {
     Halt,
     /// Pin a clock domain, the overclock band included (ADR-184).
     Overclock,
+    /// Change what the display shows (ADR-196).
+    Display,
 }
 
 impl ShellAction {
@@ -729,6 +731,7 @@ impl ShellAction {
             ShellAction::Reboot => "system.reboot",
             ShellAction::Halt => "system.halt",
             ShellAction::Overclock => "system.overclock",
+            ShellAction::Display => "system.display",
         }
     }
 
@@ -944,6 +947,11 @@ pub trait ShellHost {
     fn frame_bytes(&self) -> usize {
         4096
     }
+    /// Switch the desktop to `w` x `h` (ADR-196): `Ok` with the mode now running, or the named
+    /// reason it was not switched (the desktop keeps running as it was). Defaulted to no desktop.
+    fn set_display_mode(&self, _w: u32, _h: u32) -> Result<(u32, u32), &'static str> {
+        Err("this machine has no desktop to switch")
+    }
     /// The network device the console dials with, `None` on a machine without one (ADR-185).
     fn net_facts(&self) -> Option<NetFacts> {
         None
@@ -983,6 +991,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "display",
         "the display: its current geometry, every mode and refresh rate it reports, the best fit",
+    ),
+    (
+        "resolution MODE",
+        "switch the desktop to MODE (WxH, one `display` lists); window contents reset",
     ),
     ("mem", "physical memory, in frames and bytes"),
     ("faults", "supervisor containment and escalation counters"),
@@ -1676,6 +1688,22 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             report_display(out);
+        }
+        "resolution" => {
+            if !authorize(host, ShellAction::Display, out) {
+                return Outcome::Continue;
+            }
+            let (mode, extra) = split_first(rest);
+            let parsed = mode
+                .split_once('x')
+                .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)));
+            match parsed {
+                Some((w, h)) if extra.is_empty() => match host.set_display_mode(w, h) {
+                    Ok((rw, rh)) => outf!(out, "resolution: the desktop now runs at {}x{}", rw, rh),
+                    Err(why) => outf!(out, "resolution refused: {}", why),
+                },
+                _ => out("usage: resolution WxH (a mode `display` lists, e.g. 1920x1080)"),
+            }
         }
         "boot" => {
             if !authorize(host, ShellAction::Inspect, out) {
@@ -3280,6 +3308,12 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
     check!(
         "console: display reports the scanout and the monitor's modes, or that there is no display",
         log.contains("display: scanout ") || log.contains("no display device on this machine")
+    );
+    let (bad, _) = transcript("resolution 1x1\r", host, &mut fs, dev);
+    let (usage, _) = transcript("resolution wide\r", host, &mut fs, dev);
+    check!(
+        "console: resolution refuses a mode by name and teaches its own syntax",
+        bad.contains("resolution refused: ") && usage.contains("usage: resolution WxH")
     );
     let (log, _) = transcript("net\r", host, &mut fs, dev);
     check!(

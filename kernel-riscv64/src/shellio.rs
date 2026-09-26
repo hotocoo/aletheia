@@ -90,6 +90,10 @@ impl ShellHost for Host {
     /// running. `None` = no desktop was installed, and the command says so rather than
     /// inventing zeros.
     #[cfg(feature = "interactive")]
+    fn set_display_mode(&self, w: u32, h: u32) -> Result<(u32, u32), &'static str> {
+        crate::desktop::set_mode(w, h)
+    }
+    #[cfg(feature = "interactive")]
     fn input_facts(&self) -> Option<shell::InputFacts> {
         crate::desktop::facts()
     }

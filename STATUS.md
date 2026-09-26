@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — the resolution changes while the machine runs (ADR-196)
+
+- `resolution WxH` switches the live desktop to any mode the display lists (capability
+  `system.display`), validated first, rebuilt through the boot's install path; refused by name when
+  the mode is not listed, cannot be backed, or the never-freeing heap would drop under 4 MiB (about
+  four switches per boot). aarch64 and riscv64; x86-64 refuses (VT-d window fixed at boot).
+  `console=59`.
+
 ### 2026-09-26 — windows open where the screen is (ADR-195); v0.4.0 released
 
 - Windows open at the same fraction of the screen they held at 640x240, kept inside the work area

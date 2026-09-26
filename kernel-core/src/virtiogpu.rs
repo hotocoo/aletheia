@@ -919,6 +919,24 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
         Ok(())
     }
 
+    /// Turn a scanout off (SET_SCANOUT with resource 0): the step before its resource may be
+    /// destroyed for a mode switch (ADR-196).
+    ///
+    /// # Safety
+    /// The device must be live.
+    pub unsafe fn disable_scanout(&mut self, scanout_id: u32) -> Result<(), GpuError> {
+        if scanout_id >= self.num_scanouts {
+            return Err(self.refused("no such scanout"));
+        }
+        let buf = core::slice::from_raw_parts_mut(self.cmd_buf as *mut u8, PAGE);
+        let len = encode_set_scanout(buf, scanout_id, 0, Rect::covering(0, 0));
+        let (ty, _) = self.command(len)?;
+        if ty != RESP_OK_NODATA {
+            return Err(GpuError::Device(ty));
+        }
+        Ok(())
+    }
+
     /// Copy a rect of a resource's backing into the host surface. The rect must sit inside the
     /// resource, and the byte range its origin implies must fit the backing — both checked here,
     /// before any descriptor exists.

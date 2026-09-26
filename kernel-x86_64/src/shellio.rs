@@ -84,6 +84,11 @@ impl ShellHost for Host {
     fn input_dropped(&self) -> u64 {
         crate::conirq::dropped()
     }
+    /// ADR-196: switching the desktop's mode at runtime is not offered on this target yet.
+    fn set_display_mode(&self, w: u32, h: u32) -> Result<(u32, u32), &'static str> {
+        let _ = (w, h);
+        Err("x86-64: the GPU sits behind a VT-d window fixed at boot; the mode is chosen at boot only")
+    }
     /// The live desktop's session facts (ALET-P2-021's hardware rung, ADR-080), read from
     /// the pump's atomic ledger — one machine word per fact, so a concurrent PIT pump cannot
     /// tear a readout. `None` = no desktop was installed, and the command says so.

@@ -157,3 +157,79 @@ pub fn take_navigation() -> Option<kernel_core::desktop::BrowserRequest> {
 pub fn set_browser_page(text: &[u8]) {
     let _ = with_desktop(|d| d.set_browser_page(text));
 }
+
+/// Switch the running desktop to `w` x `h` (ADR-196). The desktop is taken apart to its devices,
+/// its backing returned to the frame pool, and installed again at the new mode through the same
+/// path the boot uses; if the new mode cannot be installed, the old one is. Main thread only.
+#[cfg(feature = "interactive")]
+pub fn set_mode(w: u32, h: u32) -> Result<(u32, u32), &'static str> {
+    use kernel_core::frameown::Owner;
+    let facts = kernel_core::edid::resident::facts().ok_or("this machine has no display")?;
+    let modes = facts.edid.as_ref().map(|e| e.modes()).unwrap_or(&[]);
+    if !ENABLED.load(Ordering::Relaxed) {
+        return Err("this machine has no desktop to switch");
+    }
+    if crate::heap::free_bytes()
+        < kernel_core::desktop::MODE_SWITCH_HEAP_FLOOR + kernel_core::desktop::MODE_SWITCH_HEAP_COST
+    {
+        return Err("the kernel heap (which never frees) cannot afford another switch; the mode chosen at boot stays until reboot");
+    }
+    // Validated BEFORE anything is torn down: a refused request costs nothing. The frames the
+    // current desktop holds count as free, since the switch returns them first.
+    let (cw, ch) = kernel_core::edid::resident::facts()
+        .and_then(|f| f.running)
+        .unwrap_or((kernel_core::desktop::W, kernel_core::desktop::H));
+    let held = kernel_core::desktop::pages_for(cw, ch);
+    kernel_core::desktop::mode_allowed((w, h), modes, crate::frames::free_count() + held)?;
+    if (w, h) == (cw, ch) {
+        return Ok((w, h));
+    }
+    let was_unmasked = crate::conirq::mask_irqs_pub();
+    ENABLED.store(false, Ordering::Relaxed);
+    // SAFETY: IRQs are masked and the pump is disabled; this is the only reference.
+    let Some(old) = (unsafe { (*core::ptr::addr_of_mut!(DESKTOP)).take() }) else {
+        if was_unmasked {
+            crate::conirq::unmask_irqs_pub();
+        }
+        return Err("this machine has no desktop to switch");
+    };
+    let old_geom = old.framebuffer_size();
+    // SAFETY: the devices are live and ours; the desktop is gone after this call.
+    let (gpu, kb, tab, pages) = unsafe { old.into_devices() };
+    for pa in &pages {
+        let _ = crate::frames::free_addr_as(*pa, Owner::KERNEL);
+    }
+    let target = kernel_core::desktop::mode_allowed((w, h), modes, crate::frames::free_count());
+    let geom = target.unwrap_or(old_geom);
+    let result = reinstall(gpu, kb, tab, geom);
+    if was_unmasked {
+        crate::conirq::unmask_irqs_pub();
+    }
+    match (target, result) {
+        (Ok(g), Ok(())) => Ok(g),
+        (Err(why), Ok(())) => Err(why),
+        (_, Err(why)) => Err(why),
+    }
+}
+
+#[cfg(feature = "interactive")]
+fn reinstall(gpu: Gpu, kb: Input, tab: Input, geom: (u32, u32)) -> Result<(), &'static str> {
+    let need = kernel_core::desktop::pages_for(geom.0, geom.1);
+    let mut pages: Vec<usize> = Vec::with_capacity(need);
+    for _ in 0..need {
+        match crate::frames::alloc_zeroed() {
+            Some(f) => pages.push(f.addr()),
+            None => return Err("the frame allocator could not cover the new mode"),
+        }
+    }
+    pages.sort_unstable();
+    // SAFETY: the devices were live and handed back by `into_devices`; the pages are ours.
+    let d = unsafe { Desktop::install(gpu, kb, tab, pages, geom)? };
+    kernel_core::edid::resident::set_running(geom.0, geom.1);
+    // SAFETY: IRQs are masked by the caller and the pump is disabled.
+    unsafe {
+        (*core::ptr::addr_of_mut!(DESKTOP)) = Some(d);
+    }
+    ENABLED.store(true, Ordering::Relaxed);
+    Ok(())
+}

@@ -143,6 +143,37 @@ pub const fn place_window(x: i32, y: i32, win: (u32, u32), w: u32, h: u32) -> (i
     (if cx < 0 { 0 } else { cx }, if cy < 0 { 0 } else { cy })
 }
 
+/// Heap a mode switch must leave free (ADR-196). The kernel heap never frees (ADR-063) and a switch
+/// rebuilds the desktop's compositor, surfaces and grids — measured 0.6-1.1 MiB per switch at
+/// 1080p-1440p — so a switch that would leave less than this is refused rather than risking the
+/// machine; the boot's own choice costs nothing extra.
+pub const MODE_SWITCH_HEAP_FLOOR: usize = 4 << 20;
+/// The most one switch has been measured to cost, with margin.
+pub const MODE_SWITCH_HEAP_COST: usize = 3 << 19;
+
+/// May the desktop switch to `req` now (ADR-196)? Only a mode the display lists (or the fixed
+/// 640x240 desktop), and only one `choose_geometry` would pick with `free_frames` available — the
+/// same bounds the boot applies.
+pub fn mode_allowed(
+    req: (u32, u32),
+    modes: &[crate::edid::Mode],
+    free_frames: usize,
+) -> Result<(u32, u32), &'static str> {
+    if req != (W, H)
+        && !modes
+            .iter()
+            .any(|m| (m.width, m.height) == req && !m.interlaced)
+    {
+        return Err("the display does not list that mode (see `display`)");
+    }
+    if choose_geometry(Some(req), free_frames) != req {
+        return Err(
+            "that mode is outside what this machine can back (size, driver bound or memory)",
+        );
+    }
+    Ok(req)
+}
+
 /// Backing pages a desktop of `w` x `h` BGRA pixels needs (ADR-192).
 pub const fn pages_for(w: u32, h: u32) -> usize {
     (w as usize * h as usize * 4).div_ceil(crate::dma::PAGE)
@@ -795,6 +826,15 @@ fn switcher_empty_state(has_entries: bool) -> &'static str {
     }
 }
 
+/// What a desktop taken apart hands back (ADR-196): the GPU, the keyboard, the tablet, and the
+/// backing pages.
+pub type DesktopDevices<H, T> = (
+    VirtioGpu<H, T>,
+    VirtioInput<H, T>,
+    VirtioInput<H, T>,
+    Vec<usize>,
+);
+
 impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Bring the desktop up on a live GPU and a live keyboard/tablet pair: create the resource
     /// over the caller's backing pages, bind the scanout, mint the input session, open the two
@@ -1111,6 +1151,24 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     /// Raw events each device has delivered since boot.
     pub fn device_events(&self) -> (u64, u64) {
         (self.kb.events_seen(), self.tab.events_seen())
+    }
+
+    /// Take the desktop apart for a mode switch (ADR-196): turn the scanout off, destroy the
+    /// desktop's GPU resource and hand back the devices and the backing pages, which the caller
+    /// frees or reuses. Window contents are the desktop's and end with it.
+    ///
+    /// # Safety
+    /// The devices must be live and this must be the only reference to the desktop.
+    pub unsafe fn into_devices(mut self) -> DesktopDevices<H, T> {
+        let _ = self.gpu.disable_scanout(0);
+        let _ = self.gpu.detach_backing(DESKTOP_RID);
+        let _ = self.gpu.unref_resource(DESKTOP_RID);
+        (self.gpu, self.kb, self.tab, self.pages)
+    }
+
+    /// The desktop's device size.
+    pub fn framebuffer_size(&self) -> (u32, u32) {
+        (self.fb_w, self.fb_h)
     }
 
     /// Windows the manager holds open right now.
