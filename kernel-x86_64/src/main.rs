@@ -230,6 +230,7 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         "[boot] heap: 8 MiB static region; {} B used after init",
         heap::used_bytes()
     );
+    kprintln!("[hal] clock: {}", hal::select_clock());
     kernel_core::boottime::start::<ActiveHal>();
     kprintln!(
         "[boot] privilege: CPL {} (ring 0 = kernel)",
@@ -316,11 +317,20 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             ActiveHal::exit(619);
         }
     }
-    kprintln!("[hal] rdtsc monotonic sample: {}", ActiveHal::timer_ticks());
-    match hal::calibrate_tsc() {
-        Some(hz) => kprintln!("[hal] TSC calibrated against PIT: {} Hz", hz),
-        None => {
-            kprintln!("[hal] WARNING: TSC calibration failed; latency reports remain uncalibrated")
+    kprintln!("[hal] clock monotonic sample: {}", ActiveHal::timer_ticks());
+    if hal::clock_is_hpet() {
+        kprintln!("[hal] HPET clock: {} Hz", ActiveHal::timer_freq_hz());
+    } else {
+        match hal::calibrate_tsc() {
+            Some(hz) => kprintln!(
+                "[hal] TSC calibrated (CPUID.15, else HPET, else PIT): {} Hz",
+                hz
+            ),
+            None => {
+                kprintln!(
+                    "[hal] WARNING: TSC calibration failed; latency reports remain uncalibrated"
+                )
+            }
         }
     }
 

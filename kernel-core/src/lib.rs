@@ -58,6 +58,7 @@ pub mod fsstorm;
 pub mod fwcfg;
 pub mod grant;
 pub mod hkdf;
+pub mod hpet;
 pub mod http;
 pub mod iommu;
 pub mod ipc;

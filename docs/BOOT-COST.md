@@ -6,7 +6,7 @@ every gate's boot log: one `[boot] FAMILY suite: N ms` line under each family's 
 `[boot] NAME phase: N ms` line after each timed phase that is not a suite, and one
 `[boot] suites: N timed, T ms total, slowest F at S ms` line before the console.
 
-**How to read it.** Numbers are QEMU TCG on one development machine (Apple silicon, 2026-09-23),
+**How to read it.** Numbers are QEMU TCG on one development machine (Apple silicon, 2026-09-26),
 uncontended, one boot each; they are RELATIVE - which suite is heavy on which CPU - not a promise
 about hardware. `total` runs from the first suite to the summary. `unattributed` is `total` minus the
 sum of the laps: time no lap claims (device bring-up between suites, printing).
@@ -18,84 +18,84 @@ three boot gates' output.
 
 | measure | value |
 |---|---|
-| laps timed | 58 (58 suites) |
-| total, first suite to summary | 3847 ms |
-| sum of laps | 3821 ms |
-| unattributed (between laps) | 26 ms |
-| slowest suite | perf-report at 1313 ms |
+| laps timed | 61 (61 suites) |
+| total, first suite to summary | 4667 ms |
+| sum of laps | 4637 ms |
+| unattributed (between laps) | 30 ms |
+| slowest suite | perf-report at 1507 ms |
 
 | rank | lap | kind | ms | share of total |
 |---|---|---|---|---|
-| 1 | `perf-report` | phase | 1313 | 34% |
-| 2 | `bench` | suite | 331 | 9% |
-| 3 | `fsstorm` | suite | 307 | 8% |
-| 4 | `mlrisk-stress` | suite | 273 | 7% |
-| 5 | `smp` | suite | 224 | 6% |
-| 6 | `reclaim` | suite | 214 | 6% |
-| 7 | `schedstorm` | suite | 163 | 4% |
-| 8 | `conring` | suite | 152 | 4% |
-| 9 | `compose` | suite | 126 | 3% |
-| 10 | `soak` | suite | 89 | 2% |
-| 11 | `usermode` | suite | 82 | 2% |
-| 12 | `tlsclient` | suite | 82 | 2% |
+| 1 | `perf-report` | phase | 1507 | 32% |
+| 2 | `bench` | suite | 410 | 9% |
+| 3 | `fsstorm` | suite | 330 | 7% |
+| 4 | `mlrisk-stress` | suite | 313 | 7% |
+| 5 | `conring` | suite | 313 | 7% |
+| 6 | `compose` | suite | 258 | 6% |
+| 7 | `reclaim` | suite | 244 | 5% |
+| 8 | `schedstorm` | suite | 191 | 4% |
+| 9 | `smp` | suite | 144 | 3% |
+| 10 | `usermode` | suite | 107 | 2% |
+| 11 | `tlsclient` | suite | 104 | 2% |
+| 12 | `soak` | suite | 102 | 2% |
 
 ## riscv64 (QEMU virt, rv64, TCG)
 
 | measure | value |
 |---|---|
-| laps timed | 56 (56 suites) |
-| total, first suite to summary | 2265 ms |
-| sum of laps | 2238 ms |
-| unattributed (between laps) | 27 ms |
-| slowest suite | bench at 387 ms |
+| laps timed | 59 (59 suites) |
+| total, first suite to summary | 3171 ms |
+| sum of laps | 3143 ms |
+| unattributed (between laps) | 28 ms |
+| slowest suite | bench at 677 ms |
 
 | rank | lap | kind | ms | share of total |
 |---|---|---|---|---|
-| 1 | `bench` | suite | 387 | 17% |
-| 2 | `mlrisk-stress` | suite | 234 | 10% |
-| 3 | `schedstorm` | suite | 198 | 9% |
-| 4 | `reclaim` | suite | 189 | 8% |
-| 5 | `conring` | suite | 187 | 8% |
-| 6 | `fsstorm` | suite | 172 | 8% |
-| 7 | `compose` | suite | 153 | 7% |
-| 8 | `tlsclient` | suite | 85 | 4% |
-| 9 | `tlshandshake` | suite | 81 | 4% |
-| 10 | `trust` | suite | 67 | 3% |
-| 11 | `soak` | suite | 66 | 3% |
-| 12 | `usermode` | suite | 60 | 3% |
+| 1 | `bench` | suite | 677 | 21% |
+| 2 | `conring` | suite | 356 | 11% |
+| 3 | `compose` | suite | 290 | 9% |
+| 4 | `schedstorm` | suite | 253 | 8% |
+| 5 | `mlrisk-stress` | suite | 235 | 7% |
+| 6 | `reclaim` | suite | 209 | 7% |
+| 7 | `fsstorm` | suite | 203 | 6% |
+| 8 | `usermode` | suite | 100 | 3% |
+| 9 | `tlsclient` | suite | 97 | 3% |
+| 10 | `tlshandshake` | suite | 91 | 3% |
+| 11 | `shellstorm` | suite | 90 | 3% |
+| 12 | `soak` | suite | 80 | 3% |
 
 ## x86-64 (QEMU q35, OVMF, TCG)
 
 | measure | value |
 |---|---|
-| laps timed | 58 (58 suites) |
-| total, first suite to summary | 4499 ms |
-| sum of laps | 4471 ms |
-| unattributed (between laps) | 28 ms |
-| slowest suite | dmar at 3510 ms |
+| laps timed | 61 (61 suites) |
+| total, first suite to summary | 5434 ms |
+| sum of laps | 5403 ms |
+| unattributed (between laps) | 31 ms |
+| slowest suite | dmar at 3521 ms |
 
 | rank | lap | kind | ms | share of total |
 |---|---|---|---|---|
-| 1 | `dmar` | suite | 3510 | 78% |
-| 2 | `mlrisk-stress` | suite | 149 | 3% |
-| 3 | `reclaim` | suite | 101 | 2% |
-| 4 | `fsstorm` | suite | 101 | 2% |
-| 5 | `bench` | suite | 98 | 2% |
-| 6 | `usermode` | suite | 59 | 1% |
-| 7 | `schedstorm` | suite | 46 | 1% |
-| 8 | `smp` | suite | 43 | 1% |
-| 9 | `soak` | suite | 35 | 1% |
-| 10 | `conring` | suite | 27 | 1% |
-| 11 | `mlrisk` | suite | 25 | 1% |
-| 12 | `compose` | suite | 25 | 1% |
+| 1 | `dmar` | suite | 3521 | 65% |
+| 2 | `mlrisk-stress` | suite | 254 | 5% |
+| 3 | `reclaim` | suite | 175 | 3% |
+| 4 | `bench` | suite | 172 | 3% |
+| 5 | `fsstorm` | suite | 167 | 3% |
+| 6 | `conring` | suite | 147 | 3% |
+| 7 | `usermode` | suite | 115 | 2% |
+| 8 | `compose` | suite | 98 | 2% |
+| 9 | `schedstorm` | suite | 76 | 1% |
+| 10 | `smp` | suite | 68 | 1% |
+| 11 | `soak` | suite | 58 | 1% |
+| 12 | `tlsclient` | suite | 46 | 1% |
 
 ## The interactive image (ADR-163: contracts before the prompt, storms deferred)
 
 | target | gate image total | interactive image total | saved | interactive slowest | deferred line printed |
 |---|---|---|---|---|---|
-| aarch64 | 3847 ms | 1410 ms | 2437 ms (63%) | `smp` 323 ms | yes |
-| riscv64 | 2265 ms | 1150 ms | 1115 ms (49%) | `reclaim` 194 ms | yes |
-| x86-64 | 4499 ms | 436 ms | 4063 ms (90%) | `reclaim` 96 ms | yes |
+| aarch64 | 4667 ms | 1855 ms | 2812 ms (60%) | `conring` 310 ms | yes |
+| riscv64 | 3171 ms | 1648 ms | 1523 ms (48%) | `conring` 352 ms | yes |
+| x86-64 | 5434 ms | 973 ms | 4461 ms (82%) | `reclaim` 168 ms | yes |
 
 The interactive logs come from the live gates (`scripts/browser-e2e.sh` on the device-tree targets,
 `scripts/vinput-e2e.sh` on x86-64). Those machines are not the gate image's machine: the x86-64

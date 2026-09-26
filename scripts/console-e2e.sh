@@ -78,6 +78,8 @@ drive_session() {
     # high, that command spins its full timeout, and every later command inherits the skew — six
     # commands x 30s is exactly the watchdog, which is how this presented (a session that answered
     # every command and then "never received" the last one).
+    # `+N` is not typed: the operator waits N seconds, so a clock that stops while idle shows (ADR-200).
+    if [[ "$line" =~ ^\+([0-9]+)$ ]]; then sleep "${BASH_REMATCH[1]}"; continue; fi
     local want cur spun=0
     want=$(( $(prompt_count "$log") + 1 ))
     printf '%s\r' "$line" >&3
@@ -154,6 +156,19 @@ check_session() {
     # Every frame a run takes it gives back: the two `mem` readings around the runs agree.
     local fr; fr="$(grep -o '^frames: [0-9]* free' <<<"$log" | tail -2 | sort -u | wc -l | tr -d ' ')"
     [ "$fr" = "1" ] || { echo "  FAIL [$label/first] tasks runs changed the free frame count"; bad=1; }
+    # The machine's clock keeps time while it idles (ADR-200): across ten idle seconds of real time,
+    # `uptime` advances by at least 80% of what the RTC says passed.
+    local clock; clock="$(python3 -c '
+import re, sys
+t = sys.stdin.read()
+unix = [int(x) for x in re.findall(r"\(unix (\d+)\)", t)][-2:]
+up = [int(x) for x in re.findall(r"\((\d+) ns since boot\)", t)][-2:]
+if len(unix) < 2 or len(up) < 2:
+    print("missing"); sys.exit()
+wall, mono = unix[1] - unix[0], (up[1] - up[0]) / 1e9
+print("ok" if wall >= 9 and mono >= 0.8 * wall else "rtc %ds, uptime %.2fs" % (wall, mono))
+' <<<"$log")"
+    [ "$clock" = "ok" ] || { echo "  FAIL [$label/first] the clock did not keep time while idle: $clock"; bad=1; }
     # And `mlstat` then measures the silence in uptime: seconds, not commissioning's simulated hours.
     local sil; sil="$(grep -o 'silence: [0-9]*s since the last advice' <<<"$log" | tail -1 | tr -dc '0-9')"
     { [ -n "$sil" ] && [ "$sil" -lt 60 ]; } || { echo "  FAIL [$label/first] mlstat silence after tasks was '${sil}' s, not under 60"; bad=1; }
@@ -210,7 +225,7 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "mem" "mlstat" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
@@ -288,7 +303,7 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "mem" "mlstat" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?
