@@ -38,6 +38,9 @@ impl Machine {
 pub struct Target {
     pub machine: Machine,
     pub code_va: u64,
+    /// How many pages of code the target reserves for a program (ADR-211). The data page sits
+    /// above them, so this is also the distance from `code_va` to the program's stack.
+    pub code_pages: u64,
     /// Where a program's writable data page goes (ADR-210), above its stack page: the three pages
     /// stay contiguous, so one range check still covers a program's whole address space.
     pub data_va: u64,
@@ -203,7 +206,7 @@ pub fn judge(bytes: &[u8], target: Target) -> Result<Placement<'_>, Refusal> {
     if vaddr != target.code_va || (align > 1 && offset % align != vaddr % align) {
         return Err(Refusal::WrongAddress);
     }
-    if memsz > PAGE || filesz > memsz {
+    if memsz > target.code_pages * PAGE || filesz > memsz {
         return Err(Refusal::TooLarge);
     }
     let start = usize::try_from(offset).map_err(|_| Refusal::OutsideFile)?;

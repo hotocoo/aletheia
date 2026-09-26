@@ -1900,14 +1900,22 @@ pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
 /// its stack page, contiguous: the check is sufficient only because the window IS the mapping.
 const PROGRAM_WINDOW: () =
     assert!(USER_STACK_VA == USER_CODE_VA + 0x1000 && USER_STACK_TOP == USER_CODE_VA + 0x2000);
+/// A console-started program's own layout (ADR-211), independent of the boot suites' stubs: up to
+/// [`PROGRAM_CODE_PAGES`] pages of code, then one stack page, then one writable data page, all
+/// contiguous so one range check still covers a program's whole address space.
+pub const PROGRAM_CODE_PAGES: u64 = 16;
+const PROGRAM_STACK_VA: u64 = USER_CODE_VA + PROGRAM_CODE_PAGES * 0x1000;
+const PROGRAM_STACK_TOP: u64 = PROGRAM_STACK_VA + 0x1000;
+const PROGRAM_DATA_VA: u64 = PROGRAM_STACK_TOP;
+
 /// The running program's `console.output` grant (ADR-204); `None` whenever no `run` is in progress.
 static mut PROGRAM_GRANT: Option<kernel_core::progout::Grant> = None;
 /// The running program's pages (ADR-210): its data page exists only if it declared one.
 static mut PROGRAM_WINDOW_NOW: kernel_core::progout::Window = kernel_core::progout::Window {
     code_va: USER_CODE_VA,
-    stack_va: USER_STACK_VA,
-    stack_top: USER_STACK_TOP,
-    data_top: USER_STACK_TOP,
+    stack_va: PROGRAM_STACK_VA,
+    stack_top: PROGRAM_STACK_TOP,
+    data_top: PROGRAM_STACK_TOP,
 };
 /// A `SYS_FS_READ` the handler admitted, for the run loop to serve (ADR-207).
 static mut PENDING_READ: Option<kernel_core::progout::ReadRequest> = None;
@@ -1923,6 +1931,9 @@ pub const USERLAND_SHOW: &[u8] = include_bytes!("../../userland/bin/x86_64/show.
 const USERLAND_PROBE: &[u8] = include_bytes!("../../userland/bin/x86_64/probe.elf");
 /// `counter`, from `userland/` (ADR-210): seeded, a program with real mutable globals.
 pub const USERLAND_COUNTER: &[u8] = include_bytes!("../../userland/bin/x86_64/counter.elf");
+/// `big`, from `userland/` (ADR-211): three pages of code, so it runs only if the machine maps
+/// every page the segment declares. Not seeded; the boot suite's.
+const USERLAND_BIG: &[u8] = include_bytes!("../../userland/bin/x86_64/big.elf");
 
 /// The run storms (ADR-202's faulting runs, ADR-204's writes, ADR-207's reads) prove bounds under
 /// load; like `kmain`'s storms (ADR-163) they run in the gate image only, so an interactive boot
@@ -1942,7 +1953,8 @@ const BOOT_SPIN_SLICES: u32 = 4;
 pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
     machine: kernel_core::elf::Machine::X86_64,
     code_va: USER_CODE_VA,
-    data_va: USER_STACK_TOP,
+    code_pages: PROGRAM_CODE_PAGES,
+    data_va: PROGRAM_DATA_VA,
 };
 
 /// The console's `run NAME` (ADR-201): one ring-3 task in its own address space, its code page the
@@ -1979,14 +1991,21 @@ fn run_program(
 
     let root_main = vm::active_root();
     let mut roots = [0u64; NTASK];
-    let mut code: [Option<frames::Frame>; NTASK] = [None, None];
     let mut stack: [Option<frames::Frame>; NTASK] = [None, None];
     roots[0] = vm::build_space()?;
-    code[0] = vm::map_stub_frame(roots[0], program.vaddr, program.code);
-    stack[0] = vm::map_user(roots[0], USER_STACK_VA, true);
+    // As many code pages as the segment declares (ADR-211), each mapped read+execute.
+    let mut code_frames: alloc::vec::Vec<frames::Frame> = alloc::vec::Vec::new();
+    for (i, chunk) in program.code.chunks(0x1000).enumerate() {
+        match vm::map_stub_frame(roots[0], program.vaddr + i as u64 * 0x1000, chunk) {
+            Some(f) => code_frames.push(f),
+            None => break,
+        }
+    }
+    let code_ok = code_frames.len() == program.code.len().div_ceil(0x1000).max(1);
+    stack[0] = vm::map_user(roots[0], PROGRAM_STACK_VA, true);
     // The writable page, if the program declared one (ADR-210).
     let data = if program.data_memsz > 0 {
-        let f = vm::map_user(roots[0], USER_STACK_TOP, true);
+        let f = vm::map_user(roots[0], PROGRAM_DATA_VA, true);
         if let Some(f) = f {
             if !program.data.is_empty() {
                 // SAFETY: `f` is the zeroed page this run just mapped, identity-mapped and
@@ -2007,23 +2026,28 @@ fn run_program(
     // SAFETY: single-threaded; the window belongs to the program about to run.
     unsafe {
         (*addr_of_mut!(PROGRAM_WINDOW_NOW)).data_top = if data.is_some() {
-            USER_STACK_TOP + 0x1000
+            PROGRAM_DATA_VA + 0x1000
         } else {
-            USER_STACK_TOP
+            PROGRAM_STACK_TOP
         };
     }
-    if code[0].is_none()
+    if !code_ok
         || stack[0].is_none()
         || (program.data_memsz > 0 && data.is_none())
         || args.len() > kernel_core::elf::MAX_ARGS
     {
-        cleanup_tasks(&roots, &mut code, &mut stack);
+        for (i, f) in core::mem::take(&mut code_frames).into_iter().enumerate() {
+            free_leaf(roots[0], program.vaddr + i as u64 * 0x1000, Some(f));
+        }
+        free_leaf(roots[0], PROGRAM_STACK_VA, stack[0].take());
+        free_leaf(roots[0], PROGRAM_DATA_VA, data);
+        vm::destroy_space(roots[0]);
         return None;
     }
     // The arguments sit at the top of the stack page, 16-aligned, and the stack starts below them
     // (ADR-206); the program is entered with their address and length in rdi and rsi.
     let args_at = ((args.len() + 15) & !15) as u64;
-    let args_va = USER_STACK_TOP - args_at;
+    let args_va = PROGRAM_STACK_TOP - args_at;
     if let Some(f) = stack[0] {
         // SAFETY: `f` is the zeroed stack frame this run just allocated, identity-mapped and
         // kernel-writable; the copy stays inside its last `args_at` bytes.
@@ -2066,7 +2090,12 @@ fn run_program(
         free_pages: frames::free_count() as u64,
     });
     if resident::admit(&mut policy, TaskId(0), Priority(5), now_secs, &submission).is_err() {
-        cleanup_tasks(&roots, &mut code, &mut stack);
+        for (i, f) in core::mem::take(&mut code_frames).into_iter().enumerate() {
+            free_leaf(roots[0], program.vaddr + i as u64 * 0x1000, Some(f));
+        }
+        free_leaf(roots[0], PROGRAM_STACK_VA, stack[0].take());
+        free_leaf(roots[0], PROGRAM_DATA_VA, data);
+        vm::destroy_space(roots[0]);
         return None;
     }
 
@@ -2130,7 +2159,7 @@ fn run_program(
         // lands in the saved rax (ADR-207); the entry stub's own writeback happened first.
         // SAFETY: single-threaded; the program is off the CPU.
         if let Some(req) = unsafe { (*addr_of_mut!(PENDING_READ)).take() } {
-            if let (Some(c), Some(st)) = (code[0], stack[0]) {
+            if let (Some(c), Some(st)) = (code_frames.first().copied(), stack[0]) {
                 // SAFETY: `c` and `st` are this run's own identity-mapped frames, one page each, and
                 // nothing else touches them while the program is off the CPU.
                 let mut empty = [0u8; 0];
@@ -2164,9 +2193,15 @@ fn run_program(
         run.dropped = out.dropped();
     }
     if let Some(f) = data {
-        free_leaf(roots[0], USER_STACK_TOP, Some(f));
+        free_leaf(roots[0], PROGRAM_DATA_VA, Some(f));
     }
-    cleanup_tasks(&roots, &mut code, &mut stack);
+    if let Some(f) = stack[0].take() {
+        free_leaf(roots[0], PROGRAM_STACK_VA, Some(f));
+    }
+    for (i, f) in code_frames.into_iter().enumerate() {
+        free_leaf(roots[0], program.vaddr + i as u64 * 0x1000, Some(f));
+    }
+    vm::destroy_space(roots[0]);
     Some(run)
 }
 
@@ -3216,6 +3251,15 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                     && r.output == b"counter read: just words\n"),
                 "data: an object read by a program lands in a buffer on its writable page"
             );
+            // A program whose code is three pages (ADR-211): every page the segment declares is
+            // mapped, so the table it sums is all there and its exit value is the whole sum.
+            let big = run(USERLAND_BIG, b"", &mut svc);
+            check!(
+                big.is_some_and(|r| r.exited
+                    && r.status == 0x5839_3C00
+                    && r.output == b"big ran\n"),
+                "code: a program larger than one page runs, with every page of its segment mapped"
+            );
             let refused = [
                 &b"codebuf"[..],
                 b"straddle",
@@ -3266,7 +3310,9 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                 )
             })
         };
-        let refused = [(cv - 0x1000, 8), (cv + 0x2000 - 4, 8), (cv, 65_537)]
+        // Below the code pages, straddling the last page's end, and past the copy budget: a
+        // program's window is its code pages, its stack and (if it has one) its data page.
+        let refused = [(cv - 0x1000, 8), (PROGRAM_STACK_TOP - 4, 8), (cv, 65_537)]
             .iter()
             .all(|&(a, l)| {
                 write(a, l).is_some_and(|r| r.exited && r.status == u64::MAX && r.output.is_empty())

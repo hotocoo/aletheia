@@ -23,6 +23,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "big"
+path = "src/big.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "probe"
 path = "src/probe.rs"
 test = false

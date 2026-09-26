@@ -10,6 +10,9 @@ use crate::usermem::UserSlice;
 /// Bytes one run may leave for the console.
 pub const CAPACITY: usize = 256;
 
+/// A page, as every target maps them.
+const PAGE: u64 = 4096;
+
 /// The authority a console `run` hands its program (ADR-204): one `console.output` capability,
 /// minted when the run starts and gone when it ends. The chain is the operator's `run` (itself
 /// authorized as `system.schedule`) -> this grant -> `SYS_WRITE_CONSOLE`; a task started any other
@@ -43,16 +46,25 @@ impl Grant {
     }
 }
 
+/// Which page a name lies in (ADR-211): a program may pass one from its first code page, its
+/// stack, or its data page, and the run loop views exactly that page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamePage {
+    Code,
+    Stack,
+    Data,
+}
+
 /// A `SYS_FS_READ` the trap handler admitted (ADR-207), for the run loop to serve once the program
 /// is off the CPU: the loop is back in the console's address space with the namespace in reach,
 /// and it reads and writes the program's pages through their physical frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadRequest {
-    /// Offset of the name in the page `name_in_stack` names.
+    /// Offset of the name in the page `name_page` names.
     pub name_off: usize,
     pub name_len: usize,
     /// The name lies in the stack page (else in the code page).
-    pub name_in_stack: bool,
+    pub name_page: NamePage,
     /// Offset of the buffer in the page `buf_in_data` names.
     pub buf_off: usize,
     pub buf_len: usize,
@@ -82,10 +94,16 @@ pub fn admit_read(
     if name_len == 0 || name_len > crate::fs::MAX_NAME {
         return None;
     }
-    let (name_in_stack, page) = if UserSlice::validate(name, name_len, code_va, stack_va).is_ok() {
-        (false, code_va)
+    // A name in the code segment must lie in its FIRST page: the run loop serves a read through
+    // physical frames, and it views that one (ADR-211). Later code pages hold instructions, not
+    // names a program would pass.
+    let (name_page, page) = if UserSlice::validate(name, name_len, code_va, code_va + PAGE).is_ok()
+    {
+        (NamePage::Code, code_va)
     } else if UserSlice::validate(name, name_len, stack_va, stack_top).is_ok() {
-        (true, stack_va)
+        (NamePage::Stack, stack_va)
+    } else if UserSlice::validate(name, name_len, stack_top, w.data_top).is_ok() {
+        (NamePage::Data, stack_top)
     } else {
         return None;
     };
@@ -98,7 +116,7 @@ pub fn admit_read(
     Some(ReadRequest {
         name_off: (name - page) as usize,
         name_len,
-        name_in_stack,
+        name_page,
         buf_off: (buf - if buf_in_data { stack_top } else { stack_va }) as usize,
         buf_len,
         buf_in_data,
@@ -117,10 +135,10 @@ pub fn serve_read(
     data_page: &mut [u8],
 ) -> u64 {
     let mut name = [0u8; crate::fs::MAX_NAME];
-    let src = if req.name_in_stack {
-        &*stack_page
-    } else {
-        code_page
+    let src = match req.name_page {
+        NamePage::Code => code_page,
+        NamePage::Stack => &*stack_page,
+        NamePage::Data => &*data_page,
     };
     let Some(bytes) = src.get(req.name_off..req.name_off + req.name_len) else {
         return u64::MAX;
@@ -176,7 +194,8 @@ impl ProgramServices for NoServices {
 /// pages), otherwise hand the range to `read` - the target's copy, in the task's address space -
 /// and keep what fits. Returns the bytes kept, or `u64::MAX` when refused; nothing is appended on a
 /// refusal.
-/// The three pages a program has (ADR-210): code, stack, then data. `data_top` is the end of the
+/// The pages a program has (ADR-210, ADR-211): its code pages, then its stack page, then its data
+/// page. `data_top` is the end of the
 /// data page when the program declared one, else the stack top - a program without a data segment
 /// has no third page and no address there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -277,6 +296,13 @@ mod tests {
         stack_top: 0x3000,
         data_top: 0x4000,
     };
+    /// A program with two code pages: its stack sits after them.
+    const W_BIG: Window = Window {
+        stack_va: 0x3000,
+        stack_top: 0x4000,
+        data_top: 0x5000,
+        ..W
+    };
     /// The same program without a data segment: its last page is its stack.
     const W_NODATA: Window = Window {
         data_top: 0x3000,
@@ -292,7 +318,7 @@ mod tests {
             Some(ReadRequest {
                 name_off: 0x80,
                 name_len: 5,
-                name_in_stack: false,
+                name_page: NamePage::Code,
                 buf_off: 0x100,
                 buf_len: 64,
                 buf_in_data: false
@@ -301,8 +327,15 @@ mod tests {
         assert!(
             admit_read(Some(&g), 0x2ff0, 5, 0x2000, 16, W)
                 .unwrap()
-                .name_in_stack
+                .name_page
+                == NamePage::Stack
         );
+        // A name past the first code page is refused: the served read views that page only.
+        assert_eq!(
+            admit_read(Some(&g), 0x1000u64 + super::PAGE, 5, 0x3100, 64, W_BIG),
+            None
+        );
+        assert!(admit_read(Some(&g), 0x1080, 5, 0x3100, 64, W_BIG).is_some());
         // The buffer may lie in the data page, and its offset is then that page's (ADR-210); a
         // program with no data page has no address there.
         let into_data = admit_read(Some(&g), 0x1080, 5, 0x3040, 16, W).unwrap();
@@ -363,7 +396,7 @@ mod tests {
         let req = ReadRequest {
             name_off: 0x80,
             name_len: 4,
-            name_in_stack: false,
+            name_page: NamePage::Code,
             buf_off: 0x200,
             buf_len: 4,
             buf_in_data: false,
@@ -391,19 +424,33 @@ mod tests {
         let req = ReadRequest {
             name_off: 0x10,
             name_len: 4,
-            name_in_stack: true,
+            name_page: NamePage::Stack,
             buf_off: 0x10,
             buf_len: 16,
             buf_in_data: false,
         };
         assert_eq!(serve_read(&req, &mut One, &code, &mut stack, &mut data), 10);
         assert_eq!(&stack[0x10..0x1a], b"just words");
+        // A name may also live in the data page (ADR-211).
+        data[0x100..0x104].copy_from_slice(b"note");
+        let from_data = ReadRequest {
+            name_off: 0x100,
+            name_len: 4,
+            name_page: NamePage::Data,
+            buf_off: 0x300,
+            buf_len: 16,
+            buf_in_data: true,
+        };
+        assert_eq!(
+            serve_read(&from_data, &mut One, &code, &mut stack, &mut data),
+            10
+        );
         // Unknown and non-UTF-8 names are refused.
         code[0x80..0x84].copy_from_slice(b"nope");
         let req = ReadRequest {
             name_off: 0x80,
             name_len: 4,
-            name_in_stack: false,
+            name_page: NamePage::Code,
             buf_off: 0,
             buf_len: 4,
             buf_in_data: false,

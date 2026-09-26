@@ -8,16 +8,19 @@ use kernel_core::elf::{
 const A64: Target = Target {
     machine: Machine::Aarch64,
     code_va: 0x5000_0000,
+    code_pages: 16,
     data_va: 0x5000_2000,
 };
 const RV: Target = Target {
     machine: Machine::Riscv64,
     code_va: 0x5000_0000,
+    code_pages: 16,
     data_va: 0x5000_2000,
 };
 const X86: Target = Target {
     machine: Machine::X86_64,
     code_va: 0x4000_0000,
+    code_pages: 16,
     data_va: 0x4000_2000,
 };
 
@@ -116,8 +119,9 @@ fn every_malformed_shape_is_refused_by_name() {
         with(&|b| put(b, 64 + 8, &4u64.to_le_bytes())),
         Err(Refusal::WrongAddress)
     );
+    // Past the pages the target reserves for code (ADR-211: 16 of them here).
     assert_eq!(
-        with(&|b| put(b, 64 + 40, &8192u64.to_le_bytes())),
+        with(&|b| put(b, 64 + 40, &(17 * 4096u64).to_le_bytes())),
         Err(Refusal::TooLarge)
     );
     assert_eq!(

@@ -7,7 +7,9 @@
 mod mem;
 mod sys;
 
-static NOTE: &[u8] = b"note";
+/// In `.data` (ADR-211): a name a program passes must live in its first code page, its stack or
+/// its data page, and a `&[u8]` constant would sit in `.rodata`, which is code.
+static mut NOTE: [u8; 4] = *b"note";
 
 /// The entry point the kernel jumps to.
 ///
@@ -21,7 +23,8 @@ pub unsafe extern "C" fn _start(args: *const u8, len: usize) -> ! {
     let code_page = (_start as *const () as u64) & !0xfff;
     let mut buf = [0u8; 64];
     let stack_buf = buf.as_mut_ptr() as u64;
-    let name = NOTE.as_ptr() as u64;
+    // SAFETY: single-threaded program; nothing else touches this global.
+    let name = core::ptr::addr_of!(NOTE) as u64;
     let r = match case {
         // A good read: `note` into a stack buffer; prints what arrived.
         b"read" => {
