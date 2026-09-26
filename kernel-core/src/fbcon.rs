@@ -157,7 +157,16 @@ pub struct ComposeSink<'s, 'p> {
     /// Device pixels per logical pixel on each axis (ADR-194): the compositor lays out a logical
     /// desktop and every pixel it puts becomes a `scale` x `scale` block. 1 = no scaling.
     scale: u32,
+    /// The device-pixel rects written this frame (ADR-197), as inclusive `(x0, y0, x1, y1)`: what
+    /// the device must be sent. The compositor writes each damage region in raster order, so a put
+    /// next to the last rect grows it and a put elsewhere starts a new one; past [`MAX_DIRTY`] the
+    /// rects collapse into their bounding box.
+    dirty: [(u32, u32, u32, u32); MAX_DIRTY],
+    n_dirty: usize,
 }
+
+/// Separate dirty rects one frame keeps before collapsing them (ADR-197).
+pub const MAX_DIRTY: usize = 8;
 
 impl<'s, 'p> ComposeSink<'s, 'p> {
     /// Scale every put by an integer factor (ADR-194). The surface must be at least the logical
@@ -165,6 +174,49 @@ impl<'s, 'p> ComposeSink<'s, 'p> {
     pub fn with_scale(mut self, scale: u32) -> Self {
         self.scale = scale.max(1);
         self
+    }
+
+    /// The device-pixel rects written this frame, each `(x, y, w, h)`.
+    pub fn dirty_rects(&self) -> impl Iterator<Item = (u32, u32, u32, u32)> + '_ {
+        self.dirty[..self.n_dirty]
+            .iter()
+            .map(|&(x0, y0, x1, y1)| (x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+    }
+
+    /// The bounding box of everything written this frame, `(x, y, w, h)`.
+    pub fn dirty_rect(&self) -> Option<(u32, u32, u32, u32)> {
+        let mut it = self.dirty[..self.n_dirty].iter();
+        let first = *it.next()?;
+        let (a, b, c, d) = it.fold(first, |(a, b, c, d), &(x0, y0, x1, y1)| {
+            (a.min(x0), b.min(y0), c.max(x1), d.max(y1))
+        });
+        Some((a, b, c - a + 1, d - b + 1))
+    }
+
+    fn mark(&mut self, x: u32, y: u32) {
+        let s = self.scale;
+        let (x0, y0, x1, y1) = (x * s, y * s, x * s + s - 1, y * s + s - 1);
+        if self.n_dirty > 0 {
+            let r = &mut self.dirty[self.n_dirty - 1];
+            if x0 + s >= r.0 && x0 <= r.2 + s && y0 + s >= r.1 && y0 <= r.3 + s {
+                *r = (r.0.min(x0), r.1.min(y0), r.2.max(x1), r.3.max(y1));
+                return;
+            }
+        }
+        if self.n_dirty == MAX_DIRTY {
+            // Too many separate rects: collapse to one bounding box and keep growing it.
+            let (a, b, w, h) = self.dirty_rect().unwrap_or((x0, y0, 1, 1));
+            self.dirty[0] = (
+                a.min(x0),
+                b.min(y0),
+                (a + w - 1).max(x1),
+                (b + h - 1).max(y1),
+            );
+            self.n_dirty = 1;
+            return;
+        }
+        self.dirty[self.n_dirty] = (x0, y0, x1, y1);
+        self.n_dirty += 1;
     }
 
     /// Write one logical pixel as a scale x scale block.
@@ -188,6 +240,8 @@ impl<'s, 'p> ComposeSink<'s, 'p> {
             refused: 0,
             wallpaper: None,
             scale: 1,
+            dirty: [(0, 0, 0, 0); MAX_DIRTY],
+            n_dirty: 0,
         }
     }
 
@@ -213,6 +267,7 @@ impl<'s, 'p> ComposeSink<'s, 'p> {
 impl crate::compositor::Raster for ComposeSink<'_, '_> {
     fn put(&mut self, x: u32, y: u32, ink: bool) {
         self.puts += 1;
+        self.mark(x, y);
         if self.scale == 1 {
             if self.surf.set(x, y, ink).is_err() {
                 self.refused += 1;
@@ -239,6 +294,7 @@ impl crate::compositor::Raster for ComposeSink<'_, '_> {
         match photo {
             Some(c) => {
                 self.puts += 1;
+                self.mark(x, y);
                 if self.scale == 1 {
                     if self.surf.set_bgra(x, y, c).is_err() {
                         self.refused += 1;

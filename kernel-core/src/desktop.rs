@@ -1190,14 +1190,29 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         if st.pixels_blitted == 0 {
             return Ok(0); // a quiet frame moves nothing — no device traffic at all
         }
-        // SAFETY: the device is live and ours; the rect is the resource's own full extent.
+        // Only what changed crosses to the device (ADR-197): the frame's damaged bounding box, not
+        // the whole framebuffer - a cursor move is a few hundred bytes, not 8 MB at 1080p.
+        let mut rects = [GpuRect::covering(0, 0); crate::fbcon::MAX_DIRTY];
+        let mut n = 0;
+        for (x, y, w, h) in sink.dirty_rects() {
+            rects[n] = GpuRect {
+                x,
+                y,
+                width: w,
+                height: h,
+            };
+            n += 1;
+        }
+        // SAFETY: the device is live and ours; every rect lies inside the resource.
         unsafe {
-            self.gpu
-                .transfer_to_host_2d(DESKTOP_RID, GpuRect::covering(self.fb_w, self.fb_h))
-                .map_err(|_| "the desktop frame's TRANSFER was refused")?;
-            self.gpu
-                .resource_flush(DESKTOP_RID, GpuRect::covering(self.fb_w, self.fb_h))
-                .map_err(|_| "the desktop frame's FLUSH was refused")?;
+            for rect in &rects[..n] {
+                self.gpu
+                    .transfer_to_host_2d(DESKTOP_RID, *rect)
+                    .map_err(|_| "the desktop frame's TRANSFER was refused")?;
+                self.gpu
+                    .resource_flush(DESKTOP_RID, *rect)
+                    .map_err(|_| "the desktop frame's FLUSH was refused")?;
+            }
         }
         Ok(st.pixels_blitted)
     }
