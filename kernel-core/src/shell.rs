@@ -719,6 +719,8 @@ pub enum ShellAction {
     Overclock,
     /// Change what the display shows (ADR-196).
     Display,
+    /// Start user-mode tasks through the advised scheduler (ADR-199).
+    Schedule,
 }
 
 impl ShellAction {
@@ -732,6 +734,7 @@ impl ShellAction {
             ShellAction::Halt => "system.halt",
             ShellAction::Overclock => "system.overclock",
             ShellAction::Display => "system.display",
+            ShellAction::Schedule => "system.schedule",
         }
     }
 
@@ -811,6 +814,19 @@ pub struct InputFacts {
     pub browser_page_len: usize,
     pub browser_first: [u8; 48],
     pub browser_first_len: u8,
+}
+
+/// One console-started run of user-mode tasks (ADR-199), as the target reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TaskRun {
+    /// Tasks admitted, each with its own address space.
+    pub tasks: usize,
+    /// Every task ran all its slices and exited.
+    pub all_exited: bool,
+    /// Every slice presented its own task's magic (no task ran in another's address space).
+    pub own_magic: bool,
+    /// Every task was consulted on by the resident advisor at admission.
+    pub advised: bool,
 }
 
 /// The machine's network device as the console reports it (ADR-185): addresses and the driver's
@@ -952,6 +968,11 @@ pub trait ShellHost {
     fn set_display_mode(&self, _w: u32, _h: u32) -> Result<(u32, u32), &'static str> {
         Err("this machine has no desktop to switch")
     }
+    /// Run this target's user-mode tasks through the advised scheduler now (ADR-199). `None` = this
+    /// machine cannot start a user-mode task from the console. Defaulted for hosts with no tasks.
+    fn run_tasks(&self) -> Option<TaskRun> {
+        None
+    }
     /// The network device the console dials with, `None` on a machine without one (ADR-185).
     fn net_facts(&self) -> Option<NetFacts> {
         None
@@ -1045,6 +1066,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "mlstat",
         "the resident risk advisor: what it is, and what it has done since boot",
+    ),
+    (
+        "tasks",
+        "run real user-mode tasks now, each admitted through the resident risk advisor",
     ),
     (
         "power",
@@ -1469,6 +1494,41 @@ fn split_first(line: &str) -> (&str, &str) {
         Some(i) => (&t[..i], t[i..].trim_start()),
         None => (t, ""),
     }
+}
+
+/// `tasks`: start the target's user-mode tasks now, each admitted through the resident advisor, and
+/// say what the advisor answered for exactly this run (ADR-199). The counts are the advisor's own
+/// statistics before and after, so this line cannot disagree with `mlstat`.
+fn run_tasks(host: &dyn ShellHost, out: &mut dyn FnMut(&str)) {
+    let before = crate::mlsched::resident::stats().unwrap_or_default();
+    let Some(run) = host.run_tasks() else {
+        out("tasks: this machine cannot start a user-mode task from the console");
+        return;
+    };
+    let after = crate::mlsched::resident::stats().unwrap_or_default();
+    outf!(
+        out,
+        "tasks: {} user-mode task(s) admitted: advisor said {} low / {} elevated / {} abstain",
+        run.tasks,
+        after.low - before.low,
+        after.elevated - before.elevated,
+        after.abstain - before.abstain
+    );
+    let verdict = if run.all_exited && run.own_magic && run.advised {
+        "every task ran in its own address space and exited"
+    } else if !run.advised {
+        "FAILED: a task was admitted without advice"
+    } else if !run.own_magic {
+        "FAILED: a slice ran outside its own address space"
+    } else {
+        "FAILED: a task did not run to its exit"
+    };
+    outf!(
+        out,
+        "tasks: {} dispatch(es); {}",
+        after.schedules - before.schedules,
+        verdict
+    );
 }
 
 /// Everything `mlstat` prints, as a function a boot can call before there is a console.
@@ -1898,6 +1958,12 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             report_risk_advisor(out);
+        }
+        "tasks" => {
+            if !authorize(host, ShellAction::Schedule, out) {
+                return Outcome::Continue;
+            }
+            run_tasks(host, out);
         }
         "power" => {
             if !authorize(host, ShellAction::Inspect, out) {

@@ -550,3 +550,26 @@ fn the_resident_seam_carries_the_same_door() {
     assert!(c.permutation);
     resident::uninstall();
 }
+
+/// Commissioning's simulated hours must not outlive it (ADR-199): after `start_clock`, a live advice
+/// stamped with uptime closes the silence instead of landing hours "before" the last simulated tick.
+#[test]
+fn a_started_clock_measures_silence_in_uptime_not_simulated_time() {
+    let mut svc = RiskService::without_model(SUITE_MACHINE);
+    let mut sched = PriorityScheduler::default();
+    svc.admit(&mut sched, TaskId(1), Priority(5), 0, &task(1, 0, 1));
+    svc.tick(28_665);
+    svc.admit(&mut sched, TaskId(2), Priority(5), 28_665, &task(1, 1, 1));
+    svc.start_clock();
+
+    // Uptime 8 s: no live advice yet, so the machine has been quiet all 8 of them.
+    svc.tick(8);
+    assert_eq!(svc.stats().silence_secs(), 8);
+    assert_eq!(svc.stats().advices, 2, "the counts survive the restart");
+
+    svc.admit(&mut sched, TaskId(3), Priority(5), 8, &task(1, 2, 1));
+    let s = svc.stats();
+    assert_eq!(s.silence_secs(), 0);
+    assert_eq!(s.last_advice_secs, 8);
+    assert_eq!(s.max_gap_secs, 8);
+}

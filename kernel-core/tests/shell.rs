@@ -787,3 +787,124 @@ fn an_unfinished_escape_never_eats_the_enter() {
         }
     }
 }
+
+struct TasksHost(Option<kernel_core::shell::TaskRun>);
+
+impl ShellHost for TasksHost {
+    fn arch(&self) -> &str {
+        "test-host"
+    }
+    fn uptime_ns(&self) -> u64 {
+        0
+    }
+    fn free_frames(&self) -> usize {
+        1
+    }
+    fn total_frames(&self) -> usize {
+        1
+    }
+    fn privilege(&self) -> u64 {
+        1
+    }
+    fn authorize(&self, _: ShellAction) -> bool {
+        true
+    }
+    fn run_tasks(&self) -> Option<kernel_core::shell::TaskRun> {
+        self.0
+    }
+}
+
+fn run_on<H: ShellHost>(host: &H, input: &str) -> String {
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let mut session = Session::new();
+    let mut log = String::new();
+    for b in input.bytes() {
+        session.feed(b, host, &mut fs, &mut dev, &mut |s| log.push_str(s));
+    }
+    log
+}
+
+/// `tasks` (ADR-199) names a machine that cannot start one, reports a clean run, and names each
+/// way a run can fail rather than printing success for it.
+#[test]
+fn tasks_reports_what_the_run_did_and_names_every_failure() {
+    let none = run_on(&TasksHost(None), "tasks\r");
+    assert!(none.contains("tasks: this machine cannot start a user-mode task from the console"));
+
+    let good = kernel_core::shell::TaskRun {
+        tasks: 2,
+        all_exited: true,
+        own_magic: true,
+        advised: true,
+    };
+    let log = run_on(&TasksHost(Some(good)), "tasks\r");
+    assert!(
+        log.contains("tasks: 2 user-mode task(s) admitted: advisor said"),
+        "{log}"
+    );
+    assert!(
+        log.contains("every task ran in its own address space and exited"),
+        "{log}"
+    );
+
+    for (run, want) in [
+        (
+            kernel_core::shell::TaskRun {
+                advised: false,
+                ..good
+            },
+            "FAILED: a task was admitted without advice",
+        ),
+        (
+            kernel_core::shell::TaskRun {
+                own_magic: false,
+                ..good
+            },
+            "FAILED: a slice ran outside its own address space",
+        ),
+        (
+            kernel_core::shell::TaskRun {
+                all_exited: false,
+                ..good
+            },
+            "FAILED: a task did not run to its exit",
+        ),
+    ] {
+        let log = run_on(&TasksHost(Some(run)), "tasks\r");
+        assert!(log.contains(want), "{want}: {log}");
+    }
+}
+
+/// A console without `system.schedule` starts nothing (ADR-199).
+#[test]
+fn tasks_needs_the_schedule_capability() {
+    struct NoSchedule;
+    impl ShellHost for NoSchedule {
+        fn arch(&self) -> &str {
+            "test-host"
+        }
+        fn uptime_ns(&self) -> u64 {
+            0
+        }
+        fn free_frames(&self) -> usize {
+            1
+        }
+        fn total_frames(&self) -> usize {
+            1
+        }
+        fn privilege(&self) -> u64 {
+            1
+        }
+        fn authorize(&self, action: ShellAction) -> bool {
+            action != ShellAction::Schedule
+        }
+        fn run_tasks(&self) -> Option<kernel_core::shell::TaskRun> {
+            panic!("tasks ran without system.schedule")
+        }
+    }
+    let log = run_on(&NoSchedule, "tasks\r");
+    assert!(log.contains("system.schedule"), "{log}");
+    assert!(!log.contains("admitted"), "{log}");
+}

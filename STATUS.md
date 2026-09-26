@@ -1271,6 +1271,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — the scheduler is advised while the machine runs (ADR-199)
+
+- `tasks` (capability `system.schedule`) admits real user-mode tasks through the resident risk
+  advisor, the scheduler's System 1, on all three CPUs under the live desktop; before, only the boot
+  suite's two tasks ever reached it. Commissioning's simulated clock no longer outlives it:
+  `mlstat` silence after `tasks` reads 0-1 s instead of ~28,660 s. Every run gives its frames back
+  on every CPU (the runs had kept page tables: ~338 frames per run on riscv64, 14 on aarch64, 4 on
+  x86-64).
+
 ### 2026-09-26 — the kernel heap frees (ADR-198)
 
 - `kheap` is the global allocator on all three CPUs (spin lock with interrupts masked). Twelve

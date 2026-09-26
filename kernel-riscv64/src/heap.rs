@@ -22,7 +22,7 @@ static HEAP: kernel_core::sync::SpinLock<kernel_core::kheap::Heap> =
 
 /// Mask supervisor interrupts on this hart; returns whether they were enabled.
 #[inline]
-fn irq_save() -> bool {
+pub(crate) fn irq_save() -> bool {
     let prev: usize;
     // SAFETY: clearing sstatus.SIE only changes this hart's interrupt enable.
     unsafe {
@@ -32,7 +32,7 @@ fn irq_save() -> bool {
 }
 
 #[inline]
-fn irq_restore(were_enabled: bool) {
+pub(crate) fn irq_restore(were_enabled: bool) {
     if were_enabled {
         // SAFETY: setting sstatus.SIE only changes this hart's interrupt enable.
         unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)) };

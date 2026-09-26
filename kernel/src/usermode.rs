@@ -1278,6 +1278,10 @@ fn cleanup_tasks(
         if let Some(f) = code[i].take() {
             drop_user_page(roots[i], USER_CODE_VA, f);
         }
+        // The page tables go back too: the console's `tasks` runs this again and again (ADR-199).
+        if roots[i] != 0 {
+            vm::destroy_space(roots[i]);
+        }
     }
 }
 
@@ -1375,6 +1379,25 @@ fn run_scheduler() -> (bool, bool, bool) {
     let magic_ok = order.len() == 8 && order.iter().all(|(slot, mag)| *mag == magics[*slot]);
     let spaces_distinct = roots[0] != roots[1] && roots[0] != root_main && roots[1] != root_main;
     (order_ok && both_done, magic_ok, spaces_distinct)
+}
+
+/// The console's `tasks` (ADR-199): the same advised run the boot suite proves, started at the
+/// operator's word, so the resident advisor is consulted during the machine's life and not only
+/// during its boot.
+///
+/// IRQs stay masked for the whole run, as they are during the boot suite: the desktop's pump runs
+/// off the timer interrupt and must not run while a task's address space is live, and the trap
+/// return path leaves the mask set, so the prompt's own state is restored explicitly afterwards.
+pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
+    let were_enabled = crate::heap::irq_save();
+    let (all_exited, own_magic, advised) = run_advised_scheduler();
+    crate::heap::irq_restore(were_enabled);
+    kernel_core::shell::TaskRun {
+        tasks: NTASK,
+        all_exited,
+        own_magic,
+        advised,
+    }
 }
 
 /// Run two **real ring-3 tasks** — own address spaces, own trap frames, real context switches —

@@ -1080,6 +1080,37 @@ fn run_scheduler() -> (bool, bool, bool) {
     (order_ok, magic_ok, spaces_distinct)
 }
 
+/// The console's `tasks` (ADR-199): the same advised run the boot suite proves, started at the
+/// operator's word, so the resident advisor is consulted during the machine's life and not only
+/// during its boot.
+///
+/// Interrupts stay off for the whole run, as they are during the boot suite. `sstatus.SIE` alone is
+/// not enough: an S-mode interrupt is taken while a U-mode task runs whatever SIE says, so every
+/// source in `sie` is cleared for the run and restored afterwards; the desktop's pump, which runs
+/// off the timer, then sees one late tick instead of running while a task's address space is live.
+///
+/// The console runs on the kernel's own trap vector (`shellio` re-installs it), which assumes the
+/// trap came from S-mode. A task's `ecall` taken there is stored through the TASK's stack pointer,
+/// so the user-mode vector is installed for exactly the run and the console's put back after it.
+pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
+    let were_enabled = crate::heap::irq_save();
+    let sources: usize;
+    // SAFETY: swapping `sie` with zero only masks this hart's interrupt sources; restored below.
+    unsafe { asm!("csrrw {s}, sie, zero", s = out(reg) sources, options(nomem, nostack)) };
+    install_trap_vector();
+    let (all_exited, own_magic, advised) = run_advised_scheduler();
+    crate::trap::init();
+    // SAFETY: restores exactly the sources that were enabled before the run.
+    unsafe { asm!("csrw sie, {s}", s = in(reg) sources, options(nomem, nostack)) };
+    crate::heap::irq_restore(were_enabled);
+    kernel_core::shell::TaskRun {
+        tasks: NTASK,
+        all_exited,
+        own_magic,
+        advised,
+    }
+}
+
 /// Run two **real U-mode tasks** — own address spaces, own trap frames, real `sret` context switches
 /// — admitted through the machine's **resident risk advisor** and dispatched by the shared
 /// `PriorityScheduler` (REQ-ML-003, ADR-056).
@@ -1104,12 +1135,15 @@ fn run_advised_scheduler() -> (bool, bool, bool) {
     let root_main = vm::active_root();
     let magics = [0x333u64, 0x444u64];
     let mut roots = [0usize; NTASK];
-    for r in roots.iter_mut() {
+    // Kept so the run can give every frame back: the console runs this again and again (ADR-199).
+    let mut pages = [None; NTASK];
+    for (r, p) in roots.iter_mut().zip(pages.iter_mut()) {
         let root = vm::build_identity().expect("advised sched root");
-        map_user_code(root, USER_CODE_VA, stub(_stub_sched_s, _stub_sched_e))
+        let code = map_user_code(root, USER_CODE_VA, stub(_stub_sched_s, _stub_sched_e))
             .expect("advised sched code");
-        map_user_data(root, USER_STACK_VA).expect("advised sched stack");
+        let stack = map_user_data(root, USER_STACK_VA).expect("advised sched stack");
         *r = root;
+        *p = Some((code, stack));
     }
     let mut tcb = [
         make_frame(USER_CODE_VA, USER_STACK_TOP, 0, magics[0], 0),
@@ -1209,6 +1243,15 @@ fn run_advised_scheduler() -> (bool, bool, bool) {
     let both_advised = resident::stats()
         .map(|s| s.advices == advices_before + NTASK as u64)
         .unwrap_or(false);
+    for (root, p) in roots.iter().zip(pages.iter_mut()) {
+        if let Some((code, stack)) = p.take() {
+            vm::unmap_page(*root, USER_STACK_VA);
+            frames::free_as(stack, Owner::USER);
+            vm::unmap_page(*root, USER_CODE_VA);
+            frames::free_as(code, Owner::USER);
+        }
+        vm::destroy_space(*root);
+    }
     (ran_ok, magic_ok, both_advised)
 }
 

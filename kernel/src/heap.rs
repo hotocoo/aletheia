@@ -59,7 +59,7 @@ static HEAP: kernel_core::sync::SpinLock<kernel_core::kheap::Heap> =
 
 /// Mask IRQs on this CPU; returns whether they were enabled.
 #[inline]
-fn irq_save() -> bool {
+pub(crate) fn irq_save() -> bool {
     let daif: u64;
     // SAFETY: reading DAIF and setting the I bit affect only this CPU's interrupt mask.
     unsafe {
@@ -70,7 +70,7 @@ fn irq_save() -> bool {
 }
 
 #[inline]
-fn irq_restore(were_enabled: bool) {
+pub(crate) fn irq_restore(were_enabled: bool) {
     if were_enabled {
         // SAFETY: clearing the I bit only changes this CPU's interrupt mask.
         unsafe { core::arch::asm!("msr daifclr, #2", options(nomem, nostack, preserves_flags)) };

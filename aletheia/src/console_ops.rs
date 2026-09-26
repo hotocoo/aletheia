@@ -117,6 +117,9 @@ fn risk_of(name: &str) -> Risk {
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
         | "history" | "echo" | "clear" | "input" | "date" | "display" | "power" | "boot"
         | "caps" | "net" => Risk::Safe,
+        // `tasks` starts two kernel-built user-mode stubs in their own address spaces: nothing on
+        // any medium changes and nothing leaves the machine (ADR-199).
+        "tasks" => Risk::Safe,
         // Unknown to this file: fail closed. An unclassified command is refused by the validator
         // below rather than being planned as harmless.
         _ => Risk::Destructive,
@@ -351,6 +354,7 @@ mod tests {
                     | "echo"
                     | "clear"
                     | "input"
+                    | "tasks"
             );
             assert!(named, "{verb} has no explicit risk classification");
         }

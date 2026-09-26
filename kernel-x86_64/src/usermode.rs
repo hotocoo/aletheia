@@ -1612,6 +1612,10 @@ fn cleanup_tasks(
     for i in 0..NTASK {
         free_leaf(roots[i], USER_STACK_VA, stack[i].take());
         free_leaf(roots[i], USER_CODE_VA, code[i].take());
+        // The page tables go back too: the console's `tasks` runs this again and again (ADR-199).
+        if roots[i] != 0 {
+            vm::destroy_space(roots[i]);
+        }
     }
 }
 
@@ -1718,6 +1722,19 @@ fn run_scheduler() -> (bool, bool, bool) {
     let magic_ok = order.len() == 8 && order.iter().all(|(slot, mag)| *mag == magics[*slot]);
     let spaces_distinct = roots[0] != roots[1] && roots[0] != root_main && roots[1] != root_main;
     (order_ok && both_done, magic_ok, spaces_distinct)
+}
+
+/// The console's `tasks` (ADR-199): the same advised run the boot suite proves, started at the
+/// operator's word, so the resident advisor is consulted during the machine's life and not only
+/// during its boot.
+pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
+    let (all_exited, own_magic, advised) = run_advised_scheduler();
+    kernel_core::shell::TaskRun {
+        tasks: NTASK,
+        all_exited,
+        own_magic,
+        advised,
+    }
 }
 
 /// Run two **real ring-3 tasks** — own address spaces, own trap frames, real `iretq` context

@@ -145,6 +145,18 @@ check_session() {
     grep -q "created marker" <<<"$log" || { echo "  FAIL [$label/first] touch did not create"; bad=1; }
     grep -q "work in"     <<<"$log" || { echo "  FAIL [$label/first] grep found nothing it should have"; bad=1; }
     grep -q "device flushed" <<<"$log" || { echo "  FAIL [$label/first] sync did not report"; bad=1; }
+    # System 1 is consulted during the machine's life, not only at boot (ADR-199): two runs of real
+    # user-mode tasks, each admitted through the resident advisor, under the live desktop.
+    [ "$(grep -c "every task ran in its own address space and exited" <<<"$log")" -ge 2 ] \
+      || { echo "  FAIL [$label/first] tasks did not run and exit twice"; bad=1; }
+    grep -q "tasks: 2 user-mode task(s) admitted: advisor said" <<<"$log" || { echo "  FAIL [$label/first] tasks did not report the advisor's answers"; bad=1; }
+    grep -q "FAILED:" <<<"$log" && { echo "  FAIL [$label/first] a tasks run reported a failure"; bad=1; }
+    # Every frame a run takes it gives back: the two `mem` readings around the runs agree.
+    local fr; fr="$(grep -o '^frames: [0-9]* free' <<<"$log" | tail -2 | sort -u | wc -l | tr -d ' ')"
+    [ "$fr" = "1" ] || { echo "  FAIL [$label/first] tasks runs changed the free frame count"; bad=1; }
+    # And `mlstat` then measures the silence in uptime: seconds, not commissioning's simulated hours.
+    local sil; sil="$(grep -o 'silence: [0-9]*s since the last advice' <<<"$log" | tail -1 | tr -dc '0-9')"
+    { [ -n "$sil" ] && [ "$sil" -lt 60 ]; } || { echo "  FAIL [$label/first] mlstat silence after tasks was '${sil}' s, not under 60"; bad=1; }
   else
     grep -q "$BODY" <<<"$log" \
       || { echo "  FAIL [$label/second] what the operator wrote did NOT survive the reboot"; bad=1; }
@@ -198,7 +210,7 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "mem" "mlstat" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
@@ -276,7 +288,7 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "mem" "mlstat" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?

@@ -77,6 +77,9 @@ impl ShellHost for Host {
     fn supervisor_escalations(&self) -> usize {
         crate::usermode::supervisor().escalations()
     }
+    fn run_tasks(&self) -> Option<shell::TaskRun> {
+        Some(crate::usermode::run_tasks_live())
+    }
     fn authorize(&self, action: shell::ShellAction) -> bool {
         shell::authorize_with_capabilities(&self.authority, &self.offered, action)
     }

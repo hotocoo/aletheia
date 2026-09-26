@@ -413,6 +413,18 @@ impl<'a> RiskService<'a> {
         probe.observe_submit(now_secs, task)
     }
 
+    /// Start the machine's own clock (ADR-199). Commissioning spreads its arrivals over SIMULATED
+    /// seconds, hours of them; left in place, every live advice afterwards, stamped with uptime,
+    /// lands "before" the last simulated tick and `mlstat` reports hours of silence straight after
+    /// an advice. The counts stay; only the timestamps restart at zero, the clock the machine keeps
+    /// from here on.
+    pub fn start_clock(&mut self) {
+        self.stats.first_advice_secs = 0;
+        self.stats.last_advice_secs = 0;
+        self.stats.max_gap_secs = 0;
+        self.stats.last_tick_secs = 0;
+    }
+
     /// Timestamp bookkeeping, including the gap that makes residency falsifiable.
     fn note_consultation(&mut self, now_secs: u64) {
         self.stats.advices = self.stats.advices.saturating_add(1);
@@ -956,6 +968,13 @@ pub mod resident {
         RESIDENT.lock().as_ref().and_then(|s| s.model_error())
     }
 
+    /// Restart the resident service's timestamps at zero (see [`RiskService::start_clock`]).
+    pub fn start_clock() {
+        if let Some(ref mut s) = *RESIDENT.lock() {
+            s.start_clock();
+        }
+    }
+
     /// Live counters. `None` only when no target ever installed an advisor.
     pub fn stats() -> Option<AdviceStats> {
         RESIDENT.lock().as_ref().map(|s| s.stats())
@@ -1139,11 +1158,14 @@ pub fn commission(tasks: u64, secs_per_task: u64) -> Commissioning {
     a.sort();
     b.sort();
 
+    let stats = resident::stats().unwrap_or_default();
+    // The simulated arrival times end here: from now on the service is stamped with uptime.
+    resident::start_clock();
     Commissioning {
         admitted,
         span_secs: span,
         bins: span / crate::taskfeat::PRESSURE_BIN_SEC,
-        stats: resident::stats().unwrap_or_default(),
+        stats,
         permutation: a == b && a.len() as u64 == admitted,
         refused,
     }
