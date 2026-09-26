@@ -60,9 +60,19 @@ pub const DISPLAY_ONE_LEN: usize = 24;
 /// The GET_DISPLAY_INFO response: header plus MAX_SCANOUTS entries.
 pub const DISPLAY_INFO_RESP_LEN: usize = CTRL_HDR_LEN + MAX_SCANOUTS * DISPLAY_ONE_LEN;
 
-/// Device-writable half of the control chain. The longest answer this driver asks for is the
-/// display-info table (408 B); half a page covers it with room to NOTICE an overrun attempt.
-const RESP_CAP: usize = 512;
+/// Device-writable half of the control chain. The longest answer this driver asks for is the EDID
+/// (ADR-191): header, size and a 1024-byte blob = 1056 B. Half the response frame covers it with
+/// room to NOTICE an overrun attempt.
+const RESP_CAP: usize = 2048;
+
+/// `VIRTIO_GPU_F_EDID` (feature bit 1, low word) and the command it enables (ADR-191).
+const F_EDID_BIT: u32 = 1;
+pub const CMD_GET_EDID: u32 = 0x010a;
+pub const RESP_OK_EDID: u32 = 0x1104;
+/// GET_EDID request: header + scanout u32 + padding u32. Response: header + size u32 + padding
+/// u32 + edid[1024].
+const GET_EDID_LEN: usize = CTRL_HDR_LEN + 8;
+pub const EDID_MAX: usize = 1024;
 
 /// Bounded completion wait — the same doctrine as the block and network drivers: a device that
 /// never completes yields an error instead of hanging past the VM watchdog.
@@ -394,6 +404,8 @@ pub struct VirtioGpu<H: VirtioHal, T: Transport> {
     resources: Vec<Resource>,
     num_scanouts: u32,
     version1: bool,
+    /// `VIRTIO_GPU_F_EDID` was offered and accepted.
+    edid: bool,
     status_at_ok: u32,
     /// Commands actually published to the device. The counter the suite compares across refusal
     /// batteries: silence is MEASURED, not assumed.
@@ -439,7 +451,10 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
         // REQUIRES the feature clears FEATURES_OK otherwise. VIRGL, EDID and blob resources stay
         // declined; they are behaviors this driver has no proofs for.
         let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
-        transport.set_driver_features(0, 0);
+        // EDID (ADR-191): accepted when offered - the display's own statement of its modes, read
+        // by a bounded, checksummed parser (`crate::edid`). VIRGL and blobs stay declined.
+        let edid = transport.device_features(0) & (1 << F_EDID_BIT) != 0;
+        transport.set_driver_features(0, if edid { 1 << F_EDID_BIT } else { 0 });
         transport.set_driver_features(
             1,
             1 << F_VERSION_1_BIT
@@ -492,6 +507,7 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
             resources: Vec::new(),
             num_scanouts,
             version1: true,
+            edid,
             status_at_ok: status,
             cmds_sent: Cell::new(0),
             local_refusals: Cell::new(0),
@@ -603,6 +619,81 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
                 Ok((le32(resp, 0), resp.len()))
             }
             None => Err(GpuError::Timeout),
+        }
+    }
+
+    /// Did the device agree to answer GET_EDID?
+    pub fn edid_supported(&self) -> bool {
+        self.edid
+    }
+
+    /// Ask the display for its EDID (ADR-191), copied into `out`; returns the bytes the device
+    /// said it wrote, bounded by `out` and `EDID_MAX`. Read-only.
+    ///
+    /// # Safety
+    /// The device must be live.
+    pub unsafe fn get_edid(&mut self, scanout: u32, out: &mut [u8]) -> Result<usize, GpuError> {
+        if !self.edid {
+            return Err(GpuError::Unsupported(
+                "the device did not offer VIRTIO_GPU_F_EDID",
+            ));
+        }
+        if scanout >= self.num_scanouts {
+            return Err(self.refused("no such scanout"));
+        }
+        let buf = core::slice::from_raw_parts_mut(self.cmd_buf as *mut u8, PAGE);
+        encode_req(buf, CMD_GET_EDID, GET_EDID_LEN);
+        buf[CTRL_HDR_LEN..CTRL_HDR_LEN + 4].copy_from_slice(&scanout.to_le_bytes());
+        let (ty, written) = self.command(GET_EDID_LEN)?;
+        if ty != RESP_OK_EDID || written < CTRL_HDR_LEN + 8 {
+            return Err(GpuError::Device(ty));
+        }
+        let resp = core::slice::from_raw_parts(self.resp_buf as *const u8, written);
+        let size = le32(resp, CTRL_HDR_LEN) as usize;
+        let avail = written - (CTRL_HDR_LEN + 8);
+        let n = size.min(EDID_MAX).min(avail).min(out.len());
+        out[..n].copy_from_slice(&resp[CTRL_HDR_LEN + 8..CTRL_HDR_LEN + 8 + n]);
+        Ok(n)
+    }
+
+    /// Everything the console reports about the display (ADR-191): the first enabled scanout's
+    /// geometry, its EDID (or why there is none), and the best mode within this driver's limits.
+    ///
+    /// # Safety
+    /// The device must be live.
+    pub unsafe fn read_display_facts(&mut self) -> crate::edid::resident::DisplayFacts {
+        use crate::edid::resident::{DisplayFacts, EdidAbsent};
+        let (index, current) = match self.get_display_info() {
+            Ok(scans) => scans
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.enabled)
+                .map(|(i, s)| (i as u32, (s.rect.width, s.rect.height)))
+                .unwrap_or((0, (0, 0))),
+            Err(_) => (0, (0, 0)),
+        };
+        let edid = if !self.edid {
+            Err(EdidAbsent::NotOffered)
+        } else {
+            // The whole answer (base block + extensions, up to EDID_MAX); `parse` reads the base.
+            let mut blob = [0u8; EDID_MAX];
+            match self.get_edid(index, &mut blob) {
+                Ok(n) => crate::edid::parse(&blob[..n]).map_err(EdidAbsent::Refused),
+                Err(_) => Err(EdidAbsent::DeviceError),
+            }
+        };
+        let best = edid.as_ref().ok().and_then(|e| {
+            e.best_fit(
+                MAX_RESOURCE_EXTENT_PX,
+                MAX_RESOURCE_EXTENT_PX,
+                MAX_RESOURCE_AREA_PX,
+            )
+        });
+        DisplayFacts {
+            current,
+            edid,
+            best,
+            running: None,
         }
     }
 
@@ -933,19 +1024,39 @@ pub fn gpu_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
         scans_ok
     );
 
-    // 4 — the geometry is PINNED, not merely sane: the qualified QEMU reports its head as
-    //     1280x800, enabled (MEASURED — the first boot of this suite answered exactly that; do not
-    //     "fix" this number from spec knowledge). A silent change here (different -device flags,
-    //     a different emulator or version) is a different machine than the one these gates qualify.
+    // 4 — the geometry agrees with the display (ADR-191): scanout 0 is enabled, and when the device
+    //     offers EDID its head IS the monitor's preferred mode. This used to pin 1280x800 - one
+    //     emulator's default - so any other monitor failed boot; the display is now asked instead.
     let pinned = match &scans {
-        Ok(v) => matches!(
-            v.first(),
-            Some(s) if s.enabled && s.rect == Rect { x: 0, y: 0, width: 1280, height: 800 }
-        ),
+        Ok(v) => match v.first() {
+            Some(s)
+                if s.enabled
+                    && s.rect.x == 0
+                    && s.rect.y == 0
+                    && s.rect.width > 0
+                    && s.rect.height > 0 =>
+            {
+                if dev.edid_supported() {
+                    let mut blob = [0u8; 256];
+                    // SAFETY: the device is live; GET_EDID is read-only.
+                    match unsafe { dev.get_edid(0, &mut blob) } {
+                        Ok(n) => crate::edid::parse(&blob[..n]).is_ok_and(|e| {
+                            e.preferred().is_some_and(|p| {
+                                p.width == s.rect.width && p.height == s.rect.height
+                            })
+                        }),
+                        Err(_) => false,
+                    }
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        },
         Err(_) => false,
     };
     check!(
-        "gpu: scanout 0 reports the machine display geometry (1280x800, enabled)",
+        "gpu: scanout 0 is enabled and its geometry is the display's own preferred mode",
         pinned
     );
 

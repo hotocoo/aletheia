@@ -232,7 +232,7 @@ fn the_vm_gate_marker_count_is_thirteen_and_dense() {
         "gpu: init reached DRIVER_OK",
         "gpu: the control queue DMA gate denies unregistered addresses",
         "gpu: GET_DISPLAY_INFO is answered",
-        "gpu: scanout 0 reports the machine display geometry", // (1280x800, enabled)
+        "gpu: scanout 0 is enabled and its geometry is the display's own preferred mode",
         "gpu: twelve invalid requests are refused by NAME",
         "gpu: RESOURCE_CREATE_2D is accepted",
         "gpu: rects outside a live resource are refused by name",

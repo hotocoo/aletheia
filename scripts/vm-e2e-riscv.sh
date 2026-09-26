@@ -132,7 +132,7 @@ echo "$OUT" | grep -E "\[soak\] journal: [0-9]+ txs .* => [0-9]+ tx/s" >/dev/nul
 echo "$OUT" | grep "ALL 12 BENCHMARK INVARIANTS HOLD" >/dev/null || { echo "FAIL: benchmark invariants marker missing (ALET-P2-010, ADR-064, REQ-PERF-002)"; fail=1; }
 echo "$OUT" | grep -E "\[bench\] authority: [0-9]+ checks \\| " >/dev/null || { echo "FAIL: the machine never measured its own authority-check cost (REQ-PERF-002)"; fail=1; }
 echo "$OUT" | grep "ALL 10 INPUT-RING INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-ring invariants marker missing (REQ-CON-002)"; fail=1; }
-echo "$OUT" | grep "ALL 57 CONSOLE INVARIANTS HOLD" >/dev/null || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
+echo "$OUT" | grep "ALL 58 CONSOLE INVARIANTS HOLD" >/dev/null || { echo "FAIL: console invariants marker missing (REQ-CON-001)"; fail=1; }
 echo "$OUT" | grep "ALL 9 DMA-BOUNDARY INVARIANTS HOLD" >/dev/null || { echo "FAIL: DMA-boundary invariants marker missing (REQ-DRV-006)"; fail=1; }
 # The advisor must be RESIDENT and CONSULTED on this booted machine, not merely verified
 # (REQ-ML-003, ADR-056): the live-path invariants hold, a model is actually resident, the
@@ -158,7 +158,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # map by design — the same arch-independent suites must prove the same counts over either bus, and
 # a divergence here is exactly what this assertion exists to catch. See scripts/lib-markers.sh.
 source "$ROOT/scripts/lib-markers.sh"
-RISCV_EXPECTED="bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=57 dma=9 dns=9 ed25519=8 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 reclaim=9 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=33 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=66"
+RISCV_EXPECTED="bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=58 dma=9 dns=9 ed25519=8 edid=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 reclaim=9 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=33 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$RISCV_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

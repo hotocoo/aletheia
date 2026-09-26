@@ -980,6 +980,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("uptime", "time since boot"),
     ("boot", "where boot time went: suites timed, total, the slowest"),
     ("date", "the wall clock, in UTC"),
+    (
+        "display",
+        "the display: its current geometry, every mode and refresh rate it reports, the best fit",
+    ),
     ("mem", "physical memory, in frames and bytes"),
     ("faults", "supervisor containment and escalation counters"),
     ("caps", "the capabilities this console holds (names, never tokens)"),
@@ -1089,6 +1093,74 @@ fn storage_error(e: StorageError) -> &'static str {
         StorageError::BadBlockSize => "a buffer was not one block",
         StorageError::TooLarge => "the transaction is too large for the journal",
         StorageError::Device => "the device reported a failure",
+    }
+}
+
+/// `display` (ADR-191): what the monitor says it can show.
+fn report_display(out: &mut dyn FnMut(&str)) {
+    use crate::edid::resident::EdidAbsent;
+    let Some(f) = crate::edid::resident::facts() else {
+        out("display: no display device on this machine");
+        return;
+    };
+    outf!(
+        out,
+        "display: scanout {}x{}{}",
+        f.current.0,
+        f.current.1,
+        match f.running {
+            Some((w, h)) => {
+                let mut b = crate::linebuf::LineBuf::<48>::new();
+                let _ =
+                    core::fmt::Write::write_fmt(&mut b, format_args!(", desktop at {}x{}", w, h));
+                b
+            }
+            None => crate::linebuf::LineBuf::<48>::new(),
+        }
+        .as_str()
+    );
+    match &f.edid {
+        Err(EdidAbsent::NotOffered) => out("  EDID: the device offers none (modes unknown)"),
+        Err(EdidAbsent::DeviceError) => out("  EDID: the device failed the request"),
+        Err(EdidAbsent::Refused(why)) => outf!(out, "  EDID: refused ({:?})", why),
+        Ok(e) => {
+            let m = e.manufacturer;
+            outf!(
+                out,
+                "  monitor: {} {}{}{} product {:#06x}, EDID {}.{}, {} extension block(s) not read",
+                core::str::from_utf8(e.name()).unwrap_or("?"),
+                m[0] as char,
+                m[1] as char,
+                m[2] as char,
+                e.product,
+                e.version,
+                e.revision,
+                e.extensions
+            );
+            let sorted = e.sorted();
+            let pref = e.preferred();
+            for mode in &sorted[..e.modes().len()] {
+                outf!(
+                    out,
+                    "  {:>5}x{:<5} {:>3}.{:02} Hz{}{}{}",
+                    mode.width,
+                    mode.height,
+                    mode.refresh_mhz / 1000,
+                    (mode.refresh_mhz % 1000) / 10,
+                    if mode.interlaced { " interlaced" } else { "" },
+                    if Some(*mode) == pref {
+                        "  preferred"
+                    } else {
+                        ""
+                    },
+                    if Some(*mode) == f.best {
+                        "  best fit"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
     }
 }
 
@@ -1598,6 +1670,12 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 }
                 Err(e) => outf!(out, "date: no wall clock ({:?})", e),
             }
+        }
+        "display" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            report_display(out);
         }
         "boot" => {
             if !authorize(host, ShellAction::Inspect, out) {
@@ -3197,6 +3275,11 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
     check!(
         "console: caps names the console's capabilities and never prints a token",
         log.contains("tokens are never printed") || log.contains("offers no capabilities")
+    );
+    let (log, _) = transcript("display\r", host, &mut fs, dev);
+    check!(
+        "console: display reports the scanout and the monitor's modes, or that there is no display",
+        log.contains("display: scanout ") || log.contains("no display device on this machine")
     );
     let (log, _) = transcript("net\r", host, &mut fs, dev);
     check!(

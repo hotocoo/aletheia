@@ -45,6 +45,7 @@ pub mod dhcp;
 pub mod dma;
 pub mod dns;
 pub mod ed25519;
+pub mod edid;
 pub mod entropy;
 pub mod faultclass;
 pub mod faultdev;

@@ -2165,6 +2165,40 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
                 }
                 Err(e) => kprintln!("[gpu] display info error: {:?}", e),
             }
+            // The display's own statement of its modes (ADR-191): EDID, parsed and kept for the
+            // console's `display`, after the reader's contract is proved on this CPU.
+            match kernel_core::edid::edid_suite(|n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            }) {
+                Ok(n) => kprintln!("[edid] ALL {} EDID INVARIANTS HOLD", n),
+                Err((idx, name)) => {
+                    kprintln!("[edid] FAILED at edid invariant {}: {}", idx, name);
+                    ActiveHal::exit(1080 + idx as i32);
+                }
+            }
+            // SAFETY: the device is live and owned here; GET_DISPLAY_INFO and GET_EDID are read-only.
+            let facts = unsafe { gpu.read_display_facts() };
+            match (&facts.edid, facts.best) {
+                (Ok(e), Some(b)) => kprintln!(
+                    "[edid] {} modes, preferred {:?}, best fit {}x{} @ {}.{:02} Hz",
+                    e.modes().len(),
+                    e.preferred().map(|p| (p.width, p.height, p.refresh_hz())),
+                    b.width,
+                    b.height,
+                    b.refresh_mhz / 1000,
+                    (b.refresh_mhz % 1000) / 10
+                ),
+                (Ok(e), None) => kprintln!(
+                    "[edid] {} modes, none within the driver's limits",
+                    e.modes().len()
+                ),
+                (Err(why), _) => kprintln!("[edid] no EDID: {:?}", why),
+            }
+            kernel_core::edid::resident::record(facts);
             match kernel_core::virtiogpu::gpu_suite(gpu, |n, passed, name| {
                 if passed {
                     kprintln!("  [pass {:>2}] {}", n, name);

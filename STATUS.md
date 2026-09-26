@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-09-26 — the display says what it can show (ADR-191)
+
+- EDID: the GPU driver accepts `VIRTIO_GPU_F_EDID`, reads the monitor's EDID and parses every
+  detailed, standard and established mode with its exact refresh rate (`kernel-core/src/edid.rs`,
+  `edid=5` on all three CPUs); `display` lists them with the preferred mode and the best fit.
+- The GPU suite no longer pins 1280x800 (any other monitor used to fail boot): the scanout must be
+  the display's own preferred mode. Live at 2560x1440: 12 modes, best fit 2560x1440 @ 74.99 Hz.
+
 ### 2026-09-26 — the browser follows redirects, under its own policy (ADR-190)
 
 - `go` and the browser window follow `301/302/303/307/308` up to 5 hops: https only, same-host paths
