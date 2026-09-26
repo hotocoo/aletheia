@@ -113,6 +113,8 @@ fn risk_of(name: &str) -> Risk {
         "oc" => Risk::Destructive,
         // `resolution` tears the desktop down and rebuilds it: its windows' contents reset.
         "resolution" => Risk::Destructive,
+        // `run` executes code from the namespace (ADR-201): a human answers for it.
+        "run" => Risk::Destructive,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
         | "history" | "echo" | "clear" | "input" | "date" | "display" | "power" | "boot"
@@ -355,6 +357,7 @@ mod tests {
                     | "clear"
                     | "input"
                     | "tasks"
+                    | "run"
             );
             assert!(named, "{verb} has no explicit risk classification");
         }

@@ -262,6 +262,7 @@ pub fn boot_suite<D: BlockDevice>(
         Ok(f) => f,
         Err(crate::fs::FsError::NotFormatted) => {
             Filesystem::format(dev).map_err(|_| (0, "platform custody: medium refused format"))?;
+            crate::persist::note_formatted();
             Filesystem::mount(dev).map_err(|_| (0, "platform custody: medium refused mount"))?
         }
         Err(_) => return Err((0, "platform custody: medium refused mount")),

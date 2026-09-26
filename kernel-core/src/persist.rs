@@ -372,6 +372,20 @@ pub fn boot_count(store: &Store) -> u64 {
     best
 }
 
+static FORMATTED_THIS_BOOT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Record that this boot formatted the machine's medium: it is a new machine's namespace.
+pub fn note_formatted() {
+    FORMATTED_THIS_BOOT.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether this boot formatted the medium (ADR-201): the console seeds a new namespace exactly
+/// once, on the boot that created it, so an object the operator removed never comes back.
+pub fn formatted_this_boot() -> bool {
+    FORMATTED_THIS_BOOT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Mount (formatting a blank device), load the store if one is there, record that this boot happened,
 /// and save it back atomically. Returns `(boot_number, entities_verified_from_the_previous_boot)`.
 ///
@@ -386,6 +400,7 @@ pub fn open_and_witness<D: BlockDevice>(dev: &mut D) -> Result<(u64, usize), Per
         Err(FsError::NotFormatted) => {
             // A blank medium: format it once, then proceed. A device error is NOT swallowed.
             Filesystem::format(dev)?;
+            note_formatted();
             Filesystem::mount(dev)?
         }
         Err(e) => return Err(PersistError::from(e)),

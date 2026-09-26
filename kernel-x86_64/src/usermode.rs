@@ -1742,6 +1742,106 @@ pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
     }
 }
 
+/// Slices a console-started program gets before it is abandoned (ADR-201).
+const PROGRAM_SLICES: u32 = 64;
+
+/// Where this target places a program: ring-3 code at [`USER_CODE_VA`] (ADR-201).
+pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
+    machine: kernel_core::elf::Machine::X86_64,
+    code_va: USER_CODE_VA,
+};
+
+/// The console's `run NAME` (ADR-201): one ring-3 task in its own address space, its code page the
+/// judged segment, admitted through the resident advisor and dispatched by the priority scheduler,
+/// with interrupts off as in [`run_tasks_live`]. Every frame it takes is given back.
+pub fn run_program_live(
+    program: &kernel_core::elf::Placement,
+) -> Option<kernel_core::shell::ProgramRun> {
+    x86_64::instructions::interrupts::without_interrupts(|| run_program(program))
+}
+
+fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::shell::ProgramRun> {
+    use crate::hal::{ActiveHal, Hal};
+    use kernel_core::mlsched::resident;
+    use kernel_core::priosched::{Priority, PriorityScheduler};
+    use kernel_core::taskfeat::{JobId, Outcome, TaskSubmission, UserId};
+
+    let root_main = vm::active_root();
+    let mut roots = [0u64; NTASK];
+    let mut code: [Option<frames::Frame>; NTASK] = [None, None];
+    let mut stack: [Option<frames::Frame>; NTASK] = [None, None];
+    roots[0] = vm::build_space()?;
+    code[0] = vm::map_stub_frame(roots[0], program.vaddr, program.code);
+    stack[0] = vm::map_user(roots[0], USER_STACK_VA, true);
+    if code[0].is_none() || stack[0].is_none() {
+        cleanup_tasks(&roots, &mut code, &mut stack);
+        return None;
+    }
+    // SAFETY: single-threaded; slot 0's TCB is initialised before its first resume.
+    unsafe {
+        (*addr_of_mut!(TCBS))[0] = Tcb {
+            frame: TrapFrame::new_user(program.entry, USER_STACK_TOP, RFLAGS_COOP),
+            done: false,
+        };
+    }
+
+    let mut policy = PriorityScheduler::default();
+    let now_secs = ActiveHal::ticks_to_ns(ActiveHal::timer_ticks()) / 1_000_000_000;
+    let submission = TaskSubmission {
+        sched_class: 2,
+        priority: 5,
+        cpu_millis: 500,
+        // The pages this program really holds: its code page and its stack page.
+        memory_pages: 2,
+        disk_pages: None,
+        diff_machine: false,
+        task_index: 0,
+        job: JobId(2),
+        user: UserId(0),
+    };
+    let _ = resident::observe_memory(kernel_core::mlsched::MemoryMeter {
+        total_pages: frames::total_count() as u64,
+        free_pages: frames::free_count() as u64,
+    });
+    if resident::admit(&mut policy, TaskId(0), Priority(5), now_secs, &submission).is_err() {
+        cleanup_tasks(&roots, &mut code, &mut stack);
+        return None;
+    }
+
+    let mut run = kernel_core::shell::ProgramRun::default();
+    while run.slices < PROGRAM_SLICES {
+        let Some(id) = policy.schedule_next() else {
+            break;
+        };
+        sched_report(0, false);
+        // SAFETY: as in `run_advised_scheduler` - switch into the program's space, resume it until
+        // it yields or exits, restore the console's space.
+        unsafe {
+            vm::switch_to(roots[0]);
+            resume_frame(&mut (*addr_of_mut!(TCBS))[0].frame as *mut TrapFrame);
+            vm::switch_to(root_main);
+        }
+        resident::observe_schedule();
+        run.slices += 1;
+        let (status, exited) = unsafe {
+            let s = &*addr_of!(SCHED);
+            (s.last_magic, s.exited)
+        };
+        if exited {
+            policy.finish(id);
+            resident::observe_outcome(JobId(2), UserId(0), Outcome::Finished);
+            run.exited = true;
+            run.status = status;
+            break;
+        }
+    }
+    if !run.exited {
+        resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
+    }
+    cleanup_tasks(&roots, &mut code, &mut stack);
+    Some(run)
+}
+
 /// Run two **real ring-3 tasks** — own address spaces, own trap frames, real `iretq` context
 /// switches — admitted through the machine's **resident risk advisor** and dispatched by the shared
 /// `PriorityScheduler` (REQ-ML-003, ADR-056).

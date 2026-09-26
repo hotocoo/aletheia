@@ -77,6 +77,12 @@ impl ShellHost for Host {
     fn supervisor_escalations(&self) -> usize {
         crate::usermode::supervisor().escalations()
     }
+    fn program_target(&self) -> Option<kernel_core::elf::Target> {
+        Some(crate::usermode::PROGRAM_TARGET)
+    }
+    fn run_program(&self, program: &kernel_core::elf::Placement) -> Option<shell::ProgramRun> {
+        crate::usermode::run_program_live(program)
+    }
     fn run_tasks(&self) -> Option<shell::TaskRun> {
         Some(crate::usermode::run_tasks_live())
     }
@@ -253,12 +259,23 @@ fn getc() -> Option<u8> {
 /// is NEVER reformatted — an interactive session must not be the thing that eats the disk.
 #[cfg(feature = "interactive")]
 fn mount_or_format<D: BlockDevice>(dev: &mut D) -> Option<Filesystem> {
-    if let Ok(fs) = Filesystem::mount(dev) {
-        return Some(fs);
+    let mut fs = match Filesystem::mount(dev) {
+        Ok(fs) => fs,
+        Err(_) => {
+            kprintln!("[console] no namespace on this device — formatting a fresh one");
+            Filesystem::format(dev).ok()?;
+            kernel_core::persist::note_formatted();
+            Filesystem::mount(dev).ok()?
+        }
+    };
+    // A namespace this boot created starts with `hello` (ADR-201); an older one is left alone.
+    if kernel_core::persist::formatted_this_boot() {
+        match shell::seed_namespace(&mut fs, dev, crate::usermode::PROGRAM_TARGET) {
+            Ok(()) => kprintln!("[console] new namespace: seeded the program `hello`"),
+            Err(e) => kprintln!("[console] could not seed the program `hello`: {:?}", e),
+        }
     }
-    kprintln!("[console] no namespace on this device — formatting a fresh one");
-    Filesystem::format(dev).ok()?;
-    Filesystem::mount(dev).ok()
+    Some(fs)
 }
 
 /// The desktop's file panel, served from the console's namespace (ADR-137). The console is the

@@ -829,6 +829,17 @@ pub struct TaskRun {
     pub advised: bool,
 }
 
+/// One console-started program run (ADR-201), as the target reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProgramRun {
+    /// Slices the program was dispatched for.
+    pub slices: u32,
+    /// The program reached `SYS_EXIT`.
+    pub exited: bool,
+    /// What it passed to `SYS_EXIT`.
+    pub status: u64,
+}
+
 /// The machine's network device as the console reports it (ADR-185): addresses and the driver's
 /// own counters, copied - nothing here is a handle to the device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -968,6 +979,14 @@ pub trait ShellHost {
     fn set_display_mode(&self, _w: u32, _h: u32) -> Result<(u32, u32), &'static str> {
         Err("this machine has no desktop to switch")
     }
+    /// Where this target places a program (ADR-201). `None` = it cannot start one from the console.
+    fn program_target(&self) -> Option<crate::elf::Target> {
+        None
+    }
+    /// Run a judged program as one user-mode task through the advised scheduler (ADR-201).
+    fn run_program(&self, _program: &crate::elf::Placement) -> Option<ProgramRun> {
+        None
+    }
     /// Run this target's user-mode tasks through the advised scheduler now (ADR-199). `None` = this
     /// machine cannot start a user-mode task from the console. Defaulted for hosts with no tasks.
     fn run_tasks(&self) -> Option<TaskRun> {
@@ -1066,6 +1085,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "mlstat",
         "the resident risk advisor: what it is, and what it has done since boot",
+    ),
+    (
+        "run NAME",
+        "run the program in object NAME as a user-mode task, admitted through the resident risk advisor",
     ),
     (
         "tasks",
@@ -1493,6 +1516,74 @@ fn split_first(line: &str) -> (&str, &str) {
     match t.find(char::is_whitespace) {
         Some(i) => (&t[..i], t[i..].trim_start()),
         None => (t, ""),
+    }
+}
+
+/// What a freshly formatted namespace starts with (ADR-201): the program `hello` for this CPU, so a
+/// new machine has something to `run` without a cross toolchain. Only ever called on the format
+/// path, so an object the operator removed is never brought back.
+pub fn seed_namespace<D: BlockDevice>(
+    fs: &mut Filesystem,
+    dev: &mut D,
+    target: crate::elf::Target,
+) -> Result<(), crate::fs::FsError> {
+    let hello = crate::elf::build(target, crate::elf::hello_code(target.machine));
+    fs.create(dev, "hello", &hello)
+}
+
+/// `run NAME` (ADR-201): judge the object's bytes as a program for this CPU, refuse by name what
+/// cannot be placed, and otherwise run it as one user-mode task admitted through the resident
+/// advisor, reporting that admission's verdict and the program's exit status.
+fn run_program(host: &dyn ShellHost, name: &str, bytes: &[u8], out: &mut dyn FnMut(&str)) {
+    let Some(target) = host.program_target() else {
+        out("run: this machine cannot start a program from the console");
+        return;
+    };
+    let program = match crate::elf::judge(bytes, target) {
+        Ok(p) => p,
+        Err(crate::elf::Refusal::WrongMachine(m)) => {
+            outf!(
+                out,
+                "run refused: {} is built for another CPU (e_machine {})",
+                name,
+                m
+            );
+            return;
+        }
+        Err(r) => {
+            outf!(out, "run refused: {}: {}", name, r.describe());
+            return;
+        }
+    };
+    let before = crate::mlsched::resident::stats().unwrap_or_default();
+    let Some(run) = host.run_program(&program) else {
+        out("run: this machine cannot start a program from the console");
+        return;
+    };
+    let after = crate::mlsched::resident::stats().unwrap_or_default();
+    outf!(
+        out,
+        "run: {} admitted: advisor said {} low / {} elevated / {} abstain",
+        name,
+        after.low - before.low,
+        after.elevated - before.elevated,
+        after.abstain - before.abstain
+    );
+    if run.exited {
+        outf!(
+            out,
+            "run: {} exited with status {} after {} slice(s)",
+            name,
+            run.status,
+            run.slices
+        );
+    } else {
+        outf!(
+            out,
+            "run: {} FAILED: did not exit within {} slice(s); abandoned",
+            name,
+            run.slices
+        );
     }
 }
 
@@ -1958,6 +2049,19 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             report_risk_advisor(out);
+        }
+        "run" => {
+            if !authorize(host, ShellAction::Schedule, out) {
+                return Outcome::Continue;
+            }
+            if rest.is_empty() {
+                out("usage: run NAME");
+            } else {
+                match fs.read(dev, rest) {
+                    Ok(bytes) => run_program(host, rest, &bytes, out),
+                    Err(e) => out(&fs_error(e)),
+                }
+            }
         }
         "tasks" => {
             if !authorize(host, ShellAction::Schedule, out) {

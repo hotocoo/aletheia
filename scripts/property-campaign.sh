@@ -12,13 +12,13 @@ SEED_HEX="${SEED#0x}"
 cat > "$OUT/seed.txt" <<EOF
 seed=0x${SEED_HEX}
 cases=${CASES}
-command=cargo test --manifest-path kernel-core/Cargo.toml --test property_campaign --test hostile_page -- --nocapture
+command=cargo test --manifest-path kernel-core/Cargo.toml --test property_campaign --test hostile_page --test elf -- --nocapture
 EOF
 export ALETHEIA_PROPERTY_CASES="$CASES" ALETHEIA_PROPERTY_SEED="$SEED_HEX"
 set +e
 # Two campaigns under one seed: the soak shapes (ALET-P2-010) and the hostile page (ADR-161), the
 # browser stack under generated adversarial HTTP, HTML, URLs and navigation.
-cargo test --manifest-path "$ROOT/kernel-core/Cargo.toml" --test property_campaign --test hostile_page -- --nocapture 2>&1 | tee "$OUT/run.log"
+cargo test --manifest-path "$ROOT/kernel-core/Cargo.toml" --test property_campaign --test hostile_page --test elf -- --nocapture 2>&1 | tee "$OUT/run.log"
 status=${PIPESTATUS[0]}
 set -e
 if [ "$status" -ne 0 ]; then

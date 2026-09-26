@@ -1093,22 +1093,141 @@ fn run_scheduler() -> (bool, bool, bool) {
 /// trap came from S-mode. A task's `ecall` taken there is stored through the TASK's stack pointer,
 /// so the user-mode vector is installed for exactly the run and the console's put back after it.
 pub fn run_tasks_live() -> kernel_core::shell::TaskRun {
-    let were_enabled = crate::heap::irq_save();
-    let sources: usize;
-    // SAFETY: swapping `sie` with zero only masks this hart's interrupt sources; restored below.
-    unsafe { asm!("csrrw {s}, sie, zero", s = out(reg) sources, options(nomem, nostack)) };
-    install_trap_vector();
-    let (all_exited, own_magic, advised) = run_advised_scheduler();
-    crate::trap::init();
-    // SAFETY: restores exactly the sources that were enabled before the run.
-    unsafe { asm!("csrw sie, {s}", s = in(reg) sources, options(nomem, nostack)) };
-    crate::heap::irq_restore(were_enabled);
+    let (all_exited, own_magic, advised) = fenced(run_advised_scheduler);
     kernel_core::shell::TaskRun {
         tasks: NTASK,
         all_exited,
         own_magic,
         advised,
     }
+}
+
+/// The live-run fence of [`run_tasks_live`], shared with `run` (ADR-199, ADR-201).
+fn fenced<R>(f: impl FnOnce() -> R) -> R {
+    let were_enabled = crate::heap::irq_save();
+    let sources: usize;
+    // SAFETY: swapping `sie` with zero only masks this hart's interrupt sources; restored below.
+    unsafe { asm!("csrrw {s}, sie, zero", s = out(reg) sources, options(nomem, nostack)) };
+    install_trap_vector();
+    let r = f();
+    crate::trap::init();
+    // SAFETY: restores exactly the sources that were enabled before the run.
+    unsafe { asm!("csrw sie, {s}", s = in(reg) sources, options(nomem, nostack)) };
+    crate::heap::irq_restore(were_enabled);
+    r
+}
+
+/// Slices a console-started program gets before it is abandoned (ADR-201).
+const PROGRAM_SLICES: u32 = 64;
+
+/// Where this target places a program: U-mode code at [`USER_CODE_VA`] (ADR-201).
+pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
+    machine: kernel_core::elf::Machine::Riscv64,
+    code_va: USER_CODE_VA as u64,
+};
+
+/// The console's `run NAME` (ADR-201): one U-mode task in its own address space, its code page the
+/// judged segment, admitted through the resident advisor and dispatched by the priority scheduler,
+/// under [`fenced`]. Every frame it takes is given back.
+pub fn run_program_live(
+    program: &kernel_core::elf::Placement,
+) -> Option<kernel_core::shell::ProgramRun> {
+    fenced(|| run_program(program))
+}
+
+fn run_program(program: &kernel_core::elf::Placement) -> Option<kernel_core::shell::ProgramRun> {
+    use crate::hal::{ActiveHal, Hal};
+    use kernel_core::mlsched::resident;
+    use kernel_core::priosched::{Priority, PriorityScheduler};
+    use kernel_core::taskfeat::{JobId, Outcome, TaskSubmission, UserId};
+
+    let root_main = vm::active_root();
+    let root = vm::build_identity()?;
+    // The judged bytes live in kernel RAM, identity-accessible, exactly as a linked stub does.
+    let bytes = Stub {
+        start: program.code.as_ptr() as usize,
+        end: program.code.as_ptr() as usize + program.code.len(),
+    };
+    let code = map_user_code(root, program.vaddr as usize, bytes);
+    let stack = map_user_data(root, USER_STACK_VA);
+    let teardown = |code: Option<frames::PhysFrame>, stack: Option<frames::PhysFrame>| {
+        if let Some(f) = stack {
+            vm::unmap_page(root, USER_STACK_VA);
+            frames::free_as(f, Owner::USER);
+        }
+        if let Some(f) = code {
+            vm::unmap_page(root, program.vaddr as usize);
+            frames::free_as(f, Owner::USER);
+        }
+        vm::destroy_space(root);
+    };
+    if code.is_none() || stack.is_none() {
+        teardown(code, stack);
+        return None;
+    }
+    let mut frame = make_frame(program.entry as usize, USER_STACK_TOP, 0, 0, 0);
+
+    let mut policy = PriorityScheduler::default();
+    let now_secs = ActiveHal::ticks_to_ns(ActiveHal::timer_ticks()) / 1_000_000_000;
+    let submission = TaskSubmission {
+        sched_class: 2,
+        priority: 5,
+        cpu_millis: 500,
+        // The pages this program really holds: its code page and its stack page.
+        memory_pages: 2,
+        disk_pages: None,
+        diff_machine: false,
+        task_index: 0,
+        job: JobId(2),
+        user: UserId(0),
+    };
+    let _ = resident::observe_memory(kernel_core::mlsched::MemoryMeter {
+        total_pages: frames::total_count() as u64,
+        free_pages: frames::free_count() as u64,
+    });
+    if resident::admit(&mut policy, TaskId(0), Priority(5), now_secs, &submission).is_err() {
+        teardown(code, stack);
+        return None;
+    }
+
+    let mut run = kernel_core::shell::ProgramRun::default();
+    while run.slices < PROGRAM_SLICES {
+        let Some(id) = policy.schedule_next() else {
+            break;
+        };
+        // SAFETY: single-threaded scheduler state, reset before the slice as in
+        // `run_advised_scheduler`.
+        unsafe {
+            *addr_of_mut!(CURRENT) = None;
+            let s = &mut *addr_of_mut!(SCHED);
+            s.exited = false;
+            s.last_magic = 0;
+        }
+        // SAFETY: `root` replicates the kernel identity map; switching for the slice is safe.
+        unsafe {
+            vm::switch_address_space(root);
+            run_one_shot(&mut frame);
+            vm::switch_address_space(root_main);
+        }
+        resident::observe_schedule();
+        run.slices += 1;
+        let (status, exited) = unsafe {
+            let s = &*addr_of!(SCHED);
+            (s.last_magic, s.exited)
+        };
+        if exited {
+            policy.finish(id);
+            resident::observe_outcome(JobId(2), UserId(0), Outcome::Finished);
+            run.exited = true;
+            run.status = status;
+            break;
+        }
+    }
+    if !run.exited {
+        resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
+    }
+    teardown(code, stack);
+    Some(run)
 }
 
 /// Run two **real U-mode tasks** — own address spaces, own trap frames, real `sret` context switches

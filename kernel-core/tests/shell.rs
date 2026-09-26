@@ -908,3 +908,101 @@ fn tasks_needs_the_schedule_capability() {
     assert!(log.contains("system.schedule"), "{log}");
     assert!(!log.contains("admitted"), "{log}");
 }
+
+const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
+    machine: kernel_core::elf::Machine::Aarch64,
+    code_va: 0x5000_0000,
+};
+
+/// A host that places programs for aarch64 and "runs" them by recording what it was given.
+struct ProgramHost(std::cell::Cell<Option<(u64, u64, usize)>>);
+
+impl ShellHost for ProgramHost {
+    fn arch(&self) -> &str {
+        "test-host"
+    }
+    fn uptime_ns(&self) -> u64 {
+        0
+    }
+    fn free_frames(&self) -> usize {
+        1
+    }
+    fn total_frames(&self) -> usize {
+        1
+    }
+    fn privilege(&self) -> u64 {
+        1
+    }
+    fn authorize(&self, _: ShellAction) -> bool {
+        true
+    }
+    fn program_target(&self) -> Option<kernel_core::elf::Target> {
+        Some(PROGRAM_TARGET)
+    }
+    fn run_program(
+        &self,
+        p: &kernel_core::elf::Placement,
+    ) -> Option<kernel_core::shell::ProgramRun> {
+        self.0.set(Some((p.vaddr, p.entry, p.code.len())));
+        Some(kernel_core::shell::ProgramRun {
+            slices: 1,
+            exited: true,
+            status: kernel_core::elf::HELLO_STATUS,
+        })
+    }
+}
+
+fn run_with_objects(host: &ProgramHost, objects: &[(&str, Vec<u8>)], input: &str) -> String {
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    for (name, bytes) in objects {
+        fs.create(&mut dev, name, bytes).unwrap();
+    }
+    let mut session = Session::new();
+    let mut log = String::new();
+    for b in input.bytes() {
+        session.feed(b, host, &mut fs, &mut dev, &mut |s| log.push_str(s));
+    }
+    log
+}
+
+/// `run NAME` (ADR-201) hands the target exactly the judged placement, reports the exit status,
+/// and refuses by name an object that is not a program for this CPU, before anything runs.
+#[test]
+fn run_places_a_judged_program_and_refuses_everything_else_by_name() {
+    use kernel_core::elf::{build, hello_code, Machine, Target};
+    let hello = build(PROGRAM_TARGET, hello_code(Machine::Aarch64));
+    let riscv = build(
+        Target {
+            machine: Machine::Riscv64,
+            code_va: 0x5000_0000,
+        },
+        hello_code(Machine::Riscv64),
+    );
+    let host = ProgramHost(std::cell::Cell::new(None));
+    let log = run_with_objects(
+        &host,
+        &[
+            ("hello", hello.clone()),
+            ("other", riscv),
+            ("note", b"just words".to_vec()),
+        ],
+        "run hello\rrun other\rrun note\rrun nosuch\r",
+    );
+    assert_eq!(
+        host.0.get(),
+        Some((0x5000_0000, 0x5000_0000 + 120, hello.len()))
+    );
+    assert!(log.contains("run: hello admitted: advisor said"), "{log}");
+    assert!(
+        log.contains("run: hello exited with status 55 after 1 slice(s)"),
+        "{log}"
+    );
+    assert!(
+        log.contains("run refused: other is built for another CPU (e_machine 243)"),
+        "{log}"
+    );
+    assert!(log.contains("run refused: note: not an ELF image"), "{log}");
+    assert!(!log.contains("run: nosuch admitted"), "{log}");
+}
