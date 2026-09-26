@@ -295,6 +295,71 @@ pub fn spawn_llama_server(cfg: &AiConfig, ctx: u32) -> std::io::Result<std::proc
         .spawn()
 }
 
+/// Where each System-1 backend's sidecar script lives: `ALETHEIA_SIDECARS`, else the tree this
+/// binary was built from (`scripts/system1/`, ADR-189).
+pub fn sidecar_root() -> PathBuf {
+    std::env::var("ALETHEIA_SIDECARS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("scripts")
+                .join("system1")
+        })
+}
+
+/// The command that serves `entry` on its manifest endpoint (ADR-189), built from the manifest
+/// alone: System 2 on `llama_cpp` is `llama-server`; System 1 is `<backend>_server.py` from
+/// `sidecars`. Every server binds 127.0.0.1. Refused by name when the weights are not on this
+/// machine, or when no server is known for the backend.
+pub fn serve_command(
+    entry: &super::registry::ModelEntry,
+    endpoint: &str,
+    sidecars: &Path,
+) -> Result<std::process::Command, String> {
+    let Some(path) = entry.path.as_ref().filter(|p| p.exists()) else {
+        return Err(format!(
+            "{} is not on this machine — `aletheiad model pull {}` first",
+            entry.id, entry.id
+        ));
+    };
+    let (_, port) = endpoint_host_port(endpoint);
+    match (entry.role, entry.backend.as_str()) {
+        (super::registry::Role::System2, "llama_cpp") => {
+            let mut c = std::process::Command::new("llama-server");
+            c.arg("-m")
+                .arg(path)
+                .arg("-c")
+                .arg(entry.context.to_string())
+                .args(["--host", "127.0.0.1", "--port"])
+                .arg(port.to_string())
+                .arg("--jinja");
+            Ok(c)
+        }
+        (super::registry::Role::System1, backend) => {
+            let script = sidecars.join(format!("{backend}_server.py"));
+            if !script.exists() {
+                return Err(format!(
+                    "no System-1 server for backend `{backend}` (looked for {})",
+                    script.display()
+                ));
+            }
+            let dir = path.parent().unwrap_or(Path::new("."));
+            let mut c = std::process::Command::new("python3");
+            c.arg(script)
+                .arg(dir)
+                .arg("--serve-id")
+                .arg(&entry.serve_id)
+                .arg("--port")
+                .arg(port.to_string());
+            Ok(c)
+        }
+        (_, backend) => Err(format!("no server is known for backend `{backend}`")),
+    }
+}
+
 /// Provision the configured model into the local cache if missing, returning its path (ADR-017).
 /// Aletheia-OWNED lifecycle: this is how the model "comes with" Aletheia without a 1.1 GB blob in
 /// git (see `models/minicpm.toml`). Prefers `huggingface-cli`/`hf` (which verify LFS integrity),

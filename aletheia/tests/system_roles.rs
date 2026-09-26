@@ -160,3 +160,53 @@ fn an_archive_that_does_not_match_its_pin_unpacks_nothing() {
     let err = aletheia::ai::runtime::pull_archive(&e, &cache).unwrap_err();
     assert!(err.contains("unverified"), "{err}");
 }
+
+#[test]
+fn serving_is_built_from_the_manifest_and_refused_by_name() {
+    use aletheia::ai::runtime::serve_command;
+    let root = scratch("sidecars");
+    std::fs::write(root.join("fake_server.py"), b"").unwrap();
+    let weights = scratch("serve-weights").join("model.safetensors");
+    std::fs::write(&weights, b"w").unwrap();
+    let mut e = system1_manifests()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| registry::manifests().into_iter().next().unwrap());
+    e.role = Role::System1;
+    e.backend = "fake".into();
+    e.serve_id = "s1-under-test".into();
+
+    e.path = None;
+    let err = serve_command(&e, "http://127.0.0.1:8091", &root).unwrap_err();
+    assert!(err.contains("model pull"), "{err}");
+
+    e.path = Some(weights.clone());
+    let c = serve_command(&e, "http://127.0.0.1:8123", &root).unwrap();
+    let args: Vec<String> = c
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(c.get_program(), "python3");
+    assert!(args[0].ends_with("fake_server.py"));
+    assert_eq!(args[1], weights.parent().unwrap().to_string_lossy());
+    assert_eq!(
+        &args[2..],
+        ["--serve-id", "s1-under-test", "--port", "8123"]
+    );
+
+    e.backend = "nobody".into();
+    let err = serve_command(&e, "http://127.0.0.1:8123", &root).unwrap_err();
+    assert!(err.contains("no System-1 server"), "{err}");
+
+    e.role = Role::System2;
+    e.backend = "llama_cpp".into();
+    let c = serve_command(&e, "http://127.0.0.1:8099", &root).unwrap();
+    let args: Vec<String> = c
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(c.get_program(), "llama-server");
+    assert!(args.windows(2).any(|w| w == ["--host", "127.0.0.1"]));
+    assert!(args.windows(2).any(|w| w == ["--port", "8099"]));
+    assert!(args.iter().any(|a| a == "--jinja"));
+}

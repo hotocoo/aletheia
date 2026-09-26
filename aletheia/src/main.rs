@@ -788,6 +788,7 @@ fn model_cmd(args: &[String]) {
             }
         },
         Some("bench") => model_bench(dirp),
+        Some("serve") => model_serve(dirp, args.get(3).map(|s| s.as_str())),
         // `model pull <id>`: one named model, whichever role it fills, from its hub or its
         // published archive (ADR-187).
         Some("pull") if args.get(3).is_some() => {
@@ -824,6 +825,76 @@ fn model_cmd(args: &[String]) {
             }
         }
         _ => model_status(dirp),
+    }
+}
+
+/// `aletheiad model serve [<id>]` (ADR-189): start the server for one named model, or for both
+/// selected systems, from their manifests, and stay in the foreground until one of them exits.
+fn model_serve(dir: &std::path::Path, id: Option<&str>) {
+    let mut want: Vec<(aletheia::ai::registry::ModelEntry, String)> = Vec::new();
+    match id {
+        Some(id) => {
+            let Some(e) = aletheia::ai::registry::find(id) else {
+                eprintln!("no model `{id}` is registered — try `aletheiad model list`");
+                std::process::exit(1);
+            };
+            let endpoint = match e.role {
+                aletheia::ai::registry::Role::System1 => std::env::var("SYSTEM1_ENDPOINT")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| e.endpoint.clone()),
+                aletheia::ai::registry::Role::System2 => std::env::var("MODEL_ENDPOINT")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| e.endpoint.clone()),
+            };
+            want.push((e, endpoint));
+        }
+        None => {
+            if let Some(s1) = aletheia::ai::config::System1Config::resolve(Some(dir)) {
+                want.push((s1.entry, s1.endpoint));
+            }
+            let cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
+            if let Some(e) = cfg.entry {
+                want.push((e, cfg.endpoint));
+            }
+        }
+    }
+    let root = aletheia::ai::runtime::sidecar_root();
+    let mut children = Vec::new();
+    for (e, endpoint) in &want {
+        match aletheia::ai::runtime::serve_command(e, endpoint, &root) {
+            Ok(mut c) => match c.spawn() {
+                Ok(child) => {
+                    eprintln!(
+                        "serving {} ({}) at {} — pid {}",
+                        e.id,
+                        e.role.as_str(),
+                        endpoint,
+                        child.id()
+                    );
+                    children.push((e.id.clone(), child));
+                }
+                Err(err) => eprintln!("could not start {}: {err}", e.id),
+            },
+            Err(err) => eprintln!("not serving {}: {err}", e.id),
+        }
+    }
+    if children.is_empty() {
+        std::process::exit(1);
+    }
+    // Foreground: the first server to exit ends the session, and says which one it was.
+    loop {
+        for (id, child) in children.iter_mut() {
+            if let Ok(Some(status)) = child.try_wait() {
+                eprintln!("{id} exited: {status}");
+                for (_, other) in children.iter_mut() {
+                    let _ = other.kill();
+                }
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }
 
