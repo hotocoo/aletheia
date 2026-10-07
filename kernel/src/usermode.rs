@@ -1582,7 +1582,7 @@ pub fn run_programs_live(
 /// Give back every page a program run mapped, and its address space (ADR-211).
 fn free_program_pages(
     root: usize,
-    program: &kernel_core::elf::Placement,
+    vaddr: usize,
     code: &mut Vec<frames::PhysFrame>,
     stack: &mut Option<frames::PhysFrame>,
     data: &mut Option<frames::PhysFrame>,
@@ -1594,7 +1594,7 @@ fn free_program_pages(
         drop_user_page(root, PROGRAM_STACK_VA, f);
     }
     for (i, f) in core::mem::take(code).into_iter().enumerate() {
-        drop_user_page(root, program.vaddr as usize + i * frames::FRAME_SIZE, f);
+        drop_user_page(root, vaddr + i * frames::FRAME_SIZE, f);
     }
     vm::destroy_space(root);
 }
@@ -1612,8 +1612,9 @@ fn run_program(
 /// runs, and its share of the "program on the CPU" state (`TCBS[0]`'s frame, `PROGRAM_GRANT`,
 /// `PROGRAM_OUT`, `PROGRAM_WINDOW_NOW`), which is swapped in for each of its slices and back out
 /// after, so the trap handler serves whichever program is running without knowing there are others.
-struct Slot<'p> {
-    program: &'p kernel_core::elf::Placement<'p>,
+struct Slot {
+    /// Where its code pages start, so they can be unmapped.
+    vaddr: usize,
     root: usize,
     code: Vec<frames::PhysFrame>,
     stack: Option<frames::PhysFrame>,
@@ -1627,7 +1628,7 @@ struct Slot<'p> {
     run: kernel_core::shell::ProgramRun,
 }
 
-impl Slot<'_> {
+impl Slot {
     /// Exchange this slot's state with the "program on the CPU" statics: once before its slice
     /// (the handler then serves it) and once after (the statics hold what they held before).
     ///
@@ -1642,10 +1643,19 @@ impl Slot<'_> {
         core::ptr::swap(&mut self.window, addr_of_mut!(PROGRAM_WINDOW_NOW));
     }
 
+    /// The program's report, its output included, with every page it held given back.
+    fn finish(mut self) -> kernel_core::shell::ProgramRun {
+        let mut run = core::mem::take(&mut self.run);
+        run.output = self.out.bytes().to_vec();
+        run.dropped = self.out.dropped();
+        self.free();
+        run
+    }
+
     fn free(mut self) {
         free_program_pages(
             self.root,
-            self.program,
+            self.vaddr,
             &mut self.code,
             &mut self.stack,
             &mut self.data,
@@ -1656,10 +1666,7 @@ impl Slot<'_> {
 /// Give a program its address space: code pages (ADR-211), stack page with its arguments at the
 /// top (ADR-206), data page if declared (ADR-210), and an entry frame. `None` = it cannot be
 /// placed; whatever was taken is given back.
-fn place_program<'p>(
-    program: &'p kernel_core::elf::Placement<'p>,
-    args: &[u8],
-) -> Option<Slot<'p>> {
+fn place_program(program: &kernel_core::elf::Placement, args: &[u8]) -> Option<Slot> {
     if args.len() > kernel_core::elf::MAX_ARGS {
         return None;
     }
@@ -1706,7 +1713,13 @@ fn place_program<'p>(
         }
     }
     let Some(st) = stack.filter(|_| code_ok && data_ok) else {
-        free_program_pages(root, program, &mut code, &mut stack, &mut data);
+        free_program_pages(
+            root,
+            program.vaddr as usize,
+            &mut code,
+            &mut stack,
+            &mut data,
+        );
         return None;
     };
     // The arguments sit at the top of the stack page, 16-aligned, and the stack starts below them
@@ -1734,7 +1747,7 @@ fn place_program<'p>(
         *addr_of!(CURRENT_TASK)
     };
     Some(Slot {
-        program,
+        vaddr: program.vaddr as usize,
         root,
         code,
         stack,
@@ -1755,6 +1768,90 @@ fn place_program<'p>(
         out: kernel_core::progout::OutputSink::new(),
         run: kernel_core::shell::ProgramRun::default(),
     })
+}
+
+/// Give one program one turn on the CPU (ADR-212, ADR-213): its state onto the CPU, its address
+/// space, resume until a timer slice or a syscall ends the turn, then back. Counts the slice,
+/// serves a read it asked for, and says how it ended - `None` while it is still running.
+fn run_slice(
+    slot: &mut Slot,
+    root_main: usize,
+    services: &mut dyn kernel_core::progout::ProgramServices,
+) -> Option<kernel_core::taskfeat::Outcome> {
+    use kernel_core::mlsched::resident;
+    use kernel_core::taskfeat::Outcome;
+
+    sched_report(0, false);
+    let dead_before = supervisor().terminated();
+    // SAFETY: single-threaded; the slot's state goes onto the CPU for exactly this slice, and only
+    // the timer's IRQ handler sets `preempted`, read after the slice. `CURRENT_TASK` is the
+    // supervisor's high-water id between turns (every id is handed out by bumping it), so it is put
+    // back after the turn and the next id handed out is never one a live program holds.
+    let high = unsafe {
+        (*addr_of_mut!(SCHED)).preempted = false;
+        let high = *addr_of!(CURRENT_TASK);
+        *addr_of_mut!(CURRENT_TASK) = slot.task;
+        slot.swap_onto_cpu();
+        // The slot's root identity-maps the kernel; switch into the program's space, resume it
+        // until it yields or exits, then restore the console's space.
+        vm::switch_address_space(slot.root);
+        resume_frame(&mut (*addr_of_mut!(TCBS))[0].frame as *mut TrapFrame);
+        vm::switch_address_space(root_main);
+        slot.swap_onto_cpu();
+        high
+    };
+    resident::observe_schedule();
+    slot.run.slices += 1;
+    // SAFETY: single-threaded; the slice is over.
+    let (preempted, status, exited) = unsafe {
+        *addr_of_mut!(CURRENT_TASK) = high;
+        let s = &*addr_of!(SCHED);
+        (s.preempted, s.last_magic, s.exited)
+    };
+    if preempted {
+        slot.run.preempted += 1;
+    }
+    if supervisor().terminated() != dead_before {
+        // The supervisor terminated it for a fault: the slice was its last (ADR-202).
+        // SAFETY: single-threaded; the run owns this id's record and gives it back here, and a
+        // terminated program's request is never served.
+        let reason = unsafe {
+            *addr_of_mut!(PENDING_READ) = None;
+            (*addr_of_mut!(SUPERVISOR)).reap(TaskId(slot.task))
+        };
+        slot.run.terminated = Some(reason.map_or("fault", |r| r.name()));
+        return Some(Outcome::Failed);
+    }
+    if exited {
+        slot.run.exited = true;
+        slot.run.status = status;
+        return Some(Outcome::Finished);
+    }
+    // A read the handler admitted is served now, through THIS program's frames, and its result
+    // lands in its saved x0 (ADR-207).
+    // SAFETY: single-threaded; the program is off the CPU.
+    if let Some(req) = unsafe { (*addr_of_mut!(PENDING_READ)).take() } {
+        if let (Some(c), Some(st)) = (slot.code.first().copied(), slot.stack) {
+            let mut empty = [0u8; 0];
+            // SAFETY: `c`, `st` and the data frame are this program's own identity-mapped frames,
+            // one page each, untouched while it is off the CPU.
+            slot.frame.regs[0] = unsafe {
+                kernel_core::progout::serve_read(
+                    &req,
+                    services,
+                    core::slice::from_raw_parts(c.addr() as *const u8, frames::FRAME_SIZE),
+                    core::slice::from_raw_parts_mut(st.addr() as *mut u8, frames::FRAME_SIZE),
+                    match slot.data {
+                        Some(d) => {
+                            core::slice::from_raw_parts_mut(d.addr() as *mut u8, frames::FRAME_SIZE)
+                        }
+                        None => &mut empty,
+                    },
+                )
+            };
+        }
+    }
+    None
 }
 
 /// Run programs together (ADR-212): each placed in its own address space, each admitted through
@@ -1834,78 +1931,12 @@ fn run_programs(
         dispatched += 1;
         let slot = &mut slots[id.0 as usize];
         slot.run.ended_at = dispatched;
-        sched_report(0, false);
-        let dead_before = supervisor().terminated();
-        // SAFETY: single-threaded; the slot's state goes onto the CPU for exactly this slice, and
-        // only the timer's IRQ handler sets `preempted`, read after the slice.
-        unsafe {
-            (*addr_of_mut!(SCHED)).preempted = false;
-            *addr_of_mut!(CURRENT_TASK) = slot.task;
-            slot.swap_onto_cpu();
-            // The slot's root identity-maps the kernel; switch into the program's space, resume
-            // it until it yields or exits, then restore the console's space.
-            vm::switch_address_space(slot.root);
-            resume_frame(&mut (*addr_of_mut!(TCBS))[0].frame as *mut TrapFrame);
-            vm::switch_address_space(root_main);
-            slot.swap_onto_cpu();
-        }
-        resident::observe_schedule();
-        slot.run.slices += 1;
-        // SAFETY: single-threaded; the slice is over.
-        let (preempted, status, exited) = unsafe {
-            let s = &*addr_of!(SCHED);
-            (s.preempted, s.last_magic, s.exited)
-        };
-        if preempted {
-            slot.run.preempted += 1;
-        }
-        if supervisor().terminated() != dead_before {
-            // The supervisor terminated it for a fault: the slice was its last (ADR-202).
+        let ended = run_slice(slot, root_main, services);
+        let spent = slot.run.preempted >= budget || slot.run.slices >= PROGRAM_DISPATCHES;
+        // Ended, or its budget spent (abandoned): the others keep their turns either way.
+        if let Some(outcome) = ended.or(spent.then_some(Outcome::Evicted)) {
             policy.finish(id);
-            resident::observe_outcome(JobId(2), UserId(0), Outcome::Failed);
-            // SAFETY: single-threaded; the run owns this id's record and gives it back here.
-            let reason = unsafe { (*addr_of_mut!(SUPERVISOR)).reap(TaskId(slot.task)) };
-            slot.run.terminated = Some(reason.map_or("fault", |r| r.name()));
-            // SAFETY: single-threaded; a terminated program's request is never served.
-            unsafe { *addr_of_mut!(PENDING_READ) = None };
-            continue;
-        }
-        if exited {
-            policy.finish(id);
-            resident::observe_outcome(JobId(2), UserId(0), Outcome::Finished);
-            slot.run.exited = true;
-            slot.run.status = status;
-            continue;
-        }
-        // A read the handler admitted is served now, through THIS program's frames, and its result
-        // lands in its saved x0 (ADR-207).
-        // SAFETY: single-threaded; the program is off the CPU.
-        if let Some(req) = unsafe { (*addr_of_mut!(PENDING_READ)).take() } {
-            if let (Some(c), Some(st)) = (slot.code.first().copied(), slot.stack) {
-                let mut empty = [0u8; 0];
-                // SAFETY: `c`, `st` and the data frame are this program's own identity-mapped
-                // frames, one page each, untouched while it is off the CPU.
-                slot.frame.regs[0] = unsafe {
-                    kernel_core::progout::serve_read(
-                        &req,
-                        services,
-                        core::slice::from_raw_parts(c.addr() as *const u8, frames::FRAME_SIZE),
-                        core::slice::from_raw_parts_mut(st.addr() as *mut u8, frames::FRAME_SIZE),
-                        match slot.data {
-                            Some(d) => core::slice::from_raw_parts_mut(
-                                d.addr() as *mut u8,
-                                frames::FRAME_SIZE,
-                            ),
-                            None => &mut empty,
-                        },
-                    )
-                };
-            }
-        }
-        if slot.run.preempted >= budget || slot.run.slices >= PROGRAM_DISPATCHES {
-            // Its budget is spent: abandoned, and the others keep their turns.
-            policy.finish(id);
-            resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
+            resident::observe_outcome(JobId(2), UserId(0), outcome);
         }
     }
     // The live desktop is pumped from this same timer: left armed, its handler re-arms at its own
@@ -1913,22 +1944,132 @@ fn run_programs(
     if own_gic {
         gic_teardown();
     }
-    // The ids handed out stay spent: the next run's programs count on from the last.
-    // SAFETY: single-threaded; the run is over.
-    unsafe {
-        *addr_of_mut!(CURRENT_TASK) = slots.iter().map(|s| s.task).max().unwrap_or(0);
-    }
-    let runs = slots
-        .into_iter()
-        .map(|mut slot| {
-            let mut run = core::mem::take(&mut slot.run);
-            run.output = slot.out.bytes().to_vec();
-            run.dropped = slot.out.dropped();
+    Some(slots.into_iter().map(Slot::finish).collect())
+}
+
+/// Programs left running in the background (ADR-213). Touched only by the console's thread with
+/// IRQs masked at EL1.
+static mut JOBS: kernel_core::jobs::Jobs<Slot> = kernel_core::jobs::Jobs::new();
+
+/// `start NAME` (ADR-213): place the program and admit it through the resident advisor exactly as
+/// `run` does, then leave it in [`JOBS`] for the console's idle loop to give turns to.
+pub fn start_program_live(
+    name: &str,
+    program: &kernel_core::elf::Placement,
+    args: &[u8],
+) -> Result<u32, &'static str> {
+    use crate::hal::{ActiveHal, Hal};
+    use kernel_core::mlsched::resident;
+    use kernel_core::taskfeat::{JobId, TaskSubmission, UserId};
+
+    let were_enabled = crate::heap::irq_save();
+    let started = (|| {
+        let slot = place_program(program, args)
+            .ok_or("it cannot be placed: too many arguments or not enough free memory")?;
+        let mut policy = PriorityScheduler::default();
+        let _ = resident::observe_memory(kernel_core::mlsched::MemoryMeter {
+            total_pages: frames::total_count() as u64,
+            free_pages: frames::free_count() as u64,
+        });
+        let submission = TaskSubmission {
+            sched_class: 2,
+            priority: 5,
+            cpu_millis: 500,
+            memory_pages: 2,
+            disk_pages: None,
+            diff_machine: false,
+            task_index: 0,
+            job: JobId(2),
+            user: UserId(0),
+        };
+        let now_secs = ActiveHal::ticks_to_ns(ActiveHal::timer_ticks()) / 1_000_000_000;
+        if resident::admit(&mut policy, TaskId(0), Priority(5), now_secs, &submission).is_err() {
             slot.free();
-            run
+            return Err("the resident advisor refused it at the memory boundary");
+        }
+        // SAFETY: single-threaded, IRQs masked; nothing else touches the table meanwhile.
+        unsafe { (*addr_of_mut!(JOBS)).add(name, slot) }.map_err(|slot| {
+            slot.free();
+            "every background place is taken; `kill` one first"
         })
-        .collect();
-    Some(runs)
+    })();
+    crate::heap::irq_restore(were_enabled);
+    started
+}
+
+/// Whether any program is left running (ADR-213).
+pub fn jobs_live() -> bool {
+    // SAFETY: a read of the table on the console's own thread, which is the only one that writes it.
+    unsafe { !(*addr_of!(JOBS)).is_empty() }
+}
+
+/// One turn for the next background program (ADR-213), from the console's idle loop. A program
+/// that ended in it is taken out, its pages given back, and handed to `ended`.
+pub fn tick_jobs_live(
+    services: &mut dyn kernel_core::progout::ProgramServices,
+    ended: &mut dyn FnMut(u32, &kernel_core::jobs::JobName, &kernel_core::shell::ProgramRun),
+) {
+    use kernel_core::mlsched::resident;
+    use kernel_core::taskfeat::{JobId, UserId};
+
+    let were_enabled = crate::heap::irq_save();
+    let own_gic = gicd_r32(GICD_CTLR) & 1 == 0;
+    if own_gic {
+        gic_init();
+    }
+    timer_arm();
+    let root_main = vm::active_root();
+    // SAFETY: single-threaded, IRQs masked; the table is the console thread's own.
+    let jobs = unsafe { &mut *addr_of_mut!(JOBS) };
+    let done = jobs.next_turn().and_then(|job| {
+        run_slice(&mut job.slot, root_main, services).map(|outcome| (job.id, outcome))
+    });
+    // The program's turn ended on the timer this desktop is pumped from, at EL0, where nothing
+    // pumps it: pump it here, so a program that never yields cannot freeze the screen.
+    #[cfg(feature = "interactive")]
+    crate::desktop::tick_pump();
+    if own_gic {
+        gic_teardown();
+    }
+    let finished = done.and_then(|(id, outcome)| {
+        resident::observe_outcome(JobId(2), UserId(0), outcome);
+        jobs.take(id)
+    });
+    crate::heap::irq_restore(were_enabled);
+    if let Some(job) = finished {
+        let id = job.id;
+        let run = job.slot.finish();
+        ended(id, &job.name, &run);
+    }
+}
+
+/// Every background program, as `jobs` shows it (ADR-213).
+pub fn list_jobs(each: &mut dyn FnMut(&kernel_core::jobs::JobFacts)) {
+    // SAFETY: a read of the table on the console's own thread, which is the only one that writes it.
+    let jobs = unsafe { &*addr_of!(JOBS) };
+    for j in jobs.iter() {
+        each(&kernel_core::jobs::JobFacts {
+            id: j.id,
+            name: j.name,
+            slices: j.slot.run.slices,
+        });
+    }
+}
+
+/// `kill ID` (ADR-213): end a background program now and give back everything it holds.
+pub fn kill_job_live(
+    id: u32,
+) -> Option<(kernel_core::jobs::JobName, kernel_core::shell::ProgramRun)> {
+    use kernel_core::mlsched::resident;
+    use kernel_core::taskfeat::{JobId, Outcome, UserId};
+
+    let were_enabled = crate::heap::irq_save();
+    // SAFETY: single-threaded, IRQs masked; the table is the console thread's own.
+    let job = unsafe { (*addr_of_mut!(JOBS)).take(id) };
+    crate::heap::irq_restore(were_enabled);
+    let job = job?;
+    resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
+    Some((job.name, job.slot.finish()))
 }
 
 /// Run two **real ring-3 tasks** — own address spaces, own trap frames, real context switches —
@@ -3117,6 +3258,56 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         check!(
             frames::free_count() == frames0 && crate::heap::live_bytes() == heap0,
             "together: three programs run at once give back every frame and heap byte"
+        );
+        // Programs left running (ADR-213): a spinner and `hello` started in the background; turns
+        // are given until `hello` ends on its own, a foreground `run` works while the spinner is
+        // still live, `kill` ends the spinner, and every frame and heap byte comes back.
+        let (frames0, heap0) = (frames::free_count(), crate::heap::live_bytes());
+        let (spin_job, hello_job) = match (judge(&spin, t), judge(&hello, t)) {
+            (Ok(s), Ok(h)) => (
+                start_program_live("spin", &s, b""),
+                start_program_live("hello", &h, b""),
+            ),
+            _ => (Err("judge"), Err("judge")),
+        };
+        let mut ended: Option<(u32, kernel_core::shell::ProgramRun)> = None;
+        let mut turns = 0;
+        while ended.is_none() && turns < 64 {
+            tick_jobs_live(&mut kernel_core::progout::NoServices, &mut |id, _, run| {
+                ended = Some((id, run.clone()))
+            });
+            turns += 1;
+        }
+        let foreground = judge(&hello, t).ok().and_then(|p| {
+            run_program(
+                &p,
+                b"",
+                &mut kernel_core::progout::NoServices,
+                PROGRAM_SLICES,
+            )
+        });
+        let mut listed = 0;
+        list_jobs(&mut |j| {
+            if j.name.as_str() == "spin" && j.slices > 0 {
+                listed += 1;
+            }
+        });
+        let killed = spin_job.ok().and_then(kill_job_live);
+        check!(
+            hello_job.is_ok()
+                && ended.as_ref().is_some_and(|(id, r)| Ok(*id) == hello_job
+                    && r.exited
+                    && r.status == HELLO_STATUS)
+                && foreground.is_some_and(|r| r.exited && r.status == HELLO_STATUS)
+                && listed == 1
+                && killed.is_some_and(|(n, r)| n.as_str() == "spin" && !r.exited && r.slices > 0)
+                && !jobs_live(),
+            "jobs: a background program ends on its own while a spinner runs beside it, a foreground run still works, and kill ends the spinner"
+        );
+        drop(ended);
+        check!(
+            frames::free_count() == frames0 && crate::heap::live_bytes() == heap0,
+            "jobs: background programs give back every frame and heap byte"
         );
         if STORMS {
             let (held, frames0, heap0) = (

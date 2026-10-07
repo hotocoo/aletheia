@@ -63,6 +63,7 @@ pub mod hpet;
 pub mod http;
 pub mod iommu;
 pub mod ipc;
+pub mod jobs;
 pub mod keymap;
 pub mod kheap;
 pub mod layout;

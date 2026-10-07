@@ -1083,3 +1083,166 @@ fn together_runs_a_set_or_refuses_it_whole() {
         "{log}"
     );
 }
+
+/// A host whose background programs each end after a set number of turns (ADR-213).
+struct JobHost(std::cell::RefCell<kernel_core::jobs::Jobs<u32>>);
+
+impl ShellHost for JobHost {
+    fn arch(&self) -> &str {
+        "test-host"
+    }
+    fn uptime_ns(&self) -> u64 {
+        0
+    }
+    fn free_frames(&self) -> usize {
+        1
+    }
+    fn total_frames(&self) -> usize {
+        1
+    }
+    fn privilege(&self) -> u64 {
+        1
+    }
+    fn authorize(&self, _: ShellAction) -> bool {
+        true
+    }
+    fn program_target(&self) -> Option<kernel_core::elf::Target> {
+        Some(PROGRAM_TARGET)
+    }
+    fn start_program(
+        &self,
+        name: &str,
+        _p: &kernel_core::elf::Placement,
+        args: &[u8],
+    ) -> Result<u32, &'static str> {
+        // The arguments say how many turns the job lasts.
+        let turns = core::str::from_utf8(args).ok().and_then(|a| a.parse().ok());
+        self.0
+            .borrow_mut()
+            .add(name, turns.unwrap_or(u32::MAX))
+            .map_err(|_| "every background place is taken")
+    }
+    fn jobs_live(&self) -> bool {
+        !self.0.borrow().is_empty()
+    }
+    fn tick_jobs(
+        &self,
+        _services: &mut dyn kernel_core::progout::ProgramServices,
+        ended: &mut dyn FnMut(u32, &kernel_core::jobs::JobName, &kernel_core::shell::ProgramRun),
+    ) {
+        let mut jobs = self.0.borrow_mut();
+        let Some(job) = jobs.next_turn() else { return };
+        job.slot -= 1;
+        if job.slot == 0 {
+            let id = job.id;
+            let job = jobs.take(id).unwrap();
+            let run = kernel_core::shell::ProgramRun {
+                slices: 2,
+                exited: true,
+                status: 55,
+                output: b"done\n".to_vec(),
+                ..Default::default()
+            };
+            ended(id, &job.name, &run);
+        }
+    }
+    fn jobs(&self, each: &mut dyn FnMut(&kernel_core::jobs::JobFacts)) {
+        for j in self.0.borrow().iter() {
+            each(&kernel_core::jobs::JobFacts {
+                id: j.id,
+                name: j.name,
+                slices: 7,
+            });
+        }
+    }
+    fn kill_job(
+        &self,
+        id: u32,
+    ) -> Option<(kernel_core::jobs::JobName, kernel_core::shell::ProgramRun)> {
+        let job = self.0.borrow_mut().take(id)?;
+        Some((
+            job.name,
+            kernel_core::shell::ProgramRun {
+                slices: 9,
+                ..Default::default()
+            },
+        ))
+    }
+}
+
+/// `start` leaves a program running and gives the console back; `jobs` lists it; the idle loop
+/// gives it turns and reports it when it ends; `kill` ends one at once (ADR-213).
+#[test]
+fn a_started_program_runs_in_the_background_and_is_reported_when_it_ends() {
+    use kernel_core::elf::{build, hello_code, Machine};
+    let host = JobHost(Default::default());
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    fs.create(
+        &mut dev,
+        "hello",
+        &build(PROGRAM_TARGET, hello_code(Machine::Aarch64)),
+    )
+    .unwrap();
+    fs.create(&mut dev, "note", b"words").unwrap();
+    // Two jobs: `hello 2` ends after two turns, `hello` never does until it is killed. Idle turns
+    // (None) come after `jobs`, then `kill`, `jobs` and `halt`.
+    let script: Vec<Option<u8>> = b"start hello 2\rstart hello\rstart note\rjobs\r"
+        .iter()
+        .map(|&b| Some(b))
+        .chain([None; 5])
+        .chain(
+            b"kill hello\rkill 2\rkill x\rkill\rjobs\rhalt\r"
+                .iter()
+                .map(|&b| Some(b)),
+        )
+        .collect();
+    let mut feed = script.into_iter();
+    let mut getc = move || feed.next().flatten();
+    let mut log = String::new();
+    shell::run_loop_serviced(
+        &host,
+        &mut fs,
+        &mut dev,
+        &mut getc,
+        &mut |s| log.push_str(s),
+        &mut |_, _, _, _| false,
+        &mut shell::BrowserHooks {
+            take_navigation: &mut || None,
+            show_page: &mut |_| {},
+        },
+    );
+    assert!(
+        log.contains("start: hello is job 1, running in the background: advisor said"),
+        "{log}"
+    );
+    assert!(
+        log.contains("start: hello is job 2, running in the background"),
+        "{log}"
+    );
+    assert!(
+        log.contains("start refused: note: not an ELF image"),
+        "{log}"
+    );
+    assert!(log.contains("  job 1  hello  7 slice(s) so far"), "{log}");
+    assert!(log.contains("  job 2  hello  7 slice(s) so far"), "{log}");
+    // Job 1 ended on an idle turn, in run's words, and only once.
+    assert_eq!(log.matches("job 1 (hello) ended:").count(), 1, "{log}");
+    assert!(log.contains("run: hello said:\r\ndone"), "{log:?}");
+    assert!(
+        log.contains("run: hello exited with status 55 after 2 slice(s)"),
+        "{log}"
+    );
+    assert!(
+        log.contains("kill: job 2 (hello) ended by the operator after 9 slice(s)"),
+        "{log}"
+    );
+    assert!(log.contains("kill: there is no job 2"), "{log}");
+    assert!(log.contains("kill: no job is running as x"), "{log}");
+    assert!(log.contains("usage: kill ID|NAME"), "{log}");
+    assert!(
+        log.contains("jobs: no program is running in the background"),
+        "{log}"
+    );
+}

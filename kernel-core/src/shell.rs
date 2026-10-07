@@ -1008,6 +1008,34 @@ pub trait ShellHost {
     ) -> Option<Vec<ProgramRun>> {
         None
     }
+    /// Leave a judged program running in the background as job `name` (ADR-213), handed `args`;
+    /// its job id, or why it was not started (nothing of it is left on the machine then).
+    fn start_program(
+        &self,
+        _name: &str,
+        _program: &crate::elf::Placement,
+        _args: &[u8],
+    ) -> Result<u32, &'static str> {
+        Err("this machine cannot start a program from the console")
+    }
+    /// Whether any background program is still running (ADR-213).
+    fn jobs_live(&self) -> bool {
+        false
+    }
+    /// Give the next background program one turn on the CPU (ADR-213), serving its reads through
+    /// `services`; a program that ended in that turn is handed to `ended` with its report.
+    fn tick_jobs(
+        &self,
+        _services: &mut dyn crate::progout::ProgramServices,
+        _ended: &mut dyn FnMut(u32, &crate::jobs::JobName, &ProgramRun),
+    ) {
+    }
+    /// Every background program still running, in place order (ADR-213).
+    fn jobs(&self, _each: &mut dyn FnMut(&crate::jobs::JobFacts)) {}
+    /// End background job `id` now (ADR-213): its name and report, or `None` if there is none.
+    fn kill_job(&self, _id: u32) -> Option<(crate::jobs::JobName, ProgramRun)> {
+        None
+    }
     /// Run this target's user-mode tasks through the advised scheduler now (ADR-199). `None` = this
     /// machine cannot start a user-mode task from the console. Defaulted for hosts with no tasks.
     fn run_tasks(&self) -> Option<TaskRun> {
@@ -1115,6 +1143,12 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "together NAME1 NAME2 [NAME3] [NAME4]",
         "run 2 to 4 programs at once, each its own user-mode task taking turns on the CPU",
     ),
+    (
+        "start NAME [TEXT]",
+        "leave the program in object NAME running in the background, handed TEXT; the console stays yours",
+    ),
+    ("jobs", "every program left running in the background"),
+    ("kill ID|NAME", "end a background job now, by its id or its name"),
     (
         "tasks",
         "run real user-mode tasks now, each admitted through the resident risk advisor",
@@ -1690,8 +1724,61 @@ fn run_together(
     out(&line);
 }
 
-/// What one program did, in `run`'s words (ADR-201..204), so `run` and `together` cannot drift.
-fn report_run(name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
+/// `start NAME [TEXT]` (ADR-213): judge the program as `run` does, then leave it running as a
+/// background job and give the console back at once.
+fn start_program(
+    host: &dyn ShellHost,
+    name: &str,
+    args: &[u8],
+    bytes: &[u8],
+    out: &mut dyn FnMut(&str),
+) {
+    let Some(target) = host.program_target() else {
+        out("start: this machine cannot start a program from the console");
+        return;
+    };
+    let program = match crate::elf::judge(bytes, target) {
+        Ok(p) => p,
+        Err(crate::elf::Refusal::WrongMachine(m)) => {
+            outf!(
+                out,
+                "start refused: {} is built for another CPU (e_machine {})",
+                name,
+                m
+            );
+            return;
+        }
+        Err(r) => {
+            outf!(out, "start refused: {}: {}", name, r.describe());
+            return;
+        }
+    };
+    let before = crate::mlsched::resident::stats().unwrap_or_default();
+    match host.start_program(name, &program, args) {
+        Ok(id) => {
+            let after = crate::mlsched::resident::stats().unwrap_or_default();
+            outf!(
+                out,
+                "start: {} is job {}, running in the background: advisor said {} low / {} elevated / {} abstain",
+                name,
+                id,
+                after.low - before.low,
+                after.elevated - before.elevated,
+                after.abstain - before.abstain
+            );
+        }
+        Err(why) => outf!(out, "start: {}: {}", name, why),
+    }
+}
+
+/// A background job ended on its own (ADR-213): say so, in `run`'s words.
+fn report_job_end(id: u32, name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
+    outf!(out, "job {} ({}) ended:", id, name);
+    report_run(name, run, out);
+}
+
+/// What a program wrote, as `run` shows it.
+fn report_output(name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
     if !run.output.is_empty() {
         outf!(out, "run: {} said:", name);
         crate::filepanel::print_safely(&run.output, out);
@@ -1704,6 +1791,11 @@ fn report_run(name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
             run.dropped
         );
     }
+}
+
+/// What one program did, in `run`'s words (ADR-201..204), so `run` and `together` cannot drift.
+fn report_run(name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
+    report_output(name, run, out);
     if let Some(kind) = run.terminated {
         outf!(
             out,
@@ -2216,6 +2308,80 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     }
                     Err(e) => out(&fs_error(e)),
                 }
+            }
+        }
+        "start" => {
+            if !authorize(host, ShellAction::Schedule, out) {
+                return Outcome::Continue;
+            }
+            let (name, args) = split_first(rest);
+            if name.is_empty() {
+                out("usage: start NAME [TEXT]");
+            } else if args.len() > crate::elf::MAX_ARGS {
+                outf!(
+                    out,
+                    "start refused: {} bytes of arguments; a program is handed at most {}",
+                    args.len(),
+                    crate::elf::MAX_ARGS
+                );
+            } else {
+                match fs.read(dev, name) {
+                    Ok(bytes) => start_program(host, name, args.as_bytes(), &bytes, out),
+                    Err(e) => out(&fs_error(e)),
+                }
+            }
+        }
+        "jobs" => {
+            if !authorize(host, ShellAction::Inspect, out) {
+                return Outcome::Continue;
+            }
+            let mut any = false;
+            host.jobs(&mut |j| {
+                any = true;
+                outf!(
+                    out,
+                    "  job {}  {}  {} slice(s) so far",
+                    j.id,
+                    j.name.as_str(),
+                    j.slices
+                );
+            });
+            if !any {
+                out("jobs: no program is running in the background");
+            }
+        }
+        "kill" => {
+            if !authorize(host, ShellAction::Schedule, out) {
+                return Outcome::Continue;
+            }
+            let target = rest.trim();
+            // A number is a job id; anything else is the name of a running job (the oldest
+            // started, if several share it).
+            let id = target.parse::<u32>().ok().or_else(|| {
+                let mut found = None;
+                host.jobs(&mut |j| {
+                    if found.is_none() && !target.is_empty() && j.name.as_str() == target {
+                        found = Some(j.id);
+                    }
+                });
+                found
+            });
+            match id {
+                None if target.is_empty() => out("usage: kill ID|NAME (as `jobs` shows them)"),
+                None => outf!(out, "kill: no job is running as {}", target),
+                Some(id) => match host.kill_job(id) {
+                    None => outf!(out, "kill: there is no job {}", id),
+                    Some((name, run)) => {
+                        outf!(
+                            out,
+                            "kill: job {} ({}) ended by the operator after {} slice(s)",
+                            id,
+                            name.as_str(),
+                            run.slices
+                        );
+                        report_output(name.as_str(), &run, out);
+                    }
+                },
             }
         }
         "together" => {
@@ -3535,6 +3701,28 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
             }
             if service(ServicePhase::Idle, fs, dev, &mut *out) {
                 session.prompt(out);
+            }
+            // Programs left running get the CPU while nobody types (ADR-213): one turn per pass,
+            // so a key pressed during a turn is read as soon as that turn ends.
+            if host.jobs_live() {
+                let mut services = crate::progout::FsServices {
+                    fs: &*fs,
+                    dev: &*dev,
+                };
+                let mut ended = false;
+                host.tick_jobs(&mut services, &mut |id, name, run| {
+                    // Below whatever prompt is showing, one console line per report line.
+                    out("\r\n");
+                    report_job_end(id, name.as_str(), run, &mut |l: &str| {
+                        out(l);
+                        out("\r\n");
+                    });
+                    ended = true;
+                });
+                if ended {
+                    session.prompt(out);
+                }
+                continue;
             }
             // Nothing typed. Wait for an interrupt rather than asking again immediately; see
             // `ShellHost::idle`, which does nothing at all unless a target has said it is safe.

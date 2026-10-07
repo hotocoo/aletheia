@@ -65,7 +65,7 @@ so the honest statement is the table in BENCHMARKS.md, extended one scenario at 
 ## The next rungs, in order
 
 1. Multi-page programs with a writable data segment and a heap (widen the ELF judge and the window). Done: ADR-210, ADR-211 (heap still open).
-2. More than one program at a time, preempted and scheduled together, with the advisor ranking them. Done: ADR-212.
+2. More than one program at a time, preempted and scheduled together, with the advisor ranking them. Done: ADR-212; left running in the background: ADR-213.
 3. Interrupt-driven virtio on every target (today most drivers poll).
 4. virtio-gpu 3D (virgl/Venus) research spike and ADR.
 5. First real-hardware boot (one x86-64 machine) with a measured, named driver list.

@@ -87,6 +87,30 @@ impl ShellHost for Host {
     ) -> Option<alloc::vec::Vec<shell::ProgramRun>> {
         crate::usermode::run_programs_live(set, services)
     }
+    fn start_program(
+        &self,
+        name: &str,
+        program: &kernel_core::elf::Placement,
+        args: &[u8],
+    ) -> Result<u32, &'static str> {
+        crate::usermode::start_program_live(name, program, args)
+    }
+    fn jobs_live(&self) -> bool {
+        crate::usermode::jobs_live()
+    }
+    fn tick_jobs(
+        &self,
+        services: &mut dyn kernel_core::progout::ProgramServices,
+        ended: &mut dyn FnMut(u32, &kernel_core::jobs::JobName, &shell::ProgramRun),
+    ) {
+        crate::usermode::tick_jobs_live(services, ended)
+    }
+    fn jobs(&self, each: &mut dyn FnMut(&kernel_core::jobs::JobFacts)) {
+        crate::usermode::list_jobs(each)
+    }
+    fn kill_job(&self, id: u32) -> Option<(kernel_core::jobs::JobName, shell::ProgramRun)> {
+        crate::usermode::kill_job_live(id)
+    }
     fn run_tasks(&self) -> Option<shell::TaskRun> {
         Some(crate::usermode::run_tasks_live())
     }

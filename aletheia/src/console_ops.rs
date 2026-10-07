@@ -117,6 +117,10 @@ fn risk_of(name: &str) -> Risk {
         "run" => Risk::Destructive,
         // `together` executes several of them at once (ADR-212): the same answer as `run`.
         "together" => Risk::Destructive,
+        // `start` leaves a program running and `kill` ends one (ADR-213): a human answers for both.
+        "start" | "kill" => Risk::Destructive,
+        // `jobs` only lists what is running.
+        "jobs" => Risk::Safe,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
         | "history" | "echo" | "clear" | "input" | "date" | "display" | "power" | "boot"
@@ -361,6 +365,9 @@ mod tests {
                     | "tasks"
                     | "run"
                     | "together"
+                    | "start"
+                    | "kill"
+                    | "jobs"
             );
             assert!(named, "{verb} has no explicit risk classification");
         }
