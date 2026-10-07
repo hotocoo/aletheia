@@ -16,6 +16,7 @@
 # kernel-x86_64/scripts/mkesp.py, so this gate needs no mtools, no hdiutil, and no QEMU.
 #
 # Exit 0 = PASS. Exit 0 with "SKIP" = VirtualBox is not installed (never a silent pass). Exit 1 = FAIL.
+# VBOX_REQUIRED=1 (set by CI) turns every SKIP-because-VirtualBox-cannot-run into exit 1.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -53,6 +54,7 @@ for c in "${VBOXMANAGE:-}" "$(command -v VBoxManage 2>/dev/null)" \
 done
 if [ -z "$VBM" ]; then
   echo "SKIP: VBoxManage not found (install Oracle VirtualBox, or set VBOXMANAGE=/path/to/VBoxManage)"
+  if [ "${VBOX_REQUIRED:-0}" = 1 ]; then echo "VM-E2E-VBOX: FAIL (VBOX_REQUIRED=1 and VirtualBox absent)"; exit 1; fi
   echo "VM-E2E-VBOX: SKIP (VirtualBox absent — this rung did NOT run)"
   exit 0
 fi
@@ -73,6 +75,7 @@ case "$HOST_ARCH" in
   *)
     echo "SKIP: this host is $HOST_ARCH and VirtualBox virtualizes the host architecture — it cannot"
     echo "      run an x86-64 guest here. Run this rung on an x86-64 host (see docs/VIRTUALBOX.md)."
+    if [ "${VBOX_REQUIRED:-0}" = 1 ]; then echo "VM-E2E-VBOX: FAIL (VBOX_REQUIRED=1 and host cannot virtualize x86-64)"; exit 1; fi
     echo "VM-E2E-VBOX: SKIP (host cannot virtualize x86-64 — this rung did NOT run)"
     exit 0
     ;;
@@ -188,7 +191,7 @@ boot_once() {
   } >/dev/null 2>&1 || { echo "FAIL: VM provisioning" >&2; return 2; }
 
   echo "==> [4/4] booting headless (watchdog ${TIMEOUT_S}s)" >&2
-  "$VBM" startvm "$VM_NAME" --type headless >/dev/null 2>&1 \
+  "$VBM" startvm "$VM_NAME" --type headless >&2 \
     || { echo "FAIL: startvm (nested virtualization unavailable?)" >&2; return 2; }
 
   # The kernel halts rather than exiting (no isa-debug-exit here), so the gate watches the log and

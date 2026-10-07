@@ -295,12 +295,19 @@ jobs:
         run: |
           rustup toolchain install nightly-2026-08-09 --profile minimal
           rustup target add x86_64-unknown-uefi --toolchain nightly-2026-08-09
-      # GitHub-hosted runners are themselves VMs with no nested virtualization, so VirtualBox cannot
-      # start a guest here. The gate reports SKIP and exits 0 rather than failing — a job that is
-      # guaranteed red trains people to ignore a red pipeline (ADR-046 §6). It still RUNS, so the
-      # build + image-assembly half is exercised on every push, and on a self-hosted runner with
-      # nested virtualization the boot half runs too and the job becomes a real gate.
-      - name: Build .efi, assemble the GPT/ESP image, boot under VirtualBox (SKIP without nested virt)
+      # ubuntu-latest exposes /dev/kvm (nested virtualization). VirtualBox cannot take VT-x/AMD-V while
+      # KVM holds it, so unload KVM, build the vbox kernel modules, and boot for real.
+      - name: Install VirtualBox, free VT-x from KVM, load vboxdrv
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y virtualbox virtualbox-dkms linux-headers-$(uname -r)
+          sudo modprobe -r kvm_intel kvm_amd kvm || true
+          sudo modprobe vboxdrv
+          sudo chmod 666 /dev/vboxdrv /dev/vboxdrvu 2>/dev/null || true
+          VBoxManage --version
+      - name: Build .efi, assemble the GPT/ESP image, boot under VirtualBox (SKIP is a failure here)
+        env:
+          VBOX_REQUIRED: "1"
         run: ./scripts/vm-e2e-vbox.sh
 
   conformance:
