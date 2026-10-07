@@ -45,7 +45,9 @@ game and its audio, a server and its client. This is the next rung of
   and `trap`; `hello` exits with its status and `trap` is terminated, both ending before the
   spinner, which is abandoned at its budget; the set gives back every frame and heap byte.
 * Live console, every target (`scripts/console-e2e.sh`): `together spin hello trap` under the
-  desktop prints `together: finished in order: hello trap spin`.
+  desktop prints `together: finished in order: trap hello spin` - `trap` is terminated in its
+  first slice, `hello` needs several (each write is a syscall that ends its turn), and the spinner
+  admitted before both is the last to end, abandoned at its budget.
 
 ## Non-claims
 

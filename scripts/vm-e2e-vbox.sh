@@ -156,11 +156,19 @@ PY="$(command -v python3 || command -v python)"
 "$PY" "$X86/scripts/mkesp.py" --efi "$EFI" --out "$IMG" \
   || { echo "FAIL: image build"; echo "VM-E2E-VBOX: FAIL"; exit 1; }
 
+# Every VBoxManage call is bounded: a host-side command that blocks (a poweroff the VM never
+# acknowledges, a wedged service) must fail this gate with its name, not hang the job for an hour.
+if command -v timeout >/dev/null 2>&1; then
+  vbm() { timeout --kill-after=10 "${VBM_CALL_TIMEOUT_S:-90}" "$VBM" "$@"; local rc=$?; [ $rc -eq 124 ] && echo "VBoxManage $1 timed out" >&2; return $rc; }
+else
+  vbm() { "$VBM" "$@"; }
+fi
+
 # --- one full boot at a given guest memory size ---------------------------------------------------
 cleanup() {
-  "$VBM" controlvm "$VM_NAME" poweroff >/dev/null 2>&1
-  "$VBM" unregistervm "$VM_NAME" --delete >/dev/null 2>&1
-  "$VBM" closemedium disk "$(hostpath "$VDI")" --delete >/dev/null 2>&1
+  vbm controlvm "$VM_NAME" poweroff >/dev/null 2>&1
+  vbm unregistervm "$VM_NAME" --delete >/dev/null 2>&1
+  vbm closemedium disk "$(hostpath "$VDI")" --delete >/dev/null 2>&1
   rm -f "$VDI"
 }
 
@@ -173,25 +181,25 @@ boot_once() {
   rm -f "$LOG"
 
   echo "==> [2/4] converting raw image -> VDI" >&2
-  "$VBM" convertfromraw "$(hostpath "$IMG")" "$(hostpath "$VDI")" --format VDI >/dev/null 2>&1 \
+  vbm convertfromraw "$(hostpath "$IMG")" "$(hostpath "$VDI")" --format VDI >/dev/null 2>&1 \
     || { echo "FAIL: convertfromraw" >&2; return 2; }
 
   echo "==> [3/4] provisioning VM (EFI firmware, SATA/AHCI, ${CPUS} vCPU, ${mem} MiB, serial -> file)" >&2
   {
-    "$VBM" createvm --name "$VM_NAME" --ostype Other_64 --register &&
+    vbm createvm --name "$VM_NAME" --ostype Other_64 --register &&
     # --firmware efi is not optional: VirtualBox defaults to legacy BIOS, which never loads
     # \EFI\BOOT\BOOTX64.EFI and would present as a silent hang rather than a configuration error.
-    "$VBM" modifyvm "$VM_NAME" --firmware efi --memory "$mem" --cpus "$CPUS" \
+    vbm modifyvm "$VM_NAME" --firmware efi --memory "$mem" --cpus "$CPUS" \
         --graphicscontroller vmsvga --nic1 none --audio-driver none &&
-    "$VBM" storagectl "$VM_NAME" --name SATA --add sata --controller IntelAhci --portcount 1 --bootable on &&
-    "$VBM" storageattach "$VM_NAME" --storagectl SATA --port 0 --device 0 --type hdd \
+    vbm storagectl "$VM_NAME" --name SATA --add sata --controller IntelAhci --portcount 1 --bootable on &&
+    vbm storageattach "$VM_NAME" --storagectl SATA --port 0 --device 0 --type hdd \
         --medium "$(hostpath "$VDI")" &&
     # COM1 at the architectural 0x3F8/IRQ4, backed by a host file the gate greps.
-    "$VBM" modifyvm "$VM_NAME" --uart1 0x3F8 4 --uart-mode1 file "$(hostpath "$LOG")"
+    vbm modifyvm "$VM_NAME" --uart1 0x3F8 4 --uart-mode1 file "$(hostpath "$LOG")"
   } >/dev/null 2>&1 || { echo "FAIL: VM provisioning" >&2; return 2; }
 
   echo "==> [4/4] booting headless (watchdog ${TIMEOUT_S}s)" >&2
-  "$VBM" startvm "$VM_NAME" --type headless >&2 \
+  vbm startvm "$VM_NAME" --type headless >&2 \
     || { echo "FAIL: startvm (nested virtualization unavailable?)" >&2; return 2; }
 
   # The kernel halts rather than exiting (no isa-debug-exit here), so the gate watches the log and
@@ -204,7 +212,7 @@ boot_once() {
     if grep -q 'e2e\] PASS' "$LOG" 2>/dev/null; then v="pass"; break; fi
     if grep -Eq 'FAILED at|FATAL|KERNEL PANIC' "$LOG" 2>/dev/null; then v="fail"; break; fi
   done
-  "$VBM" controlvm "$VM_NAME" poweroff >/dev/null 2>&1
+  vbm controlvm "$VM_NAME" poweroff >/dev/null 2>&1
   sleep 1
   printf '%s' "$v"
 }

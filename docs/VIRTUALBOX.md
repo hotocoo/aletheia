@@ -231,6 +231,7 @@ protection — which is the behavior you want from an OS that cannot verify a CP
 
 | Symptom | Cause |
 |---|---|
+| `FAIL: ... VBOX_REQUIRED=1` | CI requires the rung to run (since 2026-10-07); install VirtualBox on the runner |
 | `SKIP: VBoxManage not found` | VirtualBox not installed, or set `VBOXMANAGE=/path/to/VBoxManage` |
 | `FAIL: startvm (nested virtualization unavailable?)` | you are inside a VM already; VirtualBox cannot nest here |
 | VM window blank, no serial output | `--firmware efi` was omitted, so the VM is in BIOS mode |

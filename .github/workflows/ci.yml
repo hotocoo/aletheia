@@ -289,6 +289,8 @@ jobs:
   vm-e2e-vbox:
     name: Second-hypervisor boot e2e — x86-64 on Oracle VirtualBox (ADR-046)
     runs-on: ubuntu-latest
+    # Two boots of at most a few minutes each; a hang must end as a failure with its log.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust nightly + x86_64-unknown-uefi target

@@ -95,6 +95,11 @@ serial log rather than by a process exit code.**
    runner" guard that reports **SKIP** on an incapable runner, and `scripts/check-ci-parity.sh` learns
    about the rung so the two pipelines still have to agree about it.
 
+   **Superseded on GitHub (2026-10-07, commit b1ae8c4):** GitHub-hosted Ubuntu runners now expose
+   hardware virtualization. The job installs VirtualBox, unloads KVM (which holds VT-x), loads
+   `vboxdrv` and runs the gate with `VBOX_REQUIRED=1`, which turns an absent-VirtualBox SKIP into a
+   FAIL. The job boots the image for real at both memory sizes and is a blocking gate there.
+
 7. **The gate boots at two guest memory sizes, and that is not padding.** The firmware's memory map
    is an *input* to the kernel — it decides where the image is loaded and where the largest
    conventional region starts — so a gate that always passes the same size proves "correct against
