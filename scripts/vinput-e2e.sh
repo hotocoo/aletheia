@@ -227,7 +227,11 @@ def run_input():
         if FACTS_RE.search(chunk) and CURSOR_RE.search(chunk) and FOCUS_RE.search(chunk):
             break
         time.sleep(0.2)
-    time.sleep(0.2)                # let the prompt land too
+    # Let the whole readout and the prompt after it land before returning: a fixed pause lost the
+    # race on a loaded runner, and the late prompt then counted as console output in the NEXT step.
+    end = time.time() + 10
+    while time.time() < end and not log_text()[mark:].rstrip().endswith('aletheia>'):
+        time.sleep(0.1)
     chunk = log_text()[mark:]
     facts = FACTS_RE.search(chunk)
     cursor = CURSOR_RE.search(chunk)
