@@ -173,7 +173,7 @@ cleanup() {
   rm -f "$VDI"
 }
 
-# Echoes "pass"/"fail"/"" (watchdog) on stdout; everything human-facing goes to stderr so the caller
+# Writes "pass"/"fail"/"" (watchdog) to stdout; everything human-facing goes to stderr so the caller
 # can capture the verdict without parsing the transcript.
 boot_once() {
   local mem="$1"
@@ -224,7 +224,10 @@ for mem in $MEM_SIZES; do
   echo "======================================================================"
   echo "  BOOT @ ${mem} MiB guest RAM"
   echo "======================================================================"
-  verdict="$(boot_once "$mem")"
+  # The verdict comes back through a file, not `$(...)`: a VirtualBox service the first call
+  # spawns inherits a captured stdout, and the shell would wait for it to close - forever.
+  boot_once "$mem" > "$BUILD/vbox-verdict" </dev/null
+  verdict="$(cat "$BUILD/vbox-verdict")"
   rc=$?
   if [ "$rc" -eq 2 ]; then cleanup; echo "VM-E2E-VBOX: FAIL"; exit 1; fi
 

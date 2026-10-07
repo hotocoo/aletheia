@@ -310,7 +310,13 @@ jobs:
       - name: Build .efi, assemble the GPT/ESP image, boot under VirtualBox (SKIP is a failure here)
         env:
           VBOX_REQUIRED: "1"
-        run: ./scripts/vm-e2e-vbox.sh
+        # A hard bound inside the step, so a hang FAILS with its log and a process listing instead
+        # of being cancelled by the job timeout, which discards the log.
+        run: |
+          timeout --kill-after=30 18m ./scripts/vm-e2e-vbox.sh && exit 0
+          rc=$?
+          echo "vm-e2e-vbox exited $rc"; ps -eo pid,ppid,etime,cmd | grep -iE "vbox|qemu|cargo" | grep -v grep || true
+          exit $rc
 
   conformance:
     name: Cross-architecture semantic conformance (all three targets, one core contract)
