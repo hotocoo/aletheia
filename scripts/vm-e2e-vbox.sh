@@ -166,9 +166,10 @@ fi
 
 # --- one full boot at a given guest memory size ---------------------------------------------------
 cleanup() {
-  vbm controlvm "$VM_NAME" poweroff >/dev/null 2>&1
-  vbm unregistervm "$VM_NAME" --delete >/dev/null 2>&1
-  vbm closemedium disk "$(hostpath "$VDI")" --delete >/dev/null 2>&1
+  # stdout only: a VBoxManage call that times out says so on stderr, into the job log.
+  vbm controlvm "$VM_NAME" poweroff >/dev/null
+  vbm unregistervm "$VM_NAME" --delete >/dev/null
+  vbm closemedium disk "$(hostpath "$VDI")" --delete >/dev/null
   rm -f "$VDI"
 }
 
