@@ -6,6 +6,7 @@ pub const SYS_EXIT: u64 = 3;
 pub const SYS_FS_READ: u64 = 8;
 pub const SYS_WRITE_CONSOLE: u64 = 12;
 pub const SYS_PRESENT: u64 = 13;
+pub const SYS_POLL_INPUT: u64 = 14;
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn syscall2(num: u64, a0: u64, a1: u64) -> u64 {
@@ -99,6 +100,20 @@ pub fn present(bits: &[u8], width: u32, height: u32) -> Result<(), ()> {
         Err(())
     } else {
         Ok(())
+    }
+}
+
+/// The next input event the operator gave this program's window (ADR-216): `Ok(None)` when none
+/// is waiting, `Ok(Some(byte))` for a key, `Err(())` when the program holds no open window. A
+/// focus change is reported as `Ok(Some(0))`.
+pub fn poll_input() -> Result<Option<u8>, ()> {
+    // SAFETY: the call takes no pointers; the kernel answers from the program's own window.
+    let r = unsafe { syscall2(SYS_POLL_INPUT, 0, 0) };
+    match r {
+        u64::MAX => Err(()),
+        0 => Ok(None),
+        0x100..=0x1FF => Ok(Some(r as u8)),
+        _ => Ok(Some(0)),
     }
 }
 

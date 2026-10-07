@@ -212,6 +212,12 @@ pub fn present_app(owner: u64, size: (u32, u32), fill: &mut dyn FnMut(&mut [u8])
     ok
 }
 
+/// The next input event for program `owner`'s window (ADR-216), as `SYS_POLL_INPUT` returns it.
+#[cfg(feature = "interactive")]
+pub fn poll_app(owner: u64) -> u64 {
+    with_desktop(|d| d.poll_app(owner).unwrap_or(u64::MAX)).unwrap_or(u64::MAX)
+}
+
 /// Program `owner` ended: its window closes (ADR-215). Main thread only.
 #[cfg(feature = "interactive")]
 pub fn close_app(owner: u64) {

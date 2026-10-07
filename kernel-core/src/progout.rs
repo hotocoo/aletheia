@@ -226,6 +226,12 @@ pub fn admit_present(
     })
 }
 
+/// Admit `SYS_POLL_INPUT` (ADR-216): the input is the window's, so the same grant that lets a
+/// program present to it lets it read what was typed there.
+pub fn admit_poll(grant: Option<&Grant>) -> bool {
+    grant.is_some_and(|g| g.allows(PRESENT))
+}
+
 /// Copy an admitted present's bitmap out of the program's data pages, which the run loop views one
 /// physical frame at a time, into `out` (exactly `req.len` bytes). `false` when a page it needs was
 /// not handed over.

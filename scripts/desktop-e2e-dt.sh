@@ -156,6 +156,12 @@ def frame_px(tag):
     return parts[3]
 def changed(a,b):
     return sum(1 for i in range(0,len(a),3) if a[i:i+3]!=b[i:i+3])
+def wait_from(n, needle, secs):
+    end=time.time()+secs
+    while time.time()<end:
+        if needle in txt()[n:]: return True
+        time.sleep(.2)
+    return False
 def serial(c, needle, secs=30):
     n=len(txt()); s.sendall(c.encode()+b'\r'); end=time.time()+secs
     while time.time()<end:
@@ -165,7 +171,12 @@ def serial(c, needle, secs=30):
 before=frame_px('before')
 serial('start draw','running in the background')
 time.sleep(2); during=frame_px('during'); time.sleep(1.5); later=frame_px('later')
-serial('kill draw','ended by the operator'); time.sleep(1.5); after=frame_px('after')
+# Input (ADR-216): the window took the keyboard when it opened; `q` typed on the virtio keyboard
+# reaches the program, which ends itself with status 113 and takes its window with it.
+n0=len(txt()); key('q')
+if not wait_from(n0,'exited with status 113',30):
+    raise RuntimeError('a key typed at the program window did not reach the program')
+time.sleep(1.5); after=frame_px('after')
 opened, moving, left = changed(before,during), changed(during,later), changed(before,after)
 print(f'program window: {opened} px changed when it opened, {moving} while it ran, {left} left after it closed')
 assert opened>=4000, f'the program window did not reach the display ({opened} px)'

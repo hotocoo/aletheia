@@ -43,8 +43,8 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_PRESENT, SYS_PROCESS_INFO,
-    SYS_RECV, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_POLL_INPUT, SYS_PRESENT,
+    SYS_PROCESS_INFO, SYS_RECV, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's Sv39 `vm.rs` performs the real page mapping into each space.
@@ -512,6 +512,14 @@ extern "C" fn _user_trap_rust(frame: *mut TrapFrame) {
                             0
                         }
                         None => u64::MAX,
+                    }
+                } else if num == SYS_POLL_INPUT {
+                    // Admitted here, answered by the run loop from the program's window (ADR-216).
+                    if kernel_core::progout::admit_poll((*addr_of!(PROGRAM_GRANT)).as_ref()) {
+                        *addr_of_mut!(PENDING_POLL) = true;
+                        0
+                    } else {
+                        u64::MAX
                     }
                 } else if num == SYS_PRESENT {
                     // Admitted here, served by the run loop once the program is off the CPU
@@ -1251,6 +1259,8 @@ static mut PROGRAM_WINDOW_NOW: kernel_core::progout::Window = kernel_core::progo
     stack_top: PROGRAM_STACK_TOP as u64,
     data_top: PROGRAM_STACK_TOP as u64,
 };
+/// A `SYS_POLL_INPUT` the handler admitted, for the run loop to answer (ADR-216).
+static mut PENDING_POLL: bool = false;
 /// A `SYS_PRESENT` the handler admitted, for the run loop to serve (ADR-215).
 static mut PENDING_PRESENT: Option<kernel_core::progout::PresentRequest> = None;
 /// A `SYS_FS_READ` the handler admitted, for the run loop to serve (ADR-207).
@@ -1530,6 +1540,7 @@ fn run_slice(
         let reason = unsafe {
             *addr_of_mut!(PENDING_READ) = None;
             *addr_of_mut!(PENDING_PRESENT) = None;
+            *addr_of_mut!(PENDING_POLL) = false;
             (*addr_of_mut!(SUPERVISOR)).reap(TaskId(slot.task))
         };
         slot.run.terminated = Some(reason.map_or("fault", |r| r.name()));
@@ -1575,6 +1586,15 @@ fn run_slice(
         } else {
             u64::MAX
         };
+    }
+    // An input poll is answered from the program's own window (ADR-216).
+    // SAFETY: single-threaded; the program is off the CPU.
+    if unsafe { core::mem::take(&mut *addr_of_mut!(PENDING_POLL)) } {
+        #[cfg(feature = "interactive")]
+        let event = crate::desktop::poll_app(slot.task);
+        #[cfg(not(feature = "interactive"))]
+        let event = u64::MAX;
+        slot.frame.regs[10] = event;
     }
     None
 }
@@ -1670,6 +1690,7 @@ fn run_programs(
     unsafe {
         *addr_of_mut!(PENDING_READ) = None;
         *addr_of_mut!(PENDING_PRESENT) = None;
+        *addr_of_mut!(PENDING_POLL) = false;
     }
     // Preemptible (ADR-203): the S-timer is the only source enabled while the program runs, so a
     // slice the program never yields ends at the deadline; a fresh one, so none is already pending.
@@ -2890,6 +2911,12 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             check!(
                 drawn.is_some_and(|r| r.exited && r.status == 0 && r.terminated.is_none()),
                 "present: a frame with no live desktop to show it is refused and the program ends cleanly"
+            );
+            // Input (ADR-216): a program that holds no window is refused when it asks for input.
+            let polled = run(USERLAND_DRAW, b"poll", &mut svc);
+            check!(
+                polled.is_some_and(|r| r.exited && r.status == 7),
+                "input: a program with no window of its own is refused the window's input"
             );
             let refused = [
                 &b"codebuf"[..],

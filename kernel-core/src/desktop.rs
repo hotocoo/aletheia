@@ -2827,6 +2827,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         )
     }
 
+    /// The next input event for program `owner`'s window (ADR-216), encoded as `SYS_POLL_INPUT`
+    /// returns it.
+    pub fn poll_app(&mut self, owner: u64) -> Result<u64, crate::appwin::Refusal> {
+        self.app.poll(&self.wm, &mut self.comp, owner)
+    }
+
     /// Program `owner` has ended: its window closes (ADR-215).
     pub fn close_app(&mut self, owner: u64) {
         self.app

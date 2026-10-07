@@ -37,8 +37,8 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_PRESENT, SYS_PROCESS_INFO,
-    SYS_RECV, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_POLL_INPUT, SYS_PRESENT,
+    SYS_PROCESS_INFO, SYS_RECV, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's `vm.rs` performs the real page mapping into each address space.
@@ -358,6 +358,19 @@ pub extern "C" fn el0_trap(num: u64, arg: u64, frame: *mut TrapFrame) -> u64 {
                         (*frame).regs[0] = u64::MAX;
                         u64::MAX
                     }
+                }
+            }
+        }
+        SYS_POLL_INPUT => {
+            // Admitted here, answered by the run loop from the program's window (ADR-216).
+            // SAFETY: the grant and the pending flag belong to the program running now.
+            unsafe {
+                if kernel_core::progout::admit_poll((*addr_of!(PROGRAM_GRANT)).as_ref()) {
+                    *addr_of_mut!(PENDING_POLL) = true;
+                    0
+                } else {
+                    (*frame).regs[0] = u64::MAX;
+                    u64::MAX
                 }
             }
         }
@@ -1552,6 +1565,8 @@ static mut PROGRAM_WINDOW_NOW: kernel_core::progout::Window = kernel_core::progo
     stack_top: PROGRAM_STACK_TOP as u64,
     data_top: PROGRAM_STACK_TOP as u64,
 };
+/// A `SYS_POLL_INPUT` the handler admitted, for the run loop to answer (ADR-216).
+static mut PENDING_POLL: bool = false;
 /// A `SYS_PRESENT` the handler admitted, for the run loop to serve (ADR-215).
 static mut PENDING_PRESENT: Option<kernel_core::progout::PresentRequest> = None;
 /// A `SYS_FS_READ` the handler admitted, for the run loop to serve (ADR-207).
@@ -1849,6 +1864,7 @@ fn run_slice(
         let reason = unsafe {
             *addr_of_mut!(PENDING_READ) = None;
             *addr_of_mut!(PENDING_PRESENT) = None;
+            *addr_of_mut!(PENDING_POLL) = false;
             (*addr_of_mut!(SUPERVISOR)).reap(TaskId(slot.task))
         };
         slot.run.terminated = Some(reason.map_or("fault", |r| r.name()));
@@ -1894,6 +1910,15 @@ fn run_slice(
         } else {
             u64::MAX
         };
+    }
+    // An input poll is answered from the program's own window (ADR-216).
+    // SAFETY: single-threaded; the program is off the CPU.
+    if unsafe { core::mem::take(&mut *addr_of_mut!(PENDING_POLL)) } {
+        #[cfg(feature = "interactive")]
+        let event = crate::desktop::poll_app(slot.task);
+        #[cfg(not(feature = "interactive"))]
+        let event = u64::MAX;
+        slot.frame.regs[0] = event;
     }
     None
 }
@@ -1990,6 +2015,7 @@ fn run_programs(
     unsafe {
         *addr_of_mut!(PENDING_READ) = None;
         *addr_of_mut!(PENDING_PRESENT) = None;
+        *addr_of_mut!(PENDING_POLL) = false;
     }
     // The GIC and the timer: the interactive console's own when it is live (its distributor is on);
     // otherwise this run brings them up and puts them back down, as the preemption suite does.
@@ -3175,6 +3201,12 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             check!(
                 drawn.is_some_and(|r| r.exited && r.status == 0 && r.terminated.is_none()),
                 "present: a frame with no live desktop to show it is refused and the program ends cleanly"
+            );
+            // Input (ADR-216): a program that holds no window is refused when it asks for input.
+            let polled = run(USERLAND_DRAW, b"poll", &mut svc);
+            check!(
+                polled.is_some_and(|r| r.exited && r.status == 7),
+                "input: a program with no window of its own is refused the window's input"
             );
             let refused = [
                 &b"codebuf"[..],

@@ -1,7 +1,9 @@
-//! `draw` (ADR-215): a program with its own desktop window. It draws a framed 160 x 96 scene - a
-//! border, a diagonal, and a bar that moves one column per frame - and hands each frame to the
-//! desktop with `SYS_PRESENT`. Given `once` it shows one frame and exits with the frame count;
-//! otherwise it animates until the operator kills it or closes its window (then it exits 0).
+//! `draw` (ADR-215, ADR-216): a program with its own desktop window. It draws a framed 160 x 96
+//! scene - a border, a diagonal, and a bar that moves one column per frame - and hands each frame
+//! to the desktop with `SYS_PRESENT`. Typed at its window: `a` and `d` push the bar back and
+//! forward, `q` ends it with status 113. Given `once` it shows one frame and exits with the frame
+//! count; given `poll` it asks for input once and exits 7 if refused (no window), else 8.
+//! Otherwise it animates until the operator quits it, kills it or closes its window.
 #![no_std]
 #![no_main]
 
@@ -51,10 +53,24 @@ pub unsafe extern "C" fn _start(args: *const u8, len: usize) -> ! {
     // SAFETY: single-threaded program; nothing else touches this global.
     let frame = unsafe { &mut *core::ptr::addr_of_mut!(FRAME) };
     // SAFETY: the kernel placed `len` argument bytes at `args`, on this program's stack page.
-    let once = unsafe { core::slice::from_raw_parts(args, len) } == b"once";
+    let arg = unsafe { core::slice::from_raw_parts(args, len) };
+    if arg == b"poll" {
+        sys::exit(if sys::poll_input().is_err() { 7 } else { 8 });
+    }
+    let once = arg == b"once";
     let mut tick = 0u32;
+    let mut push = 0u32;
     loop {
-        render(frame, tick);
+        // Everything typed at the window since the last frame.
+        while let Ok(Some(key)) = sys::poll_input() {
+            match key {
+                b'q' => sys::exit(113),
+                b'a' => push = push.wrapping_sub(8),
+                b'd' => push = push.wrapping_add(8),
+                _ => {}
+            }
+        }
+        render(frame, tick.wrapping_add(push));
         if sys::present(frame, W, H).is_err() {
             // No desktop, or the operator closed the window: nothing left to draw on.
             sys::exit(tick as u64);

@@ -9,6 +9,8 @@
 //! * **Bounded.** At most [`MAX_W`] x [`MAX_H`] pixels; the buffer must be exactly the packed size.
 //! * **The operator wins.** A window the operator closed stays closed: its owner's later presents
 //!   are refused, so the program can notice and end, instead of the window springing back.
+//! * **Its keys are its own (ADR-216).** The window takes the keyboard when it opens; what the
+//!   operator types there queues on its surface, and only its owner can take it (`SYS_POLL_INPUT`).
 //! * **Allocation per open, never per present.** The packed buffer is sized when the window opens
 //!   (or changes size); a present only fills it.
 
@@ -46,6 +48,22 @@ pub struct AppWindow {
     size: (u32, u32),
     packed: Vec<u8>,
     presents: u64,
+}
+
+/// No event waiting.
+pub const NO_EVENT: u64 = 0;
+/// A key: `KEY | byte`, the byte in the console's decoded alphabet (the keymap's output).
+pub const KEY: u64 = 0x100;
+/// The window lost the keyboard to another.
+pub const FOCUS_LOST: u64 = 0x200;
+
+/// An input event as `SYS_POLL_INPUT` returns it (ADR-216). Never `u64::MAX`, which is a refusal.
+pub fn encode(e: Option<crate::compositor::Event>) -> u64 {
+    match e.map(|e| e.kind) {
+        None => NO_EVENT,
+        Some(crate::compositor::EventKind::Key(b)) => KEY | b as u64,
+        Some(crate::compositor::EventKind::FocusLost) => FOCUS_LOST,
+    }
 }
 
 /// The packed size of a `w` x `h` one-bit bitmap, LSB first, row-major (the compositor's format).
@@ -112,6 +130,8 @@ impl AppWindow {
             self.packed.resize(packed_len(w, h), 0);
             self.owner = Some((owner, false));
             let _ = comp.raise(APP, token);
+            // A window that opens takes the keyboard, as on every desktop (ADR-216).
+            let _ = comp.set_focus(session, APP);
         }
         if !fill(&mut self.packed) {
             return Err(Refusal::BadBuffer);
@@ -120,6 +140,23 @@ impl AppWindow {
             .map_err(|_| Refusal::BadBuffer)?;
         self.presents += 1;
         Ok(())
+    }
+
+    /// The next input event the operator gave `owner`'s window (ADR-216), encoded for a register:
+    /// see [`encode`]. Refused when `owner` does not hold an open window.
+    pub fn poll(
+        &mut self,
+        wm: &WindowManager,
+        comp: &mut Compositor,
+        owner: u64,
+    ) -> Result<u64, Refusal> {
+        match self.owner {
+            Some((o, false)) if o == owner && wm.is_open(APP) => {}
+            Some((o, _)) if o == owner => return Err(Refusal::Dismissed),
+            Some(_) => return Err(Refusal::Busy),
+            None => return Err(Refusal::NoWindow),
+        }
+        Ok(encode(comp.pop_input(APP, self.token).ok().flatten()))
     }
 
     /// `owner` has ended: its window goes, and the next program may open one.
@@ -249,5 +286,24 @@ mod tests {
             app.present(&mut wm, &mut comp, s, 2, (13, 5), (0, 0), &mut solid(0)),
             Ok(())
         );
+    }
+
+    #[test]
+    fn keys_typed_at_the_window_reach_its_owner_and_nobody_else() {
+        let (mut wm, mut comp, s) = setup();
+        let mut app = AppWindow::new();
+        assert_eq!(app.poll(&wm, &mut comp, 3), Err(Refusal::NoWindow));
+        app.present(&mut wm, &mut comp, s, 3, (8, 8), (0, 0), &mut solid(0))
+            .unwrap();
+        // The new window holds the keyboard: a key typed now queues on its surface.
+        assert_eq!(comp.focus(), Some(APP));
+        comp.post_key(s, b'q').unwrap();
+        assert_eq!(app.poll(&wm, &mut comp, 4), Err(Refusal::Busy));
+        assert_eq!(app.poll(&wm, &mut comp, 3), Ok(KEY | b'q' as u64));
+        assert_eq!(app.poll(&wm, &mut comp, 3), Ok(NO_EVENT));
+        // Closed by the operator: its owner's polls are refused like its presents.
+        wm.close(&mut comp, s, APP).unwrap();
+        assert_eq!(app.poll(&wm, &mut comp, 3), Err(Refusal::Dismissed));
+        assert_ne!(encode(None), u64::MAX);
     }
 }

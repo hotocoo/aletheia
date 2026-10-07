@@ -33,7 +33,7 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-10-07, latest (A PROGRAM DRAWS INTO ITS OWN WINDOW — ADR-215; before it A PROGRAM'S WRITABLE MEMORY IS SEVERAL PAGES — ADR-214; before it PROGRAMS LEFT RUNNING IN THE BACKGROUND — ADR-213; before it PROGRAMS RUN TOGETHER — ADR-212; before it A PROGRAM LARGER THAN ONE PAGE — ADR-211; before it A PROGRAM HAS WRITABLE MEMORY — ADR-210; before it SYSTEM 1 V3, MEASURED AND NOT SHIPPED — ADR-209; before it THE COMPARISONS, RE-MEASURED — ADR-208; before it A PROGRAM READS THE NAMESPACE — ADR-207; before it A PROGRAM IS HANDED ITS ARGUMENTS — ADR-206; before it A PROGRAM WRITTEN IN RUST — ADR-205; before it A PROGRAM WRITES TO THE CONSOLE — ADR-204; before it A PROGRAM THAT NEVER YIELDS IS PREEMPTED — ADR-203; before it A PROGRAM CANNOT STOP THE MACHINE BY FAULTING — ADR-202; before it A PROGRAM FROM THE NAMESPACE RUNS — ADR-201; before it THE CLOCK KEEPS TIME WHILE THE MACHINE IDLES — ADR-200; before it THE SCHEDULER IS ADVISED WHILE THE MACHINE RUNS — ADR-199, see the dated section below; waves ADR-174..198 are recorded there too. Before it: THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
+**As of:** 2026-10-07, latest (A PROGRAM HEARS WHAT IS TYPED AT ITS WINDOW — ADR-216; before it A PROGRAM DRAWS INTO ITS OWN WINDOW — ADR-215; before it A PROGRAM'S WRITABLE MEMORY IS SEVERAL PAGES — ADR-214; before it PROGRAMS LEFT RUNNING IN THE BACKGROUND — ADR-213; before it PROGRAMS RUN TOGETHER — ADR-212; before it A PROGRAM LARGER THAN ONE PAGE — ADR-211; before it A PROGRAM HAS WRITABLE MEMORY — ADR-210; before it SYSTEM 1 V3, MEASURED AND NOT SHIPPED — ADR-209; before it THE COMPARISONS, RE-MEASURED — ADR-208; before it A PROGRAM READS THE NAMESPACE — ADR-207; before it A PROGRAM IS HANDED ITS ARGUMENTS — ADR-206; before it A PROGRAM WRITTEN IN RUST — ADR-205; before it A PROGRAM WRITES TO THE CONSOLE — ADR-204; before it A PROGRAM THAT NEVER YIELDS IS PREEMPTED — ADR-203; before it A PROGRAM CANNOT STOP THE MACHINE BY FAULTING — ADR-202; before it A PROGRAM FROM THE NAMESPACE RUNS — ADR-201; before it THE CLOCK KEEPS TIME WHILE THE MACHINE IDLES — ADR-200; before it THE SCHEDULER IS ADVISED WHILE THE MACHINE RUNS — ADR-199, see the dated section below; waves ADR-174..198 are recorded there too. Before it: THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
 advisor (`lethe=12`) and the resident governor on real timer interrupts (`lethed=15`) boot on all three CPUs, 4-7 ms each,
 with a live census gated on every target; conformance 383 -> **397**; attack surface measured against Linux and the boot
 gap attributed, each its own CI job. Before it: THE BROWSER WINDOW'S OWN KEYS — ADR-164. While the browser window holds focus,
@@ -1270,6 +1270,12 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-10-07 — a program hears what is typed at its window (ADR-216)
+
+- A program's window takes the keyboard when it opens; `SYS_POLL_INPUT` hands its owner the keys
+  typed there. `draw` moves its bar on `a`/`d` and quits on `q`, proved on the live desktop.
+  `usermode` 59/59/67.
 
 ### 2026-10-07 — a program draws into its own window (ADR-215)
 

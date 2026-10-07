@@ -35,6 +35,10 @@ pub const SYS_WRITE_CONSOLE: u64 = 12;
 /// Show a frame in the program's own desktop window (ADR-215): a packed one-bit bitmap in the
 /// program's data pages, its width and height. Returns 0, or `u64::MAX` when refused.
 pub const SYS_PRESENT: u64 = 13;
+/// Take the next input event the operator gave the program's window (ADR-216): 0 when none,
+/// `appwin::KEY | byte` for a key, `appwin::FOCUS_LOST`, or `u64::MAX` when the program holds no
+/// open window.
+pub const SYS_POLL_INPUT: u64 = 14;
 /// Upper 32 bits of [`SYS_PROCESS_INFO`] response.
 pub const PROCESS_INFO_TERMINATED_SHIFT: u32 = 32;
 
@@ -67,6 +71,7 @@ pub enum Syscall {
     ProcessKill,
     WriteConsole,
     Present,
+    PollInput,
 }
 
 impl Syscall {
@@ -86,6 +91,7 @@ impl Syscall {
             SYS_PROCESS_KILL => Some(Self::ProcessKill),
             SYS_WRITE_CONSOLE => Some(Self::WriteConsole),
             SYS_PRESENT => Some(Self::Present),
+            SYS_POLL_INPUT => Some(Self::PollInput),
             _ => None,
         }
     }
@@ -106,6 +112,7 @@ impl Syscall {
             Self::ProcessKill => SYS_PROCESS_KILL,
             Self::WriteConsole => SYS_WRITE_CONSOLE,
             Self::Present => SYS_PRESENT,
+            Self::PollInput => SYS_POLL_INPUT,
         }
     }
 
@@ -121,7 +128,7 @@ impl Syscall {
             Self::FsList => Some("fs.inspect"),
             Self::ProcessKill => Some("process.kill"),
             Self::WriteConsole => Some("console.output"),
-            Self::Present => Some("window.present"),
+            Self::Present | Self::PollInput => Some("window.present"),
             Self::Yield | Self::Exit | Self::Regcheck => None,
         }
     }
@@ -147,6 +154,7 @@ mod tests {
             Syscall::ProcessKill,
             Syscall::WriteConsole,
             Syscall::Present,
+            Syscall::PollInput,
         ] {
             assert_eq!(Syscall::decode(syscall.number()), Some(syscall));
         }
@@ -154,7 +162,7 @@ mod tests {
 
     #[test]
     fn unknown_numbers_fail_closed() {
-        for number in [0, 14, 99, u64::MAX] {
+        for number in [0, 15, 99, u64::MAX] {
             assert_eq!(Syscall::decode(number), None);
         }
     }
