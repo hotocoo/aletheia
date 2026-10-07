@@ -1178,6 +1178,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "hold a clock domain (default 0) at operating point KHZ, overclock band included; `oc off` releases it",
     ),
     (
+        "autostart [add|remove NAME]",
+        "the programs started in the background at boot; add or remove one, kept across boots",
+    ),
+    (
         "persona [NAME]",
         "the desktop's look: aletheia (its own), windows, macos or gnome; NAME sets it and is kept",
     ),
@@ -1865,6 +1869,23 @@ pub fn apply_settings<H: ShellHost, D: BlockDevice>(
             ),
         }
     }
+    // The operator's own programs last, once the machine looks the way they chose (ADR-221).
+    for name in s.autostarts() {
+        let name = name.as_str();
+        match fs.read(dev, name) {
+            Ok(bytes) => start_program(host, name, b"", &bytes, &mut |l: &str| {
+                out("settings: ");
+                out(l);
+                out("\r\n");
+            }),
+            Err(e) => outf!(
+                out,
+                "settings: autostart {} not started ({})\r\n",
+                name,
+                fs_error(e)
+            ),
+        }
+    }
     if skipped > 0 {
         outf!(
             out,
@@ -2190,6 +2211,56 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     Err(why) => outf!(out, "resolution refused: {}", why),
                 },
                 _ => out("usage: resolution WxH (a mode `display` lists, e.g. 1920x1080)"),
+            }
+        }
+        "autostart" => {
+            if !authorize(host, ShellAction::Schedule, out) {
+                return Outcome::Continue;
+            }
+            let (op, name) = split_first(rest);
+            let name = name.trim();
+            let current = fs
+                .read(dev, crate::settings::OBJECT)
+                .map(|b| crate::settings::Settings::parse(&b).0)
+                .unwrap_or_default();
+            match op {
+                "" => {
+                    let mut any = false;
+                    for n in current.autostarts() {
+                        any = true;
+                        outf!(out, "  autostart {}", n.as_str());
+                    }
+                    if !any {
+                        out("autostart: nothing is started at boot");
+                    }
+                }
+                "add" if !name.is_empty() && fs.read(dev, name).is_ok() => {
+                    let mut s = current;
+                    if s.add_autostart(name) {
+                        keep_setting(fs, dev, |k| *k = s, out);
+                        outf!(out, "autostart: {} starts at boot from now on", name);
+                    } else {
+                        outf!(
+                            out,
+                            "autostart refused: {} is already listed, or {} programs are",
+                            name,
+                            crate::jobs::MAX_JOBS
+                        );
+                    }
+                }
+                "add" if !name.is_empty() => {
+                    outf!(out, "autostart refused: there is no object named {}", name)
+                }
+                "remove" if !name.is_empty() => {
+                    let mut s = current;
+                    if s.remove_autostart(name) {
+                        keep_setting(fs, dev, |k| *k = s, out);
+                        outf!(out, "autostart: {} no longer starts at boot", name);
+                    } else {
+                        outf!(out, "autostart: {} was not listed", name);
+                    }
+                }
+                _ => out("usage: autostart [add NAME | remove NAME]"),
             }
         }
         "persona" => {

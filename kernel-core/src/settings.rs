@@ -7,6 +7,9 @@
 //!
 //! * `resolution=WxH` - the desktop's mode (ADR-196).
 //! * `refresh=HZ` - how often the desktop redraws and polls its devices, [`MIN_HZ`]..=[`MAX_HZ`].
+//! * `autostart=NAME` - a program the console starts in the background before its first prompt
+//!   (ADR-221), up to [`crate::jobs::MAX_JOBS`] of them, in order: the operator's own additions
+//!   to the machine.
 //! * `persona=NAME` - the desktop's look (ADR-220): Aletheia's own, or a Windows-, macOS- or
 //!   GNOME-like layout.
 
@@ -40,6 +43,45 @@ pub struct Settings {
     pub resolution: Option<(u32, u32)>,
     pub refresh: Option<u32>,
     pub persona: Option<crate::persona::ShellPersona>,
+    /// Programs to start at boot, in order (ADR-221).
+    pub autostart: [Option<crate::jobs::JobName>; crate::jobs::MAX_JOBS],
+}
+
+impl Settings {
+    /// Add `name` to the programs started at boot; `false` when it is there already or the list
+    /// is full.
+    pub fn add_autostart(&mut self, name: &str) -> bool {
+        if self.autostarts().any(|n| n.as_str() == name) {
+            return false;
+        }
+        match self.autostart.iter_mut().find(|s| s.is_none()) {
+            Some(slot) => {
+                *slot = Some(crate::jobs::JobName::new(name));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take `name` off the programs started at boot; `false` when it was not there. The rest keep
+    /// their order.
+    pub fn remove_autostart(&mut self, name: &str) -> bool {
+        let Some(i) = self
+            .autostart
+            .iter()
+            .position(|s| s.is_some_and(|n| n.as_str() == name))
+        else {
+            return false;
+        };
+        self.autostart.copy_within(i + 1.., i);
+        self.autostart[crate::jobs::MAX_JOBS - 1] = None;
+        true
+    }
+
+    /// The programs started at boot, in order.
+    pub fn autostarts(&self) -> impl Iterator<Item = &crate::jobs::JobName> {
+        self.autostart.iter().flatten()
+    }
 }
 
 impl Settings {
@@ -69,6 +111,13 @@ impl Settings {
                     .ok()
                     .filter(|hz| (MIN_HZ..=MAX_HZ).contains(hz))
                     .map(|hz| s.refresh = Some(hz)),
+                "autostart" => {
+                    let name = v.trim();
+                    (!name.is_empty() && name.len() <= crate::fs::MAX_NAME)
+                        .then(|| s.add_autostart(name))
+                        .filter(|&added| added)
+                        .map(|_| ())
+                }
                 "persona" => {
                     crate::persona::ShellPersona::from_label(v.trim()).map(|p| s.persona = Some(p))
                 }
@@ -94,6 +143,9 @@ impl Settings {
         if let Some(p) = self.persona {
             let _ = writeln!(out, "persona={}", p.label());
         }
+        for name in self.autostarts() {
+            let _ = writeln!(out, "autostart={}", name.as_str());
+        }
     }
 }
 
@@ -101,6 +153,7 @@ impl Settings {
 mod tests {
     use super::*;
     use alloc::string::String;
+    use alloc::vec::Vec;
 
     #[test]
     fn settings_round_trip_and_bad_lines_are_skipped_not_fatal() {
@@ -108,6 +161,7 @@ mod tests {
             resolution: Some((1024, 768)),
             refresh: Some(120),
             persona: Some(crate::persona::ShellPersona::Macos),
+            ..Default::default()
         };
         let mut text = String::new();
         s.render(&mut text);
@@ -121,6 +175,28 @@ mod tests {
         assert_eq!(t.resolution, None);
         assert_eq!(skipped, 5);
         assert_eq!(Settings::parse(b""), (Settings::default(), 0));
+    }
+
+    #[test]
+    fn autostart_programs_keep_their_order_refuse_duplicates_and_cap_at_the_job_table() {
+        let mut s = Settings::default();
+        assert!(s.add_autostart("clock") && s.add_autostart("draw"));
+        assert!(!s.add_autostart("clock"));
+        assert!(s.add_autostart("a") && s.add_autostart("b"));
+        assert!(!s.add_autostart("c"), "four is the job table's size");
+        assert!(s.remove_autostart("clock") && !s.remove_autostart("clock"));
+        let names: Vec<&str> = s.autostarts().map(|n| n.as_str()).collect();
+        assert_eq!(names, ["draw", "a", "b"]);
+        let mut text = String::new();
+        s.render(&mut text);
+        assert_eq!(text, "autostart=draw\nautostart=a\nautostart=b\n");
+        let (back, skipped) = Settings::parse(text.as_bytes());
+        assert_eq!((back, skipped), (s, 0));
+        // A duplicate or an empty name in the file is a skipped line.
+        assert_eq!(
+            Settings::parse(b"autostart=x\nautostart=x\nautostart=\n").1,
+            2
+        );
     }
 
     #[test]

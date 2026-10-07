@@ -1325,3 +1325,75 @@ fn a_refresh_rate_is_set_kept_and_put_back_at_the_next_start() {
     );
     kernel_core::settings::set_pump_hz(1000);
 }
+
+/// `autostart add` keeps a program in the settings object, and the next console start leaves it
+/// running as a background job before the first prompt; `autostart remove` takes it off (ADR-221).
+#[test]
+fn an_autostart_program_is_started_in_the_background_at_the_next_start() {
+    use kernel_core::elf::{build, hello_code, Machine};
+    let host = JobHost(Default::default());
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    fs.create(
+        &mut dev,
+        "hello",
+        &build(PROGRAM_TARGET, hello_code(Machine::Aarch64)),
+    )
+    .unwrap();
+    let session = |fs: &mut Filesystem, dev: &mut MemBlockDevice, input: &[u8]| {
+        let mut feed = input.iter().copied();
+        let mut log = String::new();
+        shell::run_loop_serviced(
+            &host,
+            fs,
+            dev,
+            &mut || feed.next(),
+            &mut |s| log.push_str(s),
+            &mut |_, _, _, _| false,
+            &mut shell::BrowserHooks {
+                take_navigation: &mut || None,
+                show_page: &mut |_| {},
+            },
+        );
+        log
+    };
+    let log = session(
+        &mut fs,
+        &mut dev,
+        b"autostart add hello\rautostart add nosuch\rautostart add hello\rautostart\rhalt\r",
+    );
+    assert!(
+        log.contains("autostart: hello starts at boot from now on"),
+        "{log}"
+    );
+    assert!(
+        log.contains("autostart refused: there is no object named nosuch"),
+        "{log}"
+    );
+    assert!(
+        log.contains("autostart refused: hello is already listed"),
+        "{log}"
+    );
+    assert!(log.contains("  autostart hello"), "{log}");
+    assert!(
+        host.0.borrow().is_empty(),
+        "nothing runs until the next start"
+    );
+    let log = session(
+        &mut fs,
+        &mut dev,
+        b"jobs\rautostart remove hello\rautostart\rhalt\r",
+    );
+    let started = log.find("settings: start: hello is job").expect(&log);
+    assert!(started < log.find("aletheia>").unwrap(), "{log}");
+    assert!(log.contains("  job 1  hello"), "{log}");
+    assert!(
+        log.contains("autostart: hello no longer starts at boot"),
+        "{log}"
+    );
+    assert!(
+        log.contains("autostart: nothing is started at boot"),
+        "{log}"
+    );
+}
