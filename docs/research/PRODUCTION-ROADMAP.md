@@ -19,7 +19,7 @@ measurement made here.
 | Security | Capability engine, W^X, guard pages, VT-d on x86, fault containment, fuzz and crash gates | MATURITY.md, ADR-202, ADR-180..183 |
 | Lightweight | 0.0 % idle CPU vs Linux 2.0 %; 3 MB payload vs 14 MB; ~76k privileged lines | ADR-208 |
 | Performance under load | Storms and bench on every boot; typed load 3 vs 29 ms/op against Linux | ADR-086..089, ADR-208 |
-| User programs | ELF from the namespace, Rust userland, args, console output, file read, contained faults, preemption | ADR-201..207 |
+| User programs | ELF from the namespace, Rust userland, args, console output, file read, contained faults, preemption, multi-page, writable data, several at once | ADR-201..212 |
 | GUI | Compositor, window manager, desktop, file panel, browser window, runtime resolution | ADR-078..085, ADR-194..197 |
 | Drivers | virtio (blk, net, gpu 2D, input, rng), i8042, PL011/16550, VT-d, HPET | MATURITY.md |
 | Real hardware | None. Every number is QEMU TCG (plus VMware/VirtualBox boot) | BENCHMARKS.md |
@@ -39,7 +39,7 @@ is the product of many years of work by GPU vendors, Mesa, Valve and others.
 For Aletheia each layer is a program of work:
 
 1. **Userland that can host large programs** - many pages, writable data, heap, threads, dynamic
-   loading. Today: one code page, one stack page, one program at a time (ADR-201..207).
+   loading. Today: up to 16 code pages, a stack page and a data page, up to four programs at once (ADR-201..212); no heap, threads or dynamic loading yet.
 2. **A paravirtual 3D path first** - virtio-gpu with virgl or Venus is the one 3D device QEMU gives
    a guest; it is the honest first rung and still needs a Mesa-class user-mode driver.
 3. **Real GPUs** - vendor hardware documentation or porting an existing open driver; each vendor
@@ -64,8 +64,8 @@ so the honest statement is the table in BENCHMARKS.md, extended one scenario at 
 
 ## The next rungs, in order
 
-1. Multi-page programs with a writable data segment and a heap (widen the ELF judge and the window).
-2. More than one program at a time, preempted and scheduled together, with the advisor ranking them.
+1. Multi-page programs with a writable data segment and a heap (widen the ELF judge and the window). Done: ADR-210, ADR-211 (heap still open).
+2. More than one program at a time, preempted and scheduled together, with the advisor ranking them. Done: ADR-212.
 3. Interrupt-driven virtio on every target (today most drivers poll).
 4. virtio-gpu 3D (virgl/Venus) research spike and ADR.
 5. First real-hardware boot (one x86-64 machine) with a measured, named driver list.

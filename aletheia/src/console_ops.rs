@@ -115,6 +115,8 @@ fn risk_of(name: &str) -> Risk {
         "resolution" => Risk::Destructive,
         // `run` executes code from the namespace (ADR-201): a human answers for it.
         "run" => Risk::Destructive,
+        // `together` executes several of them at once (ADR-212): the same answer as `run`.
+        "together" => Risk::Destructive,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
         | "ls" | "find" | "stat" | "cat" | "head" | "wc" | "grep" | "hexdump" | "sync"
         | "history" | "echo" | "clear" | "input" | "date" | "display" | "power" | "boot"
@@ -358,6 +360,7 @@ mod tests {
                     | "input"
                     | "tasks"
                     | "run"
+                    | "together"
             );
             assert!(named, "{verb} has no explicit risk classification");
         }

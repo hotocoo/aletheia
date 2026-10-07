@@ -848,6 +848,9 @@ pub struct ProgramRun {
     pub output: Vec<u8>,
     /// Bytes it wrote that the sink had no room for.
     pub dropped: u64,
+    /// Slices the whole set had been dispatched for when this program ended (ADR-212): the order
+    /// programs run together actually finished in.
+    pub ended_at: u32,
 }
 
 /// The machine's network device as the console reports it (ADR-185): addresses and the driver's
@@ -993,15 +996,16 @@ pub trait ShellHost {
     fn program_target(&self) -> Option<crate::elf::Target> {
         None
     }
-    /// Run a judged program as one user-mode task through the advised scheduler (ADR-201), handing
-    /// it `args` (at most [`crate::elf::MAX_ARGS`] bytes) at entry (ADR-206) and serving its reads
-    /// of the namespace through `services` (ADR-207).
-    fn run_program(
+    /// Run judged programs as user-mode tasks through the advised scheduler (ADR-201), each in its
+    /// own address space, taking turns on the CPU until every one has exited, faulted or spent its
+    /// budget (ADR-212). Each is handed its `args` (at most [`crate::elf::MAX_ARGS`] bytes) at entry
+    /// (ADR-206); their reads of the namespace are served through `services` (ADR-207). One report
+    /// per program, in the order given; `None` = this target cannot start a program.
+    fn run_programs(
         &self,
-        _program: &crate::elf::Placement,
-        _args: &[u8],
+        _programs: &[(&crate::elf::Placement, &[u8])],
         _services: &mut dyn crate::progout::ProgramServices,
-    ) -> Option<ProgramRun> {
+    ) -> Option<Vec<ProgramRun>> {
         None
     }
     /// Run this target's user-mode tasks through the advised scheduler now (ADR-199). `None` = this
@@ -1106,6 +1110,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "run NAME [TEXT]",
         "run the program in object NAME as a user-mode task, handed TEXT as its arguments, admitted through the resident risk advisor",
+    ),
+    (
+        "together NAME1 NAME2 [NAME3] [NAME4]",
+        "run 2 to 4 programs at once, each its own user-mode task taking turns on the CPU",
     ),
     (
         "tasks",
@@ -1590,7 +1598,10 @@ fn run_program(
         }
     };
     let before = crate::mlsched::resident::stats().unwrap_or_default();
-    let Some(run) = host.run_program(&program, args, services) else {
+    let Some(run) = host
+        .run_programs(&[(&program, args)], services)
+        .and_then(|mut runs| runs.pop())
+    else {
         out("run: this machine cannot start a program from the console");
         return;
     };
@@ -1603,6 +1614,84 @@ fn run_program(
         after.elevated - before.elevated,
         after.abstain - before.abstain
     );
+    report_run(name, &run, out);
+}
+
+/// Most programs `together` starts at once (ADR-212): each holds its own address space and up to
+/// [`crate::elf::Target::code_pages`] + 2 frames while the set runs.
+pub const MAX_TOGETHER: usize = 4;
+
+/// `together NAME1 NAME2 [NAME3] [NAME4]` (ADR-212): judge every object first - one that cannot be placed
+/// refuses the whole set by name, before anything runs - then start them all at once, each its
+/// own user-mode task taking turns on the CPU, and report each as `run` would.
+fn run_together(
+    host: &dyn ShellHost,
+    objects: &[(&str, Vec<u8>)],
+    services: &mut dyn crate::progout::ProgramServices,
+    out: &mut dyn FnMut(&str),
+) {
+    let Some(target) = host.program_target() else {
+        out("together: this machine cannot start a program from the console");
+        return;
+    };
+    let mut programs = Vec::with_capacity(objects.len());
+    for (name, bytes) in objects {
+        match crate::elf::judge(bytes, target) {
+            Ok(p) => programs.push(p),
+            Err(crate::elf::Refusal::WrongMachine(m)) => {
+                outf!(
+                    out,
+                    "together refused: {} is built for another CPU (e_machine {})",
+                    name,
+                    m
+                );
+                return;
+            }
+            Err(r) => {
+                outf!(out, "together refused: {}: {}", name, r.describe());
+                return;
+            }
+        }
+    }
+    let set: Vec<(&crate::elf::Placement, &[u8])> = programs.iter().map(|p| (p, &[][..])).collect();
+    let before = crate::mlsched::resident::stats().unwrap_or_default();
+    let runs = match host.run_programs(&set, services) {
+        Some(runs) if runs.len() == set.len() => runs,
+        _ => {
+            out("together: this machine cannot start these programs from the console");
+            return;
+        }
+    };
+    let after = crate::mlsched::resident::stats().unwrap_or_default();
+    outf!(
+        out,
+        "together: {} programs admitted: advisor said {} low / {} elevated / {} abstain",
+        runs.len(),
+        after.low - before.low,
+        after.elevated - before.elevated,
+        after.abstain - before.abstain
+    );
+    for ((name, _), run) in objects.iter().zip(&runs) {
+        report_run(name, run, out);
+    }
+    // The order they ended in is the proof they took turns: a program started after a spinner
+    // that finishes before it ran while the spinner was still on the machine.
+    let mut order: Vec<(u32, &str)> = objects
+        .iter()
+        .zip(&runs)
+        .map(|((name, _), run)| (run.ended_at, *name))
+        .collect();
+    order.sort_by_key(|&(at, _)| at);
+    let mut line = String::from("together: finished in order:");
+    for (_, name) in order {
+        line.push(' ');
+        line.push_str(name);
+    }
+    out(&line);
+}
+
+/// What one program did, in `run`'s words (ADR-201..204), so `run` and `together` cannot drift.
+fn report_run(name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
     if !run.output.is_empty() {
         outf!(out, "run: {} said:", name);
         crate::filepanel::print_safely(&run.output, out);
@@ -2127,6 +2216,32 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     }
                     Err(e) => out(&fs_error(e)),
                 }
+            }
+        }
+        "together" => {
+            if !authorize(host, ShellAction::Schedule, out) {
+                return Outcome::Continue;
+            }
+            let names: Vec<&str> = rest.split_whitespace().collect();
+            if names.len() < 2 || names.len() > MAX_TOGETHER {
+                outf!(
+                    out,
+                    "usage: together NAME1 NAME2 [NAME3] [NAME4] (2 to {} programs)",
+                    MAX_TOGETHER
+                );
+            } else {
+                let mut objects = Vec::with_capacity(names.len());
+                for name in names {
+                    match fs.read(dev, name) {
+                        Ok(bytes) => objects.push((name, bytes)),
+                        Err(e) => {
+                            out(&fs_error(e));
+                            return Outcome::Continue;
+                        }
+                    }
+                }
+                let mut services = crate::progout::FsServices { fs, dev };
+                run_together(host, &objects, &mut services, out);
             }
         }
         "tasks" => {

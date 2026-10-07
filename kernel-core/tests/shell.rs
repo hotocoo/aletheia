@@ -944,27 +944,31 @@ impl ShellHost for ProgramHost {
     fn program_target(&self) -> Option<kernel_core::elf::Target> {
         Some(PROGRAM_TARGET)
     }
-    fn run_program(
+    fn run_programs(
         &self,
-        p: &kernel_core::elf::Placement,
-        args: &[u8],
+        programs: &[(&kernel_core::elf::Placement, &[u8])],
         services: &mut dyn kernel_core::progout::ProgramServices,
-    ) -> Option<kernel_core::shell::ProgramRun> {
-        self.0.set(Some((p.vaddr, p.entry, p.code.len())));
-        // The run can read the console's namespace (ADR-207): the object `note` is there.
-        let mut buf = [0u8; 16];
-        assert_eq!(services.read_object("note", &mut buf), Ok(10));
-        assert_eq!(&buf[..10], b"just words");
-        self.1.borrow_mut().push(args.to_vec());
-        Some(kernel_core::shell::ProgramRun {
-            slices: 1,
-            preempted: 0,
-            exited: true,
-            status: kernel_core::elf::HELLO_STATUS,
-            terminated: None,
-            output: b"hi\x1b[2J\n".to_vec(),
-            dropped: 3,
-        })
+    ) -> Option<Vec<kernel_core::shell::ProgramRun>> {
+        let mut runs = Vec::new();
+        for (p, args) in programs {
+            self.0.set(Some((p.vaddr, p.entry, p.code.len())));
+            // The run can read the console's namespace (ADR-207): the object `note` is there.
+            let mut buf = [0u8; 16];
+            assert_eq!(services.read_object("note", &mut buf), Ok(10));
+            assert_eq!(&buf[..10], b"just words");
+            self.1.borrow_mut().push(args.to_vec());
+            runs.push(kernel_core::shell::ProgramRun {
+                slices: 1,
+                preempted: 0,
+                exited: true,
+                status: kernel_core::elf::HELLO_STATUS,
+                terminated: None,
+                output: b"hi\x1b[2J\n".to_vec(),
+                dropped: 3,
+                ended_at: 0,
+            });
+        }
+        Some(runs)
     }
 }
 
@@ -1036,4 +1040,46 @@ fn run_places_a_judged_program_and_refuses_everything_else_by_name() {
     );
     assert!(log.contains("run refused: note: not an ELF image"), "{log}");
     assert!(!log.contains("run: nosuch admitted"), "{log}");
+}
+
+/// `together` (ADR-212) judges every object before anything runs, refuses the whole set by name
+/// when one cannot be placed, and otherwise hands the target every placement in one call and
+/// reports each program as `run` would.
+#[test]
+fn together_runs_a_set_or_refuses_it_whole() {
+    use kernel_core::elf::{build, hello_code, Machine};
+    let hello = build(PROGRAM_TARGET, hello_code(Machine::Aarch64));
+    let host = ProgramHost(std::cell::Cell::new(None), Default::default());
+    let log = run_with_objects(
+        &host,
+        &[
+            ("hello", hello.clone()),
+            ("again", hello),
+            ("note", b"just words".to_vec()),
+        ],
+        "together hello\rtogether hello note\rtogether hello again nosuch\rtogether a b c d e\rtogether hello again\r",
+    );
+    assert_eq!(
+        log.matches("usage: together NAME1 NAME2 [NAME3] [NAME4] (2 to 4 programs)")
+            .count(),
+        2,
+        "{log}"
+    );
+    assert!(
+        log.contains("together refused: note: not an ELF image"),
+        "{log}"
+    );
+    // Only the last line ran anything: two programs, no arguments, one report each.
+    assert_eq!(host.1.borrow().len(), 2, "{log}");
+    assert!(host.1.borrow().iter().all(Vec::is_empty));
+    assert!(
+        log.contains("together: 2 programs admitted: advisor said"),
+        "{log}"
+    );
+    assert!(log.contains("run: hello exited with status 55"), "{log}");
+    assert!(log.contains("run: again exited with status 55"), "{log}");
+    assert!(
+        log.contains("together: finished in order: hello again"),
+        "{log}"
+    );
 }

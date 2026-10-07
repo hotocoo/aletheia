@@ -186,6 +186,11 @@ check_session() {
     # under the live desktop, and the console answers the next command.
     grep -Eq "run: spin did not exit: abandoned after [0-9]+ slice\(s\), 64 of them ended by the timer; the machine continues" <<<"$log" \
       || { echo "  FAIL [$label/first] run spin was not preempted and abandoned"; bad=1; }
+    # Programs run together (ADR-212): a spinner started first never yields, yet hello and trap
+    # finish before it is abandoned (trap in its first slice) - they took turns on the CPU, each in its own address space.
+    grep -q "together: 3 programs admitted: advisor said" <<<"$log" \
+      && grep -Eq "together: finished in order: (hello trap|trap hello) spin" <<<"$log" \
+      || { echo "  FAIL [$label/first] together did not interleave spin, hello and trap"; bad=1; }
     grep -q "run refused: manifesto: not an ELF image" <<<"$log" || { echo "  FAIL [$label/first] run did not refuse a text object by name"; bad=1; }
     # Every frame a run takes it gives back: the two `mem` readings around the runs agree.
     local fr; fr="$(grep -o '^frames: [0-9]* free' <<<"$log" | tail -2 | sort -u | wc -l | tr -d ' ')"
@@ -259,7 +264,7 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
@@ -337,7 +342,7 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?

@@ -82,13 +82,12 @@ impl ShellHost for Host {
     fn program_target(&self) -> Option<kernel_core::elf::Target> {
         Some(crate::usermode::PROGRAM_TARGET)
     }
-    fn run_program(
+    fn run_programs(
         &self,
-        program: &kernel_core::elf::Placement,
-        args: &[u8],
+        set: &[(&kernel_core::elf::Placement, &[u8])],
         services: &mut dyn kernel_core::progout::ProgramServices,
-    ) -> Option<shell::ProgramRun> {
-        crate::usermode::run_program_live(program, args, services)
+    ) -> Option<alloc::vec::Vec<shell::ProgramRun>> {
+        crate::usermode::run_programs_live(set, services)
     }
     fn run_tasks(&self) -> Option<shell::TaskRun> {
         Some(crate::usermode::run_tasks_live())

@@ -626,3 +626,22 @@ fn a_band_census_that_emptied_still_displaces_an_elevated_leader() {
     assert_eq!(s.schedule_next(), Some(t(4)));
     assert_eq!(s.risk_of(t(4)), Some(Verdict::Low));
 }
+
+/// ADR-212: programs run together are admitted at one priority and must take turns - a task
+/// that is preempted goes to the back of its band, so `schedule_next` rotates A, B, C, A, ...
+/// and a finished task never comes back.
+#[test]
+fn equal_priority_tasks_take_turns_and_finished_ones_leave() {
+    let mut s = PriorityScheduler::default();
+    for i in 0..3 {
+        s.admit(t(i), MED);
+    }
+    let order: Vec<u64> = (0..6).map(|_| s.schedule_next().unwrap().0).collect();
+    assert_eq!(order, [0, 1, 2, 0, 1, 2]);
+    s.finish(t(0));
+    let order: Vec<u64> = (0..4).map(|_| s.schedule_next().unwrap().0).collect();
+    assert_eq!(order, [1, 2, 1, 2]);
+    s.finish(t(1));
+    s.finish(t(2));
+    assert_eq!(s.schedule_next(), None);
+}
