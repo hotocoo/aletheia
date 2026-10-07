@@ -171,6 +171,11 @@ impl ShellPersona {
         }
     }
 
+    /// The persona a label names (ADR-220), as [`ShellPersona::label`] spells it.
+    pub fn from_label(label: &str) -> Option<ShellPersona> {
+        Self::ALL.into_iter().find(|p| p.label() == label)
+    }
+
     /// The persona's position in [`ShellPersona::ALL`].
     pub const fn index(self) -> usize {
         match self {

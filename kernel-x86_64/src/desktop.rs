@@ -223,6 +223,22 @@ pub fn poll_app(owner: u64) -> u64 {
 }
 
 /// Program `owner` ended: its window closes (ADR-215). Main thread only.
+/// The desktop's look now (ADR-220). Main thread only.
+#[cfg(feature = "interactive")]
+pub fn persona() -> Option<kernel_core::persona::ShellPersona> {
+    with_desktop(|d| d.persona())
+}
+
+/// Give the desktop look `p` (ADR-220); the look now in force. Main thread only.
+#[cfg(feature = "interactive")]
+pub fn set_persona(
+    p: kernel_core::persona::ShellPersona,
+) -> Option<kernel_core::persona::ShellPersona> {
+    let now = with_desktop(|d| d.set_persona(p));
+    request_pump();
+    now
+}
+
 #[cfg(feature = "interactive")]
 pub fn close_app(owner: u64) {
     let _ = with_desktop(|d| d.close_app(owner));

@@ -7,6 +7,8 @@
 //!
 //! * `resolution=WxH` - the desktop's mode (ADR-196).
 //! * `refresh=HZ` - how often the desktop redraws and polls its devices, [`MIN_HZ`]..=[`MAX_HZ`].
+//! * `persona=NAME` - the desktop's look (ADR-220): Aletheia's own, or a Windows-, macOS- or
+//!   GNOME-like layout.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -37,6 +39,7 @@ pub fn set_pump_hz(hz: u32) -> u32 {
 pub struct Settings {
     pub resolution: Option<(u32, u32)>,
     pub refresh: Option<u32>,
+    pub persona: Option<crate::persona::ShellPersona>,
 }
 
 impl Settings {
@@ -66,6 +69,9 @@ impl Settings {
                     .ok()
                     .filter(|hz| (MIN_HZ..=MAX_HZ).contains(hz))
                     .map(|hz| s.refresh = Some(hz)),
+                "persona" => {
+                    crate::persona::ShellPersona::from_label(v.trim()).map(|p| s.persona = Some(p))
+                }
                 _ => None,
             });
             if parsed.is_none() {
@@ -85,6 +91,9 @@ impl Settings {
         if let Some(hz) = self.refresh {
             let _ = writeln!(out, "refresh={}", hz);
         }
+        if let Some(p) = self.persona {
+            let _ = writeln!(out, "persona={}", p.label());
+        }
     }
 }
 
@@ -98,10 +107,12 @@ mod tests {
         let s = Settings {
             resolution: Some((1024, 768)),
             refresh: Some(120),
+            persona: Some(crate::persona::ShellPersona::Macos),
         };
         let mut text = String::new();
         s.render(&mut text);
-        assert_eq!(text, "resolution=1024x768\nrefresh=120\n");
+        assert_eq!(text, "resolution=1024x768\nrefresh=120\npersona=macos\n");
+        assert_eq!(Settings::parse(b"persona=amiga\n").1, 1);
         assert_eq!(Settings::parse(text.as_bytes()), (s, 0));
         let (t, skipped) = Settings::parse(
             b"refresh=5\nresolution=0x10\ncolour=blue\nnot a line\n\n refresh = 60 \n\xff",

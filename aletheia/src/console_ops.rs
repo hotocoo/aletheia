@@ -115,6 +115,8 @@ fn risk_of(name: &str) -> Risk {
         "resolution" => Risk::Destructive,
         // `refresh` changes how the machine runs and is kept across boots (ADR-219).
         "refresh" => Risk::Destructive,
+        // `persona` restyles the desktop and is kept across boots (ADR-220).
+        "persona" => Risk::Destructive,
         // `run` executes code from the namespace (ADR-201): a human answers for it.
         "run" => Risk::Destructive,
         // `together` executes several of them at once (ADR-212): the same answer as `run`.
@@ -368,6 +370,7 @@ mod tests {
                     | "run"
                     | "together"
                     | "refresh"
+                    | "persona"
                     | "start"
                     | "kill"
                     | "jobs"

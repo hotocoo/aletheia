@@ -131,6 +131,17 @@ impl ShellHost for Host {
         crate::desktop::set_mode(w, h)
     }
     #[cfg(feature = "interactive")]
+    fn persona(&self) -> Option<kernel_core::persona::ShellPersona> {
+        crate::desktop::persona()
+    }
+    #[cfg(feature = "interactive")]
+    fn set_persona(
+        &self,
+        p: kernel_core::persona::ShellPersona,
+    ) -> Result<kernel_core::persona::ShellPersona, &'static str> {
+        crate::desktop::set_persona(p).ok_or("this machine has no live desktop to restyle")
+    }
+    #[cfg(feature = "interactive")]
     fn set_refresh(&self, hz: u32) -> Result<u32, &'static str> {
         if !crate::desktop::is_live() {
             return Err("this machine has no live desktop to refresh");

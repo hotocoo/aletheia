@@ -997,6 +997,17 @@ pub trait ShellHost {
     fn set_refresh(&self, _hz: u32) -> Result<u32, &'static str> {
         Err("this machine has no desktop to refresh")
     }
+    /// The desktop's look now, if this machine has a live desktop (ADR-220).
+    fn persona(&self) -> Option<crate::persona::ShellPersona> {
+        None
+    }
+    /// Give the desktop look `p` (ADR-220): the look now in force, or why not.
+    fn set_persona(
+        &self,
+        _p: crate::persona::ShellPersona,
+    ) -> Result<crate::persona::ShellPersona, &'static str> {
+        Err("this machine has no desktop to restyle")
+    }
     /// Where this target places a program (ADR-201). `None` = it cannot start one from the console.
     fn program_target(&self) -> Option<crate::elf::Target> {
         None
@@ -1165,6 +1176,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "oc KHZ [DOMAIN]",
         "hold a clock domain (default 0) at operating point KHZ, overclock band included; `oc off` releases it",
+    ),
+    (
+        "persona [NAME]",
+        "the desktop's look: aletheia (its own), windows, macos or gnome; NAME sets it and is kept",
     ),
     (
         "refresh [HZ]",
@@ -1839,6 +1854,17 @@ pub fn apply_settings<H: ShellHost, D: BlockDevice>(
             Err(why) => outf!(out, "settings: refresh {} Hz not applied ({})\r\n", hz, why),
         }
     }
+    if let Some(p) = s.persona {
+        match host.set_persona(p) {
+            Ok(now) => outf!(out, "settings: persona {}\r\n", now.label()),
+            Err(why) => outf!(
+                out,
+                "settings: persona {} not applied ({})\r\n",
+                p.label(),
+                why
+            ),
+        }
+    }
     if skipped > 0 {
         outf!(
             out,
@@ -2164,6 +2190,29 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                     Err(why) => outf!(out, "resolution refused: {}", why),
                 },
                 _ => out("usage: resolution WxH (a mode `display` lists, e.g. 1920x1080)"),
+            }
+        }
+        "persona" => {
+            if !authorize(host, ShellAction::Display, out) {
+                return Outcome::Continue;
+            }
+            let arg = rest.trim();
+            if arg.is_empty() {
+                match host.persona() {
+                    Some(p) => outf!(out, "persona: the desktop looks like {}", p.label()),
+                    None => out("persona: this machine has no live desktop"),
+                }
+            } else {
+                match crate::persona::ShellPersona::from_label(arg) {
+                    Some(p) => match host.set_persona(p) {
+                        Ok(now) => {
+                            outf!(out, "persona: the desktop now looks like {}", now.label());
+                            keep_setting(fs, dev, |s| s.persona = Some(now), out);
+                        }
+                        Err(why) => outf!(out, "persona refused: {}", why),
+                    },
+                    None => out("usage: persona [aletheia|windows|macos|gnome]"),
+                }
             }
         }
         "refresh" => {

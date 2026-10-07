@@ -230,6 +230,9 @@ print("ok" if ok or headless else "no %s" % w)
     # on one booted without.
     grep -Eq "refresh: the desktop now redraws at 120 Hz|refresh refused: this machine has no" <<<"$log" \
       || { echo "  FAIL [$label/first] refresh was neither set nor refused by name"; bad=1; }
+    # The desktop's look is a setting too (ADR-220): set to macOS-like, or refused by name.
+    grep -Eq "persona: the desktop now looks like macos|persona refused: this machine has no" <<<"$log" \
+      || { echo "  FAIL [$label/first] persona was neither set nor refused by name"; bad=1; }
     grep -q "run refused: manifesto: not an ELF image" <<<"$log" || { echo "  FAIL [$label/first] run did not refuse a text object by name"; bad=1; }
     # Every frame a run takes it gives back: the `mem` reading before the runs (the second of the
     # session) and the last one, after every job has ended, agree.
@@ -268,6 +271,8 @@ print("ok" if wall >= 9 and mono >= 0.8 * wall else "rtc %ds, uptime %.2fs" % (w
     if [ "$label" != "x86-64" ]; then
       grep -q "settings: refresh 120 Hz" <<<"$log" && grep -q "refresh: the desktop redraws at 120 Hz" <<<"$log" \
         || { echo "  FAIL [$label/second] the kept refresh was not put back at the next start"; bad=1; }
+      grep -q "settings: persona macos" <<<"$log" && grep -q "persona: the desktop looks like macos" <<<"$log" \
+        || { echo "  FAIL [$label/second] the kept persona was not put back at the next start"; bad=1; }
     fi
   fi
   [ "$bad" -eq 0 ] || fail=1
@@ -311,13 +316,13 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
 
   echo "--> session 2: a SECOND boot must still hold what the operator typed"
-  drive_session "$log" 180 "ls" "cat manifesto" "cat backup" "grep work manifesto" "refresh" "halt"
+  drive_session "$log" 180 "ls" "cat manifesto" "cat backup" "grep work manifesto" "refresh" "persona" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" second
   local s2=$?
@@ -389,14 +394,14 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?
 
   echo "--> session 2: a SECOND boot must still hold what the operator typed"
   cp "$vars" "$work/vars.fd"
-  drive_session "$log" 180 "ls" "cat manifesto" "cat backup" "grep work manifesto" "refresh" "halt"
+  drive_session "$log" 180 "ls" "cat manifesto" "cat backup" "grep work manifesto" "refresh" "persona" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" second
   local s2=$?
