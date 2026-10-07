@@ -44,6 +44,9 @@ pub struct Target {
     /// Where a program's writable data page goes (ADR-210), above its stack page: the three pages
     /// stay contiguous, so one range check still covers a program's whole address space.
     pub data_va: u64,
+    /// How many pages of writable data the target reserves for a program above `data_va`
+    /// (ADR-214): its `.data` and `.bss` together may be up to this many pages.
+    pub data_pages: u64,
 }
 
 /// A program the target can place: the segment's bytes from the file, where they go, and where
@@ -218,7 +221,7 @@ pub fn judge(bytes: &[u8], target: Target) -> Result<Placement<'_>, Refusal> {
         return Err(Refusal::EntryOutside);
     }
     // The writable segment, if the program declared one: readable, not executable, at the target's
-    // data address, at most one page, its file bytes inside the file.
+    // data address, at most the target's data pages (ADR-214), its file bytes inside the file.
     let (data, data_memsz) = match data {
         None => (&bytes[..0], 0),
         Some(ph) => {
@@ -234,7 +237,7 @@ pub fn judge(bytes: &[u8], target: Target) -> Result<Placement<'_>, Refusal> {
             if dvaddr != target.data_va || (align > 1 && offset % align != dvaddr % align) {
                 return Err(Refusal::WrongAddress);
             }
-            if memsz > PAGE || filesz > memsz {
+            if memsz > PAGE * target.data_pages || filesz > memsz {
                 return Err(Refusal::TooLarge);
             }
             let start = usize::try_from(offset).map_err(|_| Refusal::OutsideFile)?;

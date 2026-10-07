@@ -16,7 +16,7 @@ for pair in "aarch64-unknown-none-softfloat aarch64" "riscv64gc-unknown-none-elf
   if ! cargo clippy --release --target "$1" -- -D warnings >/dev/null 2>&1; then
     echo "  FAIL: userland has clippy warnings on $1 (cargo clippy --release --target $1)"; fail=1
   fi
-  for prog in hello show probe counter big; do
+  for prog in hello show probe counter big wide; do
     built="target/$1/release/$prog"
     shipped="bin/$2/$prog.elf"
     if cmp -s "$built" "$shipped"; then

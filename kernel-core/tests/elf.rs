@@ -9,18 +9,21 @@ const A64: Target = Target {
     machine: Machine::Aarch64,
     code_va: 0x5000_0000,
     code_pages: 16,
+    data_pages: 16,
     data_va: 0x5000_2000,
 };
 const RV: Target = Target {
     machine: Machine::Riscv64,
     code_va: 0x5000_0000,
     code_pages: 16,
+    data_pages: 16,
     data_va: 0x5000_2000,
 };
 const X86: Target = Target {
     machine: Machine::X86_64,
     code_va: 0x4000_0000,
     code_pages: 16,
+    data_pages: 16,
     data_va: 0x4000_2000,
 };
 
@@ -196,7 +199,8 @@ fn a_writable_data_segment_is_accepted_only_where_the_target_puts_one() {
         ),
         (A64.code_va, 8, 64, 6, Refusal::WrongAddress),
         (A64.data_va + 8, 8, 64, 6, Refusal::WrongAddress),
-        (A64.data_va, 8, 8192, 6, Refusal::TooLarge),
+        // Past the target's data pages (ADR-214): 16 pages declared, one byte more refused.
+        (A64.data_va, 8, 16 * 4096 + 1, 6, Refusal::TooLarge),
         (A64.data_va, 64, 8, 6, Refusal::TooLarge),
     ] {
         assert_eq!(
@@ -205,6 +209,19 @@ fn a_writable_data_segment_is_accepted_only_where_the_target_puts_one() {
             "{dvaddr:#x} {filesz} {memsz} {flags:#x}"
         );
     }
+    // Several pages of data (ADR-214): file bytes past the first page and a .bss to the last one.
+    let wide = with_data(A64, code, A64.data_va, 5000, 16 * 4096, 6);
+    let p = judge(&wide, A64).expect("a multi-page data segment is judged");
+    assert_eq!((p.data.len(), p.data_memsz), (5000, 16 * 4096));
+    // A target that reserves one data page keeps ADR-210's bound.
+    let one = Target {
+        data_pages: 1,
+        ..A64
+    };
+    assert_eq!(
+        judge(&with_data(one, code, one.data_va, 8, 8192, 6), one).map(|_| ()),
+        Err(Refusal::TooLarge)
+    );
     let bare = build(A64, code);
     let plain = judge(&bare, A64).unwrap();
     assert!(plain.data.is_empty() && plain.data_memsz == 0);

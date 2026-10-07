@@ -47,12 +47,13 @@ impl Grant {
 }
 
 /// Which page a name lies in (ADR-211): a program may pass one from its first code page, its
-/// stack, or its data page, and the run loop views exactly that page.
+/// stack, or one of its data pages (ADR-214: the index counts from the first), and the run loop
+/// views exactly that page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NamePage {
     Code,
     Stack,
-    Data,
+    Data(usize),
 }
 
 /// A `SYS_FS_READ` the trap handler admitted (ADR-207), for the run loop to serve once the program
@@ -68,8 +69,20 @@ pub struct ReadRequest {
     /// Offset of the buffer in the page `buf_in_data` names.
     pub buf_off: usize,
     pub buf_len: usize,
-    /// The buffer lies in the data page (ADR-210), else in the stack page.
+    /// The buffer lies in a data page (ADR-210), else in the stack page.
     pub buf_in_data: bool,
+    /// Which data page, counting from the first (ADR-214); 0 when the buffer is on the stack.
+    pub buf_data_page: usize,
+}
+
+/// The data page `[addr, addr + len)` lies wholly inside, and its index, when the program's data
+/// pages run from `first` to `top` (ADR-214). A range that crosses from one page into the next is
+/// in none: the run loop serves through physical frames, which are not adjacent.
+fn data_page_of(addr: u64, len: usize, first: u64, top: u64) -> Option<(usize, u64)> {
+    let index = addr.checked_sub(first)? / PAGE;
+    let page = first + index * PAGE;
+    UserSlice::validate(addr, len, page, (page + PAGE).min(top)).ok()?;
+    Some((index as usize, page))
 }
 
 /// Admit `SYS_FS_READ(name, name_len, buf, buf_len)` or refuse it (`None`), touching no memory.
@@ -102,24 +115,29 @@ pub fn admit_read(
         (NamePage::Code, code_va)
     } else if UserSlice::validate(name, name_len, stack_va, stack_top).is_ok() {
         (NamePage::Stack, stack_va)
-    } else if UserSlice::validate(name, name_len, stack_top, w.data_top).is_ok() {
-        (NamePage::Data, stack_top)
+    } else if let Some((i, at)) = data_page_of(name, name_len, stack_top, w.data_top) {
+        (NamePage::Data(i), at)
     } else {
         return None;
     };
-    // The buffer goes in the stack page or the data page - never the read+execute code page, where
+    // The buffer goes in the stack page or ONE data page - never the read+execute code page, where
     // a write through its frame would rewrite the program's own text.
-    let buf_in_data = UserSlice::validate(buf, buf_len, stack_top, w.data_top).is_ok();
-    if !buf_in_data {
-        UserSlice::validate(buf, buf_len, stack_va, stack_top).ok()?;
-    }
+    let (buf_in_data, buf_data_page, buf_page) =
+        match data_page_of(buf, buf_len, stack_top, w.data_top) {
+            Some((i, at)) => (true, i, at),
+            None => {
+                UserSlice::validate(buf, buf_len, stack_va, stack_top).ok()?;
+                (false, 0, stack_va)
+            }
+        };
     Some(ReadRequest {
         name_off: (name - page) as usize,
         name_len,
         name_page,
-        buf_off: (buf - if buf_in_data { stack_top } else { stack_va }) as usize,
+        buf_off: (buf - buf_page) as usize,
         buf_len,
         buf_in_data,
+        buf_data_page,
     })
 }
 
@@ -132,13 +150,16 @@ pub fn serve_read(
     services: &mut dyn ProgramServices,
     code_page: &[u8],
     stack_page: &mut [u8],
-    data_page: &mut [u8],
+    data_pages: &mut [&mut [u8]],
 ) -> u64 {
     let mut name = [0u8; crate::fs::MAX_NAME];
-    let src = match req.name_page {
+    let src: &[u8] = match req.name_page {
         NamePage::Code => code_page,
-        NamePage::Stack => &*stack_page,
-        NamePage::Data => &*data_page,
+        NamePage::Stack => stack_page,
+        NamePage::Data(i) => match data_pages.get(i) {
+            Some(p) => p,
+            None => return u64::MAX,
+        },
     };
     let Some(bytes) = src.get(req.name_off..req.name_off + req.name_len) else {
         return u64::MAX;
@@ -147,8 +168,11 @@ pub fn serve_read(
     let Ok(name) = core::str::from_utf8(&name[..req.name_len]) else {
         return u64::MAX;
     };
-    let target = if req.buf_in_data {
-        data_page
+    let target: &mut [u8] = if req.buf_in_data {
+        match data_pages.get_mut(req.buf_data_page) {
+            Some(p) => p,
+            None => return u64::MAX,
+        }
     } else {
         stack_page
     };
@@ -309,6 +333,47 @@ mod tests {
         ..W
     };
 
+    /// A program with three data pages (ADR-214): they run from the stack top to 0x6000.
+    const W_DATA3: Window = Window {
+        data_top: 0x6000,
+        ..W
+    };
+
+    #[test]
+    fn a_read_names_one_data_page_of_several_and_never_straddles_two() {
+        let g = Grant::new(9);
+        // Name in the third data page, buffer in the second: each is found by its own page.
+        let req = admit_read(Some(&g), 0x5010, 4, 0x4100, 64, W_DATA3).unwrap();
+        assert_eq!(req.name_page, NamePage::Data(2));
+        assert_eq!(req.name_off, 0x10);
+        assert!(req.buf_in_data && req.buf_data_page == 1 && req.buf_off == 0x100);
+        // A buffer that runs from one data page into the next is refused, as is one past the top.
+        assert_eq!(admit_read(Some(&g), 0x5010, 4, 0x4FF0, 0x20, W_DATA3), None);
+        assert_eq!(admit_read(Some(&g), 0x5010, 4, 0x6000, 1, W_DATA3), None);
+        // The same buffer address is refused when the program has only one data page.
+        assert_eq!(admit_read(Some(&g), 0x1080, 4, 0x4100, 64, W), None);
+        // Served: the name is read from page 2 and the object lands in page 1.
+        let code = [0u8; 4096];
+        let mut stack = [0u8; 4096];
+        let (mut d0, mut d1, mut d2) = ([0u8; 4096], [0u8; 4096], [0u8; 4096]);
+        d2[0x10..0x14].copy_from_slice(b"note");
+        let n = serve_read(
+            &req,
+            &mut One,
+            &code,
+            &mut stack,
+            &mut [&mut d0[..], &mut d1[..], &mut d2[..]],
+        );
+        assert_eq!(n, 10);
+        assert_eq!(&d1[0x100..0x10A], b"just words");
+        assert!(d0.iter().all(|&b| b == 0));
+        // A request naming a page the run loop was not handed is refused, not indexed past.
+        assert_eq!(
+            serve_read(&req, &mut One, &code, &mut stack, &mut [&mut d0[..]]),
+            u64::MAX
+        );
+    }
+
     #[test]
     fn a_read_is_admitted_only_with_the_grant_a_one_page_name_and_a_writable_buffer() {
         let g = Grant::new(9);
@@ -321,7 +386,8 @@ mod tests {
                 name_page: NamePage::Code,
                 buf_off: 0x100,
                 buf_len: 64,
-                buf_in_data: false
+                buf_in_data: false,
+                buf_data_page: 0,
             })
         );
         assert!(
@@ -400,9 +466,10 @@ mod tests {
             buf_off: 0x200,
             buf_len: 4,
             buf_in_data: false,
+            buf_data_page: 0,
         };
         assert_eq!(
-            serve_read(&req, &mut One, &code, &mut stack, &mut data),
+            serve_read(&req, &mut One, &code, &mut stack, &mut [&mut data[..]]),
             10,
             "full length"
         );
@@ -412,10 +479,17 @@ mod tests {
             buf_off: 0x40,
             buf_len: 16,
             buf_in_data: true,
+            buf_data_page: 0,
             ..req
         };
         assert_eq!(
-            serve_read(&into_data, &mut One, &code, &mut stack, &mut data),
+            serve_read(
+                &into_data,
+                &mut One,
+                &code,
+                &mut stack,
+                &mut [&mut data[..]]
+            ),
             10
         );
         assert_eq!(&data[0x40..0x4a], b"just words");
@@ -428,21 +502,32 @@ mod tests {
             buf_off: 0x10,
             buf_len: 16,
             buf_in_data: false,
+            buf_data_page: 0,
         };
-        assert_eq!(serve_read(&req, &mut One, &code, &mut stack, &mut data), 10);
+        assert_eq!(
+            serve_read(&req, &mut One, &code, &mut stack, &mut [&mut data[..]]),
+            10
+        );
         assert_eq!(&stack[0x10..0x1a], b"just words");
         // A name may also live in the data page (ADR-211).
         data[0x100..0x104].copy_from_slice(b"note");
         let from_data = ReadRequest {
             name_off: 0x100,
             name_len: 4,
-            name_page: NamePage::Data,
+            name_page: NamePage::Data(0),
             buf_off: 0x300,
             buf_len: 16,
             buf_in_data: true,
+            buf_data_page: 0,
         };
         assert_eq!(
-            serve_read(&from_data, &mut One, &code, &mut stack, &mut data),
+            serve_read(
+                &from_data,
+                &mut One,
+                &code,
+                &mut stack,
+                &mut [&mut data[..]]
+            ),
             10
         );
         // Unknown and non-UTF-8 names are refused.
@@ -454,18 +539,25 @@ mod tests {
             buf_off: 0,
             buf_len: 4,
             buf_in_data: false,
+            buf_data_page: 0,
         };
         assert_eq!(
-            serve_read(&req, &mut One, &code, &mut stack, &mut data),
+            serve_read(&req, &mut One, &code, &mut stack, &mut [&mut data[..]]),
             u64::MAX
         );
         code[0x80] = 0xff;
         assert_eq!(
-            serve_read(&req, &mut One, &code, &mut stack, &mut data),
+            serve_read(&req, &mut One, &code, &mut stack, &mut [&mut data[..]]),
             u64::MAX
         );
         assert_eq!(
-            serve_read(&req, &mut NoServices, &code, &mut stack, &mut data),
+            serve_read(
+                &req,
+                &mut NoServices,
+                &code,
+                &mut stack,
+                &mut [&mut data[..]]
+            ),
             u64::MAX
         );
     }

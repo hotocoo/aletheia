@@ -1516,6 +1516,8 @@ pub const PROGRAM_CODE_PAGES: u64 = 16;
 const PROGRAM_STACK_VA: usize = USER_CODE_VA + PROGRAM_CODE_PAGES as usize * frames::FRAME_SIZE;
 const PROGRAM_STACK_TOP: usize = PROGRAM_STACK_VA + frames::FRAME_SIZE;
 const PROGRAM_DATA_VA: usize = PROGRAM_STACK_TOP;
+/// Pages of writable data a program may declare above its stack (ADR-214).
+pub const PROGRAM_DATA_PAGES: u64 = 16;
 
 /// The running program's `console.output` grant (ADR-204); `None` whenever no `run` is in progress.
 static mut PROGRAM_GRANT: Option<kernel_core::progout::Grant> = None;
@@ -1543,6 +1545,9 @@ pub const USERLAND_COUNTER: &[u8] = include_bytes!("../../userland/bin/aarch64/c
 /// `big`, from `userland/` (ADR-211): three pages of code, so it runs only if the machine maps
 /// every page the segment declares. Not seeded; the boot suite's.
 const USERLAND_BIG: &[u8] = include_bytes!("../../userland/bin/aarch64/big.elf");
+/// `wide`, from `userland/` (ADR-214): three pages of `.bss`, so it runs only if the machine maps,
+/// zeroes and serves reads into every data page it declares. Not seeded; the boot suite's.
+const USERLAND_WIDE: &[u8] = include_bytes!("../../userland/bin/aarch64/wide.elf");
 
 /// The run storms (ADR-202's faulting runs, ADR-204's writes, ADR-207's reads) prove bounds under
 /// load; like `kmain`'s storms (ADR-163) they run in the gate image only, so an interactive boot
@@ -1564,6 +1569,7 @@ pub const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
     code_va: USER_CODE_VA as u64,
     code_pages: PROGRAM_CODE_PAGES,
     data_va: PROGRAM_DATA_VA as u64,
+    data_pages: PROGRAM_DATA_PAGES,
 };
 
 /// The console's `run NAME` and `together` (ADR-201, ADR-212): each program one EL0 task in its own
@@ -1585,10 +1591,10 @@ fn free_program_pages(
     vaddr: usize,
     code: &mut Vec<frames::PhysFrame>,
     stack: &mut Option<frames::PhysFrame>,
-    data: &mut Option<frames::PhysFrame>,
+    data: &mut Vec<frames::PhysFrame>,
 ) {
-    if let Some(f) = data.take() {
-        drop_user_page(root, PROGRAM_DATA_VA, f);
+    for (i, f) in core::mem::take(data).into_iter().enumerate() {
+        drop_user_page(root, PROGRAM_DATA_VA + i * frames::FRAME_SIZE, f);
     }
     if let Some(f) = stack.take() {
         drop_user_page(root, PROGRAM_STACK_VA, f);
@@ -1618,7 +1624,8 @@ struct Slot {
     root: usize,
     code: Vec<frames::PhysFrame>,
     stack: Option<frames::PhysFrame>,
-    data: Option<frames::PhysFrame>,
+    /// Its writable pages, from [`PROGRAM_DATA_VA`] up (ADR-210, ADR-214).
+    data: Vec<frames::PhysFrame>,
     frame: TrapFrame,
     /// The supervisor's id for this program, so a fault is charged to it (ADR-202).
     task: u64,
@@ -1690,28 +1697,24 @@ fn place_program(program: &kernel_core::elf::Placement, args: &[u8]) -> Option<S
     }
     let code_ok = code.len() == words.len().div_ceil(frames::FRAME_SIZE / 4).max(1);
     let mut stack = map_user_stack(root, PROGRAM_STACK_VA);
-    // The writable page, if the program declared one (ADR-210): a third mapped page above the
-    // stack, zero past the bytes the image carries, so `.bss` starts zeroed.
-    let mut data = None;
-    let mut data_ok = true;
-    if program.data_memsz > 0 {
-        data = map_user_stack(root, PROGRAM_DATA_VA);
-        match data {
-            Some(f) if !program.data.is_empty() => {
-                // SAFETY: `f` is the zeroed page just mapped, identity-mapped and kernel-writable;
-                // the judge bounds `data` at one page.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        program.data.as_ptr(),
-                        f.addr() as *mut u8,
-                        program.data.len(),
-                    )
-                };
-            }
-            Some(_) => {}
-            None => data_ok = false,
-        }
+    // The writable pages the program declared (ADR-210, ADR-214), contiguous above the stack,
+    // zero past the bytes the image carries, so `.bss` starts zeroed.
+    let pages = (program.data_memsz as usize).div_ceil(frames::FRAME_SIZE);
+    let mut data: Vec<frames::PhysFrame> = Vec::with_capacity(pages);
+    for i in 0..pages {
+        let Some(f) = map_user_stack(root, PROGRAM_DATA_VA + i * frames::FRAME_SIZE) else {
+            break;
+        };
+        let bytes = program
+            .data
+            .get(i * frames::FRAME_SIZE..)
+            .map_or(&[][..], |rest| &rest[..rest.len().min(frames::FRAME_SIZE)]);
+        // SAFETY: `f` is the zeroed page just mapped, identity-mapped and kernel-writable; `bytes`
+        // is at most one page of the image's data.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), f.addr() as *mut u8, bytes.len()) };
+        data.push(f);
     }
+    let data_ok = data.len() == pages;
     let Some(st) = stack.filter(|_| code_ok && data_ok) else {
         free_program_pages(
             root,
@@ -1746,6 +1749,7 @@ fn place_program(program: &kernel_core::elf::Placement, args: &[u8]) -> Option<S
         *addr_of_mut!(CURRENT_TASK) += 1;
         *addr_of!(CURRENT_TASK)
     };
+    let data_top = (PROGRAM_DATA_VA + data.len() * frames::FRAME_SIZE) as u64;
     Some(Slot {
         vaddr: program.vaddr as usize,
         root,
@@ -1759,11 +1763,7 @@ fn place_program(program: &kernel_core::elf::Placement, args: &[u8]) -> Option<S
             code_va: USER_CODE_VA as u64,
             stack_va: PROGRAM_STACK_VA as u64,
             stack_top: PROGRAM_STACK_TOP as u64,
-            data_top: if data.is_some() {
-                (PROGRAM_DATA_VA + frames::FRAME_SIZE) as u64
-            } else {
-                PROGRAM_STACK_TOP as u64
-            },
+            data_top,
         },
         out: kernel_core::progout::OutputSink::new(),
         run: kernel_core::shell::ProgramRun::default(),
@@ -1832,21 +1832,23 @@ fn run_slice(
     // SAFETY: single-threaded; the program is off the CPU.
     if let Some(req) = unsafe { (*addr_of_mut!(PENDING_READ)).take() } {
         if let (Some(c), Some(st)) = (slot.code.first().copied(), slot.stack) {
-            let mut empty = [0u8; 0];
-            // SAFETY: `c`, `st` and the data frame are this program's own identity-mapped frames,
-            // one page each, untouched while it is off the CPU.
+            // SAFETY: `c`, `st` and the data frames are this program's own identity-mapped frames,
+            // one page each and distinct, untouched while it is off the CPU.
+            let mut views: [&mut [u8]; PROGRAM_DATA_PAGES as usize] =
+                core::array::from_fn(|i| match slot.data.get(i) {
+                    Some(d) => unsafe {
+                        core::slice::from_raw_parts_mut(d.addr() as *mut u8, frames::FRAME_SIZE)
+                    },
+                    None => &mut [],
+                });
+            // SAFETY: as above.
             slot.frame.regs[0] = unsafe {
                 kernel_core::progout::serve_read(
                     &req,
                     services,
                     core::slice::from_raw_parts(c.addr() as *const u8, frames::FRAME_SIZE),
                     core::slice::from_raw_parts_mut(st.addr() as *mut u8, frames::FRAME_SIZE),
-                    match slot.data {
-                        Some(d) => {
-                            core::slice::from_raw_parts_mut(d.addr() as *mut u8, frames::FRAME_SIZE)
-                        }
-                        None => &mut empty,
-                    },
+                    &mut views[..slot.data.len()],
                 )
             };
         }
@@ -3082,6 +3084,17 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                     && r.status == 0x5839_3C00
                     && r.output == b"big ran\n"),
                 "code: a program larger than one page runs, with every page of its segment mapped"
+            );
+            // A program whose writable memory is three pages (ADR-214): each page arrives zeroed
+            // and distinct (a fill of 1, 2, 3 sums to 24,576), and a read lands in the second.
+            let wide = run(USERLAND_WIDE, b"", &mut svc);
+            let wide_read = run(USERLAND_WIDE, b"note", &mut svc);
+            check!(
+                wide.is_some_and(|r| r.exited && r.status == 24_576 && r.output.is_empty())
+                    && wide_read.is_some_and(|r| r.exited
+                        && r.status == 25_601
+                        && r.output == b"wide read: just words\n"),
+                "data: a program with three pages of writable memory gets each one zeroed and distinct, and reads into its second"
             );
             let refused = [
                 &b"codebuf"[..],

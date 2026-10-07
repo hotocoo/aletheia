@@ -913,6 +913,7 @@ const PROGRAM_TARGET: kernel_core::elf::Target = kernel_core::elf::Target {
     machine: kernel_core::elf::Machine::Aarch64,
     code_va: 0x5000_0000,
     code_pages: 16,
+    data_pages: 16,
     data_va: 0x5000_2000,
 };
 
@@ -998,6 +999,7 @@ fn run_places_a_judged_program_and_refuses_everything_else_by_name() {
             machine: Machine::Riscv64,
             code_va: 0x5000_0000,
             code_pages: 16,
+            data_pages: 16,
             data_va: 0x5000_2000,
         },
         hello_code(Machine::Riscv64),
