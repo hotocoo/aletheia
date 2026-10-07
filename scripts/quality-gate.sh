@@ -63,6 +63,20 @@ for i in "${!CRATES[@]}"; do
     fail=1
   fi
 done
+# The kernels' interactive images are what an operator boots, and half their code (the desktop, the
+# console's live paths) exists only under that feature: lint them as built, not just the gate image.
+for i in "${!CRATES[@]}"; do
+  c="${CRATES[$i]}"
+  t="${TARGETS[$i]}"
+  [ -n "$t" ] && [ -f "$c/Cargo.toml" ] && grep -q '^interactive' "$c/Cargo.toml" || continue
+  if out="$(cd "$c" && cargo clippy --locked --features interactive -- -D warnings 2>&1)"; then
+    echo "  PASS clippy: $c ($t, interactive)"
+  else
+    echo "  FAIL clippy: $c ($t, interactive)"
+    echo "$out" | grep -E '^(error|warning)' | head -20
+    fail=1
+  fi
+done
 
 step "[3] advisories — cargo audit"
 if command -v cargo-audit >/dev/null 2>&1 || cargo audit --version >/dev/null 2>&1; then

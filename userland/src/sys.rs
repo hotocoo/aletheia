@@ -7,6 +7,7 @@ pub const SYS_FS_READ: u64 = 8;
 pub const SYS_WRITE_CONSOLE: u64 = 12;
 pub const SYS_PRESENT: u64 = 13;
 pub const SYS_POLL_INPUT: u64 = 14;
+pub const SYS_CLOCK: u64 = 15;
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn syscall2(num: u64, a0: u64, a1: u64) -> u64 {
@@ -151,6 +152,12 @@ pub fn poll_input() -> Result<Option<Input>, ()> {
         },
         _ => Input::FocusLost,
     }))
+}
+
+/// Nanoseconds since the machine booted (ADR-222), monotonic.
+pub fn clock_ns() -> u64 {
+    // SAFETY: the call takes no pointers.
+    unsafe { syscall2(SYS_CLOCK, 0, 0) }
 }
 
 /// End this program with `status`.

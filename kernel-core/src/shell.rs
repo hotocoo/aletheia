@@ -1606,24 +1606,21 @@ fn split_first(line: &str) -> (&str, &str) {
     }
 }
 
-/// What a freshly formatted namespace starts with (ADR-201..215): the programs `hello`, `show`,
-/// `counter` and `draw` (built from Rust source in `userland/`, handed in by the target), `trap`
-/// (executes an undefined instruction) and `spin` (never yields) for this CPU, so a new machine has
-/// something to `run`, and two things that must be contained. Only ever called on the format
-/// path, so an object the operator removed is never brought back.
+/// What a freshly formatted namespace starts with (ADR-201..222): the userland programs the target
+/// hands in, each under its name (`hello`, `show`, `counter`, `draw`, the game `snake` - built from
+/// Rust source in `userland/`), then `trap` (executes an undefined instruction) and `spin` (never
+/// yields) for this CPU, so a new machine has something to `run`, and two things that must be
+/// contained. Only ever called on the format path, so an object the operator removed is never
+/// brought back.
 pub fn seed_namespace<D: BlockDevice>(
     fs: &mut Filesystem,
     dev: &mut D,
     target: crate::elf::Target,
-    hello: &[u8],
-    show: &[u8],
-    counter: &[u8],
-    draw: &[u8],
+    programs: &[(&str, &[u8])],
 ) -> Result<(), crate::fs::FsError> {
-    fs.create(dev, "hello", hello)?;
-    fs.create(dev, "show", show)?;
-    fs.create(dev, "counter", counter)?;
-    fs.create(dev, "draw", draw)?;
+    for (name, bytes) in programs {
+        fs.create(dev, name, bytes)?;
+    }
     let trap = crate::elf::build(target, crate::elf::trap_code(target.machine));
     fs.create(dev, "trap", &trap)?;
     let spin = crate::elf::build(target, crate::elf::spin_code(target.machine));

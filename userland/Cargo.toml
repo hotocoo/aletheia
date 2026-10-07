@@ -41,6 +41,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "snake"
+path = "src/snake.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "probe"
 path = "src/probe.rs"
 test = false

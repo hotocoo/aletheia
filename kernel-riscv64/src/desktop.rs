@@ -135,8 +135,7 @@ pub fn persona() -> Option<kernel_core::persona::ShellPersona> {
 pub fn set_persona(
     p: kernel_core::persona::ShellPersona,
 ) -> Option<kernel_core::persona::ShellPersona> {
-    let now = with_desktop(|d| d.set_persona(p));
-    now
+    with_desktop(|d| d.set_persona(p))
 }
 
 #[cfg(feature = "interactive")]

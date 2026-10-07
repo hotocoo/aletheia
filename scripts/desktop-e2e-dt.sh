@@ -200,6 +200,23 @@ assert red>=2000, f'the colour frame did not reach the display in colour ({red} 
 n0=len(txt()); key('q')
 if not wait_from(n0,'exited with status 113',30):
     raise RuntimeError('draw colour did not end on q')
+# A game (ADR-222): `snake` runs in its own colour window - its yellow head (255, 255, 0) and grey
+# wall reach the display - takes `w` as a turn, and ends itself when it hits the wall, reporting
+# 2000 + its score as its exit status.
+def colour_px(px, rgb):
+    return sum(1 for i in range(0,len(px),3) if (px[i],px[i+1],px[i+2])==rgb)
+n0=len(txt())
+serial('start snake','running in the background')
+time.sleep(1.5); shot_px=frame_px('snake')
+head, wall = colour_px(shot_px,(255,255,0)), colour_px(shot_px,(146,146,170))
+print(f'snake window: {head} head px, {wall} wall px on the display')
+assert head>=16 and wall>=400, f'the game did not reach the display ({head} head, {wall} wall px)'
+key('w')
+if not wait_from(n0,'(snake) ended',90):
+    raise RuntimeError('snake did not end on its own: '+txt()[n0:][-300:])
+m=re.search(r'snake exited with status (\d+)',txt()[n0:])
+assert m and 2000<=int(m.group(1))<2100, 'snake did not report a score: '+txt()[n0:][-300:]
+print(f'snake ended with status {m.group(1)}')
 print('DESKTOP LIVE E2E: PASS')
 PY
   kill -9 "$pid" 2>/dev/null || true; trap - RETURN; rm -f "$qmp" "$ser"

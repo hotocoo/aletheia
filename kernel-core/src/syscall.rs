@@ -39,6 +39,9 @@ pub const SYS_PRESENT: u64 = 13;
 /// `appwin::KEY | byte` for a key, `appwin::FOCUS_LOST`, or `u64::MAX` when the program holds no
 /// open window.
 pub const SYS_POLL_INPUT: u64 = 14;
+/// Nanoseconds since boot on the machine's monotonic clock (ADR-222): what a program paces frames
+/// and animations by, instead of busy loops whose speed is the emulator's.
+pub const SYS_CLOCK: u64 = 15;
 /// Upper 32 bits of [`SYS_PROCESS_INFO`] response.
 pub const PROCESS_INFO_TERMINATED_SHIFT: u32 = 32;
 
@@ -72,6 +75,7 @@ pub enum Syscall {
     WriteConsole,
     Present,
     PollInput,
+    Clock,
 }
 
 impl Syscall {
@@ -92,6 +96,7 @@ impl Syscall {
             SYS_WRITE_CONSOLE => Some(Self::WriteConsole),
             SYS_PRESENT => Some(Self::Present),
             SYS_POLL_INPUT => Some(Self::PollInput),
+            SYS_CLOCK => Some(Self::Clock),
             _ => None,
         }
     }
@@ -113,6 +118,7 @@ impl Syscall {
             Self::WriteConsole => SYS_WRITE_CONSOLE,
             Self::Present => SYS_PRESENT,
             Self::PollInput => SYS_POLL_INPUT,
+            Self::Clock => SYS_CLOCK,
         }
     }
 
@@ -129,7 +135,8 @@ impl Syscall {
             Self::ProcessKill => Some("process.kill"),
             Self::WriteConsole => Some("console.output"),
             Self::Present | Self::PollInput => Some("window.present"),
-            Self::Yield | Self::Exit | Self::Regcheck => None,
+            // Reading the clock touches no object: like yielding, it needs no authority.
+            Self::Yield | Self::Exit | Self::Regcheck | Self::Clock => None,
         }
     }
 }
@@ -155,6 +162,7 @@ mod tests {
             Syscall::WriteConsole,
             Syscall::Present,
             Syscall::PollInput,
+            Syscall::Clock,
         ] {
             assert_eq!(Syscall::decode(syscall.number()), Some(syscall));
         }
@@ -162,7 +170,7 @@ mod tests {
 
     #[test]
     fn unknown_numbers_fail_closed() {
-        for number in [0, 15, 99, u64::MAX] {
+        for number in [0, 16, 99, u64::MAX] {
             assert_eq!(Syscall::decode(number), None);
         }
     }

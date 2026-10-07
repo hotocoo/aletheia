@@ -43,8 +43,8 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_POLL_INPUT, SYS_PRESENT,
-    SYS_PROCESS_INFO, SYS_RECV, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
+    pack_process_info, Syscall, SYS_CLOCK, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_POLL_INPUT,
+    SYS_PRESENT, SYS_PROCESS_INFO, SYS_RECV, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's Sv39 `vm.rs` performs the real page mapping into each space.
@@ -513,6 +513,11 @@ extern "C" fn _user_trap_rust(frame: *mut TrapFrame) {
                         }
                         None => u64::MAX,
                     }
+                } else if num == SYS_CLOCK {
+                    use crate::hal::{ActiveHal, Hal};
+                    // The machine's monotonic clock (ADR-222), answered here: it reads a counter
+                    // and touches nothing of the program's. The result goes back in a0 below.
+                    ActiveHal::ticks_to_ns(ActiveHal::timer_ticks())
                 } else if num == SYS_POLL_INPUT {
                     // Admitted here, answered by the run loop from the program's window (ADR-216).
                     if kernel_core::progout::admit_poll((*addr_of!(PROGRAM_GRANT)).as_ref()) {
@@ -1285,6 +1290,8 @@ const USERLAND_BIG: &[u8] = include_bytes!("../../userland/bin/riscv64/big.elf")
 const USERLAND_WIDE: &[u8] = include_bytes!("../../userland/bin/riscv64/wide.elf");
 /// `draw`, from `userland/` (ADR-215): seeded, a program with its own desktop window.
 pub const USERLAND_DRAW: &[u8] = include_bytes!("../../userland/bin/riscv64/draw.elf");
+/// `snake`, from `userland/` (ADR-222): seeded, a game in its own colour window.
+pub const USERLAND_SNAKE: &[u8] = include_bytes!("../../userland/bin/riscv64/snake.elf");
 
 /// The run storms (ADR-202's faulting runs, ADR-204's writes, ADR-207's reads) prove bounds under
 /// load; like `kmain`'s storms (ADR-163) they run in the gate image only, so an interactive boot
@@ -2912,11 +2919,24 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                 drawn.is_some_and(|r| r.exited && r.status == 0 && r.terminated.is_none()),
                 "present: a frame with no live desktop to show it is refused and the program ends cleanly"
             );
+            // The clock (ADR-222): two readings a program takes move forward.
+            let clocked = run(USERLAND_SNAKE, b"clock", &mut svc);
+            check!(
+                clocked.is_some_and(|r| r.exited && r.status == 1),
+                "clock: a program's two readings of the machine's clock move forward"
+            );
             // Input (ADR-216): a program that holds no window is refused when it asks for input.
             let polled = run(USERLAND_DRAW, b"poll", &mut svc);
             check!(
                 polled.is_some_and(|r| r.exited && r.status == 7),
                 "input: a program with no window of its own is refused the window's input"
+            );
+            // A game (ADR-222): with no live desktop its first frame is refused, and it ends
+            // cleanly with a score of nothing (2000 + 0).
+            let played = run(USERLAND_SNAKE, b"", &mut svc);
+            check!(
+                played.is_some_and(|r| r.exited && r.status == 2000 && r.terminated.is_none()),
+                "game: snake with no desktop to play on ends cleanly with no score"
             );
             let refused = [
                 &b"codebuf"[..],
