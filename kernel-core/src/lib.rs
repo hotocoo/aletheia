@@ -89,6 +89,7 @@ pub mod reentry;
 pub mod sched;
 pub mod schedstorm;
 pub mod selftest;
+pub mod settings;
 pub mod sha512;
 pub mod shell;
 pub mod shellstorm;

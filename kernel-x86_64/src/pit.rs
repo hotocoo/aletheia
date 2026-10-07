@@ -15,6 +15,8 @@ const PIT_BASE_HZ: u32 = 1_193_182;
 pub const FREQ_HZ: u32 = 1_000;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// The rate [`init`] programs: [`FREQ_HZ`] unless the operator chose a desktop refresh (ADR-219).
+static RATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(FREQ_HZ);
 
 /// Was the CPU halted when this tick arrived? Set by whatever puts the core to sleep, read by the
 /// handler, so the demand the governor measures is the machine's OWN busy/idle split rather than a
@@ -35,7 +37,14 @@ pub fn set_idle(idle: bool) {
 }
 
 pub fn init() {
-    program(FREQ_HZ);
+    program(RATE.load(Ordering::Relaxed));
+}
+
+/// Run the periodic tick at `hz` from now on, and whenever it is next brought up (ADR-219).
+#[cfg_attr(not(feature = "interactive"), allow(dead_code))]
+pub fn set_rate(hz: u32) {
+    RATE.store(hz.max(1), Ordering::Relaxed);
+    program(hz.max(1));
 }
 
 /// Qualification-only override for a longer preemption proof slice. Production timing remains

@@ -1248,3 +1248,80 @@ fn a_started_program_runs_in_the_background_and_is_reported_when_it_ends() {
         "{log}"
     );
 }
+
+/// A host whose desktop refresh can be set (ADR-219).
+struct RefreshHost;
+
+impl ShellHost for RefreshHost {
+    fn arch(&self) -> &str {
+        "test-host"
+    }
+    fn uptime_ns(&self) -> u64 {
+        0
+    }
+    fn free_frames(&self) -> usize {
+        1
+    }
+    fn total_frames(&self) -> usize {
+        1
+    }
+    fn privilege(&self) -> u64 {
+        1
+    }
+    fn authorize(&self, _: ShellAction) -> bool {
+        true
+    }
+    fn set_refresh(&self, hz: u32) -> Result<u32, &'static str> {
+        Ok(kernel_core::settings::set_pump_hz(hz))
+    }
+}
+
+/// `refresh HZ` takes effect, is refused out of range, and is kept in the `settings` object; the
+/// next console start puts it back before the first prompt (ADR-219).
+#[test]
+fn a_refresh_rate_is_set_kept_and_put_back_at_the_next_start() {
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let session = |fs: &mut Filesystem, dev: &mut MemBlockDevice, input: &[u8]| {
+        let mut feed = input.iter().copied();
+        let mut log = String::new();
+        shell::run_loop_serviced(
+            &RefreshHost,
+            fs,
+            dev,
+            &mut || feed.next(),
+            &mut |s| log.push_str(s),
+            &mut |_, _, _, _| false,
+            &mut shell::BrowserHooks {
+                take_navigation: &mut || None,
+                show_page: &mut |_| {},
+            },
+        );
+        log
+    };
+    let log = session(
+        &mut fs,
+        &mut dev,
+        b"refresh 120\rrefresh 5\rrefresh\rhalt\r",
+    );
+    assert!(
+        log.contains("refresh: the desktop now redraws at 120 Hz"),
+        "{log}"
+    );
+    assert!(log.contains("usage: refresh [HZ] (30 to 1000)"), "{log}");
+    assert!(
+        log.contains("refresh: the desktop redraws at 120 Hz"),
+        "{log}"
+    );
+    assert_eq!(fs.read(&dev, "settings").unwrap(), b"refresh=120\n");
+    kernel_core::settings::set_pump_hz(1000);
+    let log = session(&mut fs, &mut dev, b"refresh\rhalt\r");
+    let applied = log.find("settings: refresh 120 Hz").expect(&log);
+    assert!(applied < log.find("aletheia>").unwrap(), "{log}");
+    assert!(
+        log.contains("refresh: the desktop redraws at 120 Hz"),
+        "{log}"
+    );
+    kernel_core::settings::set_pump_hz(1000);
+}

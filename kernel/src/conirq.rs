@@ -30,15 +30,15 @@ const UART_INTID: u32 = 33;
 /// desktop's pump (ADR-085): a desktop nobody ticks shows the first frame and nothing after it.
 #[cfg(feature = "interactive")]
 const TIMER_INTID: u32 = 30;
-/// Timer slice: one millisecond of the counter's own frequency. The desktop pump therefore
-/// runs at 1 kHz on the interactive path, matching x86-64 and minimizing timer-driven input
-/// latency. The IRQ handler remains tiny; compositor/device work stays in the foreground pump.
+/// Timer slice: the counter's own frequency divided by the desktop's refresh, 1 kHz unless the
+/// operator chose another (ADR-219). The IRQ handler remains tiny; compositor/device work stays in
+/// the foreground pump.
 #[cfg(feature = "interactive")]
 fn timer_slice() -> u64 {
     let freq: u64;
     // SAFETY: CNTFRQ_EL0 is readable at EL1 and has no side effects.
     unsafe { asm!("mrs {f}, cntfrq_el0", f = out(reg) freq, options(nomem, nostack)) };
-    (freq / 1000).max(1)
+    (freq / kernel_core::settings::pump_hz() as u64).max(1)
 }
 
 /// Arm the EL1 physical timer for one slice.

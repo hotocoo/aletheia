@@ -131,6 +131,14 @@ impl ShellHost for Host {
         crate::desktop::set_mode(w, h)
     }
     #[cfg(feature = "interactive")]
+    fn set_refresh(&self, hz: u32) -> Result<u32, &'static str> {
+        if !crate::desktop::is_live() {
+            return Err("this machine has no live desktop to refresh");
+        }
+        // The next timer arm reads the new rate (ADR-219).
+        Ok(kernel_core::settings::set_pump_hz(hz))
+    }
+    #[cfg(feature = "interactive")]
     fn input_facts(&self) -> Option<shell::InputFacts> {
         crate::desktop::facts()
     }

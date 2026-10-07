@@ -126,6 +126,16 @@ impl ShellHost for Host {
         let _ = (w, h);
         Err("x86-64: the GPU sits behind a VT-d window fixed at boot; the mode is chosen at boot only")
     }
+    #[cfg(feature = "interactive")]
+    fn set_refresh(&self, hz: u32) -> Result<u32, &'static str> {
+        if !crate::desktop::is_live() {
+            return Err("this machine has no live desktop to refresh");
+        }
+        // The PIT is the desktop's tick here (ADR-080): it runs at the new rate from now on.
+        let hz = kernel_core::settings::set_pump_hz(hz);
+        crate::pit::set_rate(hz);
+        Ok(hz)
+    }
     /// The live desktop's session facts (ALET-P2-021's hardware rung, ADR-080), read from
     /// the pump's atomic ledger — one machine word per fact, so a concurrent PIT pump cannot
     /// tear a readout. `None` = no desktop was installed, and the command says so.

@@ -992,6 +992,11 @@ pub trait ShellHost {
     fn set_display_mode(&self, _w: u32, _h: u32) -> Result<(u32, u32), &'static str> {
         Err("this machine has no desktop to switch")
     }
+    /// Pump the desktop `hz` times a second from now on (ADR-219): the rate it now runs at, which a
+    /// target records with [`crate::settings::set_pump_hz`], or why not.
+    fn set_refresh(&self, _hz: u32) -> Result<u32, &'static str> {
+        Err("this machine has no desktop to refresh")
+    }
     /// Where this target places a program (ADR-201). `None` = it cannot start one from the console.
     fn program_target(&self) -> Option<crate::elf::Target> {
         None
@@ -1160,6 +1165,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     (
         "oc KHZ [DOMAIN]",
         "hold a clock domain (default 0) at operating point KHZ, overclock band included; `oc off` releases it",
+    ),
+    (
+        "refresh [HZ]",
+        "how often the desktop redraws and polls its devices; HZ (30-1000) sets it and is kept",
     ),
     ("lsblk", "the console's block device geometry"),
     ("df", "filesystem space, in blocks"),
@@ -1779,6 +1788,66 @@ fn report_job_end(id: u32, name: &str, run: &ProgramRun, out: &mut dyn FnMut(&st
     report_run(name, run, out);
 }
 
+/// Change one setting and write the `settings` object back (ADR-219). A namespace that refuses the
+/// write says so; the change itself already took effect.
+fn keep_setting<D: BlockDevice>(
+    fs: &mut Filesystem,
+    dev: &mut D,
+    change: impl FnOnce(&mut crate::settings::Settings),
+    out: &mut dyn FnMut(&str),
+) {
+    let mut s = fs
+        .read(dev, crate::settings::OBJECT)
+        .map(|b| crate::settings::Settings::parse(&b).0)
+        .unwrap_or_default();
+    change(&mut s);
+    let mut text = String::new();
+    s.render(&mut text);
+    let _ = fs.remove(dev, crate::settings::OBJECT);
+    if let Err(e) = fs.create(dev, crate::settings::OBJECT, text.as_bytes()) {
+        outf!(out, "settings: not kept ({})", fs_error(e));
+    }
+}
+
+/// Put back what the `settings` object asks for (ADR-219), when the console starts. Each setting
+/// a target refuses is named, and the console starts regardless.
+pub fn apply_settings<H: ShellHost, D: BlockDevice>(
+    host: &H,
+    fs: &Filesystem,
+    dev: &D,
+    out: &mut dyn FnMut(&str),
+) {
+    let Ok(bytes) = fs.read(dev, crate::settings::OBJECT) else {
+        return;
+    };
+    let (s, skipped) = crate::settings::Settings::parse(&bytes);
+    if let Some((w, h)) = s.resolution {
+        match host.set_display_mode(w, h) {
+            Ok((rw, rh)) => outf!(out, "settings: resolution {}x{}\r\n", rw, rh),
+            Err(why) => outf!(
+                out,
+                "settings: resolution {}x{} not applied ({})\r\n",
+                w,
+                h,
+                why
+            ),
+        }
+    }
+    if let Some(hz) = s.refresh {
+        match host.set_refresh(hz) {
+            Ok(now) => outf!(out, "settings: refresh {} Hz\r\n", now),
+            Err(why) => outf!(out, "settings: refresh {} Hz not applied ({})\r\n", hz, why),
+        }
+    }
+    if skipped > 0 {
+        outf!(
+            out,
+            "settings: {} line(s) not understood and skipped\r\n",
+            skipped
+        );
+    }
+}
+
 /// What a program wrote, as `run` shows it.
 fn report_output(name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
     if !run.output.is_empty() {
@@ -2088,10 +2157,44 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)));
             match parsed {
                 Some((w, h)) if extra.is_empty() => match host.set_display_mode(w, h) {
-                    Ok((rw, rh)) => outf!(out, "resolution: the desktop now runs at {}x{}", rw, rh),
+                    Ok((rw, rh)) => {
+                        outf!(out, "resolution: the desktop now runs at {}x{}", rw, rh);
+                        keep_setting(fs, dev, |s| s.resolution = Some((rw, rh)), out);
+                    }
                     Err(why) => outf!(out, "resolution refused: {}", why),
                 },
                 _ => out("usage: resolution WxH (a mode `display` lists, e.g. 1920x1080)"),
+            }
+        }
+        "refresh" => {
+            if !authorize(host, ShellAction::Display, out) {
+                return Outcome::Continue;
+            }
+            let arg = rest.trim();
+            if arg.is_empty() {
+                outf!(
+                    out,
+                    "refresh: the desktop redraws at {} Hz",
+                    crate::settings::pump_hz()
+                );
+            } else {
+                match arg.parse::<u32>() {
+                    Ok(hz) if (crate::settings::MIN_HZ..=crate::settings::MAX_HZ).contains(&hz) => {
+                        match host.set_refresh(hz) {
+                            Ok(now) => {
+                                outf!(out, "refresh: the desktop now redraws at {} Hz", now);
+                                keep_setting(fs, dev, |s| s.refresh = Some(now), out);
+                            }
+                            Err(why) => outf!(out, "refresh refused: {}", why),
+                        }
+                    }
+                    _ => outf!(
+                        out,
+                        "usage: refresh [HZ] ({} to {})",
+                        crate::settings::MIN_HZ,
+                        crate::settings::MAX_HZ
+                    ),
+                }
             }
         }
         "boot" => {
@@ -3692,6 +3795,8 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
     browser: &mut BrowserHooks<'_>,
 ) {
     let mut session = Session::new();
+    // What the operator chose last time comes back before anything else (ADR-219).
+    apply_settings(host, fs, dev, out);
     // The first settle happens BEFORE the banner's prompt: a panel that opens with the desktop
     // shows the namespace as it is, not as it will be once the operator types something.
     let _ = service(ServicePhase::Settled, fs, dev, &mut *out);

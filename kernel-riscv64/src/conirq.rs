@@ -120,11 +120,9 @@ pub fn unmask_irqs_pub() {
 #[cfg(feature = "interactive")]
 pub const SCAUSE_S_TIMER: usize = (1 << 63) | 5;
 
-/// Timer slice in `time`-CSR ticks: QEMU virt's timebase is 10 MHz, so one millisecond is
-/// 10_000 ticks. The desktop pump therefore runs at 1 kHz, matching x86-64 and aarch64 and
-/// minimizing timer-driven input latency.
+/// QEMU virt's timebase: the `time` CSR counts at 10 MHz.
 #[cfg(feature = "interactive")]
-const TIMER_SLICE: u64 = 10_000;
+const TIMEBASE_HZ: u64 = 10_000_000;
 
 /// Program the next timer interrupt one slice from now, through SBI.
 #[cfg(feature = "interactive")]
@@ -132,7 +130,8 @@ pub fn timer_arm() {
     let now: u64;
     // SAFETY: reading the `time` CSR is side-effect free.
     unsafe { asm!("csrr {}, time", out(reg) now, options(nomem, nostack)) };
-    crate::sbi::set_timer(now + TIMER_SLICE);
+    // One slice of the desktop's refresh, 1 kHz unless the operator chose another (ADR-219).
+    crate::sbi::set_timer(now + TIMEBASE_HZ / kernel_core::settings::pump_hz() as u64);
 }
 
 /// The desktop's tick, taken from the trap handler: rearm first (so a slow pump cannot silently
