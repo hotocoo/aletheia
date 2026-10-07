@@ -48,6 +48,10 @@ pub struct AppWindow {
     size: (u32, u32),
     packed: Vec<u8>,
     presents: u64,
+    /// Pointer events over the window, oldest first (ADR-217).
+    pointer: [u64; POINTER_RING],
+    pointer_len: usize,
+    held: bool,
 }
 
 /// No event waiting.
@@ -66,6 +70,14 @@ pub fn encode(e: Option<crate::compositor::Event>) -> u64 {
     }
 }
 
+/// A pointer event (ADR-217): `POINTER | x | y << 16`, plus [`HELD`] while the left button is
+/// down after it and [`CLICK`] when this event is the button changing.
+pub const POINTER: u64 = 1 << 40;
+pub const HELD: u64 = 1 << 32;
+pub const CLICK: u64 = 1 << 33;
+/// Pointer events kept for a program that is not polling; moves coalesce into one.
+const POINTER_RING: usize = 16;
+
 /// The packed size of a `w` x `h` one-bit bitmap, LSB first, row-major (the compositor's format).
 pub const fn packed_len(w: u32, h: u32) -> usize {
     (w as usize * h as usize).div_ceil(8)
@@ -79,6 +91,9 @@ impl AppWindow {
             size: (0, 0),
             packed: Vec::new(),
             presents: 0,
+            pointer: [0; POINTER_RING],
+            pointer_len: 0,
+            held: false,
         }
     }
 
@@ -156,7 +171,42 @@ impl AppWindow {
             Some(_) => return Err(Refusal::Busy),
             None => return Err(Refusal::NoWindow),
         }
+        if self.pointer_len > 0 {
+            let e = self.pointer[0];
+            self.pointer.copy_within(1..self.pointer_len, 0);
+            self.pointer_len -= 1;
+            return Ok(e);
+        }
         Ok(encode(comp.pop_input(APP, self.token).ok().flatten()))
+    }
+
+    /// The pointer moved to, or its left button changed at, `(x, y)` in the window's own
+    /// coordinates (ADR-217). `button` is `Some(down)` for a press or release. A move right after
+    /// a move replaces it, so a program that is slow to poll sees where the pointer is, not a
+    /// backlog; a full ring drops the event. No allocation.
+    pub fn pointer(&mut self, x: u32, y: u32, button: Option<bool>) {
+        if self.owner.is_none_or(|(_, dismissed)| dismissed) {
+            return;
+        }
+        if let Some(down) = button {
+            self.held = down;
+        }
+        let e = POINTER
+            | (x.min(0xFFFF) as u64)
+            | ((y.min(0xFFFF) as u64) << 16)
+            | if self.held { HELD } else { 0 }
+            | if button.is_some() { CLICK } else { 0 };
+        if button.is_none() && self.pointer_len > 0 {
+            let last = &mut self.pointer[self.pointer_len - 1];
+            if *last & CLICK == 0 {
+                *last = e;
+                return;
+            }
+        }
+        if self.pointer_len < POINTER_RING {
+            self.pointer[self.pointer_len] = e;
+            self.pointer_len += 1;
+        }
     }
 
     /// `owner` has ended: its window goes, and the next program may open one.
@@ -176,6 +226,8 @@ impl AppWindow {
         self.owner = None;
         self.size = (0, 0);
         self.packed = Vec::new();
+        self.pointer_len = 0;
+        self.held = false;
     }
 
     /// The program holding the window, if any.
@@ -305,5 +357,47 @@ mod tests {
         wm.close(&mut comp, s, APP).unwrap();
         assert_eq!(app.poll(&wm, &mut comp, 3), Err(Refusal::Dismissed));
         assert_ne!(encode(None), u64::MAX);
+    }
+
+    #[test]
+    fn pointer_events_reach_the_owner_moves_coalesce_and_clicks_do_not() {
+        let (mut wm, mut comp, s) = setup();
+        let mut app = AppWindow::new();
+        app.pointer(1, 1, None); // no window: ignored
+        app.present(&mut wm, &mut comp, s, 5, (32, 32), (0, 0), &mut solid(0))
+            .unwrap();
+        app.pointer(3, 4, None);
+        app.pointer(5, 6, None); // replaces the move before it
+        app.pointer(5, 6, Some(true));
+        app.pointer(7, 8, None);
+        app.pointer(7, 8, Some(false));
+        assert_eq!(app.poll(&wm, &mut comp, 5), Ok(POINTER | 5 | 6 << 16));
+        assert_eq!(
+            app.poll(&wm, &mut comp, 5),
+            Ok(POINTER | 5 | 6 << 16 | HELD | CLICK)
+        );
+        assert_eq!(
+            app.poll(&wm, &mut comp, 5),
+            Ok(POINTER | 7 | 8 << 16 | HELD)
+        );
+        assert_eq!(
+            app.poll(&wm, &mut comp, 5),
+            Ok(POINTER | 7 | 8 << 16 | CLICK)
+        );
+        assert_eq!(app.poll(&wm, &mut comp, 5), Ok(NO_EVENT));
+        // A full ring keeps what it has; nothing is encoded as the refusal value.
+        for i in 0..40 {
+            app.pointer(i, i, Some(i % 2 == 0));
+        }
+        let mut n = 0;
+        while let Ok(e) = app.poll(&wm, &mut comp, 5) {
+            if e == NO_EVENT {
+                break;
+            }
+            assert_ne!(e, u64::MAX);
+            n += 1;
+        }
+        assert_eq!(n, POINTER_RING);
+        assert_eq!(app.poll(&wm, &mut comp, 6), Err(Refusal::Busy));
     }
 }

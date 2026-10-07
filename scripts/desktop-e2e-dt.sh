@@ -172,10 +172,16 @@ before=frame_px('before')
 serial('start draw','running in the background')
 time.sleep(2); during=frame_px('during'); time.sleep(1.5); later=frame_px('later')
 # Input (ADR-216): the window took the keyboard when it opened; `q` typed on the virtio keyboard
-# reaches the program, which ends itself with status 113 and takes its window with it.
+# reaches the program, which ends itself and takes its window with it.
+# Pointer (ADR-217): a click at scanout (200, 100) lands at x = 40 in the window, which opens at
+# (160, 40); draw reports the last click's x in its exit status (1000 + x).
+send([{'type':'abs','data':{'axis':'x','value':10240}},{'type':'abs','data':{'axis':'y','value':13654}}])
+time.sleep(.5)
+send([{'type':'btn','data':{'button':'left','down':True}}]); send([{'type':'btn','data':{'button':'left','down':False}}])
+time.sleep(1)
 n0=len(txt()); key('q')
-if not wait_from(n0,'exited with status 113',30):
-    raise RuntimeError('a key typed at the program window did not reach the program')
+if not wait_from(n0,'exited with status 1040',30):
+    raise RuntimeError('the click and the key at the program window did not reach the program: '+txt()[n0:][-300:])
 time.sleep(1.5); after=frame_px('after')
 opened, moving, left = changed(before,during), changed(during,later), changed(before,after)
 print(f'program window: {opened} px changed when it opened, {moving} while it ran, {left} left after it closed')

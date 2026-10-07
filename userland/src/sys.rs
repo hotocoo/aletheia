@@ -103,18 +103,34 @@ pub fn present(bits: &[u8], width: u32, height: u32) -> Result<(), ()> {
     }
 }
 
-/// The next input event the operator gave this program's window (ADR-216): `Ok(None)` when none
-/// is waiting, `Ok(Some(byte))` for a key, `Err(())` when the program holds no open window. A
-/// focus change is reported as `Ok(Some(0))`.
-pub fn poll_input() -> Result<Option<u8>, ()> {
+/// One input event at this program's window (ADR-216, ADR-217).
+pub enum Input {
+    /// A key, in the console's decoded alphabet.
+    Key(u8),
+    /// The pointer over the window, in its own coordinates: `held` while the left button is
+    /// down, `click` when this event is that button changing.
+    Pointer { x: u32, y: u32, held: bool, click: bool },
+    /// The window lost the keyboard.
+    FocusLost,
+}
+
+/// The next input event the operator gave this program's window: `Ok(None)` when none is
+/// waiting, `Err(())` when the program holds no open window.
+pub fn poll_input() -> Result<Option<Input>, ()> {
     // SAFETY: the call takes no pointers; the kernel answers from the program's own window.
     let r = unsafe { syscall2(SYS_POLL_INPUT, 0, 0) };
-    match r {
-        u64::MAX => Err(()),
-        0 => Ok(None),
-        0x100..=0x1FF => Ok(Some(r as u8)),
-        _ => Ok(Some(0)),
-    }
+    Ok(Some(match r {
+        u64::MAX => return Err(()),
+        0 => return Ok(None),
+        0x100..=0x1FF => Input::Key(r as u8),
+        _ if r & (1 << 40) != 0 => Input::Pointer {
+            x: (r & 0xFFFF) as u32,
+            y: ((r >> 16) & 0xFFFF) as u32,
+            held: r & (1 << 32) != 0,
+            click: r & (1 << 33) != 0,
+        },
+        _ => Input::FocusLost,
+    }))
 }
 
 /// End this program with `status`.

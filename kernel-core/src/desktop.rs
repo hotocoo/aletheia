@@ -258,6 +258,8 @@ const BROWSER_TITLE: &[u8] = b"browser";
 /// move an existing test's focus - the first placement, (20, 100), covered the monitor and went
 /// red on the runner.
 const BROWSER_X: i32 = 20;
+/// The program window's surface id (ADR-215).
+const APP_ID: u32 = crate::appwin::APP;
 /// Where a program's window opens (ADR-215), before the scanout scales it.
 const APP_X: i32 = 160;
 const APP_Y: i32 = 40;
@@ -2136,6 +2138,19 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             }
         }
         let (px, py) = self.pointer;
+        // A program's window hears the pointer over its client area (ADR-217); the desktop's own
+        // handling below (focus, drag, resize) is unchanged.
+        if let Some((APP_ID, lx, ly)) = self.wm.window_at(&self.comp, px, py) {
+            if ly >= crate::textgrid::TITLE_H as i32 {
+                let button = match batch.button {
+                    Some((Button::Left, down)) => Some(down),
+                    _ => None,
+                };
+                if batch.move_to.is_some() || button.is_some() {
+                    self.app.pointer(lx as u32, ly as u32, button);
+                }
+            }
+        }
         if let Some((Button::Left, down)) = batch.button {
             if down {
                 if self.comp.is_visible(SWITCHER) == Some(true) {

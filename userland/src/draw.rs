@@ -1,7 +1,8 @@
 //! `draw` (ADR-215, ADR-216): a program with its own desktop window. It draws a framed 160 x 96
 //! scene - a border, a diagonal, and a bar that moves one column per frame - and hands each frame
 //! to the desktop with `SYS_PRESENT`. Typed at its window: `a` and `d` push the bar back and
-//! forward, `q` ends it with status 113. Given `once` it shows one frame and exits with the frame
+//! forward, `q` ends it - with status 113, or 1000 + x when the window was last clicked at x
+//! (ADR-217), and a click also parks the bar there. Given `once` it shows one frame and exits with the frame
 //! count; given `poll` it asks for input once and exits 7 if refused (no window), else 8.
 //! Otherwise it animates until the operator quits it, kills it or closes its window.
 #![no_std]
@@ -60,13 +61,20 @@ pub unsafe extern "C" fn _start(args: *const u8, len: usize) -> ! {
     let once = arg == b"once";
     let mut tick = 0u32;
     let mut push = 0u32;
+    let mut clicked: Option<u32> = None;
     loop {
-        // Everything typed at the window since the last frame.
-        while let Ok(Some(key)) = sys::poll_input() {
-            match key {
-                b'q' => sys::exit(113),
-                b'a' => push = push.wrapping_sub(8),
-                b'd' => push = push.wrapping_add(8),
+        // Everything the operator did at the window since the last frame.
+        while let Ok(Some(event)) = sys::poll_input() {
+            match event {
+                sys::Input::Key(b'q') => sys::exit(clicked.map_or(113, |x| 1000 + x as u64)),
+                sys::Input::Key(b'a') => push = push.wrapping_sub(8),
+                sys::Input::Key(b'd') => push = push.wrapping_add(8),
+                sys::Input::Pointer { x, click: true, held: true, .. } => {
+                    clicked = Some(x);
+                    // Park the bar under the click: the bar sits at 4 + (tick + push) % (W - 12).
+                    let at = x.saturating_sub(4) % (W - 12);
+                    push = at.wrapping_sub(tick % (W - 12));
+                }
                 _ => {}
             }
         }
