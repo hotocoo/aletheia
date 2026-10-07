@@ -24,6 +24,7 @@
 
 extern crate alloc;
 
+pub mod appwin;
 pub mod arpcache;
 pub mod bench;
 pub mod bootroot;

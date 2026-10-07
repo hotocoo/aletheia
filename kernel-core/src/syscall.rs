@@ -32,6 +32,9 @@ pub const SYS_PROCESS_KILL: u64 = 11;
 /// Write bytes to the console that started the program (ADR-204): pointer and length, bounded by
 /// the run's output sink. Returns the bytes kept, or `u64::MAX` when refused.
 pub const SYS_WRITE_CONSOLE: u64 = 12;
+/// Show a frame in the program's own desktop window (ADR-215): a packed one-bit bitmap in the
+/// program's data pages, its width and height. Returns 0, or `u64::MAX` when refused.
+pub const SYS_PRESENT: u64 = 13;
 /// Upper 32 bits of [`SYS_PROCESS_INFO`] response.
 pub const PROCESS_INFO_TERMINATED_SHIFT: u32 = 32;
 
@@ -63,6 +66,7 @@ pub enum Syscall {
     FsList,
     ProcessKill,
     WriteConsole,
+    Present,
 }
 
 impl Syscall {
@@ -81,6 +85,7 @@ impl Syscall {
             SYS_FS_LIST => Some(Self::FsList),
             SYS_PROCESS_KILL => Some(Self::ProcessKill),
             SYS_WRITE_CONSOLE => Some(Self::WriteConsole),
+            SYS_PRESENT => Some(Self::Present),
             _ => None,
         }
     }
@@ -100,6 +105,7 @@ impl Syscall {
             Self::FsList => SYS_FS_LIST,
             Self::ProcessKill => SYS_PROCESS_KILL,
             Self::WriteConsole => SYS_WRITE_CONSOLE,
+            Self::Present => SYS_PRESENT,
         }
     }
 
@@ -115,6 +121,7 @@ impl Syscall {
             Self::FsList => Some("fs.inspect"),
             Self::ProcessKill => Some("process.kill"),
             Self::WriteConsole => Some("console.output"),
+            Self::Present => Some("window.present"),
             Self::Yield | Self::Exit | Self::Regcheck => None,
         }
     }
@@ -139,6 +146,7 @@ mod tests {
             Syscall::FsList,
             Syscall::ProcessKill,
             Syscall::WriteConsole,
+            Syscall::Present,
         ] {
             assert_eq!(Syscall::decode(syscall.number()), Some(syscall));
         }
@@ -146,7 +154,7 @@ mod tests {
 
     #[test]
     fn unknown_numbers_fail_closed() {
-        for number in [0, 13, 99, u64::MAX] {
+        for number in [0, 14, 99, u64::MAX] {
             assert_eq!(Syscall::decode(number), None);
         }
     }

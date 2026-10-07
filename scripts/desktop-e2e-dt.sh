@@ -144,6 +144,33 @@ keys('help\n'); assert wait('commands:',30)
 # Exercise a desktop-only action through the real keyboard path; Alt+F9 must be consumed by the desktop.
 send([{'type':'key','data':{'down':True,'key':{'type':'qcode','data':'alt'}}},{'type':'key','data':{'down':True,'key':{'type':'qcode','data':'f9'}}},{'type':'key','data':{'down':False,'key':{'type':'qcode','data':'f9'}}},{'type':'key','data':{'down':False,'key':{'type':'qcode','data':'alt'}}}])
 eventually(lambda o: 'windows:' in o, 'the window set after Alt+F9')
+# A program's own window (ADR-215): `draw` runs in the background and animates a framed scene in
+# a window the desktop opens for it. The pixels must reach the DISPLAY: the scanout changes by
+# thousands of pixels when it appears, keeps changing while the bar moves, and goes back when the
+# program is killed and its window closes.
+def frame_px(tag):
+    path=shot+'.'+tag
+    r=qcmd({'execute':'screendump','arguments':{'filename':path}})
+    if 'error' in r: raise RuntimeError(r['error'])
+    parts=open(path,'rb').read().split(b'\n',3)
+    return parts[3]
+def changed(a,b):
+    return sum(1 for i in range(0,len(a),3) if a[i:i+3]!=b[i:i+3])
+def serial(c, needle, secs=30):
+    n=len(txt()); s.sendall(c.encode()+b'\r'); end=time.time()+secs
+    while time.time()<end:
+        if needle in txt()[n:]: return
+        time.sleep(.1)
+    raise RuntimeError('serial command did not answer: '+c)
+before=frame_px('before')
+serial('start draw','running in the background')
+time.sleep(2); during=frame_px('during'); time.sleep(1.5); later=frame_px('later')
+serial('kill draw','ended by the operator'); time.sleep(1.5); after=frame_px('after')
+opened, moving, left = changed(before,during), changed(during,later), changed(before,after)
+print(f'program window: {opened} px changed when it opened, {moving} while it ran, {left} left after it closed')
+assert opened>=4000, f'the program window did not reach the display ({opened} px)'
+assert moving>0, 'the program window did not animate'
+assert left*3<opened, f'the program window did not go away ({left} of {opened} px still changed)'
 print('DESKTOP LIVE E2E: PASS')
 PY
   kill -9 "$pid" 2>/dev/null || true; trap - RETURN; rm -f "$qmp" "$ser"

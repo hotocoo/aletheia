@@ -20,7 +20,7 @@ measurement made here.
 | Lightweight | 0.0 % idle CPU vs Linux 2.0 %; 3 MB payload vs 14 MB; ~76k privileged lines | ADR-208 |
 | Performance under load | Storms and bench on every boot; typed load 3 vs 29 ms/op against Linux | ADR-086..089, ADR-208 |
 | User programs | ELF from the namespace, Rust userland, args, console output, file read, contained faults, preemption, multi-page, writable data, several at once | ADR-201..212 |
-| GUI | Compositor, window manager, desktop, file panel, browser window, runtime resolution | ADR-078..085, ADR-194..197 |
+| GUI | Compositor, window manager, desktop, file panel, browser window, runtime resolution, a program's own window | ADR-078..085, ADR-194..197, ADR-215 |
 | Drivers | virtio (blk, net, gpu 2D, input, rng), i8042, PL011/16550, VT-d, HPET | MATURITY.md |
 | Real hardware | None. Every number is QEMU TCG (plus VMware/VirtualBox boot) | BENCHMARKS.md |
 | AAA games | Not started | - |

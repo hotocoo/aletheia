@@ -5,6 +5,7 @@
 pub const SYS_EXIT: u64 = 3;
 pub const SYS_FS_READ: u64 = 8;
 pub const SYS_WRITE_CONSOLE: u64 = 12;
+pub const SYS_PRESENT: u64 = 13;
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn syscall2(num: u64, a0: u64, a1: u64) -> u64 {
@@ -78,6 +79,26 @@ pub fn write(bytes: &[u8]) -> Result<usize, ()> {
         Err(())
     } else {
         Ok(r as usize)
+    }
+}
+
+/// Show `bits` (a packed one-bit bitmap, LSB first, row-major) as a `width` x `height` frame in
+/// this program's desktop window (ADR-215). `bits` must lie in the program's writable data.
+pub fn present(bits: &[u8], width: u32, height: u32) -> Result<(), ()> {
+    // SAFETY: the kernel validates the range and the size against this program's own pages.
+    let r = unsafe {
+        syscall4(
+            SYS_PRESENT,
+            bits.as_ptr() as u64,
+            width as u64,
+            height as u64,
+            0,
+        )
+    };
+    if r == u64::MAX {
+        Err(())
+    } else {
+        Ok(())
     }
 }
 

@@ -107,6 +107,18 @@ fn with_desktop<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
     out
 }
 
+/// Show program `owner`'s frame in its window (ADR-215). Main thread only.
+#[cfg(feature = "interactive")]
+pub fn present_app(owner: u64, size: (u32, u32), fill: &mut dyn FnMut(&mut [u8]) -> bool) -> bool {
+    with_desktop(|d| d.present_app(owner, size, fill).is_ok()).unwrap_or(false)
+}
+
+/// Program `owner` ended: its window closes (ADR-215). Main thread only.
+#[cfg(feature = "interactive")]
+pub fn close_app(owner: u64) {
+    let _ = with_desktop(|d| d.close_app(owner));
+}
+
 /// The console's output reaches the terminal window (ADR-083). Main thread only.
 #[cfg(feature = "interactive")]
 pub fn term_write(bytes: &[u8]) {

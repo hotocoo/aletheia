@@ -258,6 +258,9 @@ const BROWSER_TITLE: &[u8] = b"browser";
 /// move an existing test's focus - the first placement, (20, 100), covered the monitor and went
 /// red on the runner.
 const BROWSER_X: i32 = 20;
+/// Where a program's window opens (ADR-215), before the scanout scales it.
+const APP_X: i32 = 160;
+const APP_Y: i32 = 40;
 const BROWSER_Y: i32 = 210;
 /// The longest URL the window's line holds.
 pub const URL_LINE_CAP: usize = 128;
@@ -491,6 +494,8 @@ pub struct Desktop<H: VirtioHal, T: Transport + ConfigWrite> {
     browser: TextGrid,
     browser_packed: Vec<u8>,
     browser_token: u64,
+    /// The window a running program draws into (ADR-215).
+    app: crate::appwin::AppWindow,
     /// Set when the URL line or the page changed and the browser window owes a repaint.
     browser_dirty: bool,
     /// The URL line as typed, and the last URL entered, latched until the platform collects it.
@@ -1106,6 +1111,7 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
             browser,
             browser_packed,
             browser_token: tok_browser,
+            app: crate::appwin::AppWindow::new(),
             browser_dirty: false,
             url_line: [0u8; URL_LINE_CAP],
             url_len: 0,
@@ -2800,6 +2806,31 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         self.page[..note.len()].copy_from_slice(note);
         self.page_len = note.len();
         self.browser_dirty = true;
+    }
+
+    /// Show program `owner`'s next frame in its window (ADR-215); `fill` writes the packed bitmap.
+    pub fn present_app(
+        &mut self,
+        owner: u64,
+        size: (u32, u32),
+        fill: &mut dyn FnMut(&mut [u8]) -> bool,
+    ) -> Result<(), crate::appwin::Refusal> {
+        let at = place_window(APP_X, APP_Y, size, self.w, self.h);
+        self.app.present(
+            &mut self.wm,
+            &mut self.comp,
+            self.sess,
+            owner,
+            size,
+            at,
+            fill,
+        )
+    }
+
+    /// Program `owner` has ended: its window closes (ADR-215).
+    pub fn close_app(&mut self, owner: u64) {
+        self.app
+            .close(&mut self.wm, &mut self.comp, self.sess, owner);
     }
 
     /// The page the platform fetched, as the navigation model rendered it, bounded to what the

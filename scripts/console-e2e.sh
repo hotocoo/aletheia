@@ -211,6 +211,21 @@ used = re.findall(r"heap: (\d+) B used", t)[:2]
 print("ok" if len(used) == 2 and used[0] == used[1] else "drift %s" % used)
 ' <<<"$log")"
     [ "$jobheap" = ok ] || { echo "  FAIL [$label/first] the console's polling with a job live changed the heap ($jobheap)"; bad=1; }
+    # A program draws into its own window (ADR-215): while `draw` runs the desktop holds one more
+    # managed window than it booted with, and `kill draw` closes it again. A target this gate boots
+    # without a desktop refuses the frame, and `draw` ends on its own with status 0.
+    local drew; drew="$(python3 -c '
+import re, sys
+t = sys.stdin.read()
+t = t[t.find("start draw"):]
+w = re.findall(r"windows: (\d+) open, (\d+) closed", t)[:2]
+ok = len(w) == 2 and int(w[0][0]) == int(w[1][0]) + 1 and int(w[1][1]) == int(w[0][1]) + 1
+ok = ok and "(draw) ended by the operator" in t
+# A target booted with no desktop refuses the frame: draw then ends on its own, status 0.
+headless = "no machine input session" in t and re.search(r"\(draw\) ended:\s+run: draw exited with status 0", t)
+print("ok" if ok or headless else "no %s" % w)
+' <<<"$log")"
+    [ "$drew" = ok ] || { echo "  FAIL [$label/first] draw did not open its window while running and close it when killed ($drew)"; bad=1; }
     grep -q "run refused: manifesto: not an ELF image" <<<"$log" || { echo "  FAIL [$label/first] run did not refuse a text object by name"; bad=1; }
     # Every frame a run takes it gives back: the `mem` reading before the runs (the second of the
     # session) and the last one, after every job has ended, agree.
@@ -285,7 +300,7 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start draw" "+2" "input" "kill draw" "input" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
@@ -363,7 +378,7 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start draw" "+2" "input" "kill draw" "input" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?

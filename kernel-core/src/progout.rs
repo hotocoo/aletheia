@@ -19,22 +19,25 @@ const PAGE: u64 = 4096;
 /// way holds no grant and is refused by the same evaluation every syscall effect goes through.
 pub struct Grant {
     engine: CapEngine,
-    tokens: [CapToken; 2],
+    tokens: [CapToken; 3],
 }
 
 /// The action `SYS_WRITE_CONSOLE` is authorized as.
 pub const ACTION: &str = "console.output";
 /// The action `SYS_FS_READ` is authorized as (ADR-207).
 pub const FS_READ: &str = "fs.read";
+/// The action `SYS_PRESENT` is authorized as (ADR-215).
+pub const PRESENT: &str = "window.present";
 
 impl Grant {
     pub fn new(secret: u64) -> Self {
         let mut engine = CapEngine::new(secret, 0);
         let output = engine.mint("program:run", ACTION, Scope::All, Constraints::none());
         let read = engine.mint("program:run", FS_READ, Scope::All, Constraints::none());
+        let present = engine.mint("program:run", PRESENT, Scope::All, Constraints::none());
         Grant {
             engine,
-            tokens: [output, read],
+            tokens: [output, read, present],
         }
     }
 
@@ -183,6 +186,69 @@ pub fn serve_read(
         Ok(len) => len as u64,
         Err(_) => u64::MAX,
     }
+}
+
+/// A `SYS_PRESENT` the trap handler admitted (ADR-215), for the run loop to serve once the program
+/// is off the CPU: the bitmap's offset from the first data page, its packed length, and its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PresentRequest {
+    pub data_off: usize,
+    pub len: usize,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Admit `SYS_PRESENT(buf, width, height)` or refuse it (`None`), touching no memory: the program
+/// must hold the grant, the size must be inside [`crate::appwin::MAX_W`] x
+/// [`crate::appwin::MAX_H`], and the whole packed bitmap must lie in the program's data pages -
+/// the only pages that hold a buffer that size, and the ones the run loop gathers it from.
+pub fn admit_present(
+    grant: Option<&Grant>,
+    buf: u64,
+    width: u64,
+    height: u64,
+    w: Window,
+) -> Option<PresentRequest> {
+    if !grant.is_some_and(|g| g.allows(PRESENT)) {
+        return None;
+    }
+    let (width, height) = (u32::try_from(width).ok()?, u32::try_from(height).ok()?);
+    if width == 0 || height == 0 || width > crate::appwin::MAX_W || height > crate::appwin::MAX_H {
+        return None;
+    }
+    let len = crate::appwin::packed_len(width, height);
+    UserSlice::validate(buf, len, w.stack_top, w.data_top).ok()?;
+    Some(PresentRequest {
+        data_off: (buf - w.stack_top) as usize,
+        len,
+        width,
+        height,
+    })
+}
+
+/// Copy an admitted present's bitmap out of the program's data pages, which the run loop views one
+/// physical frame at a time, into `out` (exactly `req.len` bytes). `false` when a page it needs was
+/// not handed over.
+pub fn gather_present(req: &PresentRequest, data_pages: &[&[u8]], out: &mut [u8]) -> bool {
+    if out.len() != req.len {
+        return false;
+    }
+    let mut at = req.data_off;
+    let mut done = 0;
+    while done < req.len {
+        let (page, off) = (at / PAGE as usize, at % PAGE as usize);
+        let Some(src) = data_pages.get(page) else {
+            return false;
+        };
+        let n = (PAGE as usize - off).min(req.len - done);
+        let Some(bytes) = src.get(off..off + n) else {
+            return false;
+        };
+        out[done..done + n].copy_from_slice(bytes);
+        done += n;
+        at += n;
+    }
+    true
 }
 
 /// What a program may ask of the namespace that started it (ADR-207).
@@ -338,6 +404,38 @@ mod tests {
         data_top: 0x6000,
         ..W
     };
+
+    #[test]
+    fn a_present_needs_the_grant_a_bounded_size_and_a_bitmap_in_the_data_pages() {
+        let g = Grant::new(9);
+        // 64 x 64 one-bit = 512 bytes, starting 0x10 before the end of the first data page.
+        let req = admit_present(Some(&g), 0x3FF0, 64, 64, W_DATA3).unwrap();
+        assert_eq!((req.data_off, req.len), (0xFF0, 512));
+        assert_eq!(admit_present(None, 0x3FF0, 64, 64, W_DATA3), None);
+        for (w, h) in [(0, 8), (8, 0), (321, 8), (8, 201), (1 << 40, 1)] {
+            assert_eq!(admit_present(Some(&g), 0x3000, w, h, W_DATA3), None);
+        }
+        // On the stack, in code, or running past the last data page: refused.
+        assert_eq!(admit_present(Some(&g), 0x2000, 8, 8, W_DATA3), None);
+        assert_eq!(admit_present(Some(&g), 0x1000, 8, 8, W_DATA3), None);
+        assert_eq!(admit_present(Some(&g), 0x5FF8, 8, 16, W_DATA3), None);
+        // Gathered across the page boundary, byte for byte.
+        let (mut d0, mut d1) = ([0u8; 4096], [0u8; 4096]);
+        d0[0xFF0..]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| *b = i as u8);
+        d1[..512 - 16]
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, b)| *b = (16 + i) as u8);
+        let mut out = [0u8; 512];
+        assert!(gather_present(&req, &[&d0[..], &d1[..]], &mut out));
+        assert!(out.iter().enumerate().all(|(i, &b)| b == i as u8));
+        // A page the loop did not hand over, or a wrong-sized buffer, gathers nothing.
+        assert!(!gather_present(&req, &[&d0[..]], &mut out));
+        assert!(!gather_present(&req, &[&d0[..], &d1[..]], &mut out[..511]));
+    }
 
     #[test]
     fn a_read_names_one_data_page_of_several_and_never_straddles_two() {

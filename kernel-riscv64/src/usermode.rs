@@ -43,8 +43,8 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_PROCESS_INFO, SYS_RECV,
-    SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
+    pack_process_info, Syscall, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_PRESENT, SYS_PROCESS_INFO,
+    SYS_RECV, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's Sv39 `vm.rs` performs the real page mapping into each space.
@@ -509,6 +509,22 @@ extern "C" fn _user_trap_rust(frame: *mut TrapFrame) {
                     ) {
                         Some(req) => {
                             *addr_of_mut!(PENDING_READ) = Some(req);
+                            0
+                        }
+                        None => u64::MAX,
+                    }
+                } else if num == SYS_PRESENT {
+                    // Admitted here, served by the run loop once the program is off the CPU
+                    // (ADR-215): a0..a2 = buffer, width, height.
+                    match kernel_core::progout::admit_present(
+                        (*addr_of!(PROGRAM_GRANT)).as_ref(),
+                        arg,
+                        (*frame).regs[11],
+                        (*frame).regs[12],
+                        *addr_of!(PROGRAM_WINDOW_NOW),
+                    ) {
+                        Some(req) => {
+                            *addr_of_mut!(PENDING_PRESENT) = Some(req);
                             0
                         }
                         None => u64::MAX,
@@ -1235,6 +1251,8 @@ static mut PROGRAM_WINDOW_NOW: kernel_core::progout::Window = kernel_core::progo
     stack_top: PROGRAM_STACK_TOP as u64,
     data_top: PROGRAM_STACK_TOP as u64,
 };
+/// A `SYS_PRESENT` the handler admitted, for the run loop to serve (ADR-215).
+static mut PENDING_PRESENT: Option<kernel_core::progout::PresentRequest> = None;
 /// A `SYS_FS_READ` the handler admitted, for the run loop to serve (ADR-207).
 static mut PENDING_READ: Option<kernel_core::progout::ReadRequest> = None;
 /// What the running program has written (ADR-204).
@@ -1255,6 +1273,8 @@ const USERLAND_BIG: &[u8] = include_bytes!("../../userland/bin/riscv64/big.elf")
 /// `wide`, from `userland/` (ADR-214): three pages of `.bss`, so it runs only if the machine maps,
 /// zeroes and serves reads into every data page it declares. Not seeded; the boot suite's.
 const USERLAND_WIDE: &[u8] = include_bytes!("../../userland/bin/riscv64/wide.elf");
+/// `draw`, from `userland/` (ADR-215): seeded, a program with its own desktop window.
+pub const USERLAND_DRAW: &[u8] = include_bytes!("../../userland/bin/riscv64/draw.elf");
 
 /// The run storms (ADR-202's faulting runs, ADR-204's writes, ADR-207's reads) prove bounds under
 /// load; like `kmain`'s storms (ADR-163) they run in the gate image only, so an interactive boot
@@ -1334,6 +1354,9 @@ impl Slot {
 
     /// The program's report, its output included, with every page it held given back.
     fn finish(mut self) -> kernel_core::shell::ProgramRun {
+        // A window it drew into goes with it (ADR-215).
+        #[cfg(feature = "interactive")]
+        crate::desktop::close_app(self.task);
         let mut run = core::mem::take(&mut self.run);
         run.output = self.out.bytes().to_vec();
         run.dropped = self.out.dropped();
@@ -1506,6 +1529,7 @@ fn run_slice(
         // terminated program's request is never served.
         let reason = unsafe {
             *addr_of_mut!(PENDING_READ) = None;
+            *addr_of_mut!(PENDING_PRESENT) = None;
             (*addr_of_mut!(SUPERVISOR)).reap(TaskId(slot.task))
         };
         slot.run.terminated = Some(reason.map_or("fault", |r| r.name()));
@@ -1542,7 +1566,44 @@ fn run_slice(
             };
         }
     }
+    // A frame the handler admitted is gathered from THIS program's data frames into its window,
+    // and the verdict lands in its saved a0 (ADR-215).
+    // SAFETY: single-threaded; the program is off the CPU.
+    if let Some(req) = unsafe { (*addr_of_mut!(PENDING_PRESENT)).take() } {
+        slot.frame.regs[10] = if present_frame(slot, &req) {
+            0
+        } else {
+            u64::MAX
+        };
+    }
     None
+}
+
+/// Show an admitted frame in the program's desktop window (ADR-215). `false` when there is no live
+/// desktop, another program holds the window, or the operator closed it.
+fn present_frame(slot: &Slot, req: &kernel_core::progout::PresentRequest) -> bool {
+    // SAFETY: the data frames are this program's own identity-mapped frames, one page each,
+    // untouched while it is off the CPU.
+    let views: [&[u8]; PROGRAM_DATA_PAGES as usize] =
+        core::array::from_fn(|i| match slot.data.get(i) {
+            Some(d) => unsafe {
+                core::slice::from_raw_parts(d.addr() as *const u8, frames::FRAME_SIZE)
+            },
+            None => &[],
+        });
+    let pages = &views[..slot.data.len()];
+    #[cfg(feature = "interactive")]
+    {
+        crate::desktop::present_app(slot.task, (req.width, req.height), &mut |out| {
+            kernel_core::progout::gather_present(req, pages, out)
+        })
+    }
+    #[cfg(not(feature = "interactive"))]
+    {
+        // No live desktop in a gate image: refused.
+        let _ = (pages, req);
+        false
+    }
 }
 
 /// Run programs together (ADR-212): each placed in its own address space, each admitted through
@@ -1605,8 +1666,11 @@ fn run_programs(
         }
     }
 
-    // SAFETY: single-threaded; no read is pending before any program has run.
-    unsafe { *addr_of_mut!(PENDING_READ) = None };
+    // SAFETY: single-threaded; no read or frame is pending before any program has run.
+    unsafe {
+        *addr_of_mut!(PENDING_READ) = None;
+        *addr_of_mut!(PENDING_PRESENT) = None;
+    }
     // Preemptible (ADR-203): the S-timer is the only source enabled while the program runs, so a
     // slice the program never yields ends at the deadline; a fresh one, so none is already pending.
     timer_arm();
@@ -2820,6 +2884,13 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                         && r.output == b"wide read: just words\n"),
                 "data: a program with three pages of writable memory gets each one zeroed and distinct, and reads into its second"
             );
+            // A program that draws (ADR-215): a gate image has no live desktop, so its frame is
+            // admitted from its data pages, refused, and it ends cleanly having shown none.
+            let drawn = run(USERLAND_DRAW, b"once", &mut svc);
+            check!(
+                drawn.is_some_and(|r| r.exited && r.status == 0 && r.terminated.is_none()),
+                "present: a frame with no live desktop to show it is refused and the program ends cleanly"
+            );
             let refused = [
                 &b"codebuf"[..],
                 b"straddle",
@@ -2911,6 +2982,9 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                 });
                 (crate::heap::used_bytes() - before, r)
             };
+            // One run first, unmeasured: anything allocated once per boot on a run's path lands
+            // there and not in either side.
+            let _ = gross(16);
             let (few, few_run) = gross(16);
             let (many, many_run) = gross(1024);
             crate::kprintln!(
