@@ -204,8 +204,12 @@ pub fn set_browser_page(text: &[u8]) {
 /// Show program `owner`'s frame in its window (ADR-215). Main thread only; the pump is asked to
 /// run so the frame reaches the screen.
 #[cfg(feature = "interactive")]
-pub fn present_app(owner: u64, size: (u32, u32), fill: &mut dyn FnMut(&mut [u8]) -> bool) -> bool {
-    let ok = with_desktop(|d| d.present_app(owner, size, fill).is_ok()).unwrap_or(false);
+pub fn present_app(
+    owner: u64,
+    spec: kernel_core::appwin::FrameSpec,
+    fill: &mut dyn FnMut(&mut [u8]) -> bool,
+) -> bool {
+    let ok = with_desktop(|d| d.present_app(owner, spec, fill).is_ok()).unwrap_or(false);
     if ok {
         request_pump();
     }

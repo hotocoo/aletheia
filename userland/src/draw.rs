@@ -4,7 +4,9 @@
 //! forward, `q` ends it - with status 113, or 1000 + x when the window was last clicked at x
 //! (ADR-217), and a click also parks the bar there. Given `once` it shows one frame and exits with the frame
 //! count; given `poll` it asks for input once and exits 7 if refused (no window), else 8.
-//! Otherwise it animates until the operator quits it, kills it or closes its window.
+//! Given `colour` it draws the same scene in colour (ADR-218): red, green and blue bands with a
+//! white frame and bar. Otherwise it animates until the operator quits it, kills it or closes its
+//! window.
 #![no_std]
 #![no_main]
 
@@ -19,6 +21,24 @@ const SPIN: u32 = 20_000;
 
 /// The frame, in `.bss` (two pages): where `SYS_PRESENT` requires it to be.
 static mut FRAME: [u8; BYTES] = [0; BYTES];
+/// The colour frame, one RGB332 byte per pixel (four pages).
+static mut COLOUR: [u8; (W * H) as usize] = [0; (W * H) as usize];
+
+/// The colour scene: the mono scene's ink in white over red, green and blue bands.
+fn render_colour(mono: &[u8; BYTES], out: &mut [u8; (W * H) as usize]) {
+    for (i, px) in out.iter_mut().enumerate() {
+        let y = i as u32 / W;
+        *px = if mono[i / 8] & (1 << (i % 8)) != 0 {
+            0xFF
+        } else if y < H / 3 {
+            0xE0
+        } else if y < 2 * H / 3 {
+            0x1C
+        } else {
+            0x03
+        };
+    }
+}
 
 fn put(frame: &mut [u8; BYTES], x: u32, y: u32) {
     let i = (y * W + x) as usize;
@@ -53,12 +73,15 @@ fn render(frame: &mut [u8; BYTES], tick: u32) {
 pub unsafe extern "C" fn _start(args: *const u8, len: usize) -> ! {
     // SAFETY: single-threaded program; nothing else touches this global.
     let frame = unsafe { &mut *core::ptr::addr_of_mut!(FRAME) };
+    // SAFETY: as above.
+    let colour = unsafe { &mut *core::ptr::addr_of_mut!(COLOUR) };
     // SAFETY: the kernel placed `len` argument bytes at `args`, on this program's stack page.
     let arg = unsafe { core::slice::from_raw_parts(args, len) };
     if arg == b"poll" {
         sys::exit(if sys::poll_input().is_err() { 7 } else { 8 });
     }
     let once = arg == b"once";
+    let in_colour = arg == b"colour";
     let mut tick = 0u32;
     let mut push = 0u32;
     let mut clicked: Option<u32> = None;
@@ -79,7 +102,13 @@ pub unsafe extern "C" fn _start(args: *const u8, len: usize) -> ! {
             }
         }
         render(frame, tick.wrapping_add(push));
-        if sys::present(frame, W, H).is_err() {
+        let shown = if in_colour {
+            render_colour(frame, colour);
+            sys::present_rgb332(colour, W, H)
+        } else {
+            sys::present(frame, W, H)
+        };
+        if shown.is_err() {
             // No desktop, or the operator closed the window: nothing left to draw on.
             sys::exit(tick as u64);
         }

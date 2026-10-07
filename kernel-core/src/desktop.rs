@@ -1191,6 +1191,12 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
         let mut sink = ComposeSink::new(&mut surf)
             .with_wallpaper(PANEL, WALLPAPER)
             .with_scale(self.scale);
+        // A program's colour frame paints its window's pixels (ADR-218).
+        if let (Some((w, h, plane)), Some(at)) =
+            (self.app.colour_plane(), self.comp.placement(APP_ID))
+        {
+            sink = sink.with_colour(APP_ID, at, (w, h), plane);
+        }
         let st = self.comp.compose_frame(&mut sink);
         if sink.refusals() != 0 {
             return Err("the real raster refused a put the model's bounds allowed");
@@ -2827,16 +2833,16 @@ impl<H: VirtioHal + Hal, T: Transport + ConfigWrite> Desktop<H, T> {
     pub fn present_app(
         &mut self,
         owner: u64,
-        size: (u32, u32),
+        spec: crate::appwin::FrameSpec,
         fill: &mut dyn FnMut(&mut [u8]) -> bool,
     ) -> Result<(), crate::appwin::Refusal> {
-        let at = place_window(APP_X, APP_Y, size, self.w, self.h);
+        let at = place_window(APP_X, APP_Y, (spec.width, spec.height), self.w, self.h);
         self.app.present(
             &mut self.wm,
             &mut self.comp,
             self.sess,
             owner,
-            size,
+            spec,
             at,
             fill,
         )

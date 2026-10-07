@@ -196,6 +196,22 @@ pub struct PresentRequest {
     pub len: usize,
     pub width: u32,
     pub height: u32,
+    /// One byte per pixel, RGB332 (ADR-218), else one bit per pixel.
+    pub colour: bool,
+}
+
+/// Set in `SYS_PRESENT`'s width argument: the frame is RGB332, one byte per pixel (ADR-218).
+pub const PRESENT_RGB332: u64 = 1 << 32;
+
+impl PresentRequest {
+    /// The frame as the window policy takes it.
+    pub fn spec(&self) -> crate::appwin::FrameSpec {
+        crate::appwin::FrameSpec {
+            width: self.width,
+            height: self.height,
+            colour: self.colour,
+        }
+    }
 }
 
 /// Admit `SYS_PRESENT(buf, width, height)` or refuse it (`None`), touching no memory: the program
@@ -212,17 +228,25 @@ pub fn admit_present(
     if !grant.is_some_and(|g| g.allows(PRESENT)) {
         return None;
     }
+    let colour = width & PRESENT_RGB332 != 0;
+    let width = width & !PRESENT_RGB332;
     let (width, height) = (u32::try_from(width).ok()?, u32::try_from(height).ok()?);
     if width == 0 || height == 0 || width > crate::appwin::MAX_W || height > crate::appwin::MAX_H {
         return None;
     }
-    let len = crate::appwin::packed_len(width, height);
+    let len = crate::appwin::FrameSpec {
+        width,
+        height,
+        colour,
+    }
+    .len();
     UserSlice::validate(buf, len, w.stack_top, w.data_top).ok()?;
     Some(PresentRequest {
         data_off: (buf - w.stack_top) as usize,
         len,
         width,
         height,
+        colour,
     })
 }
 
@@ -441,6 +465,18 @@ mod tests {
         // A page the loop did not hand over, or a wrong-sized buffer, gathers nothing.
         assert!(!gather_present(&req, &[&d0[..]], &mut out));
         assert!(!gather_present(&req, &[&d0[..], &d1[..]], &mut out[..511]));
+        // RGB332 (ADR-218): a byte per pixel, so 64 x 64 is 4096 bytes; too big for the data
+        // pages from a later start, and an unknown flag bit beside it is a width past the bound.
+        let c = admit_present(Some(&g), 0x3000, PRESENT_RGB332 | 64, 64, W_DATA3).unwrap();
+        assert!(c.colour && c.len == 4096 && c.spec().colour);
+        assert_eq!(
+            admit_present(Some(&g), 0x3001, PRESENT_RGB332 | 64, 192, W_DATA3),
+            None
+        );
+        assert_eq!(
+            admit_present(Some(&g), 0x3000, (1 << 33) | 64, 8, W_DATA3),
+            None
+        );
     }
 
     #[test]

@@ -103,6 +103,26 @@ pub fn present(bits: &[u8], width: u32, height: u32) -> Result<(), ()> {
     }
 }
 
+/// Show `pixels` (one RGB332 byte per pixel, `RRRGGGBB`, row-major) as a `width` x `height`
+/// colour frame in this program's desktop window (ADR-218).
+pub fn present_rgb332(pixels: &[u8], width: u32, height: u32) -> Result<(), ()> {
+    // SAFETY: the kernel validates the range and the size against this program's own pages.
+    let r = unsafe {
+        syscall4(
+            SYS_PRESENT,
+            pixels.as_ptr() as u64,
+            (1 << 32) | width as u64,
+            height as u64,
+            0,
+        )
+    };
+    if r == u64::MAX {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
 /// One input event at this program's window (ADR-216, ADR-217).
 pub enum Input {
     /// A key, in the console's decoded alphabet.

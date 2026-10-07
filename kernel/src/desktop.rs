@@ -109,8 +109,12 @@ fn with_desktop<R>(f: impl FnOnce(&mut Desktop) -> R) -> Option<R> {
 
 /// Show program `owner`'s frame in its window (ADR-215). Main thread only.
 #[cfg(feature = "interactive")]
-pub fn present_app(owner: u64, size: (u32, u32), fill: &mut dyn FnMut(&mut [u8]) -> bool) -> bool {
-    with_desktop(|d| d.present_app(owner, size, fill).is_ok()).unwrap_or(false)
+pub fn present_app(
+    owner: u64,
+    spec: kernel_core::appwin::FrameSpec,
+    fill: &mut dyn FnMut(&mut [u8]) -> bool,
+) -> bool {
+    with_desktop(|d| d.present_app(owner, spec, fill).is_ok()).unwrap_or(false)
 }
 
 /// The next input event for program `owner`'s window (ADR-216), as `SYS_POLL_INPUT` returns it.

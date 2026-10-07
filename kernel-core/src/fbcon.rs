@@ -154,6 +154,9 @@ pub struct ComposeSink<'s, 'p> {
     /// A surface whose PAPER pixels show a photograph instead of [`BG`]: (surface id, packed BGR
     /// rows at the scanout's width). Ink pixels stay [`FG`], so every readback is unchanged.
     wallpaper: Option<(u32, &'static [u8])>,
+    /// A surface whose pixels come from an RGB332 plane (ADR-218): (surface id, its scanout
+    /// origin, its size, one byte per pixel row-major).
+    colour: Option<ColourPlane<'s>>,
     /// Device pixels per logical pixel on each axis (ADR-194): the compositor lays out a logical
     /// desktop and every pixel it puts becomes a `scale` x `scale` block. 1 = no scaling.
     scale: u32,
@@ -164,6 +167,9 @@ pub struct ComposeSink<'s, 'p> {
     dirty: [(u32, u32, u32, u32); MAX_DIRTY],
     n_dirty: usize,
 }
+
+/// A surface painted from an RGB332 plane: id, scanout origin, size, bytes (ADR-218).
+type ColourPlane<'a> = (u32, (i32, i32), (u32, u32), &'a [u8]);
 
 /// Separate dirty rects one frame keeps before collapsing them (ADR-197).
 pub const MAX_DIRTY: usize = 8;
@@ -239,6 +245,7 @@ impl<'s, 'p> ComposeSink<'s, 'p> {
             puts: 0,
             refused: 0,
             wallpaper: None,
+            colour: None,
             scale: 1,
             dirty: [(0, 0, 0, 0); MAX_DIRTY],
             n_dirty: 0,
@@ -249,6 +256,19 @@ impl<'s, 'p> ComposeSink<'s, 'p> {
     /// scanout's width). A pixel past the image's end falls back to [`BG`], never a wrap.
     pub fn with_wallpaper(mut self, surface: u32, bgr: &'static [u8]) -> Self {
         self.wallpaper = Some((surface, bgr));
+        self
+    }
+
+    /// Paint surface `surface` from an RGB332 plane (ADR-218) instead of ink and paper. A pixel
+    /// the plane does not cover falls back to the one-bit write.
+    pub fn with_colour(
+        mut self,
+        surface: u32,
+        origin: (i32, i32),
+        size: (u32, u32),
+        plane: &'s [u8],
+    ) -> Self {
+        self.colour = Some((surface, origin, size, plane));
         self
     }
 
@@ -278,6 +298,26 @@ impl crate::compositor::Raster for ComposeSink<'_, '_> {
     }
 
     fn put_from(&mut self, surface: u32, x: u32, y: u32, ink: bool) {
+        if let Some((id, (ox, oy), (w, _), plane)) = self.colour {
+            let (sx, sy) = (x as i64 - ox as i64, y as i64 - oy as i64);
+            let c = (id == surface && sx >= 0 && sy >= 0 && sx < w as i64)
+                .then(|| usize::try_from(sy * w as i64 + sx).ok())
+                .flatten()
+                .and_then(|i| plane.get(i));
+            if let Some(&c) = c {
+                let c = crate::appwin::rgb332_bgra(c);
+                self.puts += 1;
+                self.mark(x, y);
+                if self.scale == 1 {
+                    if self.surf.set_bgra(x, y, c).is_err() {
+                        self.refused += 1;
+                    }
+                } else {
+                    self.block(x, y, c);
+                }
+                return;
+            }
+        }
         let photo = match self.wallpaper {
             Some((id, bgr)) if id == surface && !ink => {
                 // The photograph is 640x240; a larger desktop samples it nearest-neighbour

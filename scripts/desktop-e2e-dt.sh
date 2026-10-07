@@ -188,6 +188,18 @@ print(f'program window: {opened} px changed when it opened, {moving} while it ra
 assert opened>=4000, f'the program window did not reach the display ({opened} px)'
 assert moving>0, 'the program window did not animate'
 assert left*3<opened, f'the program window did not go away ({left} of {opened} px still changed)'
+# Colour (ADR-218): `draw colour` presents RGB332, and the display must show it in colour. Pure
+# red (255, 0, 0) is a pixel neither the one-bit desktop nor the photograph (every channel capped
+# below 0xFF) ever produces; the red band of a 160 x 96 frame is thousands of them.
+def red_px(px):
+    return sum(1 for i in range(0,len(px),3) if px[i]==255 and px[i+1]==0 and px[i+2]==0)
+serial('start draw colour','running in the background')
+time.sleep(2); red=red_px(frame_px('colour'))
+print(f'colour window: {red} pure red px on the display')
+assert red>=2000, f'the colour frame did not reach the display in colour ({red} red px)'
+n0=len(txt()); key('q')
+if not wait_from(n0,'exited with status 113',30):
+    raise RuntimeError('draw colour did not end on q')
 print('DESKTOP LIVE E2E: PASS')
 PY
   kill -9 "$pid" 2>/dev/null || true; trap - RETURN; rm -f "$qmp" "$ser"

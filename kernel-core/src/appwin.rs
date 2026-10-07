@@ -47,6 +47,8 @@ pub struct AppWindow {
     token: u64,
     size: (u32, u32),
     packed: Vec<u8>,
+    /// The frame in RGB332 when the program presents colour (ADR-218); empty for one-bit frames.
+    colour: Vec<u8>,
     presents: u64,
     /// Pointer events over the window, oldest first (ADR-217).
     pointer: [u64; POINTER_RING],
@@ -78,6 +80,60 @@ pub const CLICK: u64 = 1 << 33;
 /// Pointer events kept for a program that is not polling; moves coalesce into one.
 const POINTER_RING: usize = 16;
 
+/// What a program's frame is (ADR-218): its size, and whether it is one bit per pixel (packed,
+/// the compositor's own format) or one byte per pixel in RGB332 (`RRRGGGBB`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameSpec {
+    pub width: u32,
+    pub height: u32,
+    pub colour: bool,
+}
+
+impl FrameSpec {
+    pub const fn mono(width: u32, height: u32) -> Self {
+        FrameSpec {
+            width,
+            height,
+            colour: false,
+        }
+    }
+
+    /// Bytes the program's buffer holds for this frame.
+    pub const fn len(&self) -> usize {
+        if self.colour {
+            self.width as usize * self.height as usize
+        } else {
+            packed_len(self.width, self.height)
+        }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+}
+
+/// An RGB332 byte as the display's BGRA. Each channel's bits are repeated to fill eight, so
+/// 0x00 is black and 0xFF is white exactly.
+pub const fn rgb332_bgra(c: u8) -> [u8; 4] {
+    let r = (c >> 5) & 7;
+    let g = (c >> 2) & 7;
+    let b = c & 3;
+    [
+        b * 0x55,
+        (g << 5) | (g << 2) | (g >> 1),
+        (r << 5) | (r << 2) | (r >> 1),
+        0xFF,
+    ]
+}
+
+/// Whether an RGB332 pixel is ink in the window's one-bit plane: bright enough to read as the
+/// foreground (luminance at least half), so a one-bit readback of a colour frame still means
+/// something.
+pub const fn rgb332_ink(c: u8) -> bool {
+    let [b, g, r, _] = rgb332_bgra(c);
+    (r as u32 * 299 + g as u32 * 587 + b as u32 * 114) >= 128 * 1000
+}
+
 /// The packed size of a `w` x `h` one-bit bitmap, LSB first, row-major (the compositor's format).
 pub const fn packed_len(w: u32, h: u32) -> usize {
     (w as usize * h as usize).div_ceil(8)
@@ -90,6 +146,7 @@ impl AppWindow {
             token: 0,
             size: (0, 0),
             packed: Vec::new(),
+            colour: Vec::new(),
             presents: 0,
             pointer: [0; POINTER_RING],
             pointer_len: 0,
@@ -107,10 +164,11 @@ impl AppWindow {
         comp: &mut Compositor,
         session: u64,
         owner: u64,
-        (w, h): (u32, u32),
+        spec: FrameSpec,
         at: (i32, i32),
         fill: &mut dyn FnMut(&mut [u8]) -> bool,
     ) -> Result<(), Refusal> {
+        let (w, h) = (spec.width, spec.height);
         if w == 0 || h == 0 || w > MAX_W || h > MAX_H {
             return Err(Refusal::BadSize);
         }
@@ -148,8 +206,26 @@ impl AppWindow {
             // A window that opens takes the keyboard, as on every desktop (ADR-216).
             let _ = comp.set_focus(session, APP);
         }
-        if !fill(&mut self.packed) {
-            return Err(Refusal::BadBuffer);
+        if spec.colour {
+            // Allocated when the window opens or changes format, never per frame.
+            if self.colour.len() != spec.len() {
+                self.colour.clear();
+                self.colour.resize(spec.len(), 0);
+            }
+            if !fill(&mut self.colour) {
+                return Err(Refusal::BadBuffer);
+            }
+            self.packed.fill(0);
+            for (i, &c) in self.colour.iter().enumerate() {
+                if rgb332_ink(c) {
+                    self.packed[i / 8] |= 1 << (i % 8);
+                }
+            }
+        } else {
+            self.colour = Vec::new();
+            if !fill(&mut self.packed) {
+                return Err(Refusal::BadBuffer);
+            }
         }
         comp.fill_packed(APP, self.token, &self.packed)
             .map_err(|_| Refusal::BadBuffer)?;
@@ -226,8 +302,19 @@ impl AppWindow {
         self.owner = None;
         self.size = (0, 0);
         self.packed = Vec::new();
+        self.colour = Vec::new();
         self.pointer_len = 0;
         self.held = false;
+    }
+
+    /// The colour plane of the window's current frame, `(width, height, RGB332 bytes)`, when the
+    /// program presented colour (ADR-218).
+    pub fn colour_plane(&self) -> Option<(u32, u32, &[u8])> {
+        if self.owner.is_some() && !self.colour.is_empty() {
+            Some((self.size.0, self.size.1, &self.colour))
+        } else {
+            None
+        }
     }
 
     /// The program holding the window, if any.
@@ -268,7 +355,7 @@ mod tests {
                 &mut comp,
                 s,
                 7,
-                (16, 8),
+                FrameSpec::mono(16, 8),
                 (40, 30),
                 &mut solid(0xFF)
             ),
@@ -279,11 +366,27 @@ mod tests {
         assert_eq!(app.owner(), Some(7));
         // Another program is refused while 7 holds it; 7 may present again, and resize.
         assert_eq!(
-            app.present(&mut wm, &mut comp, s, 8, (16, 8), (0, 0), &mut solid(0)),
+            app.present(
+                &mut wm,
+                &mut comp,
+                s,
+                8,
+                FrameSpec::mono(16, 8),
+                (0, 0),
+                &mut solid(0)
+            ),
             Err(Refusal::Busy)
         );
         assert_eq!(
-            app.present(&mut wm, &mut comp, s, 7, (24, 8), (0, 0), &mut solid(0)),
+            app.present(
+                &mut wm,
+                &mut comp,
+                s,
+                7,
+                FrameSpec::mono(24, 8),
+                (0, 0),
+                &mut solid(0)
+            ),
             Ok(())
         );
         assert_eq!(wm.size(APP), Some((24, 8)));
@@ -295,7 +398,15 @@ mod tests {
         assert!(!wm.is_open(APP) && app.owner().is_none());
         // Now program 8 may have it.
         assert_eq!(
-            app.present(&mut wm, &mut comp, s, 8, (8, 8), (0, 0), &mut solid(1)),
+            app.present(
+                &mut wm,
+                &mut comp,
+                s,
+                8,
+                FrameSpec::mono(8, 8),
+                (0, 0),
+                &mut solid(1)
+            ),
             Ok(())
         );
     }
@@ -306,20 +417,44 @@ mod tests {
         let mut app = AppWindow::new();
         for size in [(0, 8), (8, 0), (MAX_W + 1, 8), (8, MAX_H + 1)] {
             assert_eq!(
-                app.present(&mut wm, &mut comp, s, 1, size, (0, 0), &mut solid(0)),
+                app.present(
+                    &mut wm,
+                    &mut comp,
+                    s,
+                    1,
+                    FrameSpec::mono(size.0, size.1),
+                    (0, 0),
+                    &mut solid(0)
+                ),
                 Err(Refusal::BadSize)
             );
         }
         assert_eq!(
-            app.present(&mut wm, &mut comp, s, 1, (8, 8), (0, 0), &mut |_| false),
+            app.present(
+                &mut wm,
+                &mut comp,
+                s,
+                1,
+                FrameSpec::mono(8, 8),
+                (0, 0),
+                &mut |_| false
+            ),
             Err(Refusal::BadBuffer)
         );
         let mut seen = 0;
         assert_eq!(
-            app.present(&mut wm, &mut comp, s, 1, (13, 5), (0, 0), &mut |b| {
-                seen = b.len();
-                true
-            }),
+            app.present(
+                &mut wm,
+                &mut comp,
+                s,
+                1,
+                FrameSpec::mono(13, 5),
+                (0, 0),
+                &mut |b| {
+                    seen = b.len();
+                    true
+                }
+            ),
             Ok(())
         );
         assert_eq!(seen, packed_len(13, 5));
@@ -328,14 +463,30 @@ mod tests {
         wm.close(&mut comp, s, APP).unwrap();
         for _ in 0..2 {
             assert_eq!(
-                app.present(&mut wm, &mut comp, s, 1, (13, 5), (0, 0), &mut solid(0)),
+                app.present(
+                    &mut wm,
+                    &mut comp,
+                    s,
+                    1,
+                    FrameSpec::mono(13, 5),
+                    (0, 0),
+                    &mut solid(0)
+                ),
                 Err(Refusal::Dismissed)
             );
         }
         assert!(!wm.is_open(APP));
         app.close(&mut wm, &mut comp, s, 1);
         assert_eq!(
-            app.present(&mut wm, &mut comp, s, 2, (13, 5), (0, 0), &mut solid(0)),
+            app.present(
+                &mut wm,
+                &mut comp,
+                s,
+                2,
+                FrameSpec::mono(13, 5),
+                (0, 0),
+                &mut solid(0)
+            ),
             Ok(())
         );
     }
@@ -345,8 +496,16 @@ mod tests {
         let (mut wm, mut comp, s) = setup();
         let mut app = AppWindow::new();
         assert_eq!(app.poll(&wm, &mut comp, 3), Err(Refusal::NoWindow));
-        app.present(&mut wm, &mut comp, s, 3, (8, 8), (0, 0), &mut solid(0))
-            .unwrap();
+        app.present(
+            &mut wm,
+            &mut comp,
+            s,
+            3,
+            FrameSpec::mono(8, 8),
+            (0, 0),
+            &mut solid(0),
+        )
+        .unwrap();
         // The new window holds the keyboard: a key typed now queues on its surface.
         assert_eq!(comp.focus(), Some(APP));
         comp.post_key(s, b'q').unwrap();
@@ -364,8 +523,16 @@ mod tests {
         let (mut wm, mut comp, s) = setup();
         let mut app = AppWindow::new();
         app.pointer(1, 1, None); // no window: ignored
-        app.present(&mut wm, &mut comp, s, 5, (32, 32), (0, 0), &mut solid(0))
-            .unwrap();
+        app.present(
+            &mut wm,
+            &mut comp,
+            s,
+            5,
+            FrameSpec::mono(32, 32),
+            (0, 0),
+            &mut solid(0),
+        )
+        .unwrap();
         app.pointer(3, 4, None);
         app.pointer(5, 6, None); // replaces the move before it
         app.pointer(5, 6, Some(true));
@@ -399,5 +566,44 @@ mod tests {
         }
         assert_eq!(n, POINTER_RING);
         assert_eq!(app.poll(&wm, &mut comp, 6), Err(Refusal::Busy));
+    }
+
+    #[test]
+    fn a_colour_frame_keeps_its_colours_and_a_one_bit_plane_by_brightness() {
+        let (mut wm, mut comp, s) = setup();
+        let mut app = AppWindow::new();
+        let spec = FrameSpec {
+            width: 4,
+            height: 2,
+            colour: true,
+        };
+        let px = [0x00, 0xFF, 0xE0, 0x1C, 0x03, 0x92, 0x6D, 0xFF];
+        assert_eq!(
+            app.present(&mut wm, &mut comp, s, 1, spec, (0, 0), &mut |b| {
+                assert_eq!(b.len(), 8);
+                b.copy_from_slice(&px);
+                true
+            }),
+            Ok(())
+        );
+        assert_eq!(app.colour_plane(), Some((4, 2, &px[..])));
+        // White and the light grey are ink; black, pure blue and the dark grey are not.
+        assert!(!comp.has_pixel(APP, 0, 0) && comp.has_pixel(APP, 1, 0));
+        assert!(comp.has_pixel(APP, 3, 1) && !comp.has_pixel(APP, 0, 1));
+        assert_eq!(rgb332_bgra(0x00), [0, 0, 0, 0xFF]);
+        assert_eq!(rgb332_bgra(0xFF), [0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(rgb332_bgra(0xE0), [0, 0, 0xFF, 0xFF]);
+        // A one-bit frame drops the colour plane.
+        app.present(
+            &mut wm,
+            &mut comp,
+            s,
+            1,
+            FrameSpec::mono(4, 2),
+            (0, 0),
+            &mut solid(0),
+        )
+        .unwrap();
+        assert_eq!(app.colour_plane(), None);
     }
 }

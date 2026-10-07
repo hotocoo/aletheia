@@ -1938,7 +1938,7 @@ fn present_frame(slot: &Slot, req: &kernel_core::progout::PresentRequest) -> boo
     let pages = &views[..slot.data.len()];
     #[cfg(feature = "interactive")]
     {
-        crate::desktop::present_app(slot.task, (req.width, req.height), &mut |out| {
+        crate::desktop::present_app(slot.task, req.spec(), &mut |out| {
             kernel_core::progout::gather_present(req, pages, out)
         })
     }
