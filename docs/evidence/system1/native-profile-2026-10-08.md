@@ -36,3 +36,11 @@ visible in the profile. Closing the gap means changing the elementwise path (a v
 fewer intermediate tensors) inside the encoder, which candle's ModernBERT does not expose; that is a
 vendoring decision under ADR-237 decision 3, with `native_parity.py` as its gate. Expected ceiling
 from the shares above: roughly 1.3-1.6x, still behind torch. Not done in v0.7.x.
+
+## Follow-up (ADR-249, 2026-10-09)
+
+Acted on: the encoder is vendored and its CPU elementwise path fused (GeGLU in one parallel pass with
+a vectorizable f32 erf; attention scale, mask and softmax in one pass; the sliding-window mask built
+once per forward pass; LayerNorm on candle's fused kernel). Same machine, v4 console checkpoint,
+400 corpus rows: native CPU p50 261 ms -> 129 ms against the reference's 100-115 ms (2.3x -> 1.3x),
+parity 932/932 answers unchanged.

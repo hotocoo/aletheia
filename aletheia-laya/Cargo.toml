@@ -16,6 +16,8 @@ candle-transformers = "0.9.1"
 # Oniguruma (BSD-2-Clause) for the tokenizer's pre-tokenizer regex; no progress bars, no C++ suffix arrays.
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+rayon = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { version = "0.9.1", features = ["metal", "accelerate"] }
@@ -24,3 +26,5 @@ candle-transformers = { version = "0.9.1", features = ["metal", "accelerate"] }
 
 [profile.release]
 panic = "abort"
+lto = "fat"
+codegen-units = 1

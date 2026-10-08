@@ -1,0 +1,15 @@
+# The upstream source vendored as aletheia-laya/src/encoder.rs (ADR-249).
+#
+# Trimmed to the encoder (masked-LM and classifier heads removed) and changed in three places: the
+# MLP's GeGLU and the attention's scale+mask+softmax call fused CPU kernels (aletheia-laya/src/fused.rs),
+# the sliding-window mask is combined once per forward pass, and bias-free LayerNorms get a zero bias
+# so candle's one-pass kernel runs. Answer parity with the Python reference is the gate:
+# scripts/system1/native_parity.py.
+
+crate   = candle-transformers
+version = 0.9.2
+file    = src/models/modernbert.rs
+sha256  = 3492293a25adb99f668e6a90ea2dd9cbb1fa2c1852f817e0a29b88fb1c12f3da
+license = MIT OR Apache-2.0
+source  = https://github.com/huggingface/candle
+taken   = 2026-10-09

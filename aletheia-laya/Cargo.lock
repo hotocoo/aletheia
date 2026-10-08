@@ -38,6 +38,8 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "rayon",
+ "serde",
  "serde_json",
  "tokenizers",
 ]

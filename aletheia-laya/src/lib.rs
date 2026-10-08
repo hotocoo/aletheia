@@ -191,6 +191,8 @@ pub fn type_name(qtype: usize) -> &'static str {
     }
 }
 
+pub mod encoder;
+pub mod fused;
 pub mod model;
 pub mod wire;
 

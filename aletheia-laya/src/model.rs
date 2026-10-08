@@ -3,10 +3,10 @@
 //! `tokenizer/`). Computed in f32 from the checkpoint's f16 weights, as the reference runtime does
 //! on CPU and MPS; f16 compute was measured and rejected (ADR-241).
 
+use crate::encoder::{Config, ModernBert};
 use crate::{answer, parse_question, sequence, temperature, type_name, Encode, Layout};
 use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
 use candle_nn::{layer_norm, linear, Embedding, LayerNorm, LayerNormConfig, Linear, VarBuilder};
-use candle_transformers::models::modernbert::{Config, ModernBert};
 use serde_json::{json, Value};
 use tokenizers::Tokenizer;
 

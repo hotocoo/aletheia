@@ -1271,6 +1271,12 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-09 — the native Laya runtime closes most of its latency gap (ADR-249)
+
+- ModernBERT encoder vendored (`third_party/candle-modernbert.pin`); fused CPU GeGLU (f32 erf),
+  scale+mask+softmax, once-per-pass window mask, fused LayerNorm, LTO. Native CPU p50 261 -> 129 ms
+  vs torch 100-115 ms; scheduler checkpoint 225 -> 159 vs 125 ms; parity 932/932 and 700/700.
+
 ### 2026-10-08 — v0.7.2 (ADR-247, ADR-248)
 
 - Crates 0.7.2: console roles and run reads, with the peer session's ADR-231 run 5 evidence
