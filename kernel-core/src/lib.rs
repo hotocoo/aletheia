@@ -27,6 +27,7 @@ extern crate alloc;
 pub mod ahci;
 pub mod appwin;
 pub mod arpcache;
+pub mod bcache;
 pub mod bench;
 pub mod bootroot;
 pub mod boottime;

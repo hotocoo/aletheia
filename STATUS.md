@@ -1271,6 +1271,11 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — a write-through block cache under the namespace (ADR-232)
+
+- `kernel_core::bcache::BlockCache`: 16 blocks, write-through, read-allocate, CLOCK eviction, nothing kept on a device error; under the capability guard in each CPU's console session.
+- Host proof: same answers, same device write sequence and bytes with and without it; namespace workload device reads 778 to 49 (94 % saved). Stale-read property over a failing, tearing device across 40 seeds.
+
 ### 2026-10-08 — a program grows its writable memory at run time (ADR-230)
 
 - `SYS_BRK = 16`: zeroed writable pages mapped above what a program holds, up to 64 pages (256 KiB) above its stack with image and growth counted together; never shrinks; no capability (bounded by the program's own ceiling). Decided by `progout::admit_brk` (host test), served by each CPU's run loop like `SYS_FS_READ`, so reads, writes and frames reach grown pages unchanged.

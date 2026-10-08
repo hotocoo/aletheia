@@ -329,8 +329,15 @@ fn serve_file_panel<D: BlockDevice>(
 #[cfg(feature = "interactive")]
 fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
     let host = Host::privileged();
-    let mut guard =
-        DeviceGuard::new_with_actions(dev, "console.inspect", "console.write", "console.flush");
+    // Repeat reads of the namespace come from memory (ADR-232); the cache sits under the guard, so
+    // every request is still authorized, and writes go through to the device.
+    let mut cached = kernel_core::bcache::BlockCache::new(dev, kernel_core::bcache::CONSOLE_BLOCKS);
+    let mut guard = DeviceGuard::new_with_actions(
+        &mut cached,
+        "console.inspect",
+        "console.write",
+        "console.flush",
+    );
     let mut device = guard.authorized_device(&host.authority, &host.offered);
     let Some(mut fs) = mount_or_format(&mut device) else {
         kprintln!("[console] FATAL: no usable namespace");
