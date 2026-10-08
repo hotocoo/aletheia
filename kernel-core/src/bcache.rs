@@ -146,7 +146,7 @@ impl<D: BlockDevice> BlockDevice for BlockCache<D> {
             }
             let span = &mut out[i * BLOCK_SIZE..j * BLOCK_SIZE];
             self.dev.read_run(start + i, span)?;
-            for (k, blk) in span.chunks_exact(BLOCK_SIZE).enumerate() {
+            for (k, blk) in span.as_chunks::<BLOCK_SIZE>().0.iter().enumerate() {
                 self.count(|s| s.misses += 1);
                 self.insert(start + i + k, blk);
             }

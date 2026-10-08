@@ -894,7 +894,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
     pub fn time_reads(&self, start: usize, blocks: usize) -> Option<(u64, u64)> {
         let mut out = alloc::vec![0u8; blocks * BLOCK_SIZE];
         let t0 = H::now_ns();
-        for (i, chunk) in out.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+        for (i, chunk) in out.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
             self.read_block(start + i, chunk).ok()?;
         }
         let t1 = H::now_ns();
@@ -960,7 +960,7 @@ impl<H: VirtioHal, T: Transport> BlockDevice for VirtioBlk<H, T> {
             // SAFETY: one request in flight; the run's data frames are ours and identity-mapped.
             unsafe {
                 self.request_run(first as u64 * SECTORS_PER_BLOCK, m)?;
-                for (k, blk) in chunk.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+                for (k, blk) in chunk.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
                     let src =
                         core::slice::from_raw_parts(self.run_frame(k) as *const u8, BLOCK_SIZE);
                     blk.copy_from_slice(src);

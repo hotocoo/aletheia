@@ -84,7 +84,7 @@ pub trait BlockDevice {
         if !out.len().is_multiple_of(BLOCK_SIZE) {
             return Err(StorageError::BadBlockSize);
         }
-        for (i, chunk) in out.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+        for (i, chunk) in out.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
             self.read_block(start + i, chunk)?;
         }
         Ok(())
