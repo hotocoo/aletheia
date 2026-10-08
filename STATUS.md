@@ -1271,6 +1271,12 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — a System-1 corpus for the scheduler, labelled by the scheduler (ADR-229)
+
+- `kernel-core/examples/sched_corpus.rs` drives the real `PriorityScheduler` through seeded hard episodes (few bands, donation chains, wait cycles, advisory reorders, mid-run admissions) and writes choice rows on the System-1 wire; every label is `schedule_next`'s answer, recomputed from the rendered state or the generator panics.
+- 20 001 rows at seed 56 (6667 donation, 6667 advice, 6667 fifo); eight further seeds pass. CI `property-campaign` job generates 2000 rows per run, seeded by the run number.
+- Open: no checkpoint trained on it yet, no scheduler arm in `console bench`. The live scheduler System 1 is still the resident forest (ADR-199).
+
 ### 2026-10-08 — drivers for device classes real machines ship; v0.5.0 (ADR-223..228)
 
 - NVMe (ADR-223), Intel 8254x e1000 (ADR-224) with the TCP stack over it (ADR-227), and AHCI

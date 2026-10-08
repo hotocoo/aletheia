@@ -29,6 +29,8 @@ jobs:
           ALETHEIA_PROPERTY_CASES: '64'
           ALETHEIA_PROPERTY_SEED: 'a1e702105eed'
         run: ./scripts/property-campaign.sh
+      - name: Scheduler System-1 corpus re-derives every label from its rendered state (ADR-229)
+        run: cargo run --release --locked --manifest-path kernel-core/Cargo.toml --example sched_corpus -- --rows 2000 --seed "$GITHUB_RUN_NUMBER" > /dev/null
       - name: Retain campaign evidence on every outcome
         if: always()
         uses: actions/upload-artifact@v4

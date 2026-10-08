@@ -69,7 +69,9 @@ so the honest statement is the table in BENCHMARKS.md, extended one scenario at 
 3. Interrupt-driven virtio on every target (today most drivers poll).
 4. virtio-gpu 3D (virgl/Venus) research spike and ADR.
 5. First real-hardware boot (one x86-64 machine) with a measured, named driver list.
-6. System 1 v4 with a better paraphrase source (ADR-209's measured bottleneck).
+6. System 1 v4 with a better paraphrase source (ADR-209's measured bottleneck). Beyond the
+   console: a self-checking scheduler dispatch corpus exists (ADR-229); no checkpoint trained on
+   it has been measured yet.
 
 ## Real-device-class drivers (2026-10-08)
 
