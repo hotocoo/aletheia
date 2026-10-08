@@ -429,10 +429,10 @@ embedding server or vector database is required** for normal OS operation.
 
 Every stable version is a tag `vX.Y.Z`, and every tag publishes a ready-to-boot x86-64 package on
 the [releases page](https://github.com/hotocoo/aletheia/releases/latest), built and **booted from
-its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.2**.
+its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.3**.
 
-1. Download `aletheia-v0.7.2-x86_64-vmware.zip` and its `.sha256`, then check the digest:
-   `shasum -a 256 -c aletheia-v0.7.2-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
+1. Download `aletheia-v0.7.3-x86_64-vmware.zip` and its `.sha256`, then check the digest:
+   `shasum -a 256 -c aletheia-v0.7.3-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
 2. Unzip. It holds two UEFI disks, each with its `.vmx`:
    - `aletheia-x86_64.vmx`: the OS you sit in front of. It boots, proves its invariants, then
      opens the console (type `help`).
@@ -453,6 +453,9 @@ its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.2**.
    Homebrew ships the firmware as `/opt/homebrew/share/qemu/edk2-x86_64-code.fd` with vars
    `edk2-i386-vars.fd` beside it; Debian/Ubuntu as `/usr/share/OVMF/OVMF_CODE_4M.fd` and
    `OVMF_VARS_4M.fd` (package `ovmf`).
+
+**v0.7.3**: the native Laya runtime is within 1.1x of the Python reference on CPU (was 2.3x;
+ADR-249, ADR-251), and operator accounts own the objects they create (ADR-250).
 
 **v0.7.2** adds console roles (admin / operator / viewer, ADR-247) and reads a run of blocks in
 one virtio-blk request (3-5x on a 48-block read, ADR-248).
