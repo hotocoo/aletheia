@@ -1280,6 +1280,8 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Discovery satisfies an archive-pinned manifest only from its own snapshot (an older cached v2
   was served under the v4 manifest). kernel-core 946, aletheia 284 passed; boot, console, vinput,
   keyboard, desktop gates pass. Crates 0.7.1.
+- **Published:** tag `v0.7.1` at `1f38847`, marked latest; v0.7.0's notes say it is superseded.
+  Assets re-downloaded and their `.sha256` checked; `model pull aletheia-console-s1` verified.
 
 ### 2026-10-08 — console System 1 v4, and release v0.7.0 (ADR-245)
 
