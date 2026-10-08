@@ -89,7 +89,7 @@ qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -g
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
-  -netdev user,id=n1 -device e1000,netdev=n1 -device ich9-ahci,id=ahci \
+  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
   -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ahci.1,serial=ALETHEIA-SCRATCH \
   -device virtio-gpu-device,xres=640,yres=240 \
@@ -113,7 +113,7 @@ OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
-  -netdev user,id=n1 -device e1000,netdev=n1 -device ich9-ahci,id=ahci \
+  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
   -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ahci.1,serial=ALETHEIA-SCRATCH \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
@@ -221,7 +221,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="ahci=25 bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 dns=9 e1000=6 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 nvme=23 net=9 persist=10 pm=14 reclaim=9 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=61 smmu=10 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=66"
+AARCH64_EXPECTED="ahci=25 bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 dns=9 e1000=7 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 nvme=23 net=9 persist=10 pm=14 reclaim=9 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=61 smmu=10 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
@@ -239,7 +239,7 @@ OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
-  -netdev user,id=n1 -device e1000,netdev=n1 -device ich9-ahci,id=ahci \
+  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
   -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ahci.1,serial=ALETHEIA-SCRATCH \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
@@ -266,7 +266,7 @@ OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
-  -netdev user,id=n1 -device e1000,netdev=n1 -device ich9-ahci,id=ahci \
+  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
   -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ahci.1,serial=ALETHEIA-SCRATCH \
   -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \

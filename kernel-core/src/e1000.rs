@@ -297,13 +297,15 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
         }
     }
 
-    /// Wait for a received frame `accept` recognises; every descriptor is handed back to the device.
+    /// Wait for a received frame `accept` recognises, for at most `polls` empty looks and at most
+    /// the time budget; every descriptor is handed back to the device.
     pub fn recv_until<T>(
         &self,
+        polls: u64,
         mut accept: impl FnMut(&[u8]) -> Option<T>,
     ) -> Result<T, E1000Error> {
         let started = H::now_ns();
-        loop {
+        for _ in 0..polls {
             let i = self.rx_next.get();
             let d = self.rx_ring + i * DESC;
             // SAFETY: the descriptor lies in our RX ring frame.
@@ -340,6 +342,7 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
             }
             core::hint::spin_loop();
         }
+        Err(E1000Error::Timeout)
     }
 
     /// Broadcast an ARP request for `target` and return the hardware address that answers.
@@ -358,7 +361,7 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
         a[14..18].copy_from_slice(&GUEST_IP);
         a[24..28].copy_from_slice(&target);
         self.send(&f)?;
-        self.recv_until(|r| {
+        self.recv_until(u64::MAX, |r| {
             if r.len() < ETH_HDR_LEN + 28 || be16(r, 12) != 0x0806 {
                 return None;
             }
@@ -372,6 +375,84 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
         })
     }
 }
+
+/// A dropped driver stops the controller: receive and transmit off, interrupts masked. Without
+/// this a frame arriving later is DMA nobody owns - found live when a late TCP segment from the
+/// echo peer faulted under VT-d enforcement (ADR-227).
+impl<H: VirtioHal, R: Regs> Drop for E1000<H, R> {
+    fn drop(&mut self) {
+        self.regs.w32(REG_RCTL, 0);
+        self.regs.w32(REG_TCTL, 0);
+        self.regs.w32(REG_IMC, u32::MAX);
+    }
+}
+
+/// The TCP stack's link (ADR-227): IPv4 datagrams to one on-link peer over this NIC.
+pub struct E1000Link<'a, H: VirtioHal, R: Regs> {
+    pub dev: &'a E1000<H, R>,
+    pub peer_mac: [u8; 6],
+}
+
+impl<H: VirtioHal, R: Regs> crate::tcpnet::Ipv4Link for E1000Link<'_, H, R> {
+    fn send_ipv4(&self, datagram: &[u8]) -> Result<(), crate::tcpnet::LinkError> {
+        let mut f = [0u8; MAX_FRAME];
+        if ETH_HDR_LEN + datagram.len() > f.len() {
+            return Err(crate::tcpnet::LinkError::TooLong);
+        }
+        f[0..6].copy_from_slice(&self.peer_mac);
+        f[6..12].copy_from_slice(&self.dev.mac);
+        put_be16(&mut f, 12, 0x0800);
+        f[ETH_HDR_LEN..ETH_HDR_LEN + datagram.len()].copy_from_slice(datagram);
+        self.dev
+            .send(&f[..ETH_HDR_LEN + datagram.len()])
+            .map_err(|_| crate::tcpnet::LinkError::Device)
+    }
+
+    fn recv_ipv4(
+        &self,
+        spins: u64,
+        protocol: u8,
+        out: &mut [u8],
+    ) -> Result<usize, crate::tcpnet::LinkError> {
+        let mut too_long = false;
+        let got = self.dev.recv_until(spins, |f| {
+            if f.len() < ETH_HDR_LEN || be16(f, 12) != 0x0800 {
+                return None;
+            }
+            let body = &f[ETH_HDR_LEN..];
+            let ip = crate::udpv4::parse_ipv4(body).ok()?;
+            if ip.protocol != protocol || ip.dst != GUEST_IP {
+                return None;
+            }
+            // The datagram's declared length, not the frame's: Ethernet padding is not data.
+            let total = be16(body, 2) as usize;
+            if total > body.len() {
+                return None;
+            }
+            if total > out.len() {
+                too_long = true;
+                return Some(0);
+            }
+            out[..total].copy_from_slice(&body[..total]);
+            Some(total)
+        });
+        match got {
+            Ok(_) if too_long => Err(crate::tcpnet::LinkError::TooLong),
+            Ok(n) => Ok(n),
+            Err(E1000Error::Timeout) => Ok(0),
+            Err(_) => Err(crate::tcpnet::LinkError::Device),
+        }
+    }
+
+    fn local_ip(&self) -> [u8; 4] {
+        GUEST_IP
+    }
+}
+
+/// The TCP echo peer a VM gate places on the e1000's user-mode network (QEMU
+/// `guestfwd=tcp:10.0.2.100:7-cmd:cat`). Absent on hypervisors without that feature.
+pub const ECHO_PEER: [u8; 4] = [10, 0, 2, 100];
+pub const ECHO_PORT: u16 = 7;
 
 /// The NIC contract over a live 8254x with a user-mode network (gateway 10.0.2.2) behind it.
 pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
@@ -416,5 +497,30 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
         "e1000: both rings wrap in step over three ring lengths of request and answer",
         same
     );
+    // The TCP stack over this NIC, when the gate placed an echo peer on the wire (ADR-227). The
+    // family count says which: 7 with the peer, 6 without, and each gate pins its own.
+    if let Ok(peer_mac) = dev.arp_resolve(ECHO_PEER) {
+        let link = E1000Link { dev, peer_mac };
+        let mut conn =
+            crate::tcpconn::Connection::new(GUEST_IP, 49_700, ECHO_PEER, ECHO_PORT, 200_000_000);
+        let plan = crate::tcpnet::Plan {
+            iss: H::now_ns() as u32,
+            budget: 4_000,
+            spins_per_turn: 20_000,
+        };
+        let mut reply = [0u8; 32];
+        let got = crate::tcpnet::exchange(
+            &link,
+            &mut conn,
+            plan,
+            b"ALETHEIA-E1000",
+            &mut reply,
+            &mut H::now_ns,
+        );
+        check!(
+            "e1000: a TCP conversation over the NIC reaches the echo peer and its bytes come back",
+            got.is_ok_and(|e| e.received == 14) && &reply[..14] == b"ALETHEIA-E1000"
+        );
+    }
     Ok(n)
 }
