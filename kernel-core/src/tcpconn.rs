@@ -19,8 +19,9 @@
 //! ## What this connection deliberately does NOT do
 //!
 //! No reassembly of out-of-order segments (they are dropped and re-acknowledged, which makes the
-//! peer retransmit), no selective acknowledgement, no window scaling, no RTT estimation (a fixed
-//! retransmission timeout), and no simultaneous open. Each omission is a thing a browser's
+//! peer retransmit), no selective acknowledgement, no window scaling, and no simultaneous open.
+//! The retransmission timeout is estimated from measured round trips (RFC 6298, ADR-233), never
+//! below the caller's initial value. Each omission is a thing a browser's
 //! transport can live without on this wire, and each is stated here rather than discovered by
 //! someone reading the code for it.
 
@@ -41,6 +42,8 @@ pub const MSS: usize = 536;
 pub const TX_BUF_MIN: usize = IPV4_HDR_MIN + TCP_HDR_MIN + MSS;
 /// How many times one segment is retransmitted before the connection declares the peer gone.
 pub const MAX_RETRIES: u8 = 5;
+/// The estimated timeout never exceeds this many initial timeouts (60 s at the console's 200 ms).
+pub const RTO_CEILING: u64 = 300;
 
 /// Where the connection is. RFC 793's state names, minus the ones a client that never listens can
 /// never reach (LISTEN, SYN_RECEIVED).
@@ -144,8 +147,16 @@ pub struct Connection {
     /// wait a whole timeout before saying hello.
     syn_due: bool,
 
-    /// Fixed retransmission timeout, in the caller's own tick units.
+    /// Retransmission timeout, in the caller's own tick units (RFC 6298, ADR-233): starts at the
+    /// caller's value, which is also its floor, and follows the measured round trips above it.
     rto: u64,
+    rto_floor: u64,
+    /// Smoothed round trip x8 and its mean deviation x4 (Jacobson's fixed point); 0 = no sample yet.
+    srtt8: u64,
+    rttvar4: u64,
+    /// The one segment being timed: the acknowledgement that completes it, and when it was sent.
+    /// Cleared by any retransmission (Karn's rule: an ambiguous echo is not a measurement).
+    timing: Option<(u32, u64)>,
     last_tx: u64,
     retries: u8,
     ident: u16,
@@ -183,6 +194,10 @@ impl Connection {
             ack_due: false,
             syn_due: false,
             rto: rto.max(1),
+            rto_floor: rto.max(1),
+            srtt8: 0,
+            rttvar4: 0,
+            timing: None,
             last_tx: 0,
             retries: 0,
             ident: 0,
@@ -197,6 +212,36 @@ impl Connection {
 
     pub fn state(&self) -> TcpState {
         self.state
+    }
+
+    /// The retransmission timeout now, in the caller's tick units.
+    pub fn rto(&self) -> u64 {
+        self.rto
+    }
+
+    /// Fold one round-trip measurement into the estimate (RFC 6298 section 2): the first sets
+    /// SRTT = R and RTTVAR = R/2, later ones move them by 1/8 and 1/4. RTO = SRTT + 4 RTTVAR
+    /// (at least one tick), held between the caller's initial value and [`RTO_CEILING`] times it.
+    fn sample_rtt(&mut self, r: u64) {
+        if self.srtt8 == 0 {
+            self.srtt8 = (r * 8).max(1);
+            self.rttvar4 = r * 2;
+        } else {
+            let srtt = self.srtt8 / 8;
+            self.rttvar4 = self.rttvar4 - self.rttvar4 / 4 + srtt.abs_diff(r);
+            self.srtt8 = self.srtt8 - self.srtt8 / 8 + r;
+        }
+        let rto = self.srtt8 / 8 + self.rttvar4.max(1);
+        self.rto = rto.clamp(self.rto_floor, self.rto_floor.saturating_mul(RTO_CEILING));
+    }
+
+    /// A retransmission timer expired: double the timeout and keep it until a clean measurement
+    /// recomputes it (RFC 6298 sections 5.5 and 5.7). Otherwise, on a path slower than the
+    /// initial timeout, every segment would be retransmitted before its echo, Karn's rule would
+    /// discard every echo, and the estimate would never learn the path.
+    fn back_off(&mut self) {
+        self.timing = None;
+        self.rto = (self.rto * 2).min(self.rto_floor.saturating_mul(RTO_CEILING));
     }
 
     /// Bytes readable right now.
@@ -316,6 +361,10 @@ impl Connection {
         self.snd_wnd = seg.window as u32;
         self.state = TcpState::Established;
         self.ack_due = true;
+        // A SYN that went once times the path; a retransmitted one is ambiguous (Karn).
+        if self.retries == 1 && self.retransmits == 0 {
+            self.sample_rtt(now.saturating_sub(self.last_tx));
+        }
         self.retries = 0;
         self.last_tx = now;
         TcpEvent::Connected
@@ -394,6 +443,10 @@ impl Connection {
             return Ok(());
         }
         let mut advanced = ack.wrapping_sub(self.snd_una) as usize;
+        if let Some((_, sent)) = self.timing.filter(|(end, _)| seq_leq(*end, ack)) {
+            self.timing = None;
+            self.sample_rtt(now.saturating_sub(sent));
+        }
         self.snd_una = ack;
         self.retries = 0;
         self.last_tx = now;
@@ -440,8 +493,6 @@ impl Connection {
                 // before the next, so five tries cover ~31 RTOs rather than 5. With a fixed RTO a
                 // peer - or an emulator's NAT on a loaded host - that took longer than a second to
                 // answer was declared gone (2026-09-25, `https-e2e.sh` x86-64 at load average 46).
-                let backoff = self.rto << u32::from(self.retries.saturating_sub(1).min(4));
-                let expired = now.saturating_sub(self.last_tx) >= backoff;
                 if !self.syn_due && !expired {
                     return None;
                 }
@@ -452,6 +503,7 @@ impl Connection {
                 }
                 if !self.syn_due {
                     self.retransmits += 1;
+                    self.back_off();
                 }
                 self.syn_due = false;
                 self.retries += 1;
@@ -492,6 +544,9 @@ impl Connection {
                 payload[..room].copy_from_slice(&self.send[start..start + room]);
                 self.in_flight += room;
                 self.snd_nxt = self.snd_una.wrapping_add(self.in_flight as u32);
+                if self.timing.is_none() {
+                    self.timing = Some((self.snd_nxt, now));
+                }
                 self.bytes_out += room as u64;
                 self.ack_due = false;
                 self.last_tx = now;
@@ -514,6 +569,7 @@ impl Connection {
             let room = self.in_flight.min(MSS);
             let mut payload = [0u8; MSS];
             payload[..room].copy_from_slice(&self.send[..room]);
+            self.back_off();
             self.retries += 1;
             self.retransmits += 1;
             self.last_tx = now;
@@ -541,6 +597,7 @@ impl Connection {
                         return None;
                     }
                     self.retransmits += 1;
+                    self.back_off();
                 }
                 let seq = self.fin_seq.unwrap_or_else(|| self.next_fin_seq());
                 if self.fin_seq.is_none() {

@@ -301,3 +301,98 @@ fn sequence_helpers_agree_with_the_definition_across_the_whole_space() {
         assert!(seq_lt(start, start.wrapping_add(1)));
     }
 }
+
+/// Drive `c` against a peer `delay` ticks away each way, for `ticks`, staging `payload`. Returns
+/// what the peer received and how many retransmissions it took.
+fn over_a_path(c: &mut Connection, payload: &[u8], delay: u64, ticks: u64) -> (Vec<u8>, u64) {
+    let mut tx = [0u8; TX_BUF_MIN];
+    let mut rx = [0u8; TX_BUF_MIN];
+    let mut peer = Peer::new(0x5000, 0);
+    let mut to_peer: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut to_client: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut offered = 0;
+    c.open(0x4000, 0).unwrap();
+    for now in 0..ticks {
+        to_client.retain(|(at, wire)| {
+            if *at == now {
+                feed(c, wire, now);
+            }
+            *at != now
+        });
+        if c.state() == TcpState::Established && offered < payload.len() {
+            offered += c.send(&payload[offered..]).unwrap_or(0);
+        }
+        while let Some(n) = c.poll_transmit(now, &mut tx) {
+            to_peer.push((now + delay, tx[..n].to_vec()));
+        }
+        for (_, wire) in to_peer.iter().filter(|(at, _)| *at == now) {
+            let syn = parse_tcp(&parse_ipv4(wire).unwrap()).unwrap().has(SYN);
+            peer.take(wire);
+            let flags = if syn { SYN | ACK } else { ACK };
+            to_client.push((now + delay, peer.ack_segment(&mut rx, flags, b"").to_vec()));
+        }
+        to_peer.retain(|(at, _)| *at != now);
+    }
+    (peer.received, c.retransmits)
+}
+
+#[test]
+fn a_path_slower_than_the_initial_timeout_is_learned_and_stops_costing_retransmits() {
+    // A 26-tick round trip against a 10-tick initial timeout: a fixed timeout would send every
+    // segment at least three times.
+    let payload: Vec<u8> = (0..20_000u32).map(|i| (i % 253) as u8).collect();
+    let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
+    let (got, retransmits) = over_a_path(&mut c, &payload, 13, 40_000);
+    eprintln!(
+        "[tcp] 26-tick path: rto {} after {} retransmits",
+        c.rto(),
+        retransmits
+    );
+    assert_eq!(got, payload, "every byte arrived, in order");
+    // Backing off alone would leave it at 40; measurements bring it to the round trip.
+    assert!(
+        (26..=32).contains(&c.rto()),
+        "the timeout did not learn the round trip: {}",
+        c.rto()
+    );
+    let segments = payload.len().div_ceil(MSS) as u64;
+    assert!(
+        retransmits <= 6,
+        "{retransmits} retransmissions for {segments} segments: the estimate did not converge"
+    );
+}
+
+#[test]
+fn a_fast_path_keeps_the_initial_timeout_as_its_floor() {
+    let payload = [7u8; 3000];
+    let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
+    let (got, retransmits) = over_a_path(&mut c, &payload, 1, 2000);
+    assert_eq!((got.len(), retransmits), (payload.len(), 0));
+    assert_eq!(c.rto(), RTO, "a two-tick round trip never lowers the floor");
+}
+
+#[test]
+fn an_echo_of_a_retransmitted_segment_is_never_taken_as_a_measurement() {
+    let mut tx = [0u8; TX_BUF_MIN];
+    let mut rx = [0u8; TX_BUF_MIN];
+    let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
+    let mut peer = Peer::new(0x6000, 0);
+    c.open(0x5000, 0).unwrap();
+    let n = c.poll_transmit(0, &mut tx).unwrap();
+    peer.take(&tx[..n]);
+    let reply = peer.ack_segment(&mut rx, SYN | ACK, b"");
+    feed(&mut c, reply, 1);
+    assert_eq!(c.rto(), RTO);
+    c.send(b"lost once").unwrap();
+    let _lost = c.poll_transmit(1, &mut tx).unwrap();
+    // The timer expires and the segment goes again with a doubled timeout.
+    let n = c.poll_transmit(1 + RTO, &mut tx).unwrap();
+    assert_eq!((c.retransmits, c.rto()), (1, 2 * RTO));
+    peer.take(&tx[..n]);
+    let ack = peer.ack_segment(&mut rx, ACK, b"");
+    feed(&mut c, ack, 2 + RTO);
+    // Was that echo for the first send (RTT 1 + RTO) or the second (RTT 1)? Unknown, so the
+    // backed-off timeout stands.
+    assert_eq!(c.rto(), 2 * RTO, "an ambiguous echo moved the estimate");
+    assert_eq!(c.unacked(), 0);
+}

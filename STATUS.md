@@ -1271,6 +1271,11 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — TCP learns its retransmission timeout (ADR-233)
+
+- `tcpconn::Connection` estimates its RTO per RFC 6298 (SRTT/RTTVAR, Karn's rule, back-off kept until a clean sample), floored at the caller's 200 ms and capped at 300 times it; data and FIN retransmissions now back off like the SYN.
+- Host: a 26-tick path against a 10-tick initial timeout settles at RTO 29 with 2 retransmissions over 38 segments (a fixed timeout resends every segment at least three times); both the estimate and Karn's rule are mutation-checked.
+
 ### 2026-10-08 — a write-through block cache under the namespace (ADR-232)
 
 - `kernel_core::bcache::BlockCache`: 16 blocks, write-through, read-allocate, CLOCK eviction, nothing kept on a device error; under the capability guard in each CPU's console session.
