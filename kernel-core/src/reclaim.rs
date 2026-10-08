@@ -315,6 +315,35 @@ impl<'a> Reclaimer<'a> {
     }
 }
 
+/// The machine's own reclaimer (ADR-238): installed once at boot beside the risk advisor, consulted
+/// by every target's console idle loop when the allocator reports pressure, its ledger printed by
+/// `mlstat`.
+pub mod resident {
+    use super::{ReclaimLedger, Reclaimer};
+    use crate::sync::SpinLock;
+
+    static RESIDENT: SpinLock<Option<Reclaimer<'static>>> = SpinLock::new(None);
+
+    /// Verify and hold the eviction forest; a refused blob still installs a model-free reclaimer.
+    /// Returns whether a forest is resident.
+    pub fn install(bytes: &'static [u8]) -> bool {
+        let r = Reclaimer::load(bytes);
+        let active = r.active();
+        *RESIDENT.lock() = Some(r);
+        active
+    }
+
+    /// Run `f` against the resident reclaimer; `None` when none was installed.
+    pub fn with<R>(f: impl FnOnce(&mut Reclaimer<'static>) -> R) -> Option<R> {
+        RESIDENT.lock().as_mut().map(f)
+    }
+
+    /// The resident ledger; `None` when none was installed.
+    pub fn ledger() -> Option<ReclaimLedger> {
+        RESIDENT.lock().as_ref().map(|r| r.ledger())
+    }
+}
+
 /// A recording ops seam for the suites: every eviction is logged, and each candidate's footprint
 /// is what "came back".
 #[derive(Default)]
@@ -602,6 +631,71 @@ pub fn reclaim_suite(
         check!(
             a == b && a.0.protected_skipped == 1 && a.0.frames_reclaimed >= 1_500,
             "reclaim: the same pressure over the same tasks evicts the same tasks in the same order"
+        );
+    }
+
+    // 10 — the running machine's own path (ADR-238): a job table that is not short is answered
+    //      before anything is ranked, with no job taken and the ledger untouched.
+    {
+        let mut r = Reclaimer::load(BUNDLED_RECLAIM_MODEL);
+        let mut jobs: crate::jobs::Jobs<u64> = crate::jobs::Jobs::new();
+        let _ = jobs.add("a", 700, crate::jobs::Admission::NONE);
+        let calm = MemoryMeter {
+            total_pages: 10_000,
+            free_pages: 5_000,
+        };
+        let got = jobs.reclaim(&mut r, calm, |s| *s);
+        check!(
+            matches!(got, Err(ReclaimRefusal::NotUnderPressure { .. }))
+                && jobs.iter().count() == 1
+                && r.ledger() == ReclaimLedger::default(),
+            "reclaim: a running machine that is not short loses no program and counts nothing"
+        );
+    }
+
+    // 11 — under pressure the job table evicts in exactly the policy's rank order, and the jobs
+    //      taken out are exactly the ones evicted, with their frames counted.
+    {
+        let mut r = Reclaimer::load(BUNDLED_RECLAIM_MODEL);
+        let mut jobs: crate::jobs::Jobs<u64> = crate::jobs::Jobs::new();
+        let sizes = [300u64, 900, 450, 120];
+        for (i, &s) in sizes.iter().enumerate() {
+            let _ = jobs.add(
+                "j",
+                s,
+                crate::jobs::Admission {
+                    features: [i as i32; N_FEATURES],
+                    submitted_secs: i as u64,
+                },
+            );
+        }
+        let cands: Vec<Candidate> = jobs
+            .iter()
+            .map(|j| Candidate {
+                task: TaskId(j.id as u64),
+                owner: Owner::USER,
+                footprint_pages: j.slot,
+                priority: Priority(5),
+                submitted_secs: j.admission.submitted_secs,
+                protected: false,
+                features: j.admission.features,
+            })
+            .collect();
+        let order: Vec<TaskId> = Reclaimer::load(BUNDLED_RECLAIM_MODEL)
+            .rank(&cands)
+            .iter()
+            .map(|x| x.candidate.task)
+            .collect();
+        let (out, gone) = jobs.reclaim(&mut r, SUITE_PRESSURE, |s| *s).unwrap();
+        let gone_ids: Vec<TaskId> = gone.iter().map(|j| TaskId(j.id as u64)).collect();
+        let freed: u64 = gone.iter().map(|j| j.slot).sum();
+        check!(
+            out.evicted == gone_ids
+                && order.starts_with(&gone_ids)
+                && out.frames_reclaimed == freed
+                && jobs.iter().count() + gone.len() == sizes.len()
+                && r.ledger().evictions == gone.len() as u64,
+            "reclaim: the job table evicts in the policy's order and gives back exactly what it took"
         );
     }
 

@@ -1121,7 +1121,11 @@ impl ShellHost for JobHost {
         let turns = core::str::from_utf8(args).ok().and_then(|a| a.parse().ok());
         self.0
             .borrow_mut()
-            .add(name, turns.unwrap_or(u32::MAX))
+            .add(
+                name,
+                turns.unwrap_or(u32::MAX),
+                kernel_core::jobs::Admission::NONE,
+            )
             .map_err(|_| "every background place is taken")
     }
     fn jobs_live(&self) -> bool {

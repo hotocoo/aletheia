@@ -2058,6 +2058,13 @@ pub fn report_risk_advisor(out: &mut dyn FnMut(&str)) {
             }
         }
     }
+    // The running machine's reclaimer (ADR-238): what live pressure has taken back so far.
+    if let Some(l) = crate::reclaim::resident::ledger() {
+        outf!(out,
+            "reclaim: {} round(s), {} program(s) evicted, {} frame(s) back, {} shortfall(s), {} advised / {} unadvised",
+            l.rounds, l.evictions, l.frames_reclaimed, l.shortfalls, l.advised, l.unadvised
+        );
+    }
 }
 
 /// Run one line. Returns whether the session continues; every output goes through `out`, one call

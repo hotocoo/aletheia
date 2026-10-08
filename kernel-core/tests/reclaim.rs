@@ -29,14 +29,14 @@ fn cand(id: u64, footprint: u64, prio: u8, at: u64, protected: bool) -> Candidat
 fn the_boot_suite_passes_on_the_host() {
     let mut seen = Vec::new();
     let n = reclaim_suite(|i, ok, name| seen.push((i, ok, name))).expect("every invariant holds");
-    assert_eq!(n, 9);
-    assert_eq!(seen.len(), 9);
+    assert_eq!(n, 11);
+    assert_eq!(seen.len(), 11);
     assert!(seen.iter().all(|(_, ok, _)| *ok));
     let names: Vec<&str> = seen.iter().map(|(_, _, n)| *n).collect();
     let mut dedup = names.clone();
     dedup.sort();
     dedup.dedup();
-    assert_eq!(dedup.len(), 9, "every invariant has its own name");
+    assert_eq!(dedup.len(), 11, "every invariant has its own name");
 }
 
 #[test]

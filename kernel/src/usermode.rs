@@ -1725,6 +1725,11 @@ impl Slot {
         core::ptr::swap(&mut self.window, addr_of_mut!(PROGRAM_WINDOW_NOW));
     }
 
+    /// Frames it holds: code, stack and writable pages (ADR-238).
+    fn pages(&self) -> u64 {
+        (self.code.len() + self.data.len() + usize::from(self.stack.is_some())) as u64
+    }
+
     /// The program's report, its output included, with every page it held given back.
     fn finish(mut self) -> kernel_core::shell::ProgramRun {
         // A window it drew into goes with it (ADR-215).
@@ -2138,7 +2143,8 @@ pub fn start_program_live(
             sched_class: 2,
             priority: 5,
             cpu_millis: 500,
-            memory_pages: 2,
+            // The frames it really holds once placed (ADR-238): what reclaiming it gives back.
+            memory_pages: slot.pages(),
             disk_pages: None,
             diff_machine: false,
             task_index: 0,
@@ -2151,7 +2157,18 @@ pub fn start_program_live(
             return Err("the resident advisor refused it at the memory boundary");
         }
         // SAFETY: single-threaded, IRQs masked; nothing else touches the table meanwhile.
-        unsafe { (*addr_of_mut!(JOBS)).add(name, slot) }.map_err(|slot| {
+        unsafe {
+            (*addr_of_mut!(JOBS)).add(
+                name,
+                slot,
+                kernel_core::jobs::Admission {
+                    features: resident::last_features()
+                        .unwrap_or(kernel_core::jobs::Admission::NONE.features),
+                    submitted_secs: now_secs,
+                },
+            )
+        }
+        .map_err(|slot| {
             slot.free();
             "every background place is taken; `kill` one first"
         })
@@ -2203,6 +2220,40 @@ pub fn tick_jobs_live(
         let id = job.id;
         let run = job.slot.finish();
         ended(id, &job.name, &run);
+    }
+    reclaim_jobs(ended);
+}
+
+/// Under memory pressure, take background programs' frames back in the eviction forest's order
+/// (ADR-238). Asked after every turn; a machine that is not short answers with one comparison.
+fn reclaim_jobs(
+    ended: &mut dyn FnMut(u32, &kernel_core::jobs::JobName, &kernel_core::shell::ProgramRun),
+) {
+    use kernel_core::mlsched::{resident, MemoryMeter};
+    use kernel_core::taskfeat::{JobId, Outcome, UserId};
+
+    let meter = MemoryMeter {
+        total_pages: frames::total_count() as u64,
+        free_pages: frames::free_count() as u64,
+    };
+    if !meter.under_pressure() {
+        return;
+    }
+    let _ = resident::observe_memory(meter);
+    let were_enabled = crate::heap::irq_save();
+    // SAFETY: single-threaded, interrupts masked; the table is the console thread's own.
+    let gone = kernel_core::reclaim::resident::with(|r| unsafe {
+        (*addr_of_mut!(JOBS)).reclaim(r, meter, Slot::pages)
+    });
+    crate::heap::irq_restore(were_enabled);
+    let Some(Ok((_, gone))) = gone else {
+        return;
+    };
+    for job in gone {
+        resident::observe_outcome(JobId(2), UserId(0), Outcome::Evicted);
+        let mut run = job.slot.finish();
+        run.terminated = Some("reclaimed under memory pressure");
+        ended(job.id, &job.name, &run);
     }
 }
 

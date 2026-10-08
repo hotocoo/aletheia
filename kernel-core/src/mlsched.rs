@@ -198,6 +198,9 @@ pub struct RiskService<'a> {
     source: FeatureSource,
     stats: AdviceStats,
     started: bool,
+    /// The vector the last admission was advised on (ADR-238): what a reclaim round later asks
+    /// the eviction forest about, so a job is judged on what it was admitted with.
+    last: [i32; crate::mlrisk_contract::N_FEATURES],
 }
 
 impl<'a> RiskService<'a> {
@@ -212,6 +215,7 @@ impl<'a> RiskService<'a> {
                 source: FeatureSource::new(capacity),
                 stats: AdviceStats::default(),
                 started: false,
+                last: [0; crate::mlrisk_contract::N_FEATURES],
             },
             Err(e) => RiskService {
                 model: None,
@@ -219,6 +223,7 @@ impl<'a> RiskService<'a> {
                 source: FeatureSource::new(capacity),
                 stats: AdviceStats::default(),
                 started: false,
+                last: [0; crate::mlrisk_contract::N_FEATURES],
             },
         }
     }
@@ -232,6 +237,7 @@ impl<'a> RiskService<'a> {
             source: FeatureSource::new(capacity),
             stats: AdviceStats::default(),
             started: false,
+            last: [0; crate::mlrisk_contract::N_FEATURES],
         }
     }
 
@@ -253,6 +259,11 @@ impl<'a> RiskService<'a> {
 
     pub fn stats(&self) -> AdviceStats {
         self.stats
+    }
+
+    /// The feature vector the last admission was advised on.
+    pub fn last_features(&self) -> [i32; crate::mlrisk_contract::N_FEATURES] {
+        self.last
     }
 
     /// Read-only view of the live history the next advice will be derived from.
@@ -285,6 +296,7 @@ impl<'a> RiskService<'a> {
         task: &TaskSubmission,
     ) -> Option<Advice> {
         let x = self.source.observe_submit(now_secs, task);
+        self.last = x;
         self.note_consultation(now_secs);
 
         match self.model {
@@ -978,6 +990,11 @@ pub mod resident {
     /// Live counters. `None` only when no target ever installed an advisor.
     pub fn stats() -> Option<AdviceStats> {
         RESIDENT.lock().as_ref().map(|s| s.stats())
+    }
+
+    /// The vector the last admission was advised on (ADR-238); `None` with no advisor installed.
+    pub fn last_features() -> Option<[i32; crate::mlrisk_contract::N_FEATURES]> {
+        RESIDENT.lock().as_ref().map(|s| s.last_features())
     }
 
     /// Admit a task through the resident advisor. This is the kernel's admission path; there is no

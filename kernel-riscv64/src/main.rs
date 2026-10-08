@@ -569,6 +569,15 @@ pub extern "C" fn kmain() -> ! {
     // `mlstat` reports to a human at any later moment in the session.
     kprintln!("");
     kprintln!("--- resident risk advisor (the model the machine consults while it runs) ---");
+    // The running machine's reclaimer (ADR-238): the eviction forest the console's idle loop asks
+    // when the allocator reports pressure while background programs run.
+    if kernel_core::reclaim::resident::install(kernel_core::reclaim::BUNDLED_RECLAIM_MODEL) {
+        kprintln!("[reclaim] RESIDENT: eviction forest verified, consulted under live pressure");
+    } else {
+        kprintln!(
+            "[reclaim] RESIDENT: eviction forest refused, model-free order under live pressure"
+        );
+    }
     if kernel_core::mlsched::resident::install(
         kernel_core::mlrisk::BUNDLED_MODEL,
         kernel_core::mlsched::SUITE_MACHINE,

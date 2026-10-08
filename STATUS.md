@@ -1271,6 +1271,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — the running machine reclaims under pressure (ADR-238)
+
+- `reclaim::resident` installs the `memrisk` forest for the machine's uptime on all three CPUs;
+  `Jobs::reclaim` ranks running background programs (forest tier, footprint, age) and takes the
+  chosen ones out; each CPU's job tick asks after every slice (one comparison when not short).
+- Jobs keep the vector they were admitted with (`resident::last_features`); submissions state the
+  frames a placed program really holds. `mlstat` prints the reclaim ledger.
+- reclaim family 9 -> 11 on every CPU; kernel-core release suite 933 passed. Not proved: a live
+  machine driven into pressure by real programs (they cannot reach the watermark today).
+
 ### 2026-10-08 — System 1 native in the OS: audit and gap register (ADR-237)
 
 - Audit at `88661be`: in-kernel System 1 is three frozen integer forests (scheduler advice live,
