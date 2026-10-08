@@ -123,6 +123,11 @@ impl<D: BlockDevice> BlockDevice for BlockCache<D> {
         if buf.len() != BLOCK_SIZE {
             return Err(StorageError::BadBlockSize);
         }
+        // Before the lookup: a slot parked by a failed write carries an index no device has, and
+        // must never answer for it.
+        if idx >= self.dev.num_blocks() {
+            return Err(StorageError::OutOfRange);
+        }
         if let Some(slot) = self.slots.borrow_mut().iter_mut().find(|s| s.idx == idx) {
             slot.referenced = true;
             buf.copy_from_slice(&slot.data[..]);

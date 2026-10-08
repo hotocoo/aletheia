@@ -601,7 +601,7 @@ const WIND_DOWN_TURNS: u64 = 64;
 /// plain when there are not) and a FIN, pumped for a bounded number of turns. Without this the
 /// peer's handshake blocks until its own timeout - and a server that handshakes on its accept
 /// thread then answers nobody. Found live (ADR-155).
-fn wind_down<L: Ipv4Link>(
+fn wind_down<L: Ipv4Link + ?Sized>(
     link: &L,
     conn: &mut Connection,
     pump: &mut TlsPump,
@@ -674,7 +674,7 @@ fn wind_down<L: Ipv4Link>(
 // the workspace, the handshake (verifier, name, key, random), what to say, where to put the answer
 // and the clock - and folding any of them into another would hide who decides it.
 #[allow(clippy::too_many_arguments)]
-pub fn exchange<L: Ipv4Link, V: PeerVerifier>(
+pub fn exchange<L: Ipv4Link + ?Sized, V: PeerVerifier>(
     link: &L,
     conn: &mut Connection,
     plan: Plan,
@@ -706,7 +706,7 @@ pub fn exchange<L: Ipv4Link, V: PeerVerifier>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run<L: Ipv4Link, V: PeerVerifier>(
+fn run<L: Ipv4Link + ?Sized, V: PeerVerifier>(
     link: &L,
     conn: &mut Connection,
     plan: Plan,

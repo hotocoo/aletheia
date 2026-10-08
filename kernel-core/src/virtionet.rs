@@ -661,85 +661,119 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
     pub unsafe fn dhcp_discover(&self, xid: u32) -> Result<dhcp::Offer, NetError> {
         let mut disc = [0u8; dhcp::BOOTP_MIN_LEN];
         let question = dhcp::write_discover(&mut disc, self.mac, xid).ok_or(NetError::TooLong)?;
-        self.dhcp_round(xid, question, |reply| dhcp::parse_offer(reply, xid).ok())
+        let mut frame = [0u8; DHCP_FRAME];
+        let n = dhcp_frame(&mut frame, self.mac, xid, question).ok_or(NetError::TooLong)?;
+        self.dhcp_round(&frame[..n], &|reply| dhcp::parse_offer(reply, xid).ok())
     }
 
-    /// Take a lease (ADR-234): DISCOVER, then REQUEST the address offered from the server that
-    /// offered it, and configure this device from the ACK, which must grant that same address.
-    /// Nothing changes unless the whole exchange succeeds.
+    /// Take a lease (ADR-234) and configure this device from it; nothing changes unless the
+    /// whole exchange succeeds. See [`take_lease`].
     ///
     /// # Safety
     /// The device must be live.
     pub unsafe fn dhcp_lease(&self, xid: u32) -> Result<dhcp::Offer, NetError> {
-        let offer = self.dhcp_discover(xid)?;
-        let mut req = [0u8; dhcp::BOOTP_MIN_LEN];
-        let question =
-            dhcp::write_request(&mut req, self.mac, xid, &offer).ok_or(NetError::TooLong)?;
-        let ack = self.dhcp_round(xid, question, |reply| {
-            dhcp::parse_ack(reply, xid)
-                .ok()
-                .filter(|a| a.yiaddr == offer.yiaddr)
-        })?;
-        let old = self.addr.get();
-        self.addr.set(Addressing {
-            ip: ack.yiaddr,
-            gateway: ack.router.or(offer.router).unwrap_or(old.gateway),
-            mask: ack.subnet_mask.or(offer.subnet_mask).unwrap_or(old.mask),
-            dns: ack.dns.or(offer.dns),
-            lease_secs: ack.lease_secs,
-            leased: true,
-        });
+        let (ack, addr) = take_lease(self.mac, xid, self.addr.get(), |frame, accept| {
+            self.dhcp_round(frame, accept).ok()
+        })
+        .ok_or(NetError::Timeout)?;
+        self.addr.set(addr);
         Ok(ack)
     }
 
-    /// Broadcast one DHCP message and wait for the reply `accept` takes (bound to `xid` by it).
+    /// Broadcast one DHCP frame and wait for the reply `accept` takes.
     unsafe fn dhcp_round(
         &self,
-        xid: u32,
-        question: &[u8],
-        accept: impl Fn(&[u8]) -> Option<dhcp::Offer>,
+        frame: &[u8],
+        accept: &dyn Fn(&[u8]) -> Option<dhcp::Offer>,
     ) -> Result<dhcp::Offer, NetError> {
-        let mut frame =
-            [0u8; ETH_HDR_LEN + udpv4::IPV4_HDR_MIN + udpv4::UDP_HDR_LEN + dhcp::BOOTP_MIN_LEN];
-        frame[0..6].copy_from_slice(&BROADCAST); // the client has no peer MAC for a server yet
-        frame[6..12].copy_from_slice(&self.mac);
-        put_be16(&mut frame, 12, ETHERTYPE_IPV4);
-        let wrote = udpv4::build_datagram(
-            &mut frame[ETH_HDR_LEN..],
-            (xid >> 16) as u16,
-            [0, 0, 0, 0], // RFC 2131 4.1: a client with no lease speaks from 0.0.0.0
-            [255, 255, 255, 255], // limited broadcast: the question itself is addressless
-            dhcp::CLIENT_PORT,
-            dhcp::SERVER_PORT,
-            question,
-        )
-        .ok_or(NetError::TooLong)?;
-        let n = ETH_HDR_LEN + wrote.len();
-        self.send(&frame[..n])?;
-
-        self.recv_until(20_000_000, |f| {
-            if f.len() < ETH_HDR_LEN || be16(f, 12) != ETHERTYPE_IPV4 {
-                return None;
-            }
-            let ip = match udpv4::parse_ipv4(&f[ETH_HDR_LEN..]) {
-                Ok(ip) => ip,
-                Err(_) => return None,
-            };
-            if ip.protocol != udpv4::PROTOCOL_UDP {
-                return None;
-            }
-            let u = match udpv4::parse_udp(&ip) {
-                Ok(u) => u,
-                Err(_) => return None,
-            };
-            if u.dport != dhcp::CLIENT_PORT {
-                return None;
-            }
-            // A malformed offer is a DROPPED frame with a counted reason, not a kernel fault: the
-            // wire is untrusted, and one bad packet must not stop the machine from asking again.
-            accept(u.payload)
-        })
+        self.send(frame)?;
+        // A malformed reply is a DROPPED frame with a counted reason, not a kernel fault: the
+        // wire is untrusted, and one bad packet must not stop the machine from asking again.
+        self.recv_until(20_000_000, |f| dhcp_payload(f).and_then(accept))
     }
+}
+
+/// The largest DHCP frame this stack sends: Ethernet, IPv4 and UDP headers around a minimum-size
+/// BOOTP packet.
+pub(crate) const DHCP_FRAME: usize =
+    ETH_HDR_LEN + udpv4::IPV4_HDR_MIN + udpv4::UDP_HDR_LEN + dhcp::BOOTP_MIN_LEN;
+
+/// One DHCP question as a broadcast Ethernet frame from `0.0.0.0` (RFC 2131 section 4.1: a client
+/// with no lease has no address to speak from). Its length, or `None` when it does not fit.
+pub(crate) fn dhcp_frame(
+    frame: &mut [u8; DHCP_FRAME],
+    mac: [u8; 6],
+    xid: u32,
+    question: &[u8],
+) -> Option<usize> {
+    frame[0..6].copy_from_slice(&BROADCAST); // the client has no peer MAC for a server yet
+    frame[6..12].copy_from_slice(&mac);
+    put_be16(frame, 12, ETHERTYPE_IPV4);
+    let wrote = udpv4::build_datagram(
+        &mut frame[ETH_HDR_LEN..],
+        (xid >> 16) as u16,
+        [0, 0, 0, 0],
+        [255, 255, 255, 255], // limited broadcast: the question itself is addressless
+        dhcp::CLIENT_PORT,
+        dhcp::SERVER_PORT,
+        question,
+    )?;
+    Some(ETH_HDR_LEN + wrote.len())
+}
+
+/// The DHCP message a received frame carries for a client (UDP to port 68, both checksums
+/// verified), or `None`.
+pub(crate) fn dhcp_payload(f: &[u8]) -> Option<&[u8]> {
+    if f.len() < ETH_HDR_LEN || be16(f, 12) != ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = udpv4::parse_ipv4(&f[ETH_HDR_LEN..]).ok()?;
+    if ip.protocol != udpv4::PROTOCOL_UDP {
+        return None;
+    }
+    let u = udpv4::parse_udp(&ip).ok()?;
+    (u.dport == dhcp::CLIENT_PORT).then_some(u.payload)
+}
+
+/// Take a lease over any network device (ADR-234): DISCOVER, then REQUEST the address offered
+/// from the server that offered it, and accept only an ACK that grants that same address.
+/// `round(frame, accept)` broadcasts one frame and returns the first reply `accept` takes. Returns
+/// the ACK and the addressing it describes (what the lease leaves out is kept from `old`).
+pub(crate) fn take_lease(
+    mac: [u8; 6],
+    xid: u32,
+    old: Addressing,
+    mut round: impl FnMut(&[u8], &dyn Fn(&[u8]) -> Option<dhcp::Offer>) -> Option<dhcp::Offer>,
+) -> Option<(dhcp::Offer, Addressing)> {
+    let mut q = [0u8; dhcp::BOOTP_MIN_LEN];
+    let mut frame = [0u8; DHCP_FRAME];
+    let n = dhcp_frame(
+        &mut frame,
+        mac,
+        xid,
+        dhcp::write_discover(&mut q, mac, xid)?,
+    )?;
+    let offer = round(&frame[..n], &|r| dhcp::parse_offer(r, xid).ok())?;
+    let n = dhcp_frame(
+        &mut frame,
+        mac,
+        xid,
+        dhcp::write_request(&mut q, mac, xid, &offer)?,
+    )?;
+    let ack = round(&frame[..n], &|r| {
+        dhcp::parse_ack(r, xid)
+            .ok()
+            .filter(|a| a.yiaddr == offer.yiaddr)
+    })?;
+    let addr = Addressing {
+        ip: ack.yiaddr,
+        gateway: ack.router.or(offer.router).unwrap_or(old.gateway),
+        mask: ack.subnet_mask.or(offer.subnet_mask).unwrap_or(old.mask),
+        dns: ack.dns.or(offer.dns),
+        lease_secs: ack.lease_secs,
+        leased: true,
+    };
+    Some((ack, addr))
 }
 
 /// The network invariant suite (REQ-NET-001/002), reported through a caller-supplied logger like every
@@ -755,12 +789,13 @@ pub struct NetLink<'a, H: VirtioHal, T: Transport> {
 }
 
 impl<'a, H: VirtioHal, T: Transport> NetLink<'a, H, T> {
-    /// Resolve the peer's MAC and hand back a link to it.
+    /// Resolve the MAC of the peer's next hop (itself on this subnet, else the gateway; ADR-235) and
+    /// hand back a link to it.
     ///
     /// # Safety
     /// The device must be live: its queues are published and its buffers posted.
     pub unsafe fn resolve(dev: &'a VirtioNet<H, T>, peer: [u8; 4]) -> Result<Self, NetError> {
-        let peer_mac = dev.arp_resolve(peer)?;
+        let peer_mac = dev.arp_resolve(dev.addressing().hop(peer))?;
         Ok(NetLink { dev, peer_mac })
     }
 }

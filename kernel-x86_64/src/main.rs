@@ -1312,8 +1312,14 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         "--- e1000 selftests (real PCI Intel 8254x NIC: reset + rings + ARP over the wire) ---"
     );
     match pci::e1000_selftest() {
-        Ok(0) => {}
-        Ok(n) => {
+        Ok((0, _)) => {}
+        Ok((n, dev)) => {
+            // Kept for the console when there is no virtio-net (ADR-235).
+            if let Some(dev) = dev {
+                // SAFETY: boot path, single-threaded, before any other context can reach the
+                // static.
+                unsafe { crate::netstatic::keep_e1000(dev) };
+            }
             kprintln!("[e1000] ALL {} E1000 INVARIANTS HOLD", n);
             kprintln!(
                 "[boot] e1000 suite: {} ms",
@@ -2865,7 +2871,18 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
     {
         dma_grants.push(vtd::DeviceGrant::new(b, g.dma_grants()));
     }
-    match vtd::dmar_suite(&dma_grants, blk_scratch.as_mut(), blk_persist.as_mut()) {
+    // The e1000 the console keeps (ADR-235) keeps receiving: its rings and buffers are granted.
+    if let (Some(b), Some(g)) = (
+        unsafe { pci::find_e1000() },
+        crate::netstatic::e1000_grants(),
+    ) {
+        dma_grants.push(vtd::DeviceGrant::new(b, g));
+    }
+    // Quiet across the enable, like every device the suite meets; it listens again after.
+    crate::netstatic::e1000_receiving(false);
+    let dmar = vtd::dmar_suite(&dma_grants, blk_scratch.as_mut(), blk_persist.as_mut());
+    crate::netstatic::e1000_receiving(true);
+    match dmar {
         Ok(_) => kprintln!(
             "[boot] dmar suite: {} ms",
             kernel_core::boottime::lap::<ActiveHal>("dmar")

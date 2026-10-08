@@ -124,6 +124,16 @@ fn a_bad_buffer_or_a_missing_block_is_refused_and_nothing_is_kept() {
     );
     let mut buf = [0u8; BLOCK_SIZE];
     assert_eq!(cache.read_block(9, &mut buf), Err(StorageError::OutOfRange));
+    // A slot parked by a failed write (index usize::MAX) never answers a read of that index.
+    let mut dev = Probe::new(4);
+    dev.chaos = Some(Cell::new(1));
+    let mut parked = BlockCache::new(dev, 2);
+    parked.read_block(0, &mut buf).ok();
+    while parked.write_block(0, &[9u8; BLOCK_SIZE]).is_ok() {}
+    assert_eq!(
+        parked.read_block(usize::MAX, &mut buf),
+        Err(StorageError::OutOfRange)
+    );
     assert_eq!(cache.stats().hits + cache.stats().misses, 0);
     // Capacity 0 passes every read through.
     let none = BlockCache::new(Probe::new(4), 0);

@@ -351,7 +351,20 @@ pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
 pub type E1000 = kernel_core::e1000::E1000<crate::virtio::X86Virtio, kernel_core::e1000::MmioRegs>;
 
 /// Prove the shared e1000 driver against the first Intel 8254x on bus 0. `Ok(0)` = none attached.
-pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
+/// The e1000 function this boot drives, if any (ADR-235: the VT-d suite maps its grants).
+///
+/// # Safety
+/// Touches only PCI configuration ports.
+pub unsafe fn find_e1000() -> Option<Bdf> {
+    use kernel_core::e1000;
+    unsafe { virtiopci::enumerate_bus0(&Ports) }
+        .into_iter()
+        .find(|&(_, v, d)| v == e1000::VENDOR_INTEL && e1000::DEVICE_IDS.contains(&d))
+        .map(|(bdf, _, _)| bdf)
+}
+
+/// The device is handed back when its suite holds, so the console can keep it (ADR-235).
+pub fn e1000_selftest() -> Result<(u32, Option<E1000>), (u32, &'static str)> {
     use kernel_core::e1000;
     // SAFETY: touches only configuration ports.
     let found = unsafe { virtiopci::enumerate_bus0(&Ports) }
@@ -359,7 +372,7 @@ pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
         .find(|&(_, v, d)| v == e1000::VENDOR_INTEL && e1000::DEVICE_IDS.contains(&d));
     let Some((bdf, _, dev_id)) = found else {
         kprintln!("[e1000] no controller (skipped)");
-        return Ok(0);
+        return Ok((0, None));
     };
     let opened = (|| {
         // SAFETY: this boot owns the function; decoding + bus master on, BAR0 mapped as device memory.
@@ -389,7 +402,7 @@ pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
     }) {
-        Ok(n) => Ok(n as u32),
+        Ok(n) => Ok((n as u32, Some(dev))),
         Err((i, name)) => Err((i as u32, name)),
     }
 }

@@ -12,7 +12,7 @@ use core::ptr::{read_volatile, write_volatile};
 
 use crate::dma::DmaRegistry;
 use crate::virtioblk::VirtioHal;
-use crate::virtionet::{be16, put_be16, ETH_HDR_LEN, GATEWAY_IP, GUEST_IP};
+use crate::virtionet::{be16, dhcp_payload, put_be16, take_lease, Addressing, ETH_HDR_LEN};
 
 // Registers (SDM §13.4).
 pub const REG_CTRL: usize = 0x0000;
@@ -118,6 +118,8 @@ pub struct E1000<H: VirtioHal, R: Regs> {
     rx_next: Cell<usize>,
     tx_next: Cell<usize>,
     dma: DmaRegistry,
+    /// Where this NIC's machine lives (ADR-234): the defaults until a DHCP lease.
+    addr: Cell<Addressing>,
     _hal: PhantomData<H>,
 }
 
@@ -215,6 +217,7 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
             rx_next: Cell::new(0),
             tx_next: Cell::new(0),
             dma,
+            addr: Cell::new(Addressing::QEMU_USER),
             _hal: PhantomData,
         })
     }
@@ -246,6 +249,39 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
 
     pub fn mac(&self) -> [u8; 6] {
         self.mac
+    }
+
+    /// Where this machine lives on the NIC's network (ADR-234).
+    pub fn addressing(&self) -> Addressing {
+        self.addr.get()
+    }
+
+    pub fn ip(&self) -> [u8; 4] {
+        self.addr.get().ip
+    }
+
+    pub fn gateway(&self) -> [u8; 4] {
+        self.addr.get().gateway
+    }
+
+    /// Stop or restart reception (ADR-235). A NIC the console keeps would otherwise go on
+    /// writing received frames into memory while a later boot suite changes the machine under it;
+    /// the VT-d suite needs every device quiet across the moment translation turns on.
+    pub fn set_receiving(&self, on: bool) {
+        let en = if on { RCTL_EN } else { 0 };
+        self.regs.w32(REG_RCTL, en | RCTL_BAM | RCTL_SECRC);
+    }
+
+    /// Take a DHCP lease over this NIC and configure it from the ACK (ADR-234); `None`, with
+    /// nothing changed, when the network does not complete the exchange.
+    pub fn dhcp_lease(&self, xid: u32) -> Option<Addressing> {
+        let (_, addr) = take_lease(self.mac, xid, self.addr.get(), |frame, accept| {
+            self.send(frame).ok()?;
+            self.recv_until(20_000_000, |f| dhcp_payload(f).and_then(accept))
+                .ok()
+        })?;
+        self.addr.set(addr);
+        Some(addr)
     }
 
     pub fn link_up(&self) -> bool {
@@ -358,7 +394,7 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
         a[5] = 4;
         put_be16(a, 6, 1); // request
         a[8..14].copy_from_slice(&self.mac);
-        a[14..18].copy_from_slice(&GUEST_IP);
+        a[14..18].copy_from_slice(&self.ip());
         a[24..28].copy_from_slice(&target);
         self.send(&f)?;
         self.recv_until(u64::MAX, |r| {
@@ -421,7 +457,7 @@ impl<H: VirtioHal, R: Regs> crate::tcpnet::Ipv4Link for E1000Link<'_, H, R> {
             }
             let body = &f[ETH_HDR_LEN..];
             let ip = crate::udpv4::parse_ipv4(body).ok()?;
-            if ip.protocol != protocol || ip.dst != GUEST_IP {
+            if ip.protocol != protocol || ip.dst != self.dev.ip() {
                 return None;
             }
             // The datagram's declared length, not the frame's: Ethernet padding is not data.
@@ -445,7 +481,7 @@ impl<H: VirtioHal, R: Regs> crate::tcpnet::Ipv4Link for E1000Link<'_, H, R> {
     }
 
     fn local_ip(&self) -> [u8; 4] {
-        GUEST_IP
+        self.dev.ip()
     }
 }
 
@@ -486,8 +522,11 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     // Wire group: only where the user-mode network's gateway (10.0.2.2) answers - the QEMU and
     // VirtualBox gates. On any other network the local group above is the whole suite (ADR-228).
     // A link that is down (no cable, or a hypervisor's link-up delay) is an absent environment.
+    // The lease first (ADR-234): the gateway is whichever the network names; a network with no
+    // DHCP server keeps the defaults.
     let gw = if dev.link_up() {
-        dev.arp_resolve(GATEWAY_IP)
+        let _ = dev.dhcp_lease(0xE100_0000 ^ u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]));
+        dev.arp_resolve(dev.gateway())
     } else {
         Err(E1000Error::Timeout)
     };
@@ -500,7 +539,7 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     );
     let mut same = true;
     for _ in 0..3 * RING {
-        same &= dev.arp_resolve(GATEWAY_IP) == gw;
+        same &= dev.arp_resolve(dev.gateway()) == gw;
     }
     check!(
         "e1000: both rings wrap in step over three ring lengths of request and answer",
@@ -511,7 +550,7 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     if let Ok(peer_mac) = dev.arp_resolve(ECHO_PEER) {
         let link = E1000Link { dev, peer_mac };
         let mut conn =
-            crate::tcpconn::Connection::new(GUEST_IP, 49_700, ECHO_PEER, ECHO_PORT, 200_000_000);
+            crate::tcpconn::Connection::new(dev.ip(), 49_700, ECHO_PEER, ECHO_PORT, 200_000_000);
         let plan = crate::tcpnet::Plan {
             iss: H::now_ns() as u32,
             budget: 4_000,

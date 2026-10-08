@@ -2848,7 +2848,11 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
             let server = if server_text.is_empty() {
                 // The lease's name server (ADR-234), else QEMU's user-network one.
-                Some(host.net_facts().and_then(|f| f.dns).unwrap_or([10, 0, 2, 3]))
+                Some(
+                    host.net_facts()
+                        .and_then(|f| f.dns)
+                        .unwrap_or([10, 0, 2, 3]),
+                )
             } else {
                 parse_ipv4_address(server_text)
             };

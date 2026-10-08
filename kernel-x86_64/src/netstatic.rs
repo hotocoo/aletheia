@@ -7,19 +7,102 @@
 //! The concurrency posture is the console's: only the main thread touches this, and it does so
 //! between keystrokes. Nothing here runs in an interrupt handler.
 
+use kernel_core::e1000::E1000Link;
 use kernel_core::entropy;
 use kernel_core::tcpconn::Connection;
+use kernel_core::tcpnet::Ipv4Link;
 use kernel_core::tcpnet::{self, LinkError, Plan};
 use kernel_core::tlsclient::{self, TlsPump, TlsReport};
 use kernel_core::tlshandshake::Handshake;
 use kernel_core::trust::PinnedRoot;
-use kernel_core::virtionet::NetLink;
+use kernel_core::virtionet::{Addressing, NetLink};
 use kernel_core::Hal;
 
 use crate::hal::ActiveHal;
 use crate::virtio::{Net, Rng};
 
 static mut NET: Option<Net> = None;
+
+/// The e1000 the boot suite proved, kept for the console when there is no virtio-net (ADR-235):
+/// the NIC a VMware or a real machine has.
+static mut E1000: Option<crate::pci::E1000> = None;
+
+/// Whichever NIC the boot kept (ADR-235): virtio-net when there is one, else the e1000.
+enum Nic {
+    Virtio(&'static Net),
+    E1000(&'static crate::pci::E1000),
+}
+
+impl Nic {
+    fn kept() -> Result<Nic, &'static str> {
+        // SAFETY: main thread only (the console's own thread), and the devices outlive the machine.
+        unsafe {
+            if let Some(d) = (*core::ptr::addr_of!(NET)).as_ref() {
+                return Ok(Nic::Virtio(d));
+            }
+            if let Some(d) = (*core::ptr::addr_of!(E1000)).as_ref() {
+                return Ok(Nic::E1000(d));
+            }
+        }
+        Err("this machine has no network device")
+    }
+
+    fn addressing(&self) -> Addressing {
+        match self {
+            Nic::Virtio(d) => d.addressing(),
+            Nic::E1000(d) => d.addressing(),
+        }
+    }
+
+    fn ip(&self) -> [u8; 4] {
+        self.addressing().ip
+    }
+
+    /// The link to `peer`, its MAC resolved for the next hop (itself on the leased subnet, else
+    /// the gateway).
+    fn link(&self, peer: [u8; 4]) -> Result<NicLink, &'static str> {
+        let why = "no answer to the address resolution for that peer";
+        match *self {
+            // SAFETY: the device was brought up by the boot and its queues are live.
+            Nic::Virtio(d) => unsafe { NetLink::resolve(d, peer) }
+                .map(NicLink::Virtio)
+                .map_err(|_| why),
+            Nic::E1000(d) => d
+                .arp_resolve(d.addressing().hop(peer))
+                .map(|peer_mac| NicLink::E1000(E1000Link { dev: d, peer_mac }))
+                .map_err(|_| why),
+        }
+    }
+}
+
+/// A link over either NIC; the TCP, TLS and DNS clients see one `Ipv4Link`.
+enum NicLink {
+    Virtio(NetLink<'static, crate::virtio::X86Virtio, crate::pci::PciTransport>),
+    E1000(E1000Link<'static, crate::virtio::X86Virtio, kernel_core::e1000::MmioRegs>),
+}
+
+impl Ipv4Link for NicLink {
+    fn send_ipv4(&self, datagram: &[u8]) -> Result<(), LinkError> {
+        match self {
+            NicLink::Virtio(l) => l.send_ipv4(datagram),
+            NicLink::E1000(l) => l.send_ipv4(datagram),
+        }
+    }
+
+    fn recv_ipv4(&self, spins: u64, protocol: u8, out: &mut [u8]) -> Result<usize, LinkError> {
+        match self {
+            NicLink::Virtio(l) => l.recv_ipv4(spins, protocol, out),
+            NicLink::E1000(l) => l.recv_ipv4(spins, protocol, out),
+        }
+    }
+
+    fn local_ip(&self) -> [u8; 4] {
+        match self {
+            NicLink::Virtio(l) => l.local_ip(),
+            NicLink::E1000(l) => l.local_ip(),
+        }
+    }
+}
 
 /// The entropy device the boot suite proved, kept for the console's keys (ADR-153).
 static mut RNG: Option<Rng> = None;
@@ -41,6 +124,29 @@ pub unsafe fn keep(dev: Net) {
     (*core::ptr::addr_of_mut!(NET)) = Some(dev);
 }
 
+/// Pause or resume the kept e1000's receiver (ADR-235), around the VT-d enable.
+pub fn e1000_receiving(on: bool) {
+    // SAFETY: boot path, single-threaded; read of a static written once before.
+    if let Some(d) = unsafe { (*core::ptr::addr_of!(E1000)).as_ref() } {
+        d.set_receiving(on);
+    }
+}
+
+/// The DMA the kept e1000 may do, for the VT-d suite to map (ADR-235): a NIC that is kept keeps
+/// receiving, so its rings and buffers must stay reachable once translation is on.
+pub fn e1000_grants() -> Option<alloc::vec::Vec<kernel_core::dma::Grant>> {
+    // SAFETY: boot path, single-threaded; read of a static written once before.
+    unsafe { (*core::ptr::addr_of!(E1000)).as_ref() }.map(|d| d.dma_grants())
+}
+
+/// Keep the entropy device the boot suite proved.
+///
+/// # Safety
+/// Called once, from the boot path, before any other context can reach the static.
+pub unsafe fn keep_e1000(dev: crate::pci::E1000) {
+    (*core::ptr::addr_of_mut!(E1000)) = Some(dev);
+}
+
 /// Keep the entropy device the boot suite proved.
 ///
 /// # Safety
@@ -53,20 +159,21 @@ pub unsafe fn keep_entropy(dev: Rng) {
 pub fn facts() -> Option<kernel_core::shell::NetFacts> {
     // SAFETY: the console's main thread is the only context that touches `NET`/`NEXT_PORT`
     // after boot (module header); this is a read between keystrokes.
-    let (dev, next_port) = unsafe {
-        (
-            (*core::ptr::addr_of!(NET)).as_ref()?,
-            *core::ptr::addr_of!(NEXT_PORT),
-        )
+    let nic = Nic::kept().ok()?;
+    let next_port = unsafe { *core::ptr::addr_of!(NEXT_PORT) };
+    let a = nic.addressing();
+    let (mac, dropped, arp_requests, dma_regions) = match nic {
+        Nic::Virtio(d) => (d.mac(), d.dropped(), d.arp_wire_requests(), d.dma_regions()),
+        Nic::E1000(d) => (d.mac(), 0, 0, d.dma_grants().len()),
     };
     Some(kernel_core::shell::NetFacts {
-        mac: dev.mac(),
-        ip: dev.ip(),
-        gateway: dev.gateway(),
-        dns: dev.addressing().dns,
-        dropped: dev.dropped(),
-        arp_requests: dev.arp_wire_requests(),
-        dma_regions: dev.dma_regions(),
+        mac,
+        ip: a.ip,
+        gateway: a.gateway,
+        dns: a.dns,
+        dropped,
+        arp_requests,
+        dma_regions,
         next_port,
     })
 }
@@ -82,13 +189,8 @@ pub fn fetch(
     request: &[u8],
     reply: &mut [u8],
 ) -> Result<usize, &'static str> {
-    // SAFETY: main thread only (the console's own thread), and the device outlives the machine.
-    let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
-        return Err("this machine has no network device");
-    };
-    // SAFETY: the device was brought up by the boot and its queues are live.
-    let link = unsafe { NetLink::resolve(dev, ip) }
-        .map_err(|_| "no answer to the address resolution for that peer")?;
+    let nic = Nic::kept()?;
+    let link = nic.link(ip)?;
 
     // SAFETY: as above; this is the sole writer of the port counter.
     let lport = unsafe {
@@ -101,7 +203,7 @@ pub fn fetch(
     // A fifth of a second between retransmissions: long enough that a local answer arrives first,
     // short enough that a lost segment does not read as a hung console.
     let rto = (hz / 5).max(1);
-    let mut conn = Connection::new(dev.ip(), lport, ip, port, rto);
+    let mut conn = Connection::new(nic.ip(), lport, ip, port, rto);
     // The initial sequence number must be unpredictable on a real network, so it comes from the
     // machine's clock rather than from a constant this kernel ships.
     let iss = (ActiveHal::timer_ticks() as u32) ^ ((lport as u32) << 16);
@@ -128,10 +230,7 @@ pub fn resolve(
     port: u16,
     name: &[u8],
 ) -> Result<kernel_core::dns::Resolved, &'static str> {
-    // SAFETY: main thread only (the console's own thread), and the device outlives the machine.
-    let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
-        return Err("this machine has no network device");
-    };
+    let nic = Nic::kept()?;
     let t = ActiveHal::timer_ticks();
     // SAFETY: as above; this is the sole writer of the port counter.
     let sport = unsafe {
@@ -139,10 +238,8 @@ pub fn resolve(
         NEXT_PORT = if p == u16::MAX { FIRST_PORT } else { p + 1 };
         p
     };
-    // SAFETY: the device was brought up by the boot and its queues are live.
-    unsafe {
-        kernel_core::virtionet::resolve_name(dev, server, port, sport, (t ^ (t >> 17)) as u16, name)
-    }
+    let link = nic.link(server)?;
+    kernel_core::dns::resolve_over(&link, server, port, sport, (t ^ (t >> 17)) as u16, name)
 }
 
 /// Open a TLS 1.3 conversation with `ip:port` as `server_name`, trusting exactly the Ed25519 root
@@ -160,13 +257,8 @@ pub fn fetch_tls(
     request: &[u8],
     reply: &mut [u8],
 ) -> Result<TlsReport, &'static str> {
-    // SAFETY: main thread only (the console's own thread), and the device outlives the machine.
-    let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
-        return Err("this machine has no network device");
-    };
-    // SAFETY: the device was brought up by the boot and its queues are live.
-    let link = unsafe { NetLink::resolve(dev, ip) }
-        .map_err(|_| "no answer to the address resolution for that peer")?;
+    let nic = Nic::kept()?;
+    let link = nic.link(ip)?;
     // SAFETY: as above; this is the sole writer of the port counter.
     let lport = unsafe {
         let p = NEXT_PORT;
@@ -180,7 +272,7 @@ pub fn fetch_tls(
 
     let hz = ActiveHal::timer_freq_hz().max(1);
     let rto = (hz / 5).max(1);
-    let mut conn = Connection::new(dev.ip(), lport, ip, port, rto);
+    let mut conn = Connection::new(nic.ip(), lport, ip, port, rto);
     let ticks = ActiveHal::timer_ticks();
     let iss = (ticks as u32) ^ ((lport as u32) << 16);
     // The key's material comes from the entropy device the boot suite proved, checked draw by

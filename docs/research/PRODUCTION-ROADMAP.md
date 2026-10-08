@@ -82,4 +82,7 @@ e1000 and AHCI also run against VirtualBox's own controllers. ADR-228 makes all 
 machine that is not a gate: storage is written only when its serial is `ALETHEIA-SCRATCH`, and a
 missing network or scratch disk shortens a suite instead of failing the boot. None of it has run
 on silicon. Queue, not claims: xHCI (USB), e1000e/igc, HD Audio, MSI-X interrupts for these
-drivers, and a DHCP lease so the e1000 can join a real LAN.
+drivers. Done since: virtio-net and the e1000 take a DHCP lease (ADR-234, ADR-235), and the
+console uses the e1000 when the machine has no virtio-net (ADR-235). Also landed 2026-10-08: a
+write-through block cache under the namespace (ADR-232) and an RFC 6298 retransmission timeout
+(ADR-233).

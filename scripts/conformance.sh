@@ -194,7 +194,7 @@ CONTRACT=(
   "net: a second echo is matched on its own sequence (replies are read, not assumed)"
   "net: a repeated ARP resolve is answered from the cache and puts no second request on the wire"
   "net: a DHCP DISCOVER is answered by an OFFER bound to its transaction id (UDP round trip)"
-  "net: the address the network offers IS the address the driver claims"
+  "net: the network's lease is requested and acknowledged, and the driver speaks from the leased address"
   "net: a second DISCOVER under a new transaction id draws its own fresh answer"
   # The task supervisor's POLICY (REQ-REL-002, ADR-042) — every target compiles it in and routes its
   # unexpected-user-fault path through it. All three targets now take an undeclared fault, reclaim its

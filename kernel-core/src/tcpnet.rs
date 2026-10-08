@@ -86,7 +86,7 @@ pub struct Plan {
 ///
 /// Returns what the exchange achieved, or the named reason it stopped. A short reply is not an
 /// error: a peer is allowed to say less than the buffer holds.
-pub fn exchange<L: Ipv4Link>(
+pub fn exchange<L: Ipv4Link + ?Sized>(
     link: &L,
     conn: &mut Connection,
     plan: Plan,
@@ -395,6 +395,56 @@ pub fn tcpnet_suite(
     Ok(n)
 }
 
+/// One UDP question and its answer over any link (ADR-235): the question goes from this machine's
+/// address, and the answer must come from `server:dport` to `sport`, both checksums verified.
+/// Returns the answer's length in `reply` (truncated at its size), or [`LinkError::BudgetSpent`]
+/// when `turns` waits pass with no such answer. Datagrams that are not the answer are skipped.
+#[allow(clippy::too_many_arguments)]
+pub fn udp_query<L: Ipv4Link + ?Sized>(
+    link: &L,
+    server: [u8; 4],
+    sport: u16,
+    dport: u16,
+    ident: u16,
+    question: &[u8],
+    reply: &mut [u8],
+    turns: u32,
+) -> Result<usize, LinkError> {
+    let mut buf = [0u8; 1500];
+    let datagram = crate::udpv4::build_datagram(
+        &mut buf,
+        ident,
+        link.local_ip(),
+        server,
+        sport,
+        dport,
+        question,
+    )
+    .ok_or(LinkError::TooLong)?;
+    link.send_ipv4(datagram)?;
+    for _ in 0..turns {
+        // 400 000 polls a turn: over the 50 turns a name query takes, the same 20 000 000-poll wait
+        // the virtio-only resolver had, which a cold first question (ARP, then the server) needs.
+        let n = link.recv_ipv4(400_000, crate::udpv4::PROTOCOL_UDP, &mut buf)?;
+        let Ok(ip) = parse_ipv4(&buf[..n]) else {
+            continue;
+        };
+        if ip.src != server {
+            continue;
+        }
+        let Ok(u) = crate::udpv4::parse_udp(&ip) else {
+            continue;
+        };
+        if u.sport != dport || u.dport != sport {
+            continue;
+        }
+        let take = u.payload.len().min(reply.len());
+        reply[..take].copy_from_slice(&u.payload[..take]);
+        return Ok(take);
+    }
+    Err(LinkError::BudgetSpent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,5 +459,67 @@ mod tests {
         .expect("the tcp pump suite should hold");
         assert_eq!(n, 3);
         assert_eq!(seen, 3);
+    }
+
+    /// A link that records what was sent and plays back a fixed list of arrivals.
+    struct Scripted {
+        sent: core::cell::RefCell<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+        arrivals: core::cell::RefCell<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+    }
+
+    impl Ipv4Link for Scripted {
+        fn send_ipv4(&self, d: &[u8]) -> Result<(), LinkError> {
+            self.sent.borrow_mut().push(d.to_vec());
+            Ok(())
+        }
+        fn recv_ipv4(&self, _: u64, _: u8, out: &mut [u8]) -> Result<usize, LinkError> {
+            let mut a = self.arrivals.borrow_mut();
+            if a.is_empty() {
+                return Ok(0);
+            }
+            let d = a.remove(0);
+            out[..d.len()].copy_from_slice(&d);
+            Ok(d.len())
+        }
+        fn local_ip(&self) -> [u8; 4] {
+            [192, 168, 76, 15]
+        }
+    }
+
+    #[test]
+    fn a_udp_query_takes_only_the_answer_from_its_server_and_port() {
+        use crate::udpv4::{build_datagram, parse_ipv4, parse_udp};
+        let me = [192, 168, 76, 15];
+        let server = [192, 168, 76, 3];
+        let dgram = |src: [u8; 4], sport: u16, dport: u16, body: &[u8]| {
+            let mut b = [0u8; 256];
+            build_datagram(&mut b, 1, src, me, sport, dport, body)
+                .unwrap()
+                .to_vec()
+        };
+        let link = Scripted {
+            sent: Default::default(),
+            arrivals: core::cell::RefCell::new(alloc::vec![
+                dgram([192, 168, 76, 9], 53, 40_000, b"impostor"),
+                dgram(server, 54, 40_000, b"wrong port"),
+                dgram(server, 53, 40_001, b"other query"),
+                dgram(server, 53, 40_000, b"the answer"),
+            ]),
+        };
+        let mut reply = [0u8; 64];
+        let n = udp_query(&link, server, 40_000, 53, 7, b"q?", &mut reply, 10).unwrap();
+        assert_eq!(&reply[..n], b"the answer");
+        let sent = link.sent.borrow()[0].clone();
+        let ip = parse_ipv4(&sent).unwrap();
+        let u = parse_udp(&ip).unwrap();
+        assert_eq!(
+            (ip.src, ip.dst, u.sport, u.dport, u.payload),
+            (me, server, 40_000, 53, &b"q?"[..])
+        );
+        // Nothing more arrives: the budget ends the wait by name.
+        assert_eq!(
+            udp_query(&link, server, 40_000, 53, 8, b"q?", &mut reply, 3),
+            Err(LinkError::BudgetSpent)
+        );
     }
 }

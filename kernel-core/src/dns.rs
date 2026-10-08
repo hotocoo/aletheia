@@ -489,6 +489,36 @@ pub fn dns_suite(
     Ok(n)
 }
 
+/// Ask `server:port` for `name` over any link (ADR-235): one query from source port `sport`
+/// with id `id`, one verified answer read by [`parse_answer`].
+pub fn resolve_over<L: crate::tcpnet::Ipv4Link + ?Sized>(
+    link: &L,
+    server: [u8; 4],
+    port: u16,
+    sport: u16,
+    id: u16,
+    name: &[u8],
+) -> Result<Resolved, &'static str> {
+    let mut query = [0u8; MAX_NAME + 20];
+    let qlen = write_query(&mut query, id, name).map_err(DnsError::describe)?;
+    let mut reply = [0u8; 512];
+    let len = crate::tcpnet::udp_query(
+        link,
+        server,
+        sport,
+        port,
+        id,
+        &query[..qlen],
+        &mut reply,
+        50,
+    )
+    .map_err(|e| match e {
+        crate::tcpnet::LinkError::BudgetSpent => "the name server did not answer",
+        _ => "the network device refused the query",
+    })?;
+    parse_answer(&reply[..len], id, name).map_err(DnsError::describe)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

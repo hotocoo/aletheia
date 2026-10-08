@@ -248,11 +248,16 @@ fn suite_log(n: usize, passed: bool, name: &str) {
     }
 }
 
-/// The shared e1000 driver on aarch64 (ADR-224, ADR-226). `Ok(0)` = no controller.
-pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
+/// The e1000 as this target holds it.
+pub type E1000 =
+    kernel_core::e1000::E1000<crate::virtio::Aarch64Virtio, kernel_core::e1000::MmioRegs>;
+
+/// The shared e1000 driver on aarch64 (ADR-224, ADR-226). `Ok((0, None))` = no controller.
+/// The device is handed back when its suite holds, so the console can keep it (ADR-235).
+pub fn e1000_selftest() -> Result<(u32, Option<E1000>), (u32, &'static str)> {
     use kernel_core::e1000;
     let Some(disc) = crate::smmu::discovery() else {
-        return Ok(0);
+        return Ok((0, None));
     };
     let env = Ecam::new(disc.pcie.ecam_base);
     // SAFETY: walks ECAM only.
@@ -261,13 +266,12 @@ pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
         .find(|&(_, v, d)| v == e1000::VENDOR_INTEL && e1000::DEVICE_IDS.contains(&d));
     let Some((bdf, _, id)) = found else {
         kprintln!("[e1000] no controller (skipped)");
-        return Ok(0);
+        return Ok((0, None));
     };
     // SAFETY: this boot owns the function; BAR0 is mapped device memory in the identity window.
     let opened = unsafe {
-        open_bar(&env, bdf, E1000_BAR_BASE, 0, 0x6000).and_then(|b| {
-            e1000::E1000::<crate::virtio::Aarch64Virtio, _>::init(e1000::MmioRegs::new(b))
-        })
+        open_bar(&env, bdf, E1000_BAR_BASE, 0, 0x6000)
+            .and_then(|b| E1000::init(e1000::MmioRegs::new(b)))
     };
     let dev = match opened {
         Ok(d) => d,
@@ -281,9 +285,10 @@ pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
         "[e1000] controller @ PCI {:02x}:{:02x}.{} id {:#06x} mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         bdf.bus, bdf.device, bdf.function, id, m[0], m[1], m[2], m[3], m[4], m[5]
     );
-    e1000::device_suite(&dev, &mut suite_log)
-        .map(|n| n as u32)
-        .map_err(|(i, name)| (i as u32, name))
+    match e1000::device_suite(&dev, &mut suite_log) {
+        Ok(n) => Ok((n as u32, Some(dev))),
+        Err((i, name)) => Err((i as u32, name)),
+    }
 }
 
 /// The shared AHCI driver on aarch64 (ADR-225, ADR-226). `Ok(0)` = no controller.

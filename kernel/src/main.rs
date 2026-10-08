@@ -886,8 +886,14 @@ pub extern "C" fn kmain() -> ! {
         "--- e1000 selftests (real PCI Intel 8254x NIC: reset + rings + ARP over the wire) ---"
     );
     match pci::e1000_selftest() {
-        Ok(0) => {}
-        Ok(n) => {
+        Ok((0, _)) => {}
+        Ok((n, dev)) => {
+            // Kept for the console when there is no virtio-net (ADR-235).
+            if let Some(dev) = dev {
+                // SAFETY: boot path, single-threaded, before any other context can reach the
+                // static.
+                unsafe { crate::netstatic::keep_e1000(dev) };
+            }
             kprintln!("[e1000] ALL {} E1000 INVARIANTS HOLD", n);
             kprintln!(
                 "[boot] e1000 suite: {} ms",
