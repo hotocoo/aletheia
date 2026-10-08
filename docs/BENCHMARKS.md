@@ -16,6 +16,29 @@ WITH_REDOX=1 WITH_FREEBSD=1 BOOT_SAMPLES=5 WORKLOAD_OPS=50 BOOT_TIMEOUT=400 ./sc
 ALETHEIA_PROPERTY_SEED=<hex> ALETHEIA_PROPERTY_CASES=1024 cargo test --release --test property_campaign   # in kernel-core
 ```
 
+## 00. Re-measured 2026-10-08 (v0.6.0, ADR-229..235)
+
+`BOOT_SAMPLES=3 WORKLOAD_OPS=25 ./scripts/comparative-bench.sh` on the same Apple Silicon host,
+`qemu-system-x86_64` TCG, no NIC on either leg (Redox and FreeBSD not re-run). The host was also
+running another session's model fine-tune during this run, so absolute times carry that load.
+
+| | Aletheia (x86-64) | Linux 6.12-lts |
+|---|---|---|
+| boot to prompt, no NIC (median of 3) | 2427 ms (2811/2427/2355) | 1924 ms (1997/1863/1924) |
+| idle host CPU at the prompt (median of 6, three guests) | 0.0 % (all samples) | 0.4-1.0 % |
+| 25 typed `echo` round-trips (three runs) | 80-102 ms (3-4 ms/op) | 650-779 ms (26-31 ms/op) |
+| bootable payload | 3,383,296 B | 14,016,362 B |
+| privileged source lines | 81,479 | ~40 million (not counted here) |
+
+Against section 0 (2026-09-27): Aletheia's boot median is 217 ms later (2210 to 2427 ms) and its
+payload 318 KB larger. The waves since then that touch a NIC-less boot add one user-mode check
+(ADR-230) and nothing on the boot path otherwise (the block cache, the RTO estimate and the DHCP
+lease run only with a console or a NIC), so the boot difference is not attributed to them: the
+first sample (2811 ms) is the host-load outlier, and the payload growth is the features landed
+since 09-27 (ADR-209 onward). A `boot-profile.sh` run on a quiet host is the way to attribute it. Idle CPU and the
+typed path are unchanged: Aletheia still waits at 0.0 % and answers in 3-4 ms/op against Linux's
+26-31 ms/op on this emulator (the asymmetries are the ones section 0 states).
+
 ## 0. Re-measured 2026-09-27 (ADR-208)
 
 ADR-200 found that x86-64's clock was the TSC, calibrated against two PIT ticks (903, 1167 and

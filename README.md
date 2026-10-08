@@ -429,10 +429,10 @@ embedding server or vector database is required** for normal OS operation.
 
 Every stable version is a tag `vX.Y.Z`, and every tag publishes a ready-to-boot x86-64 package on
 the [releases page](https://github.com/hotocoo/aletheia/releases/latest), built and **booted from
-its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.2.0**.
+its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.6.0**.
 
-1. Download `aletheia-v0.2.0-x86_64-vmware.zip` and its `.sha256`, then check the digest:
-   `shasum -a 256 -c aletheia-v0.2.0-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
+1. Download `aletheia-v0.6.0-x86_64-vmware.zip` and its `.sha256`, then check the digest:
+   `shasum -a 256 -c aletheia-v0.6.0-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
 2. Unzip. It holds two UEFI disks, each with its `.vmx`:
    - `aletheia-x86_64.vmx`: the OS you sit in front of. It boots, proves its invariants, then
      opens the console (type `help`).
@@ -454,6 +454,21 @@ its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.2.0**.
    `edk2-i386-vars.fd` beside it; Debian/Ubuntu as `/usr/share/OVMF/OVMF_CODE_4M.fd` and
    `OVMF_VARS_4M.fd` (package `ovmf`).
 
+**New in v0.6.0** (since v0.5.0):
+
+- **The network on the shipped VM:** the package's VMs now carry an Intel e1000 on VMware NAT. The
+  machine takes a DHCP lease on any subnet (ADR-234) and the console uses the e1000 when there is
+  no virtio-net (ADR-235): `net`, `resolve` and `fetch` work in VMware. `tls` still refuses there:
+  it takes its keys only from an entropy device, and VMware offers no virtio-rng.
+- **TCP that learns the path:** the retransmission timeout follows measured round trips (RFC 6298,
+  ADR-233), so a slow link no longer costs a resend of every segment.
+- **Programs grow their memory:** `SYS_BRK` gives a running program up to 256 KiB of writable
+  memory (ADR-230).
+- **Faster namespace:** a write-through block cache removes most repeated device reads without
+  changing what reaches the disk (ADR-232).
+- **System 1 for the scheduler:** a self-checking dispatch corpus, labelled by the scheduler
+  itself, for training and evaluating a System-1 model on scheduling (ADR-229).
+
 **New in v0.2.0** (since v0.1.0):
 
 - **Networking:** a TCP stack over virtio-net, proved live against a real server (ADR-138..140).
@@ -466,8 +481,8 @@ its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.2.0**.
 - **Faster interactive boot:** every suite is timed, and interactive images skip the load tests
   that the gate image proves on every push (ADR-162, ADR-163).
 
-The packaged VMs carry no network device, so the network, TLS and browser run under QEMU with
-virtio-net (the build-from-source path below). x86-64 only: VMware Fusion on Apple Silicon runs arm64 guests and cannot boot these disks; use
+Since v0.6.0 the packaged VMs carry an e1000 on NAT (ADR-235); the desktop's browser window and
+the live input devices still run under QEMU with virtio (the build-from-source path below). x86-64 only: VMware Fusion on Apple Silicon runs arm64 guests and cannot boot these disks; use
 QEMU there. The package is a research OS, not production software (`docs/MATURITY.md`). To build
 from source, or to run the aarch64 / RISC-V kernels and the live desktop, read on.
 

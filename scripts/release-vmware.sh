@@ -126,7 +126,8 @@ arm64 guests and cannot boot these disks; Aletheia's aarch64 kernel targets QEMU
       \`[e2e] PASS\`, halts. Open it once to see the artifact prove itself on YOUR machine.
 
 Open the .vmx in VMware (File > Open). Both VMs are configured with 256 MiB, 1 vCPU, UEFI
-firmware, a SATA disk and a serial port to a file; no network. To capture more, add devices
+firmware, a SATA disk, a serial port to a file, and an Intel e1000 on VMware NAT: the boot takes a
+DHCP lease and the console uses it (net, resolve, fetch; ADR-235; tls needs a virtio-rng). To capture more, add devices
 in VMware — a virtio input keyboard/tablet is what the live desktop rung (ADR-080) drives
 under QEMU; VMware exposes PS/2, which reaches the console.
 
@@ -165,6 +166,8 @@ else
   # run once satisfied the prompt poll below before the fresh boot had written a byte, and the
   # poll then killed a machine that was three seconds from its prompt. QPID is the QEMU pid — the
   # only thing ever killed, by pid, never by pattern.
+  # The NIC mirrors the .vmx: an Intel e1000 on a NAT with DHCP (ADR-235). Without `-nic`, q35
+  # would add an e1000e, which no Aletheia driver claims.
   launch_vmdk() { # $1 = vmdk, $2 = serial log
     cp "$OVMF_VARS_PATH" "$VARS"
     rm -f "$2"
@@ -172,6 +175,7 @@ else
       -drive if=pflash,format=raw,unit=0,file="$OVMF_CODE_PATH",readonly=on \
       -drive if=pflash,format=raw,unit=1,file="$VARS" \
       -drive format=vmdk,file="$1" \
+      -nic user,model=e1000 \
       -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
       -serial file:"$2" -display none -no-reboot &
     QPID=$!

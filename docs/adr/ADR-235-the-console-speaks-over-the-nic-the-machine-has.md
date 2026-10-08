@@ -53,8 +53,21 @@ constant address, and the DNS client existed only as a virtio-net method.
   wait now matches.
 * Boot gates on all three CPUs and the conformance gate pass with the e1000 leasing on QEMU.
 
+## The package (release preparation, same day)
+
+* The shipped `.vmx` template now enables an Intel e1000 on VMware NAT (it carried no NIC), and
+  `scripts/release-vmware.sh` boots the packaged disks with `-nic user,model=e1000` to match, so
+  the package proves the e1000 path before upload: the selftest disk's e1000 suite holds (5
+  invariants, the lease taken before the gateway ARP) and the interactive disk reaches its prompt.
+* That boot found a regression the other gates could not: with only an e1000 kept, the console's
+  `net` called `dma_grants()`, which builds a list, and the console-storm suite (reporting
+  commands allocate nothing) failed. `E1000::dma_regions` counts without allocating.
+
 ## Not done
 
-* The VMware package itself was not booted with this change in this wave; `release.yml`
-  boot-verifies it on the next tag.
+* Not booted in VMware itself here (no VMware on the build host); the package is boot-verified
+  under QEMU with the same NIC model. VirtualBox's e1000 gate (`vm-e2e-vbox.sh`) is the other
+  hypervisor evidence.
+* `tls` still refuses on VMware: it takes key material only from an entropy device, and VMware
+  offers no virtio-rng. RDRAND (x86-64) as a second entropy source is the next step.
 * No interrupt-driven receive and no DHCP renewal on either NIC.

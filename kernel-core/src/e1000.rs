@@ -292,6 +292,12 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
         self.dma.grants()
     }
 
+    /// DMA regions registered, counted without building a list: the console's `net` reports it,
+    /// and a reporting command allocates nothing (ADR-235).
+    pub fn dma_regions(&self) -> usize {
+        self.dma.live_regions()
+    }
+
     /// Does the DMA gate refuse an address never registered, with all seven frames live?
     pub fn dma_gate_refuses_unregistered(&self) -> bool {
         !self.dma.visible(0x7fff_0000_0000, 64)

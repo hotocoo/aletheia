@@ -164,7 +164,7 @@ pub fn facts() -> Option<kernel_core::shell::NetFacts> {
     let a = nic.addressing();
     let (mac, dropped, arp_requests, dma_regions) = match nic {
         Nic::Virtio(d) => (d.mac(), d.dropped(), d.arp_wire_requests(), d.dma_regions()),
-        Nic::E1000(d) => (d.mac(), 0, 0, d.dma_grants().len()),
+        Nic::E1000(d) => (d.mac(), 0, 0, d.dma_regions()),
     };
     Some(kernel_core::shell::NetFacts {
         mac,

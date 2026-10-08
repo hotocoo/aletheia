@@ -26,6 +26,11 @@ serial0.fileType = "file"
 serial0.fileName = "aletheia-serial.log"
 serial0.tryNoRxLoss = "FALSE"
 
-# no network / sound needed for the bring-up milestone
-ethernet0.present = "FALSE"
+# --- network: an Intel e1000 on VMware NAT (ADR-235). The boot proves the NIC, takes a DHCP lease
+# from VMware's NAT, and the console keeps it for `net`, `resolve` and `fetch` (`tls` needs a virtio-rng). ---
+ethernet0.present = "TRUE"
+ethernet0.virtualDev = "e1000"
+ethernet0.connectionType = "nat"
+ethernet0.addressType = "generated"
+
 sound.present = "FALSE"
