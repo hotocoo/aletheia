@@ -20,8 +20,8 @@ cd "$ROOT" || exit 3
 if [ -x "$HOME/.cargo/bin/cargo" ]; then export PATH="$HOME/.cargo/bin:$PATH"; fi
 
 # Crates, and the target each one lints for (host crates lint for the host).
-CRATES=(aletheia kernel-core component-sdk kernel kernel-riscv64 kernel-x86_64)
-declare -a TARGETS=("" "" "" "aarch64-unknown-none-softfloat" "riscv64gc-unknown-none-elf" "x86_64-unknown-uefi")
+CRATES=(aletheia kernel-core component-sdk aletheia-laya kernel kernel-riscv64 kernel-x86_64)
+declare -a TARGETS=("" "" "" "" "aarch64-unknown-none-softfloat" "riscv64gc-unknown-none-elf" "x86_64-unknown-uefi")
 
 fail=0
 skips=()
@@ -80,7 +80,7 @@ done
 
 step "[3] advisories — cargo audit"
 if command -v cargo-audit >/dev/null 2>&1 || cargo audit --version >/dev/null 2>&1; then
-  for c in aletheia component-sdk; do
+  for c in aletheia component-sdk aletheia-laya; do
     [ -f "$c/Cargo.lock" ] || continue
     if cargo audit --file "$c/Cargo.lock" >/dev/null 2>&1; then
       echo "  PASS audit: $c/Cargo.lock"

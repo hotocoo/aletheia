@@ -18,6 +18,15 @@ jobs:
       - name: cargo test (20 M1 acceptance criteria)
         run: cargo test --manifest-path aletheia/Cargo.toml --locked
 
+  system1-native-runtime:
+    name: Native System-1 runtime builds; its sequence, calibration and wire hold (ADR-241)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test (no checkpoint needed; parity with the reference runtime is measured in ADR-241)
+        run: cargo test --manifest-path aletheia-laya/Cargo.toml --locked --release
+
   property-campaign:
     name: Larger deterministic property campaign (64 cases) and the hostile page (browser stack under generated adversarial input)
     runs-on: ubuntu-latest

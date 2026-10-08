@@ -310,6 +310,34 @@ pub fn sidecar_root() -> PathBuf {
         })
 }
 
+/// The native runtime for a System-1 backend, `aletheia-<backend>` (ADR-241): beside this binary
+/// (how a release ships it), in the sidecar directory, in the tree this binary was built from
+/// (`aletheia-<backend>/target/release`), or on `PATH`. `None` when there is none.
+pub fn native_runtime(backend: &str, sidecars: &Path) -> Option<PathBuf> {
+    let name = format!("aletheia-{backend}{}", std::env::consts::EXE_SUFFIX);
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join(&name)));
+    let tree = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(format!("aletheia-{backend}"))
+        .join("target")
+        .join("release")
+        .join(&name);
+    let on_path = std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join(&name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    beside
+        .into_iter()
+        .chain([sidecars.join(&name), tree])
+        .chain(on_path)
+        .find(|p| p.is_file())
+}
+
 /// The command that serves `entry` on its manifest endpoint (ADR-189), built from the manifest
 /// alone: System 2 on `llama_cpp` is `llama-server`; System 1 is `<backend>_server.py` from
 /// `sidecars`. Every server binds 127.0.0.1. Refused by name when the weights are not on this
@@ -339,6 +367,27 @@ pub fn serve_command(
             Ok(c)
         }
         (super::registry::Role::System1, backend) => {
+            let dir = path.parent().unwrap_or(Path::new("."));
+            let forced = std::env::var("SYSTEM1_RUNTIME").unwrap_or_default();
+            // A native runtime for the backend ships as one binary (ADR-241); it is preferred
+            // whenever it is present, and the script is the fallback, unless the operator forces
+            // one with `SYSTEM1_RUNTIME=python|native`.
+            if forced != "python" {
+                if let Some(bin) = native_runtime(backend, sidecars) {
+                    let mut c = std::process::Command::new(bin);
+                    c.arg(dir)
+                        .arg("--serve-id")
+                        .arg(&entry.serve_id)
+                        .arg("--port")
+                        .arg(port.to_string());
+                    return Ok(c);
+                }
+                if forced == "native" {
+                    return Err(format!(
+                        "no native System-1 runtime `aletheia-{backend}` on this machine (SYSTEM1_RUNTIME=native)"
+                    ));
+                }
+            }
             let script = sidecars.join(format!("{backend}_server.py"));
             if !script.exists() {
                 return Err(format!(
@@ -346,7 +395,6 @@ pub fn serve_command(
                     script.display()
                 ));
             }
-            let dir = path.parent().unwrap_or(Path::new("."));
             let mut c = std::process::Command::new("python3");
             c.arg(script)
                 .arg(dir)

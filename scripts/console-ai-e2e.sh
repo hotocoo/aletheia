@@ -230,7 +230,9 @@ run_arm() {
   [ -n "$pid" ] || { echo "  FAIL [$label/$arm] no approval id on stderr"; bad=1; }
 
   # (B) The question is visible to the human who must answer it.
-  $ALETHEIAD approvals list --data "$approvals_dir" | grep -q "^$pid \[Pending\] .*rm poem" \
+  # The whole list is read before matching: `grep -q` stops at the first match and closes the pipe,
+  # and under pipefail the writer's broken pipe then failed a check whose line was there.
+  grep -q "^$pid \[Pending\] .*rm poem" <<<"$($ALETHEIAD approvals list --data "$approvals_dir")" \
     || { echo "  FAIL [$label/$arm] pending approval not listed"; bad=1; }
 
   # (C) A DENIAL is also a record, and a denied line types nothing — ever. The operator asking
@@ -276,7 +278,7 @@ run_arm() {
   if [ "$rc7" -ne 7 ] || [ -n "$pout" ] || [ -z "$pid3" ]; then
     echo "  FAIL [$label/$arm] a consumed grant still typed (rc=$rc7 out='$pout')"; bad=1
   fi
-  $ALETHEIAD approvals list --data "$approvals_dir" | grep -q "^$pid2 \[Consumed\]" \
+  grep -q "^$pid2 \[Consumed\]" <<<"$($ALETHEIAD approvals list --data "$approvals_dir")" \
     || { echo "  FAIL [$label/$arm] the spent grant is not recorded as Consumed"; bad=1; }
 
   # And the object a REFUSED plan named is untouched: governance protects by default.

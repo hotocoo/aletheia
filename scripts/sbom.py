@@ -20,9 +20,12 @@ import sys
 ALLOWED = {
     "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
     "Unlicense", "0BSD", "CC0-1.0", "Apache-2.0 WITH LLVM-exception",
+    # The Unicode License v3: OSI-approved and permissive (notice-only, like MIT). Admitted with the
+    # native System-1 runtime (ADR-241), whose tensor library depends on ICU4X's `yoke`/`zerofrom`.
+    "Unicode-3.0",
 }
 
-MANIFESTS = ["aletheia/Cargo.toml", "kernel-core/Cargo.toml", "component-sdk/Cargo.toml"]
+MANIFESTS = ["aletheia/Cargo.toml", "kernel-core/Cargo.toml", "component-sdk/Cargo.toml", "aletheia-laya/Cargo.toml"]
 
 
 def split_expr(expr):

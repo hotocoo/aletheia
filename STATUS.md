@@ -1271,6 +1271,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — Laya runs natively: the System-1 backend without Python (ADR-241)
+
+- New host crate `aletheia-laya` (candle ModernBERT + Laya head/scorer, decision wire on
+  127.0.0.1, one 6.2 MB binary); `serve_command` prefers `aletheia-<backend>` over the script
+  (`SYSTEM1_RUNTIME=python|native`). CI job builds it and runs its 8 checkpoint-free tests.
+- `scripts/system1/native_parity.py`: console v2 928/928 answers, scheduler run 2 700/700, same
+  threshold side, max |dconf| 0.0001. Load 0.3-3.6 s vs 22 s; RSS 0.88 GB vs 1.13 GB on Metal;
+  per-decision latency 1.8x (Metal) / 2.3x (CPU) slower than torch - an open row.
+
 ### 2026-10-08 — the OS keeps its thinking systems running (ADR-240)
 
 - `aletheia::ai::supervise`: identity preflight (already served / another model refused), bounded

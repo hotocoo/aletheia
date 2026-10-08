@@ -323,7 +323,7 @@ run_bounds() {
     echo "  FAIL [$label/$arm] an unapproved destructive step did not ASK (rc=$rc out='$out')"
     sed 's/^/      | /' < "$adir/err"; bad=1
   fi
-  $ALETHEIAD approvals list --data "$adir" | grep -q "^$id1 .*Pending.*rm scratch" \
+  grep -q "^$id1 .*Pending.*rm scratch" <<<"$($ALETHEIAD approvals list --data "$adir")" \
     || { echo "  FAIL [$label/$arm] the pending question is not listed"; bad=1; }
 
   # A DENIAL is terminal for its record; asking again opens a NEW question, which is what gets
@@ -362,7 +362,7 @@ run_bounds() {
   if [ "$rc" -ne 7 ] || [ -n "$out" ]; then
     echo "  FAIL [$label/$arm] a consumed grant still typed (rc=$rc out='$out')"; bad=1
   fi
-  $ALETHEIAD approvals list --data "$adir" | grep -q "^$id2 .*Consumed" \
+  grep -q "^$id2 .*Consumed" <<<"$($ALETHEIAD approvals list --data "$adir")" \
     || { echo "  FAIL [$label/$arm] the spent grant is not recorded as Consumed"; bad=1; }
   rm -f "$t2"
   echo "    unapproved destructive step ASKS; denial records; grant types exactly once"

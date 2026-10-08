@@ -198,6 +198,23 @@ fn serving_is_built_from_the_manifest_and_refused_by_name() {
     let err = serve_command(&e, "http://127.0.0.1:8123", &root).unwrap_err();
     assert!(err.contains("no System-1 server"), "{err}");
 
+    // A native runtime for the backend, when present, is preferred over the script (ADR-241).
+    e.backend = "fake".into();
+    let native = root.join(format!("aletheia-fake{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&native, b"").unwrap();
+    let c = serve_command(&e, "http://127.0.0.1:8123", &root).unwrap();
+    let args: Vec<String> = c
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(c.get_program(), native.as_os_str());
+    assert_eq!(args[0], weights.parent().unwrap().to_string_lossy());
+    assert_eq!(
+        &args[1..],
+        ["--serve-id", "s1-under-test", "--port", "8123"]
+    );
+    std::fs::remove_file(&native).unwrap();
+
     e.role = Role::System2;
     e.backend = "llama_cpp".into();
     let c = serve_command(&e, "http://127.0.0.1:8099", &root).unwrap();
