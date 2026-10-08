@@ -1271,6 +1271,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — System 1 native in the OS: audit and gap register (ADR-237)
+
+- Audit at `88661be`: in-kernel System 1 is three frozen integer forests (scheduler advice live,
+  Lethe governor live, `memrisk` reclaim NOT live), background jobs are blind round-robin, block
+  cache and anomaly detection have no System 1, Laya runs only as a hand-started Python sidecar.
+- Decisions: role stays model-agnostic, the Laya backend becomes shipped and supervised; every
+  kernel model follows ADR-056's advisory shape; external driver code allowed when pinned and
+  recorded. Wave order and open rows (GPU 3D, gaming, virtualization, silicon OC, interrupt I/O,
+  authentication) named in the ADR. REQ-AI-017 `deferred`.
+
 ### 2026-10-08 — RDRAND keys TLS where there is no virtio-rng; v0.6.0 prepared (ADR-236)
 
 - `kernel-x86_64/src/rdrand.rs`: the CPU generator as an `EntropySource` (CPUID-gated, ten bounded retries, refused by name); `fetch_tls` uses it only when the machine has no virtio-rng. `tls-e2e.sh` adds an x86-64 leg with no virtio-rng and `+rdrand`: a full TLS 1.3 conversation with OpenSSL.
