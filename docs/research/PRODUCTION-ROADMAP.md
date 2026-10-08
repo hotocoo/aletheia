@@ -70,3 +70,14 @@ so the honest statement is the table in BENCHMARKS.md, extended one scenario at 
 4. virtio-gpu 3D (virgl/Venus) research spike and ADR.
 5. First real-hardware boot (one x86-64 machine) with a measured, named driver list.
 6. System 1 v4 with a better paraphrase source (ADR-209's measured bottleneck).
+
+## Real-device-class drivers (2026-10-08)
+
+Delivered, each proved against QEMU's device model and gated on x86-64 and aarch64 (RISC-V has no
+PCI host bridge here yet): NVMe (ADR-223), Intel 8254x e1000 with the TCP stack over it
+(ADR-224, ADR-227), AHCI/SATA (ADR-225), the aarch64 BAR and AHCI-signature fixes (ADR-226).
+e1000 and AHCI also run against VirtualBox's own controllers. ADR-228 makes all three safe on a
+machine that is not a gate: storage is written only when its serial is `ALETHEIA-SCRATCH`, and a
+missing network or scratch disk shortens a suite instead of failing the boot. None of it has run
+on silicon. Queue, not claims: xHCI (USB), e1000e/igc, HD Audio, MSI-X interrupts for these
+drivers, and a DHCP lease so the e1000 can join a real LAN.
