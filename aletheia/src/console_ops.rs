@@ -125,6 +125,8 @@ fn risk_of(name: &str) -> Risk {
         "together" => Risk::Destructive,
         // `start` leaves a program running and `kill` ends one (ADR-213): a human answers for both.
         "start" | "kill" => Risk::Destructive,
+        // `weight` changes how running programs share the CPU (ADR-239): the same answer.
+        "weight" => Risk::Destructive,
         // `jobs` only lists what is running.
         "jobs" => Risk::Safe,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
@@ -376,6 +378,7 @@ mod tests {
                     | "autostart"
                     | "start"
                     | "kill"
+                    | "weight"
                     | "jobs"
             );
             assert!(named, "{verb} has no explicit risk classification");

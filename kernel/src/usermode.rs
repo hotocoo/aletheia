@@ -2152,10 +2152,14 @@ pub fn start_program_live(
             user: UserId(0),
         };
         let now_secs = ActiveHal::ticks_to_ns(ActiveHal::timer_ticks()) / 1_000_000_000;
-        if resident::admit(&mut policy, TaskId(0), Priority(5), now_secs, &submission).is_err() {
-            slot.free();
-            return Err("the resident advisor refused it at the memory boundary");
-        }
+        let verdict =
+            match resident::admit(&mut policy, TaskId(0), Priority(5), now_secs, &submission) {
+                Ok(advice) => advice.map(|a| a.verdict),
+                Err(_) => {
+                    slot.free();
+                    return Err("the resident advisor refused it at the memory boundary");
+                }
+            };
         // SAFETY: single-threaded, IRQs masked; nothing else touches the table meanwhile.
         unsafe {
             (*addr_of_mut!(JOBS)).add(
@@ -2165,6 +2169,7 @@ pub fn start_program_live(
                     features: resident::last_features()
                         .unwrap_or(kernel_core::jobs::Admission::NONE.features),
                     submitted_secs: now_secs,
+                    verdict,
                 },
             )
         }
@@ -2266,8 +2271,15 @@ pub fn list_jobs(each: &mut dyn FnMut(&kernel_core::jobs::JobFacts)) {
             id: j.id,
             name: j.name,
             slices: j.slot.run.slices,
+            weight: j.weight,
         });
     }
+}
+
+/// `weight ID N` (ADR-239): set a background program's share of turns.
+pub fn set_job_weight_live(id: u32, weight: u32) -> Result<u32, Option<u32>> {
+    // SAFETY: the console thread's own table; a turn is never in progress while a line runs.
+    unsafe { (*addr_of_mut!(JOBS)).set_weight(id, weight) }
 }
 
 /// `kill ID` (ADR-213): end a background program now and give back everything it holds.

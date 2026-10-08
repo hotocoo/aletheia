@@ -1054,6 +1054,11 @@ pub trait ShellHost {
     fn kill_job(&self, _id: u32) -> Option<(crate::jobs::JobName, ProgramRun)> {
         None
     }
+    /// Set background job `id`'s share of turns (ADR-239): the weight it had; `Err(None)` for no
+    /// such job, `Err(Some(w))` for a weight outside `1..=MAX_WEIGHT` (the job keeps `w`).
+    fn set_job_weight(&self, _id: u32, _weight: u32) -> Result<u32, Option<u32>> {
+        Err(None)
+    }
     /// Run this target's user-mode tasks through the advised scheduler now (ADR-199). `None` = this
     /// machine cannot start a user-mode task from the console. Defaulted for hosts with no tasks.
     fn run_tasks(&self) -> Option<TaskRun> {
@@ -1167,6 +1172,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("jobs", "every program left running in the background"),
     ("kill ID|NAME", "end a background job now, by its id or its name"),
+    (
+        "weight ID|NAME [N]",
+        "a background job's share of turns: N from 1 to 16 (default 4), twice the weight twice the turns",
+    ),
     (
         "tasks",
         "run real user-mode tasks now, each admitted through the resident risk advisor",
@@ -1940,6 +1949,20 @@ fn report_run(name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
     }
 }
 
+/// A job named on the console line: a number is a job id; anything else is the name of a running
+/// job (the oldest started, if several share it).
+fn job_id(host: &dyn ShellHost, target: &str) -> Option<u32> {
+    target.parse::<u32>().ok().or_else(|| {
+        let mut found = None;
+        host.jobs(&mut |j| {
+            if found.is_none() && !target.is_empty() && j.name.as_str() == target {
+                found = Some(j.id);
+            }
+        });
+        found
+    })
+}
+
 /// `tasks`: start the target's user-mode tasks now, each admitted through the resident advisor, and
 /// say what the advisor answered for exactly this run (ADR-199). The counts are the advisor's own
 /// statistics before and after, so this line cannot disagree with `mlstat`.
@@ -2571,14 +2594,51 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 any = true;
                 outf!(
                     out,
-                    "  job {}  {}  {} slice(s) so far",
+                    "  job {}  {}  {} slice(s) so far, weight {}",
                     j.id,
                     j.name.as_str(),
-                    j.slices
+                    j.slices,
+                    j.weight
                 );
             });
             if !any {
                 out("jobs: no program is running in the background");
+            }
+        }
+        "weight" => {
+            if !authorize(host, ShellAction::Schedule, out) {
+                return Outcome::Continue;
+            }
+            let (target, n) = split_first(rest);
+            let n = n.trim();
+            match (job_id(host, target), n.parse::<u32>()) {
+                (None, _) if target.is_empty() => out("usage: weight ID|NAME [N] (N from 1 to 16)"),
+                (None, _) => outf!(out, "weight: no job is running as {}", target),
+                (Some(id), _) if n.is_empty() => {
+                    let mut w = None;
+                    host.jobs(&mut |j| {
+                        if j.id == id {
+                            w = Some(j.weight);
+                        }
+                    });
+                    match w {
+                        Some(w) => outf!(out, "weight: job {} has weight {}", id, w),
+                        None => outf!(out, "weight: there is no job {}", id),
+                    }
+                }
+                (Some(_), Err(_)) => outf!(out, "weight refused: {} is not a number", n),
+                (Some(id), Ok(w)) => match host.set_job_weight(id, w) {
+                    Ok(was) => outf!(out, "weight: job {} now {} (was {})", id, w, was),
+                    Err(None) => outf!(out, "weight: there is no job {}", id),
+                    Err(Some(kept)) => outf!(
+                        out,
+                        "weight refused: {} is outside 1..={}; job {} keeps {}",
+                        w,
+                        crate::jobs::MAX_WEIGHT,
+                        id,
+                        kept
+                    ),
+                },
             }
         }
         "kill" => {
@@ -2586,17 +2646,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             let target = rest.trim();
-            // A number is a job id; anything else is the name of a running job (the oldest
-            // started, if several share it).
-            let id = target.parse::<u32>().ok().or_else(|| {
-                let mut found = None;
-                host.jobs(&mut |j| {
-                    if found.is_none() && !target.is_empty() && j.name.as_str() == target {
-                        found = Some(j.id);
-                    }
-                });
-                found
-            });
+            let id = job_id(host, target);
             match id {
                 None if target.is_empty() => out("usage: kill ID|NAME (as `jobs` shows them)"),
                 None => outf!(out, "kill: no job is running as {}", target),

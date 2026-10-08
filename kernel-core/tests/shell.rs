@@ -1158,6 +1158,7 @@ impl ShellHost for JobHost {
                 id: j.id,
                 name: j.name,
                 slices: 7,
+                weight: j.weight,
             });
         }
     }
@@ -1173,6 +1174,9 @@ impl ShellHost for JobHost {
                 ..Default::default()
             },
         ))
+    }
+    fn set_job_weight(&self, id: u32, weight: u32) -> Result<u32, Option<u32>> {
+        self.0.borrow_mut().set_weight(id, weight)
     }
 }
 
@@ -1194,7 +1198,7 @@ fn a_started_program_runs_in_the_background_and_is_reported_when_it_ends() {
     fs.create(&mut dev, "note", b"words").unwrap();
     // Two jobs: `hello 2` ends after two turns, `hello` never does until it is killed. Idle turns
     // (None) come after `jobs`, then `kill`, `jobs` and `halt`.
-    let script: Vec<Option<u8>> = b"start hello 2\rstart hello\rstart note\rjobs\r"
+    let script: Vec<Option<u8>> = b"start hello 2\rstart hello\rstart note\rjobs\rweight 2 8\rweight hello\rweight 2 0\rweight 9 3\rweight 2 x\rweight\r"
         .iter()
         .map(|&b| Some(b))
         .chain([None; 5])
@@ -1231,8 +1235,24 @@ fn a_started_program_runs_in_the_background_and_is_reported_when_it_ends() {
         log.contains("start refused: note: not an ELF image"),
         "{log}"
     );
-    assert!(log.contains("  job 1  hello  7 slice(s) so far"), "{log}");
-    assert!(log.contains("  job 2  hello  7 slice(s) so far"), "{log}");
+    assert!(
+        log.contains("  job 1  hello  7 slice(s) so far, weight 4"),
+        "{log}"
+    );
+    assert!(
+        log.contains("  job 2  hello  7 slice(s) so far, weight 4"),
+        "{log}"
+    );
+    // ADR-239: a weight is set by id, read by name, and refused out of range or for no job.
+    assert!(log.contains("weight: job 2 now 8 (was 4)"), "{log}");
+    assert!(log.contains("weight: job 1 has weight 4"), "{log}");
+    assert!(
+        log.contains("weight refused: 0 is outside 1..=16; job 2 keeps 8"),
+        "{log}"
+    );
+    assert!(log.contains("weight: there is no job 9"), "{log}");
+    assert!(log.contains("weight refused: x is not a number"), "{log}");
+    assert!(log.contains("usage: weight ID|NAME [N]"), "{log}");
     // Job 1 ended on an idle turn, in run's words, and only once.
     assert_eq!(log.matches("job 1 (hello) ended:").count(), 1, "{log}");
     assert!(log.contains("run: hello said:\r\ndone"), "{log:?}");

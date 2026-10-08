@@ -113,6 +113,9 @@ impl ShellHost for Host {
     fn kill_job(&self, id: u32) -> Option<(kernel_core::jobs::JobName, shell::ProgramRun)> {
         crate::usermode::kill_job_live(id)
     }
+    fn set_job_weight(&self, id: u32, weight: u32) -> Result<u32, Option<u32>> {
+        crate::usermode::set_job_weight_live(id, weight)
+    }
     fn run_tasks(&self) -> Option<shell::TaskRun> {
         Some(crate::usermode::run_tasks_live())
     }

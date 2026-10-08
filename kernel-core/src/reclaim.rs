@@ -666,6 +666,7 @@ pub fn reclaim_suite(
                 crate::jobs::Admission {
                     features: [i as i32; N_FEATURES],
                     submitted_secs: i as u64,
+                    verdict: None,
                 },
             );
         }

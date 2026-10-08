@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — background programs share turns by weight (ADR-239)
+
+- `jobs::Jobs` is a stride scheduler: weight 1..=16 (default 4), lowest pass runs, newcomers start
+  at the present, equal passes ordered by the advisor's admission verdict (Low first). Console
+  `weight ID|NAME [N]`; `jobs` shows weights; `aletheiad` classifies `weight` destructive.
+- Live on all three CPUs (console-e2e): weight 1 vs 4 measured 3.98x / 4.00x / 3.99x new turns.
+  kernel-core 935 passed.
+
 ### 2026-10-08 — the running machine reclaims under pressure (ADR-238)
 
 - `reclaim::resident` installs the `memrisk` forest for the machine's uptime on all three CPUs;

@@ -3,8 +3,14 @@
 //! A target places a program in its own address space (ADR-201..212) and hands the result - its
 //! `S`, whatever that target needs to resume it - to this table under a name. The console's idle
 //! loop then asks for the next job's turn, runs one slice of it, and takes it out when it ends.
-//! Fixed slots and a rotating cursor: starting a job is the only thing here that can fail, and
-//! nothing here allocates, because a turn is taken on every idle pass of the console.
+//! Fixed slots: starting a job is the only thing here that can fail, and taking a turn allocates
+//! nothing, because a turn is taken on every idle pass of the console.
+//!
+//! Turns are shared by weight (ADR-239), stride scheduling: every job carries a pass, the job with
+//! the lowest pass runs, and running adds `STRIDE / weight` to it, so over any window a job's
+//! turns are proportional to its weight and no job with a weight ever starves. Equal passes are
+//! broken by what the risk advisor said at admission (a decisive Low first, as ADR-056 orders
+//! equals in the priority scheduler), then by id. Equal weights give plain round-robin.
 //!
 //! Under memory pressure the table is also what a running machine reclaims from (ADR-238): each
 //! job keeps the vector it was admitted with, and [`Jobs::reclaim`] hands the eviction forest's
@@ -13,6 +19,7 @@
 use alloc::vec::Vec;
 
 use crate::frameown::Owner;
+use crate::mlrisk::Verdict;
 use crate::mlrisk_contract::N_FEATURES;
 use crate::mlsched::MemoryMeter;
 use crate::priosched::Priority;
@@ -56,7 +63,19 @@ pub struct Job<S> {
     pub slot: S,
     /// What it was admitted with (ADR-238).
     pub admission: Admission,
+    /// Its share of turns relative to the others (ADR-239), `1..=MAX_WEIGHT`.
+    pub weight: u32,
+    /// Virtual time it has used: the lowest runs next.
+    pass: u64,
 }
+
+/// A job's weight when the operator has not set one.
+pub const DEFAULT_WEIGHT: u32 = 4;
+/// The largest weight: one job gets at most this many turns per turn of a weight-1 job.
+pub const MAX_WEIGHT: u32 = 16;
+/// Virtual time one turn costs a weight-1 job; divisible by every weight up to `MAX_WEIGHT`, so a
+/// pass is exact and two schedules over the same weights are identical.
+const STRIDE: u64 = 720_720;
 
 /// What the resident advisor was told when a job was admitted: the vector the eviction forest is
 /// asked about if the machine later runs short, and when.
@@ -64,6 +83,8 @@ pub struct Job<S> {
 pub struct Admission {
     pub features: [i32; N_FEATURES],
     pub submitted_secs: u64,
+    /// The risk advisor's verdict at admission, if it gave one: orders jobs whose passes are equal.
+    pub verdict: Option<Verdict>,
 }
 
 impl Admission {
@@ -71,7 +92,17 @@ impl Admission {
     pub const NONE: Admission = Admission {
         features: [0; N_FEATURES],
         submitted_secs: 0,
+        verdict: None,
     };
+
+    /// Equal passes: a decisive Low first, then no opinion, then Elevated.
+    fn tie(&self) -> u8 {
+        match self.verdict {
+            Some(Verdict::Low) => 0,
+            Some(Verdict::Elevated) => 2,
+            _ => 1,
+        }
+    }
 }
 
 /// What `jobs` shows of a job, copied out of the table.
@@ -81,6 +112,7 @@ pub struct JobFacts {
     pub name: JobName,
     /// Slices it has been given so far.
     pub slices: u32,
+    pub weight: u32,
 }
 
 /// The table.
@@ -88,8 +120,9 @@ pub struct Jobs<S> {
     jobs: [Option<Job<S>>; MAX_JOBS],
     /// The id the next job gets.
     next_id: u32,
-    /// Where the next turn starts looking.
-    turn: usize,
+    /// The pass of the turn last given: where a new job starts, so it neither waits behind nor
+    /// leaps ahead of the jobs already running.
+    now: u64,
 }
 
 impl<S> Default for Jobs<S> {
@@ -103,7 +136,7 @@ impl<S> Jobs<S> {
         Jobs {
             jobs: [const { None }; MAX_JOBS],
             next_id: 1,
-            turn: 0,
+            now: 0,
         }
     }
 
@@ -113,6 +146,8 @@ impl<S> Jobs<S> {
         let Some(free) = self.jobs.iter().position(Option::is_none) else {
             return Err(slot);
         };
+        // A newcomer starts at the lowest pass already running (the present), never at zero.
+        let pass = self.iter().map(|j| j.pass).min().unwrap_or(self.now);
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         self.jobs[free] = Some(Job {
@@ -120,17 +155,37 @@ impl<S> Jobs<S> {
             name: JobName::new(name),
             slot,
             admission,
+            weight: DEFAULT_WEIGHT,
+            pass,
         });
         Ok(id)
     }
 
-    /// The job whose turn it is: each live job in place order, round and round.
+    /// The job whose turn it is: the lowest pass, then the advisor's tie order, then the lowest id.
     pub fn next_turn(&mut self) -> Option<&mut Job<S>> {
-        let at = (0..MAX_JOBS)
-            .map(|i| (self.turn + i) % MAX_JOBS)
-            .find(|&i| self.jobs[i].is_some())?;
-        self.turn = (at + 1) % MAX_JOBS;
-        self.jobs[at].as_mut()
+        let job = self
+            .jobs
+            .iter_mut()
+            .flatten()
+            .min_by_key(|j| (j.pass, j.admission.tie(), j.id))?;
+        self.now = job.pass;
+        job.pass += STRIDE / u64::from(job.weight);
+        Some(job)
+    }
+
+    /// Set a job's weight (ADR-239); the weight it had, or `None` for no such job. A weight outside
+    /// `1..=MAX_WEIGHT` is refused with the job unchanged.
+    pub fn set_weight(&mut self, id: u32, weight: u32) -> Result<u32, Option<u32>> {
+        let job = self
+            .jobs
+            .iter_mut()
+            .flatten()
+            .find(|j| j.id == id)
+            .ok_or(None)?;
+        if !(1..=MAX_WEIGHT).contains(&weight) {
+            return Err(Some(job.weight));
+        }
+        Ok(core::mem::replace(&mut job.weight, weight))
     }
 
     /// Take a job out (it ended, or the operator killed it).
@@ -231,6 +286,48 @@ mod tests {
         let turns: Vec<u32> = (0..4).map(|_| t.next_turn().unwrap().id).collect();
         assert_eq!(turns, [1, 3, 1, 3]);
         assert!(t.take(b).is_none());
+    }
+
+    #[test]
+    fn turns_follow_weights_exactly_and_nobody_starves() {
+        let mut t: Jobs<u8> = Jobs::new();
+        let a = t.add("a", 0, Admission::NONE).unwrap();
+        let b = t.add("b", 0, Admission::NONE).unwrap();
+        let c = t.add("c", 0, Admission::NONE).unwrap();
+        assert_eq!(t.set_weight(a, 1), Ok(DEFAULT_WEIGHT));
+        t.set_weight(b, 2).unwrap();
+        t.set_weight(c, 4).unwrap();
+        let mut n = [0u32; 4];
+        for _ in 0..700 {
+            n[t.next_turn().unwrap().id as usize] += 1;
+        }
+        assert_eq!(&n[1..], [100, 200, 400]);
+        assert_eq!(t.set_weight(a, 0), Err(Some(1)));
+        assert_eq!(t.set_weight(a, MAX_WEIGHT + 1), Err(Some(1)));
+        assert_eq!(t.set_weight(99, 2), Err(None));
+    }
+
+    #[test]
+    fn a_late_job_starts_at_the_present_and_equal_passes_go_low_risk_first() {
+        let mut t: Jobs<u8> = Jobs::new();
+        let old = t.add("old", 0, Admission::NONE).unwrap();
+        for _ in 0..50 {
+            t.next_turn();
+        }
+        let elevated = Admission {
+            verdict: Some(Verdict::Elevated),
+            ..Admission::NONE
+        };
+        let low = Admission {
+            verdict: Some(Verdict::Low),
+            ..Admission::NONE
+        };
+        let e = t.add("e", 0, elevated).unwrap();
+        let l = t.add("l", 0, low).unwrap();
+        // The newcomers start where the old job is now, not at zero: they do not get 50 turns in
+        // a row. Among the three equal passes the Low verdict goes first, Elevated last.
+        let turns: Vec<u32> = (0..6).map(|_| t.next_turn().unwrap().id).collect();
+        assert_eq!(turns, [l, old, e, l, old, e]);
     }
 
     #[test]
