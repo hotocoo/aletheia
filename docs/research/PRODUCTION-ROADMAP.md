@@ -39,7 +39,7 @@ is the product of many years of work by GPU vendors, Mesa, Valve and others.
 For Aletheia each layer is a program of work:
 
 1. **Userland that can host large programs** - many pages, writable data, heap, threads, dynamic
-   loading. Today: up to 16 code pages, a stack page and 16 data pages, up to four programs at once, foreground or background (ADR-201..214); no run-time heap growth, threads or dynamic loading yet.
+   loading. Today: up to 16 code pages, a stack page and 16 data pages, up to four programs at once, foreground or background (ADR-201..214); run-time growth of writable memory to 256 KiB (ADR-230); no threads or dynamic loading yet.
 2. **A paravirtual 3D path first** - virtio-gpu with virgl or Venus is the one 3D device QEMU gives
    a guest; it is the honest first rung and still needs a Mesa-class user-mode driver.
 3. **Real GPUs** - vendor hardware documentation or porting an existing open driver; each vendor
@@ -64,7 +64,7 @@ so the honest statement is the table in BENCHMARKS.md, extended one scenario at 
 
 ## The next rungs, in order
 
-1. Multi-page programs with a writable data segment and a heap (widen the ELF judge and the window). Done: ADR-210, ADR-211, ADR-214 (16 code + 16 data pages; run-time growth still open).
+1. Multi-page programs with a writable data segment and a heap (widen the ELF judge and the window). Done: ADR-210, ADR-211, ADR-214 (16 code + 16 data pages); run-time growth to 64 data pages: ADR-230.
 2. More than one program at a time, preempted and scheduled together, with the advisor ranking them. Done: ADR-212; left running in the background: ADR-213.
 3. Interrupt-driven virtio on every target (today most drivers poll).
 4. virtio-gpu 3D (virgl/Venus) research spike and ADR.

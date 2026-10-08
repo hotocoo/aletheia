@@ -256,6 +256,32 @@ pub fn admit_poll(grant: Option<&Grant>) -> bool {
     grant.is_some_and(|g| g.allows(PRESENT))
 }
 
+/// The most writable pages a program may hold above its stack, declared by its image and grown by
+/// `SYS_BRK` together (ADR-230): 256 KiB.
+pub const DATA_CEILING_PAGES: usize = 64;
+
+/// What a `SYS_BRK(top)` asks for (ADR-230).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Brk {
+    /// Nothing to map: answer with the current top. A query (`top == 0`) or a top at or below it;
+    /// writable memory never shrinks while a program runs.
+    Now(u64),
+    /// Map this many zeroed pages above the current top, then answer with the new top.
+    Grow(usize),
+}
+
+/// Admit `SYS_BRK(top)` or refuse it (`None`): a top past [`DATA_CEILING_PAGES`] above the stack.
+/// The new top is `top` rounded up to a page, so the window stays exactly the mapping.
+pub fn admit_brk(w: Window, top: u64) -> Option<Brk> {
+    if top <= w.data_top {
+        return Some(Brk::Now(w.data_top));
+    }
+    if top > w.stack_top + DATA_CEILING_PAGES as u64 * PAGE {
+        return None;
+    }
+    Some(Brk::Grow((top - w.data_top).div_ceil(PAGE) as usize))
+}
+
 /// Copy an admitted present's bitmap out of the program's data pages, which the run loop views one
 /// physical frame at a time, into `out` (exactly `req.len` bytes). `false` when a page it needs was
 /// not handed over.
@@ -434,6 +460,26 @@ mod tests {
         data_top: 0x6000,
         ..W
     };
+
+    #[test]
+    fn brk_grows_by_whole_pages_up_to_the_ceiling_and_never_shrinks() {
+        let ceiling = W.stack_top + DATA_CEILING_PAGES as u64 * 4096;
+        // A query, and a top at or below the current one, map nothing.
+        assert_eq!(admit_brk(W, 0), Some(Brk::Now(0x4000)));
+        assert_eq!(admit_brk(W, 0x3800), Some(Brk::Now(0x4000)));
+        assert_eq!(admit_brk(W_NODATA, 0x3000), Some(Brk::Now(0x3000)));
+        // One byte past the top is a whole page; a program with no data grows from its stack top.
+        assert_eq!(admit_brk(W, 0x4001), Some(Brk::Grow(1)));
+        assert_eq!(admit_brk(W_DATA3, 0x6000 + 8 * 4096), Some(Brk::Grow(8)));
+        assert_eq!(admit_brk(W_NODATA, 0x3001), Some(Brk::Grow(1)));
+        // The ceiling counts the image's pages too: exactly at it is admitted, a byte past is not.
+        assert_eq!(
+            admit_brk(W, ceiling),
+            Some(Brk::Grow(DATA_CEILING_PAGES - 1))
+        );
+        assert_eq!(admit_brk(W, ceiling + 1), None);
+        assert_eq!(admit_brk(W, u64::MAX), None);
+    }
 
     #[test]
     fn a_present_needs_the_grant_a_bounded_size_and_a_bitmap_in_the_data_pages() {

@@ -8,6 +8,7 @@ pub const SYS_WRITE_CONSOLE: u64 = 12;
 pub const SYS_PRESENT: u64 = 13;
 pub const SYS_POLL_INPUT: u64 = 14;
 pub const SYS_CLOCK: u64 = 15;
+pub const SYS_BRK: u64 = 16;
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn syscall2(num: u64, a0: u64, a1: u64) -> u64 {
@@ -158,6 +159,18 @@ pub fn poll_input() -> Result<Option<Input>, ()> {
 pub fn clock_ns() -> u64 {
     // SAFETY: the call takes no pointers.
     unsafe { syscall2(SYS_CLOCK, 0, 0) }
+}
+
+/// Grow writable memory to `top` (ADR-230), in zeroed pages above what the program holds; `0` asks
+/// for the current top. Returns the top after the call, or `Err` when refused.
+pub fn brk(top: u64) -> Result<u64, ()> {
+    // SAFETY: the kernel maps only fresh pages of this program's own, inside its ceiling.
+    let r = unsafe { syscall2(SYS_BRK, top, 0) };
+    if r == u64::MAX {
+        Err(())
+    } else {
+        Ok(r)
+    }
 }
 
 /// End this program with `status`.

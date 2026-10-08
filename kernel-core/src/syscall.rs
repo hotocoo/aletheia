@@ -42,6 +42,10 @@ pub const SYS_POLL_INPUT: u64 = 14;
 /// Nanoseconds since boot on the machine's monotonic clock (ADR-222): what a program paces frames
 /// and animations by, instead of busy loops whose speed is the emulator's.
 pub const SYS_CLOCK: u64 = 15;
+/// Grow the program's writable memory to `top` (ADR-230): zeroed pages mapped contiguously above
+/// what it holds, up to `progout::DATA_CEILING_PAGES` above its stack. `0` asks for the current
+/// top; returns the top after the call, or `u64::MAX` when refused (memory never shrinks).
+pub const SYS_BRK: u64 = 16;
 /// Upper 32 bits of [`SYS_PROCESS_INFO`] response.
 pub const PROCESS_INFO_TERMINATED_SHIFT: u32 = 32;
 
@@ -76,6 +80,7 @@ pub enum Syscall {
     Present,
     PollInput,
     Clock,
+    Brk,
 }
 
 impl Syscall {
@@ -97,6 +102,7 @@ impl Syscall {
             SYS_PRESENT => Some(Self::Present),
             SYS_POLL_INPUT => Some(Self::PollInput),
             SYS_CLOCK => Some(Self::Clock),
+            SYS_BRK => Some(Self::Brk),
             _ => None,
         }
     }
@@ -119,6 +125,7 @@ impl Syscall {
             Self::Present => SYS_PRESENT,
             Self::PollInput => SYS_POLL_INPUT,
             Self::Clock => SYS_CLOCK,
+            Self::Brk => SYS_BRK,
         }
     }
 
@@ -135,8 +142,9 @@ impl Syscall {
             Self::ProcessKill => Some("process.kill"),
             Self::WriteConsole => Some("console.output"),
             Self::Present | Self::PollInput => Some("window.present"),
-            // Reading the clock touches no object: like yielding, it needs no authority.
-            Self::Yield | Self::Exit | Self::Regcheck | Self::Clock => None,
+            // Reading the clock touches no object: like yielding, it needs no authority. Growing
+            // memory is bounded by the program's own ceiling, as its stack is (ADR-230).
+            Self::Yield | Self::Exit | Self::Regcheck | Self::Clock | Self::Brk => None,
         }
     }
 }
@@ -163,6 +171,7 @@ mod tests {
             Syscall::Present,
             Syscall::PollInput,
             Syscall::Clock,
+            Syscall::Brk,
         ] {
             assert_eq!(Syscall::decode(syscall.number()), Some(syscall));
         }
@@ -170,7 +179,7 @@ mod tests {
 
     #[test]
     fn unknown_numbers_fail_closed() {
-        for number in [0, 16, 99, u64::MAX] {
+        for number in [0, 17, 99, u64::MAX] {
             assert_eq!(Syscall::decode(number), None);
         }
     }

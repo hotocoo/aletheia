@@ -1271,6 +1271,11 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — a program grows its writable memory at run time (ADR-230)
+
+- `SYS_BRK = 16`: zeroed writable pages mapped above what a program holds, up to 64 pages (256 KiB) above its stack with image and growth counted together; never shrinks; no capability (bounded by the program's own ceiling). Decided by `progout::admit_brk` (host test), served by each CPU's run loop like `SYS_FS_READ`, so reads, writes and frames reach grown pages unchanged.
+- `wide grow` proves refusal past the ceiling, eight zeroed distinct pages, a read into them and no shrink: usermode 62/62/70 on aarch64/riscv64/x86-64, all three gates PASS.
+
 ### 2026-10-08 — a System-1 corpus for the scheduler, labelled by the scheduler (ADR-229)
 
 - `kernel-core/examples/sched_corpus.rs` drives the real `PriorityScheduler` through seeded hard episodes (few bands, donation chains, wait cycles, advisory reorders, mid-run admissions) and writes choice rows on the System-1 wire; every label is `schedule_next`'s answer, recomputed from the rendered state or the generator panics.

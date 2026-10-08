@@ -40,8 +40,9 @@ use core::ptr::{addr_of, addr_of_mut};
 use kernel_core::frameown::Owner;
 use kernel_core::sched::{RoundRobin, TaskId, TaskState};
 use kernel_core::syscall::{
-    pack_process_info, Syscall, SYS_CLOCK, SYS_EMIT, SYS_EXIT, SYS_FS_READ, SYS_POLL_INPUT,
-    SYS_PRESENT, SYS_PROCESS_INFO, SYS_RECV, SYS_REGCHECK, SYS_SEND, SYS_WRITE_CONSOLE, SYS_YIELD,
+    pack_process_info, Syscall, SYS_BRK, SYS_CLOCK, SYS_EMIT, SYS_EXIT, SYS_FS_READ,
+    SYS_POLL_INPUT, SYS_PRESENT, SYS_PROCESS_INFO, SYS_RECV, SYS_REGCHECK, SYS_SEND,
+    SYS_WRITE_CONSOLE, SYS_YIELD,
 };
 // REQ-IPC-008: the shared grant-table is the arch-independent authority/lifecycle layer over a
 // shared-memory region; THIS target's PML4 `vm.rs` performs the real page mapping into each space.
@@ -694,6 +695,21 @@ pub extern "sysv64" fn x86_syscall(num: u64, arg: u64, arg2: u64, arg3: u64, arg
             // The machine's monotonic clock (ADR-222), answered here: a read of the HPET or TSC
             // counter touches nothing of the program's, and is safe with IF=0.
             ActiveHal::ticks_to_ns(ActiveHal::timer_ticks())
+        }
+        SYS_BRK => {
+            // A query is answered here; growth is mapped by the run loop, which holds the
+            // program's frames (ADR-230). SAFETY: single-threaded (IF=0 on the kernel side); the
+            // window and the pending slot belong to the program running now.
+            unsafe {
+                match kernel_core::progout::admit_brk(*addr_of!(PROGRAM_WINDOW_NOW), arg) {
+                    Some(kernel_core::progout::Brk::Now(top)) => top,
+                    Some(kernel_core::progout::Brk::Grow(pages)) => {
+                        *addr_of_mut!(PENDING_BRK) = Some(pages);
+                        0
+                    }
+                    None => u64::MAX,
+                }
+            }
         }
         SYS_POLL_INPUT => {
             // Admitted here, answered by the run loop from the program's window (ADR-216).
@@ -1961,6 +1977,8 @@ static mut PROGRAM_WINDOW_NOW: kernel_core::progout::Window = kernel_core::progo
 };
 /// A `SYS_POLL_INPUT` the handler admitted, for the run loop to answer (ADR-216).
 static mut PENDING_POLL: bool = false;
+/// Pages a `SYS_BRK` the handler admitted asks for, for the run loop to map (ADR-230).
+static mut PENDING_BRK: Option<usize> = None;
 /// A `SYS_PRESENT` the handler admitted, for the run loop to serve (ADR-215).
 static mut PENDING_PRESENT: Option<kernel_core::progout::PresentRequest> = None;
 /// A `SYS_FS_READ` the handler admitted, for the run loop to serve (ADR-207).
@@ -2248,6 +2266,7 @@ fn run_slice(
             *addr_of_mut!(PENDING_READ) = None;
             *addr_of_mut!(PENDING_PRESENT) = None;
             *addr_of_mut!(PENDING_POLL) = false;
+            *addr_of_mut!(PENDING_BRK) = None;
             (*addr_of_mut!(SUPERVISOR)).reap(TaskId(slot.task))
         };
         slot.run.terminated = Some(reason.map_or("fault", |r| r.name()));
@@ -2265,7 +2284,7 @@ fn run_slice(
         if let (Some(c), Some(st)) = (slot.code.first().copied(), slot.stack) {
             // SAFETY: `c`, `st` and the data frames are this program's own identity-mapped
             // frames, one page each and distinct, untouched while it is off the CPU.
-            let mut views: [&mut [u8]; PROGRAM_DATA_PAGES as usize] =
+            let mut views: [&mut [u8]; kernel_core::progout::DATA_CEILING_PAGES] =
                 core::array::from_fn(|i| match slot.data.get(i) {
                     Some(d) => unsafe {
                         core::slice::from_raw_parts_mut(d.addr() as *mut u8, 0x1000)
@@ -2303,7 +2322,35 @@ fn run_slice(
         let event = u64::MAX;
         slot.frame.regs[RAX] = event;
     }
+    // Growth is mapped into THIS program's space, zeroed, above what it holds (ADR-230).
+    // SAFETY: single-threaded; the program is off the CPU.
+    if let Some(pages) = unsafe { (*addr_of_mut!(PENDING_BRK)).take() } {
+        slot.frame.regs[RAX] = grow_data(slot, pages);
+    }
     None
+}
+
+/// Map `pages` zeroed writable pages above a program's data and widen its window to them (ADR-230):
+/// the new top, or `u64::MAX` with nothing kept when the frames run out.
+fn grow_data(slot: &mut Slot, pages: usize) -> u64 {
+    let held = slot.data.len();
+    for i in held..held + pages {
+        match vm::map_user(slot.root, PROGRAM_DATA_VA + i as u64 * 0x1000, true) {
+            Some(f) => slot.data.push(f),
+            None => {
+                for (j, f) in slot.data.drain(held..).enumerate() {
+                    free_leaf(
+                        slot.root,
+                        PROGRAM_DATA_VA + (held + j) as u64 * 0x1000,
+                        Some(f),
+                    );
+                }
+                return u64::MAX;
+            }
+        }
+    }
+    slot.window.data_top = PROGRAM_DATA_VA + slot.data.len() as u64 * 0x1000;
+    slot.window.data_top
 }
 
 /// Show an admitted frame in the program's desktop window (ADR-215). `false` when there is no live
@@ -2311,7 +2358,7 @@ fn run_slice(
 fn present_frame(slot: &Slot, req: &kernel_core::progout::PresentRequest) -> bool {
     // SAFETY: the data frames are this program's own identity-mapped frames, one page each,
     // untouched while it is off the CPU.
-    let views: [&[u8]; PROGRAM_DATA_PAGES as usize] =
+    let views: [&[u8]; kernel_core::progout::DATA_CEILING_PAGES] =
         core::array::from_fn(|i| match slot.data.get(i) {
             Some(d) => unsafe { core::slice::from_raw_parts(d.addr() as *const u8, 0x1000) },
             None => &[],
@@ -2394,6 +2441,7 @@ fn run_programs(
         *addr_of_mut!(PENDING_READ) = None;
         *addr_of_mut!(PENDING_PRESENT) = None;
         *addr_of_mut!(PENDING_POLL) = false;
+        *addr_of_mut!(PENDING_BRK) = None;
     }
     // The budget is timer slices; a syscall returns here without spending one, so a separate cap
     // bounds a program that does nothing but trap (ADR-204).
@@ -3617,6 +3665,16 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
                         && r.status == 25_601
                         && r.output == b"wide read: just words\n"),
                 "data: a program with three pages of writable memory gets each one zeroed and distinct, and reads into its second"
+            );
+            // Writable memory grown at run time (ADR-230): a top past the ceiling is refused, eight
+            // pages arrive zeroed and distinct (a fill of 10..17 sums to 442,368), a read lands in
+            // the last, and asking for less never shrinks.
+            let grown = run(USERLAND_WIDE, b"grow", &mut svc);
+            check!(
+                grown.is_some_and(|r| r.exited
+                    && r.status == 442_368
+                    && r.output == b"wide grow: just words\n"),
+                "brk: a program grows its writable memory by whole zeroed pages, inside its ceiling, and reads into them"
             );
             // A program that draws (ADR-215): a gate image has no live desktop, so its frame is
             // admitted from its data pages, refused, and it ends cleanly having shown none.
