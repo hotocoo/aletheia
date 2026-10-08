@@ -496,11 +496,19 @@ impl Filesystem {
         if e.start < FILE_DATA_START || e.start + nblocks > dev.num_blocks() {
             return Err(FsError::Corrupt);
         }
+        // The extent is contiguous, so its whole blocks are one run read (ADR-248): a device that
+        // moves several blocks per request answers in a few requests instead of one per block. The
+        // vector is exactly the object's size (a command that returns data costs its data,
+        // ADR-089); the last, partial block comes through a stack buffer.
         let mut out = Vec::with_capacity(e.len);
-        for i in 0..nblocks {
-            let blk = self.journal.read(dev, e.start + i)?;
-            let take = core::cmp::min(BLOCK_SIZE, e.len - out.len());
-            out.extend_from_slice(&blk[..take]);
+        let whole = e.len / BLOCK_SIZE;
+        out.resize(whole * BLOCK_SIZE, 0);
+        if whole > 0 {
+            self.journal.read_run(dev, e.start, &mut out)?;
+        }
+        if whole < nblocks {
+            let blk = self.journal.read(dev, e.start + whole)?;
+            out.extend_from_slice(&blk[..e.len - whole * BLOCK_SIZE]);
         }
         Ok(out)
     }

@@ -40,10 +40,10 @@ fn the_shared_suite_proves_seventeen_invariants_over_a_device() {
     .expect("every invariant holds over a well-behaved device");
 
     assert_eq!(
-        n, 21,
+        n, 22,
         "the suite's invariant count changed - update both VM gates"
     );
-    assert_eq!(seen.len(), 21);
+    assert_eq!(seen.len(), 22);
     for (idx, (i, _)) in seen.iter().enumerate() {
         assert_eq!(*i, idx + 1, "invariant numbering has a gap at {i}");
     }
@@ -54,7 +54,12 @@ fn the_shared_suite_proves_seventeen_invariants_over_a_device() {
         seen[5].1
     );
     assert!(seen[19].1.starts_with("fs: "));
-    assert!(seen[20].1.contains("capability-gated I/O"));
+    assert!(
+        seen[20]
+            .1
+            .contains("a run read answers what block reads answer")
+            && seen[21].1.contains("capability-gated I/O")
+    );
 }
 
 #[test]

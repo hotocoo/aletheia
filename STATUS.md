@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — a run of blocks in one request (ADR-248)
+
+- `BlockDevice::read_run` (default: per block); virtio-blk registers 6 data frames and serves runs
+  of up to 6 blocks per request, fully validated; guard, cache (misses as one run), journal and
+  `Filesystem::read` pass runs through. virtio-blk family 21 -> 22.
+- 48 blocks, per-block vs runs (QEMU TCG, two boots each): 3-5x on every CPU (e.g. x86-64 1162/910
+  vs 194/210 us). Still polled, one request in flight.
+
 ### 2026-10-08 — console roles (ADR-247)
 
 - Account lines carry a role (`admin`, `operator`, `viewer`); `ShellAction::allowed_for(role)` gates

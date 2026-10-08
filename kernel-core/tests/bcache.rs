@@ -343,3 +343,40 @@ fn on_a_larger_namespace_clock_stays_near_the_optimum() {
         trace.len()
     );
 }
+
+/// ADR-248: a run read answers exactly what block reads answer, through the default path, the
+/// cache (cached blocks from memory, each stretch of misses as one device run) and the filesystem.
+#[test]
+fn run_reads_answer_what_block_reads_answer() {
+    let mut plain = Probe::new(kernel_core::fs::FILE_DATA_START + 64);
+    workload(&mut plain);
+    // Fewer blocks than the cache holds, so no warmed block is evicted mid-run.
+    let n = 20;
+    let start = kernel_core::fs::FILE_DATA_START;
+    let mut want = vec![0u8; n * BLOCK_SIZE];
+    for i in 0..n {
+        plain
+            .read_block(start + i, &mut want[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE])
+            .unwrap();
+    }
+    let mut got = vec![0u8; n * BLOCK_SIZE];
+    plain.read_run(start, &mut got).unwrap();
+    assert_eq!(got, want);
+
+    let cached = BlockCache::new(plain, CONSOLE_BLOCKS);
+    // Warm a scattered few, then read the whole run: hits and misses interleave.
+    let mut one = [0u8; BLOCK_SIZE];
+    for i in [3, 4, 17, 19] {
+        cached.read_block(start + i, &mut one).unwrap();
+    }
+    let before = cached.stats();
+    let mut through = vec![0u8; n * BLOCK_SIZE];
+    cached.read_run(start, &mut through).unwrap();
+    assert_eq!(through, want);
+    let after = cached.stats();
+    assert_eq!(after.hits - before.hits, 4);
+    assert_eq!(after.misses - before.misses, (n - 4) as u64);
+
+    let mut bad = vec![0u8; BLOCK_SIZE + 1];
+    assert!(cached.read_run(start, &mut bad).is_err());
+}

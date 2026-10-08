@@ -56,7 +56,7 @@ boots through OVMF, Linux skips firmware), idle CPU 0.0 vs 0.4-0.9 %, typed roun
 | Gap | Status | Why it matters |
 |---|---|---|
 | Real hardware | Boots on emulated boards (QEMU virt, q35/OVMF, VirtualBox); VMware package unverified on VMware itself | A production OS runs on machines people own |
-| Interrupt-driven, multi-queue I/O | Every driver polls, one request in flight | Throughput and latency under load; an I/O System 1 has no queue to order |
+| Interrupt-driven, multi-queue I/O | Every driver polls, one request in flight; since ADR-248 a virtio-blk request carries up to 6 blocks (3-5x on 48-block reads) | Throughput and latency under load; an I/O System 1 has no queue to order |
 | GPU 3D, graphics stack | virtio-gpu 2D, 1-bit surfaces plus a colour plane for programs | No 3D, no Vulkan/GL, no media decode |
 | Native 3A-class gaming | Not started | Needs the GPU stack, input latency work, and a userland that does not exist yet |
 | Virtualization (Aletheia as host) | Not started | No VMX/SVM/EL2 host support |

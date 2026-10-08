@@ -122,6 +122,13 @@ const OFF_STATUS: usize = 1040; // 1-byte status
 /// Queue size we request (capped by `QueueNumMax`). 8 is ample: one 3-descriptor request is ever in
 /// flight and it is polled to completion.
 const QSIZE_WANT: u16 = 8;
+/// Data frames beyond the first, so one request can carry a run of blocks (ADR-248): header +
+/// `RUN_BLOCKS` data descriptors + status fill the 8-entry queue.
+const RUN_EXTRA: usize = 5;
+/// Blocks one request may move.
+pub const RUN_BLOCKS: usize = 1 + RUN_EXTRA;
+/// DMA regions a live virtio-blk holds: the ring frame and `RUN_BLOCKS` data frames.
+pub const DMA_REGIONS: usize = 1 + RUN_BLOCKS;
 
 /// How a bus exposes one virtio device's registers. Implemented by [`MmioTransport`] here, and by a
 /// target that must reach the device over a different bus (x86-64's virtio-pci, ADR-037).
@@ -457,6 +464,8 @@ pub struct VirtioBlk<H: VirtioHal, T: Transport> {
     hdr: usize,
     status: usize,
     data: usize,
+    /// The further data frames a run read fills after `data` (ADR-248).
+    run: [usize; RUN_EXTRA],
     qsize: u16,
     capacity_sectors: u64,
     flush_ok: bool,
@@ -565,6 +574,12 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
             .map_err(|_| "virtio-blk: the ring frame was refused as a DMA region")?;
         dma.register(data, crate::dma::PAGE, "virtio-blk.data")
             .map_err(|_| "virtio-blk: the data frame was refused as a DMA region")?;
+        let mut run = [0usize; RUN_EXTRA];
+        for f in run.iter_mut() {
+            *f = H::alloc_frame().ok_or("frame allocator exhausted (run data)")?;
+            dma.register(*f, crate::dma::PAGE, "virtio-blk.run")
+                .map_err(|_| "virtio-blk: a run data frame was refused as a DMA region")?;
+        }
 
         Ok((
             VirtioBlk {
@@ -575,6 +590,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 hdr,
                 status: status_buf,
                 data,
+                run,
                 qsize,
                 capacity_sectors,
                 flush_ok,
@@ -814,6 +830,79 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         }
     }
 
+    /// The data frame for block `k` of a run.
+    fn run_frame(&self, k: usize) -> usize {
+        if k == 0 {
+            self.data
+        } else {
+            self.run[k - 1]
+        }
+    }
+
+    /// Blocks one request may carry on this queue: the data frames, and no more than the ring holds
+    /// besides the header and status descriptors.
+    pub fn run_blocks(&self) -> usize {
+        RUN_BLOCKS
+            .min((self.qsize as usize).saturating_sub(2))
+            .max(1)
+    }
+
+    /// One READ of `m` consecutive blocks (2 <= m <= `run_blocks`) from `sector`, into the run's
+    /// data frames: header, `m` device-writable data descriptors, status. Validated as `request`
+    /// validates a single block: every address gated, status OK, and the device's byte count
+    /// exactly `m` blocks plus the status byte.
+    unsafe fn request_run(&self, sector: u64, m: usize) -> Result<(), StorageError> {
+        if m < 2 || m > self.run_blocks() {
+            return Err(StorageError::Device);
+        }
+        for addr in [self.hdr, self.status] {
+            if !self.dma.visible(addr, 1) {
+                return Err(StorageError::Device);
+            }
+        }
+        for k in 0..m {
+            if !self.dma.visible(self.run_frame(k), BLOCK_SIZE) {
+                return Err(StorageError::Device);
+            }
+        }
+        let h = self.hdr as *mut u32;
+        write_volatile(h.add(0), VIRTIO_BLK_T_IN);
+        write_volatile(h.add(1), 0);
+        write_volatile((self.hdr + 8) as *mut u64, sector);
+        write_volatile(self.status as *mut u8, 0xff);
+        self.set_desc(0, self.hdr as u64, 16, VIRTQ_DESC_F_NEXT, 1);
+        for k in 0..m {
+            let d = k + 1;
+            self.set_desc(
+                d,
+                self.run_frame(k) as u64,
+                BLOCK_SIZE as u32,
+                VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
+                (d + 1) as u16,
+            );
+        }
+        self.set_desc(m + 1, self.status as u64, 1, VIRTQ_DESC_F_WRITE, 0);
+        match self.submit(0)? {
+            (VIRTIO_BLK_S_OK, len) if len == (m * BLOCK_SIZE + 1) as u32 => Ok(()),
+            _ => Err(StorageError::Device),
+        }
+    }
+
+    /// Time reading `blocks` blocks from `start` one request per block, then as runs, in
+    /// nanoseconds of the HAL's clock (ADR-248). Reported, never gated: the numbers belong to the
+    /// emulator and the host as much as to the driver.
+    pub fn time_reads(&self, start: usize, blocks: usize) -> Option<(u64, u64)> {
+        let mut out = alloc::vec![0u8; blocks * BLOCK_SIZE];
+        let t0 = H::now_ns();
+        for (i, chunk) in out.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+            self.read_block(start + i, chunk).ok()?;
+        }
+        let t1 = H::now_ns();
+        self.read_run(start, &mut out).ok()?;
+        let t2 = H::now_ns();
+        Some((t1.wrapping_sub(t0), t2.wrapping_sub(t1)))
+    }
+
     #[inline]
     fn check_block(&self, idx: usize, buf_len: usize) -> Result<u64, StorageError> {
         if buf_len != BLOCK_SIZE {
@@ -850,6 +939,35 @@ impl<H: VirtioHal, T: Transport> BlockDevice for VirtioBlk<H, T> {
             dst.copy_from_slice(buf);
             self.request(VIRTIO_BLK_T_OUT, sector, true, false)
         }
+    }
+
+    fn read_run(&self, start: usize, out: &mut [u8]) -> Result<(), StorageError> {
+        if !out.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(StorageError::BadBlockSize);
+        }
+        let n = out.len() / BLOCK_SIZE;
+        if start + n > self.num_blocks() {
+            return Err(StorageError::OutOfRange);
+        }
+        let per = self.run_blocks();
+        for (c, chunk) in out.chunks_mut(per * BLOCK_SIZE).enumerate() {
+            let first = start + c * per;
+            let m = chunk.len() / BLOCK_SIZE;
+            if m == 1 {
+                self.read_block(first, chunk)?;
+                continue;
+            }
+            // SAFETY: one request in flight; the run's data frames are ours and identity-mapped.
+            unsafe {
+                self.request_run(first as u64 * SECTORS_PER_BLOCK, m)?;
+                for (k, blk) in chunk.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+                    let src =
+                        core::slice::from_raw_parts(self.run_frame(k) as *const u8, BLOCK_SIZE);
+                    blk.copy_from_slice(src);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<(), StorageError> {
@@ -962,6 +1080,34 @@ pub fn device_suite_gated<D: BlockDevice, F: FnMut(usize, bool, &str)>(
     match crate::fs::selftest_on(&mut *dev, |i, passed, name| log(fs_base + i, passed, name)) {
         Ok(count) => n += count,
         Err((i, name)) => return Err((fs_base + i, name)),
+    }
+
+    // A run read (ADR-248) answers exactly what block-by-block reads answer, across more blocks than
+    // one request carries, and refuses a run that leaves the device.
+    {
+        let base = crate::storage::DATA_START + 30;
+        let mut ok = true;
+        for i in 0..13usize {
+            let mut b = [0u8; BLOCK_SIZE];
+            b.iter_mut()
+                .enumerate()
+                .for_each(|(j, x)| *x = (i * 31 + j) as u8);
+            ok &= dev.write_block(base + i, &b).is_ok();
+        }
+        let mut run = alloc::vec![0u8; 13 * BLOCK_SIZE];
+        ok &= dev.read_run(base, &mut run).is_ok();
+        for i in 0..13usize {
+            let mut one = [0u8; BLOCK_SIZE];
+            ok &= dev.read_block(base + i, &mut one).is_ok()
+                && one[..] == run[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
+        }
+        let n = dev.num_blocks();
+        let mut over = alloc::vec![0u8; 2 * BLOCK_SIZE];
+        ok &= dev.read_run(n - 1, &mut over) == Err(StorageError::OutOfRange);
+        check!(
+            "virtio-blk: a run read answers what block reads answer, and refuses a run off the device",
+            ok
+        );
     }
 
     // Capability gating over the REAL device (REQ-DRV-002): no capability → no bytes move; a write

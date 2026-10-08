@@ -77,6 +77,18 @@ pub trait BlockDevice {
     fn write_block(&mut self, idx: usize, buf: &[u8]) -> Result<(), StorageError>;
     /// Durability barrier: all prior writes are persistent once this returns.
     fn flush(&mut self) -> Result<(), StorageError>;
+    /// Read the run of blocks starting at `start` into `out` (a whole number of [`BLOCK_SIZE`]
+    /// blocks, ADR-248). A device that can move several blocks in one request overrides this; the
+    /// default reads them one by one, so every device answers the same bytes either way.
+    fn read_run(&self, start: usize, out: &mut [u8]) -> Result<(), StorageError> {
+        if !out.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(StorageError::BadBlockSize);
+        }
+        for (i, chunk) in out.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+            self.read_block(start + i, chunk)?;
+        }
+        Ok(())
+    }
 }
 
 /// A `&mut D` is as good a device as a `D`. Without this, a suite that wants to keep using a device after
@@ -94,6 +106,9 @@ impl<D: BlockDevice + ?Sized> BlockDevice for &mut D {
     }
     fn flush(&mut self) -> Result<(), StorageError> {
         (**self).flush()
+    }
+    fn read_run(&self, start: usize, out: &mut [u8]) -> Result<(), StorageError> {
+        (**self).read_run(start, out)
     }
 }
 
@@ -221,6 +236,20 @@ impl Journal {
         dev.flush()?;
         self.seq = le64(&rec, OFF_SEQ);
         Ok(true)
+    }
+
+    /// Read a run of home blocks in one device call where the device can (ADR-248).
+    pub fn read_run<D: BlockDevice>(
+        &self,
+        dev: &D,
+        start: usize,
+        out: &mut [u8],
+    ) -> Result<(), StorageError> {
+        let n = out.len() / BLOCK_SIZE;
+        if start < DATA_START || start + n > dev.num_blocks() {
+            return Err(StorageError::OutOfRange);
+        }
+        dev.read_run(start, out)
     }
 
     /// Read a home block's current contents (post-recovery, this is the consistent value).

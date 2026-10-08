@@ -433,7 +433,8 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
     // Latched: the ack stays set, the published pointers did not drift, and the software DMA
     // registry still refuses what it always refused - two independent layers, both alive.
     let residency = ctrl.smmu_enabled() && ctrl.strtab_base() == want_strtab;
-    let software_layer = blk.dev.dma_gate_refuses_unregistered() && blk.dev.dma_regions() == 2;
+    let software_layer = blk.dev.dma_gate_refuses_unregistered()
+        && blk.dev.dma_regions() == kernel_core::virtioblk::DMA_REGIONS;
     if !residency {
         bail!(
             "translation did not stay enabled / pointers drifted",

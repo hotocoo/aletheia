@@ -809,7 +809,8 @@ pub fn dmar_suite(
     n += 1;
     const NAME_14: &str = "enforcement remains ON, layered over the software DMA registry";
     let residency = ctrl.translation_enabled() && ctrl.rtaddr() == root;
-    let software_layer = dev.dma_gate_refuses_unregistered() && dev.dma_regions() == 2;
+    let software_layer = dev.dma_gate_refuses_unregistered()
+        && dev.dma_regions() == kernel_core::virtioblk::DMA_REGIONS;
     if !residency {
         bail!(
             "translation did not stay enabled / root pointer drifted",

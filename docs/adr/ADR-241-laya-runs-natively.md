@@ -65,8 +65,9 @@ which also proves `aletheiad`'s own HTTP client against the native front.
 
 **Not faster per decision.** The native forward pass is 1.8× slower than torch on Metal and 2.3×
 slower than torch on CPU; it is faster to start, smaller to install, and lighter in memory where
-the GPU holds the weights. The latency gap is an open row: fused attention and a cached local
-mask are the first candidates, and any change must keep the parity above. On a CPU-only machine
+the GPU holds the weights. The latency gap is an open row; where the time goes is measured in
+`docs/evidence/system1/native-profile-2026-10-08.md` (matmul is not the gap, candle's CPU
+elementwise path and scalar erf are), and any change must keep the parity above. On a CPU-only machine
 the f32 weights cost 1.95 GB resident. The binary is not yet a release asset (that is the release
 wave). The Python sidecar remains in the tree as the reference the parity script measures
 against, and as the fallback when no native binary is present. Fine-tuning still uses the

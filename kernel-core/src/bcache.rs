@@ -122,6 +122,39 @@ impl<D: BlockDevice> BlockDevice for BlockCache<D> {
         self.dev.num_blocks()
     }
 
+    /// A run (ADR-248): cached blocks answer from memory; each maximal stretch of misses goes to
+    /// the device as one run read and is then kept, exactly as `read_block` keeps a miss.
+    fn read_run(&self, start: usize, out: &mut [u8]) -> Result<(), StorageError> {
+        if !out.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(StorageError::BadBlockSize);
+        }
+        let n = out.len() / BLOCK_SIZE;
+        if start + n > self.dev.num_blocks() {
+            return Err(StorageError::OutOfRange);
+        }
+        let cached = |idx: usize| self.slots.borrow().iter().any(|s| s.idx == idx);
+        let mut i = 0;
+        while i < n {
+            if cached(start + i) {
+                self.read_block(start + i, &mut out[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE])?;
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            while j < n && !cached(start + j) {
+                j += 1;
+            }
+            let span = &mut out[i * BLOCK_SIZE..j * BLOCK_SIZE];
+            self.dev.read_run(start + i, span)?;
+            for (k, blk) in span.chunks_exact(BLOCK_SIZE).enumerate() {
+                self.count(|s| s.misses += 1);
+                self.insert(start + i + k, blk);
+            }
+            i = j;
+        }
+        Ok(())
+    }
+
     fn read_block(&self, idx: usize, buf: &mut [u8]) -> Result<(), StorageError> {
         if buf.len() != BLOCK_SIZE {
             return Err(StorageError::BadBlockSize);

@@ -75,6 +75,20 @@ impl<D: BlockDevice> DeviceGuard<D> {
         self.device.read_block(idx, buf).map_err(DeviceError::Io)
     }
 
+    /// Capability-gated run read (ADR-248): one authority check, then the device's own run read.
+    pub fn read_run(
+        &self,
+        engine: &CapEngine,
+        offered: &[CapToken],
+        start: usize,
+        out: &mut [u8],
+    ) -> Result<(), DeviceError> {
+        if !Self::authorized(engine, &self.read_action, offered) {
+            return Err(DeviceError::Denied);
+        }
+        self.device.read_run(start, out).map_err(DeviceError::Io)
+    }
+
     /// Capability-gated write. Fail-closed: without `write_action` authority NO bytes reach the device
     /// (an attenuated read-only client cannot mutate storage).
     pub fn write_block(
@@ -145,6 +159,12 @@ impl<D: BlockDevice> BlockDevice for AuthorizedDevice<'_, D> {
     fn flush(&mut self) -> Result<(), StorageError> {
         self.guard
             .flush(self.engine, self.offered)
+            .map_err(device_error)
+    }
+
+    fn read_run(&self, start: usize, out: &mut [u8]) -> Result<(), StorageError> {
+        self.guard
+            .read_run(self.engine, self.offered, start, out)
             .map_err(device_error)
     }
 }

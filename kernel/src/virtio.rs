@@ -138,7 +138,8 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
 
     // The device's own answer about its DMA gate: the suite asserts what the DRIVER can vouch for, never a
     // default (REQ-DRV-006, ADR-043).
-    let dma_gate_ok = dev.dma_gate_refuses_unregistered() && dev.dma_regions() == 2;
+    let dma_gate_ok = dev.dma_gate_refuses_unregistered()
+        && dev.dma_regions() == kernel_core::virtioblk::DMA_REGIONS;
     let mut dev = dev;
     match virtioblk::device_suite_gated(
         &mut dev,
@@ -152,7 +153,20 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             }
         },
     ) {
-        Ok(n) => Ok(n as u32),
+        Ok(n) => {
+            // Run reads (ADR-248), timed on this machine: the same 48 blocks one request per
+            // block, then in runs. Reported, never gated.
+            if let Some((one, run)) = dev.time_reads(kernel_core::storage::DATA_START + 30, 48) {
+                kprintln!(
+                    "[virtio] 48 blocks: {} us one request per block, {} us in runs of {} ({}x)",
+                    one / 1000,
+                    run / 1000,
+                    dev.run_blocks(),
+                    one / run.max(1)
+                );
+            }
+            Ok(n as u32)
+        }
         Err((idx, name)) => Err((idx as u32, name)),
     }
 }
