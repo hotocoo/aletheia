@@ -176,6 +176,8 @@ pub struct LineEditor {
     stash: Vec<u8>,
     /// The line most recently submitted, kept (with its capacity) until the next one.
     submitted: Vec<u8>,
+    /// A secret is being typed (ADR-244): the line is not remembered in history.
+    quiet: bool,
 }
 
 impl Default for LineEditor {
@@ -196,6 +198,7 @@ impl LineEditor {
             hist: None,
             stash: Vec::new(),
             submitted: Vec::with_capacity(MAX_LINE),
+            quiet: false,
         }
     }
 
@@ -459,7 +462,7 @@ impl LineEditor {
     /// Record a submitted line. Empty lines and an immediate repeat are not recorded: history exists
     /// to save typing, and a screen of identical entries saves none.
     fn remember(&mut self, line: &str) {
-        if line.trim().is_empty() {
+        if self.quiet || line.trim().is_empty() {
             return;
         }
         if self.history.last().map(|l| l.as_str()) == Some(line) {
@@ -480,6 +483,17 @@ impl LineEditor {
             entry.push_str(line);
             self.history.push(entry);
         }
+    }
+
+    /// While set, submitted lines are not remembered (a password is being typed, ADR-244).
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
+    /// Overwrite the last submitted line, so a password does not stay in memory after use.
+    pub fn wipe_submitted(&mut self) {
+        self.submitted.fill(0);
+        self.submitted.clear();
     }
 
     /// How many lines the history holds right now — observable so a suite can pin the bound
@@ -894,6 +908,11 @@ pub trait ShellHost {
     fn supervisor_escalations(&self) -> usize {
         0
     }
+    /// Fill `out` from the machine's entropy device (ADR-244): salts for console accounts.
+    /// Defaulted to a named refusal: a machine without one creates no account.
+    fn random(&self, _out: &mut [u8]) -> Result<(), &'static str> {
+        Err("this machine has no entropy device")
+    }
     /// Console bytes the target refused because the input ring was full (REQ-CON-002). A polled
     /// target reports 0. Surfaced rather than hidden: input loss the operator cannot see is input
     /// loss they will blame on the command they typed.
@@ -1171,6 +1190,13 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "leave the program in object NAME running in the background, handed TEXT; the console stays yours",
     ),
     ("jobs", "every program left running in the background"),
+    (
+        "passwd NAME",
+        "set NAME's console password (asked twice, not echoed); once one exists every session starts locked",
+    ),
+    ("login NAME", "unlock this console as NAME (the password is asked for, not echoed)"),
+    ("logout", "lock this console again"),
+    ("whoami", "who unlocked this console"),
     ("kill ID|NAME", "end a background job now, by its id or its name"),
     (
         "weight ID|NAME [N]",
@@ -2141,6 +2167,15 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
 
     let (verb, rest) = split_first(line);
     if verb.is_empty() {
+        return Outcome::Continue;
+    }
+    // The account record is nobody's to read or move from the console (ADR-244): its hashes are
+    // what an offline guess needs. Any argument naming it, a redirect included, is refused.
+    if rest
+        .split_whitespace()
+        .any(|t| t.trim_start_matches('>') == crate::login::RECORD)
+    {
+        out("refused: .users holds this machine's console accounts; only `passwd` changes it");
         return Outcome::Continue;
     }
     match verb {
@@ -3610,12 +3645,36 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
     Outcome::Continue
 }
 
+/// What the session knows about who is at the console (ADR-244).
+#[derive(Default)]
+struct Auth {
+    /// Whether the account record was looked for yet (on the first byte, when the namespace is at hand).
+    checked: bool,
+    /// Accounts exist and nobody has logged in: only `login` is answered.
+    locked: bool,
+    user: Option<String>,
+    guard: crate::login::Guard,
+    secret: Secret,
+}
+
+/// A password the session is waiting for.
+#[derive(Default)]
+enum Secret {
+    #[default]
+    None,
+    Login(String),
+    New(String),
+    Confirm(String, String),
+}
+
 /// A console session: the editor and the dispatcher wired together, driven one input byte at a
 /// time. The interactive loop and the live invariant suite run THIS, so what a gate proves is the
 /// same code a human types at.
 pub struct Session {
     editor: LineEditor,
     started: bool,
+    /// Who is at this console, and whether anyone must be (ADR-244).
+    auth: Auth,
     /// The browser's navigation state (ADR-156): the hosts this person trusts, the history, the
     /// page. One per console session, like the line editor.
     navigator: Navigator,
@@ -3632,6 +3691,7 @@ impl Session {
         Session {
             editor: LineEditor::new(),
             started: false,
+            auth: Auth::default(),
             navigator: Navigator::new(),
         }
     }
@@ -3735,21 +3795,50 @@ impl Session {
         dev: &mut D,
         out: &mut dyn FnMut(&str),
     ) -> Outcome {
+        self.check_accounts(fs, dev, out);
         if !self.started {
             self.started = true;
             out(PROMPT);
         }
-        match self.editor.feed_in_place(byte, out) {
+        // A password is typed without echo: only the line ending and a cancel reach the screen.
+        let secret = !matches!(self.auth.secret, Secret::None);
+        self.editor.set_quiet(secret);
+        let edit = if secret {
+            self.editor.feed_in_place(byte, &mut |s: &str| {
+                if s == "\r\n" || s.starts_with("^C") {
+                    out(s)
+                }
+            })
+        } else {
+            self.editor.feed_in_place(byte, out)
+        };
+        match edit {
             Edit::Pending | Edit::Line(_) => Outcome::Continue,
+            Edit::Complete if secret => Outcome::Continue,
             Edit::Complete => {
                 self.complete(fs, dev, out);
                 Outcome::Continue
             }
             Edit::Cancelled => {
+                self.auth.secret = Secret::None;
                 out(PROMPT);
                 Outcome::Continue
             }
+            Edit::Submitted if secret => {
+                let typed = String::from(self.editor.submitted());
+                self.editor.wipe_submitted();
+                self.secret_line(typed, host, fs, dev, out);
+                if matches!(self.auth.secret, Secret::None) {
+                    out(PROMPT);
+                } else {
+                    out("password: ");
+                }
+                Outcome::Continue
+            }
             Edit::Submitted => {
+                if let Some(o) = self.account_line(host, fs, dev, out) {
+                    return o;
+                }
                 let line = self.editor.submitted();
                 // The history the `history` command prints is the SAME list the up arrow walks:
                 // one list, so what the operator is shown and what they can recall cannot diverge.
@@ -3772,6 +3861,188 @@ impl Session {
                     out(PROMPT);
                 }
                 outcome
+            }
+        }
+    }
+
+    /// Look for the account record once, before the first prompt where the caller has the
+    /// namespace at hand (ADR-244): if it exists, this session starts locked and says so.
+    pub fn check_accounts<D: BlockDevice>(
+        &mut self,
+        fs: &Filesystem,
+        dev: &D,
+        out: &mut dyn FnMut(&str),
+    ) {
+        if self.auth.checked {
+            return;
+        }
+        self.auth.checked = true;
+        self.auth.locked = fs.read(dev, crate::login::RECORD).is_ok();
+        if self.auth.locked {
+            out("this console is locked: `login NAME`\r\n");
+        }
+    }
+
+    /// The account commands, which need the session (ADR-244): `login`, `logout`, `passwd`,
+    /// `whoami`. A locked console answers nothing else. `None` lets the line through to `execute`.
+    fn account_line<H: ShellHost, D: BlockDevice>(
+        &mut self,
+        host: &H,
+        fs: &mut Filesystem,
+        dev: &mut D,
+        out: &mut dyn FnMut(&str),
+    ) -> Option<Outcome> {
+        let line = self.editor.submitted();
+        let (verb, rest) = split_first(line);
+        // Borrowed: only a line that starts a login or a passwd copies the name (storm discipline,
+        // ADR-089: every other line costs this path nothing).
+        let name = rest.trim();
+        let say = |out: &mut dyn FnMut(&str), s: &str| {
+            out(s);
+            out("\r\n");
+        };
+        match verb {
+            "login" => {
+                let now = host.uptime_ns() / 1_000_000_000;
+                if let Some(w) = self.auth.guard.wait(now) {
+                    outf!(
+                        &mut |s: &str| say(out, s),
+                        "login refused: too many failures; try again in {} s",
+                        w
+                    );
+                } else if name.is_empty() {
+                    say(out, "usage: login NAME");
+                } else {
+                    self.auth.secret = Secret::Login(String::from(name));
+                    out("password: ");
+                    return Some(Outcome::Continue);
+                }
+            }
+            "logout" if !self.auth.locked => {
+                self.auth.user = None;
+                self.auth.locked = fs.read(dev, crate::login::RECORD).is_ok();
+                say(
+                    out,
+                    if self.auth.locked {
+                        "logged out; this console is locked"
+                    } else {
+                        "no accounts on this machine; nothing to log out of"
+                    },
+                );
+            }
+            "whoami" if !self.auth.locked => match &self.auth.user {
+                Some(u) => outf!(&mut |s: &str| say(out, s), "{}", u),
+                None => say(
+                    out,
+                    "nobody: this machine has no accounts (`passwd NAME` creates one)",
+                ),
+            },
+            "passwd" if !self.auth.locked => {
+                if !authorize(host, ShellAction::Write, &mut |s: &str| say(out, s)) {
+                } else if name.is_empty() {
+                    say(out, "usage: passwd NAME");
+                } else if let Err(why) = host.random(&mut [0u8; 1]) {
+                    outf!(
+                        &mut |s: &str| say(out, s),
+                        "passwd refused: {}; a salt made from a clock is refused",
+                        why
+                    );
+                } else if !crate::login::valid_name(name) {
+                    outf!(
+                        &mut |s: &str| say(out, s),
+                        "passwd refused: {}",
+                        crate::login::Refusal::BadName.name()
+                    );
+                } else {
+                    self.auth.secret = Secret::New(String::from(name));
+                    out("password: ");
+                    return Some(Outcome::Continue);
+                }
+            }
+            _ if self.auth.locked => say(out, "this console is locked: `login NAME`"),
+            _ => return None,
+        }
+        out(PROMPT);
+        Some(Outcome::Continue)
+    }
+
+    /// A line typed while a password was asked for.
+    fn secret_line<H: ShellHost, D: BlockDevice>(
+        &mut self,
+        typed: String,
+        host: &H,
+        fs: &mut Filesystem,
+        dev: &mut D,
+        out: &mut dyn FnMut(&str),
+    ) {
+        let mut say = |s: &str| {
+            out(s);
+            out("\r\n");
+        };
+        match core::mem::take(&mut self.auth.secret) {
+            Secret::None => {}
+            Secret::Login(name) => {
+                let now = host.uptime_ns() / 1_000_000_000;
+                let record = fs
+                    .read(dev, crate::login::RECORD)
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                let ok = crate::login::verify(&record, &name, &typed);
+                self.auth.guard.record(ok, now);
+                if ok {
+                    say(&alloc::format!("welcome, {name}"));
+                    self.auth.user = Some(name);
+                    self.auth.locked = false;
+                } else {
+                    say("login refused: that name and password do not match");
+                }
+            }
+            Secret::New(name) => {
+                if typed.is_empty() {
+                    say(&alloc::format!(
+                        "passwd refused: {}",
+                        crate::login::Refusal::EmptyPassword.name()
+                    ));
+                } else {
+                    self.auth.secret = Secret::Confirm(name, typed);
+                    say("again, to confirm:");
+                }
+            }
+            Secret::Confirm(name, first) => {
+                if !crate::login::same(first.as_bytes(), typed.as_bytes()) {
+                    say("passwd refused: the two passwords differ; nothing changed");
+                    return;
+                }
+                let mut salt = [0u8; crate::login::SALT_LEN];
+                if let Err(why) = host.random(&mut salt) {
+                    say(&alloc::format!("passwd refused: {why}"));
+                    return;
+                }
+                let new_line = match crate::login::line(&name, &typed, &salt) {
+                    Ok(l) => l,
+                    Err(why) => {
+                        say(&alloc::format!("passwd refused: {}", why.name()));
+                        return;
+                    }
+                };
+                let record = fs
+                    .read(dev, crate::login::RECORD)
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                let next = crate::login::upsert(&record, &name, &new_line);
+                match fs.replace(dev, crate::login::RECORD, next.as_bytes()) {
+                    Ok(_) => {
+                        say(&alloc::format!(
+                            "passwd: {name} set; every console session on this machine now starts locked"
+                        ));
+                        if self.auth.user.is_none() {
+                            self.auth.user = Some(name);
+                        }
+                    }
+                    Err(e) => say(&fs_error(e)),
+                }
             }
         }
     }
@@ -4009,6 +4280,7 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
     // The first settle happens BEFORE the banner's prompt: a panel that opens with the desktop
     // shows the namespace as it is, not as it will be once the operator types something.
     let _ = service(ServicePhase::Settled, fs, dev, &mut *out);
+    session.check_accounts(fs, dev, out);
     session.prompt(out);
     loop {
         // The anomaly watch reads the machine's counters on every pass, typed or idle (ADR-242).

@@ -1421,3 +1421,151 @@ fn an_autostart_program_is_started_in_the_background_at_the_next_start() {
         "{log}"
     );
 }
+
+/// A host with an entropy device, so accounts can be made (ADR-244).
+struct AccountHost {
+    clock_secs: std::cell::Cell<u64>,
+}
+
+impl ShellHost for AccountHost {
+    fn arch(&self) -> &str {
+        "test-host"
+    }
+    fn uptime_ns(&self) -> u64 {
+        self.clock_secs.get() * 1_000_000_000
+    }
+    fn free_frames(&self) -> usize {
+        1
+    }
+    fn total_frames(&self) -> usize {
+        1
+    }
+    fn privilege(&self) -> u64 {
+        1
+    }
+    fn authorize(&self, _: ShellAction) -> bool {
+        true
+    }
+    fn random(&self, out: &mut [u8]) -> Result<(), &'static str> {
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = 0x5A ^ i as u8;
+        }
+        Ok(())
+    }
+}
+
+fn feed_as(
+    host: &AccountHost,
+    session: &mut Session,
+    input: &str,
+    fs: &mut Filesystem,
+    dev: &mut MemBlockDevice,
+) -> String {
+    let mut log = String::new();
+    for b in input.bytes() {
+        session.feed(b, host, fs, dev, &mut |s| log.push_str(s));
+    }
+    log
+}
+
+/// ADR-244: a machine with no account runs open; the first `passwd` makes every later session
+/// start locked; a password is never echoed nor remembered; a wrong one is refused and failures
+/// back off; the record is readable by no command.
+#[test]
+fn accounts_lock_the_console_and_never_show_a_password() {
+    let host = AccountHost {
+        clock_secs: std::cell::Cell::new(100),
+    };
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+
+    // Open machine: commands run; `whoami` says nobody; the account is created.
+    let mut s1 = Session::new();
+    let log = feed_as(
+        &host,
+        &mut s1,
+        "whoami\rpasswd ada\rhunter2 is long\rhunter2 is long\rhistory\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(
+        log.contains("nobody: this machine has no accounts"),
+        "{log}"
+    );
+    assert!(log.contains("passwd: ada set"), "{log}");
+    assert!(
+        !log.contains("hunter2"),
+        "a password was echoed or remembered: {log}"
+    );
+
+    // A mismatch changes nothing.
+    let log = feed_as(&host, &mut s1, "passwd bob\rone\rtwo\r", &mut fs, &mut dev);
+    assert!(
+        log.contains("the two passwords differ; nothing changed"),
+        "{log}"
+    );
+
+    // A new session on the same machine starts locked and answers only `login`.
+    let mut s2 = Session::new();
+    let log = feed_as(&host, &mut s2, "ls\rcat .users\r", &mut fs, &mut dev);
+    assert!(log.contains("this console is locked"), "{log}");
+    assert!(!log.contains(".users") || !log.contains(":20000:"), "{log}");
+    assert_eq!(log.matches("this console is locked").count(), 3, "{log}");
+
+    // Wrong passwords: refused, and after three the next attempt must wait.
+    let log = feed_as(
+        &host,
+        &mut s2,
+        "login ada\rnope\rlogin ada\rnope\rlogin ada\rnope\rlogin ada\rnope\rlogin ada\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert_eq!(
+        log.matches("login refused: that name and password do not match")
+            .count(),
+        4,
+        "{log}"
+    );
+    assert!(log.contains("too many failures; try again in 2 s"), "{log}");
+    assert!(!log.contains("nope"), "{log}");
+
+    // An unknown name is refused the same way.
+    host.clock_secs.set(200);
+    let log = feed_as(
+        &host,
+        &mut s2,
+        "login eve\rhunter2 is long\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(
+        log.contains("login refused: that name and password do not match"),
+        "{log}"
+    );
+
+    // The right password opens it; the record is still refused to every command; logout locks.
+    host.clock_secs.set(400);
+    let log = feed_as(
+        &host,
+        &mut s2,
+        "login ada\rhunter2 is long\rwhoami\rcat .users\rcp .users x\rls > .users\rlogout\rls\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(log.contains("welcome, ada"), "{log}");
+    assert!(log.contains("\r\nada\r\n"), "{log}");
+    assert_eq!(
+        log.matches("refused: .users holds this machine's console accounts")
+            .count(),
+        3,
+        "{log}"
+    );
+    assert!(log.contains("logged out; this console is locked"), "{log}");
+    assert!(
+        log.ends_with("this console is locked: `login NAME`\r\naletheia> "),
+        "{log:?}"
+    );
+    assert!(!log.contains("hunter2"), "{log}");
+    assert!(!s2.history().iter().any(|l| l.contains("hunter2")));
+}

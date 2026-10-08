@@ -76,6 +76,7 @@ pub mod lethe;
 pub mod lethe_contract;
 pub mod lethed;
 pub mod linebuf;
+pub mod login;
 pub mod memattr;
 pub mod mlrisk;
 pub mod mlrisk_contract;

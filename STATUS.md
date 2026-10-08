@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — console accounts (ADR-244)
+
+- `kernel_core::login` + console session: `passwd NAME` (twice, no echo) writes `.users`
+  (PBKDF2-HMAC-SHA256, 20 000 rounds, 16-byte salt from virtio-rng/RDRAND); then every session
+  starts locked until `login NAME`; constant-time, name-blind refusals; back-off after 3 failures;
+  `.users` refused to every command; `logout`, `whoami`.
+- Live on all three CPUs across a reboot (console-e2e); kernel-core 945 passed.
+
 ### 2026-10-08 — the block cache, measured against the optimum (ADR-243)
 
 - Read traces of the namespace workload simulated under CLOCK (equal to the real cache), LRU,

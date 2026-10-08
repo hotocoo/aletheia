@@ -145,6 +145,22 @@ pub fn resolve(
     }
 }
 
+/// Fresh bytes from the machine's entropy source (ADR-244): salts for console accounts. Refused
+/// by name without a device, and when a draw is all one byte value.
+pub fn random(out: &mut [u8]) -> Result<(), &'static str> {
+    // SAFETY: main thread only (the console's own thread); the device outlives the machine.
+    match unsafe { (*core::ptr::addr_of_mut!(RNG)).as_mut() } {
+        Some(rng) => {
+            entropy::EntropySource::fill(rng, out).map_err(|_| "the entropy device did not answer")
+        }
+        None => Err("this machine has no entropy device"),
+    }?;
+    if out.len() > 1 && out.iter().all(|&b| b == out[0]) {
+        return Err("the entropy source produced no entropy");
+    }
+    Ok(())
+}
+
 /// Open a TLS 1.3 conversation with `ip:port` as `server_name`, trusting exactly the Ed25519 root
 /// `pin`, at the time this machine's own clock reads (ADR-148), and carry `request` and its
 /// answer protected (ADR-151).

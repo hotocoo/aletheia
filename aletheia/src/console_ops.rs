@@ -127,6 +127,10 @@ fn risk_of(name: &str) -> Risk {
         "start" | "kill" => Risk::Destructive,
         // `weight` changes how running programs share the CPU (ADR-239): the same answer.
         "weight" => Risk::Destructive,
+        // Accounts (ADR-244): setting a password, logging in or out changes who may use the
+        // console, and a password is never something a model types: a human answers for all three.
+        "passwd" | "login" | "logout" => Risk::Destructive,
+        "whoami" => Risk::Safe,
         // `jobs` only lists what is running.
         "jobs" => Risk::Safe,
         "help" | "ver" | "arch" | "uptime" | "mem" | "faults" | "mlstat" | "lsblk" | "df"
@@ -379,6 +383,10 @@ mod tests {
                     | "start"
                     | "kill"
                     | "weight"
+                    | "passwd"
+                    | "login"
+                    | "logout"
+                    | "whoami"
                     | "jobs"
             );
             assert!(named, "{verb} has no explicit risk classification");
