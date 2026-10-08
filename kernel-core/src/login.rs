@@ -37,6 +37,39 @@ pub const MAX_NAME: usize = 32;
 pub const FREE_FAILURES: u32 = 3;
 const MAX_BACKOFF_SECS: u64 = 300;
 
+/// What an account may do at the console (ADR-247). The first account is always `Admin`, and a
+/// machine with no accounts runs as `Admin` (as before ADR-244).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Role {
+    /// Everything, including other accounts and the machine's power and clock.
+    #[default]
+    Admin,
+    /// Uses the machine: reads, writes, runs programs, changes the display. Not reboot, halt,
+    /// overclock, nor anyone else's account.
+    Operator,
+    /// Reads only.
+    Viewer,
+}
+
+impl Role {
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::Operator => "operator",
+            Role::Viewer => "viewer",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Role> {
+        match s {
+            "admin" => Some(Role::Admin),
+            "operator" => Some(Role::Operator),
+            "viewer" => Some(Role::Viewer),
+            _ => None,
+        }
+    }
+}
+
 /// PBKDF2-HMAC-SHA256 with one 32-byte output block (RFC 8018 section 5.2).
 pub fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
     let mut msg = [0u8; SALT_LEN + 4];
@@ -111,8 +144,13 @@ fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
     Some(out)
 }
 
-/// One account line for `name`, hashing `password` with `salt`.
-pub fn line(name: &str, password: &str, salt: &[u8; SALT_LEN]) -> Result<String, Refusal> {
+/// One account line for `name` with `role`, hashing `password` with `salt`.
+pub fn line(
+    name: &str,
+    password: &str,
+    salt: &[u8; SALT_LEN],
+    role: Role,
+) -> Result<String, Refusal> {
     if !valid_name(name) {
         return Err(Refusal::BadName);
     }
@@ -121,9 +159,10 @@ pub fn line(name: &str, password: &str, salt: &[u8; SALT_LEN]) -> Result<String,
     }
     let h = pbkdf2_sha256(password.as_bytes(), salt, ITERATIONS);
     Ok(alloc::format!(
-        "{name}:{ITERATIONS}:{}:{}\n",
+        "{name}:{ITERATIONS}:{}:{}:{}\n",
         hex(salt),
-        hex(&h)
+        hex(&h),
+        role.name()
     ))
 }
 
@@ -138,29 +177,52 @@ pub fn upsert(record: &str, name: &str, new_line: &str) -> String {
     out
 }
 
-/// Whether `password` opens `name` in `record`. An unknown name, a malformed line or a wrong
-/// password are all `false`, and all cost the same hashing work.
-pub fn verify(record: &str, name: &str, password: &str) -> bool {
-    let found = record.lines().find_map(|l| {
+/// `name`'s line in `record`: rounds, salt, hash and role. A line without a role field predates
+/// roles (ADR-244) and was its machine's only account, so it reads as `Admin`.
+fn parse_line(record: &str, name: &str) -> Option<(u32, [u8; SALT_LEN], [u8; 32], Role)> {
+    record.lines().find_map(|l| {
         let mut f = l.split(':');
         let (n, it, salt, hash) = (f.next()?, f.next()?, f.next()?, f.next()?);
-        if n != name || f.next().is_some() {
+        if n != name {
+            return None;
+        }
+        let role = match f.next() {
+            None => Role::Admin,
+            Some(r) => Role::parse(r)?,
+        };
+        if f.next().is_some() {
             return None;
         }
         Some((
             it.parse::<u32>().ok()?,
             unhex::<SALT_LEN>(salt)?,
             unhex::<32>(hash)?,
+            role,
         ))
-    });
+    })
+}
+
+/// The role `name` holds in `record`, if it has a well-formed line.
+pub fn role_of(record: &str, name: &str) -> Option<Role> {
+    parse_line(record, name).map(|(_, _, _, r)| r)
+}
+
+/// The role `password` opens `name` with in `record`, or `None`. An unknown name, a malformed
+/// line or a wrong password are all `None`, and all cost the same hashing work.
+pub fn verify(record: &str, name: &str, password: &str) -> Option<Role> {
+    let found = parse_line(record, name);
     // The dummy is never a real hash of anything: a name with no record always fails, after the
     // same work a real check costs.
-    let (iterations, salt, want, real) = match found {
-        Some((it, s, h)) if it >= 1 => (it, s, h, true),
-        _ => (ITERATIONS, [0u8; SALT_LEN], [0xA5u8; 32], false),
+    let (iterations, salt, want, role) = match found {
+        Some((it, s, h, r)) if it >= 1 => (it, s, h, Some(r)),
+        _ => (ITERATIONS, [0u8; SALT_LEN], [0xA5u8; 32], None),
     };
     let got = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
-    same(&got, &want) && real && !password.is_empty()
+    if same(&got, &want) && !password.is_empty() {
+        role
+    } else {
+        None
+    }
 }
 
 /// The names in `record`, for `whoami`/listing without exposing anything else.
@@ -221,34 +283,45 @@ mod tests {
     #[test]
     fn a_record_opens_for_its_password_only() {
         let salt = [7u8; SALT_LEN];
-        let rec = line("ada", "correct horse", &salt).unwrap();
-        assert!(verify(&rec, "ada", "correct horse"));
-        assert!(!verify(&rec, "ada", "correct hors"));
-        assert!(!verify(&rec, "bob", "correct horse"));
-        assert!(!verify(&rec, "ada", ""));
-        assert!(!verify("ada:x:y:z\n", "ada", "anything"));
+        let rec = line("ada", "correct horse", &salt, Role::Operator).unwrap();
+        assert_eq!(verify(&rec, "ada", "correct horse"), Some(Role::Operator));
+        assert_eq!(verify(&rec, "ada", "correct hors"), None);
+        assert_eq!(verify(&rec, "bob", "correct horse"), None);
+        assert_eq!(verify(&rec, "ada", ""), None);
+        assert_eq!(verify("ada:x:y:z\n", "ada", "anything"), None);
+        // A line from before roles (ADR-244) reads as the admin it was.
+        let old = rec.replace(":operator", "");
+        assert_eq!(verify(&old, "ada", "correct horse"), Some(Role::Admin));
+        assert_eq!(
+            verify(&rec.replace(":operator", ":root"), "ada", "correct horse"),
+            None
+        );
         assert!(!rec.contains("correct"));
     }
 
     #[test]
     fn upsert_replaces_one_account_and_keeps_the_others() {
-        let a = line("ada", "one", &[1; SALT_LEN]).unwrap();
-        let b = line("bob", "two", &[2; SALT_LEN]).unwrap();
+        let a = line("ada", "one", &[1; SALT_LEN], Role::Admin).unwrap();
+        let b = line("bob", "two", &[2; SALT_LEN], Role::Viewer).unwrap();
         let rec = upsert(&upsert("", "ada", &a), "bob", &b);
-        let a2 = line("ada", "three", &[3; SALT_LEN]).unwrap();
+        let a2 = line("ada", "three", &[3; SALT_LEN], Role::Admin).unwrap();
         let rec = upsert(&rec, "ada", &a2);
         assert_eq!(names(&rec), ["bob", "ada"]);
-        assert!(verify(&rec, "ada", "three") && !verify(&rec, "ada", "one"));
-        assert!(verify(&rec, "bob", "two"));
+        assert!(verify(&rec, "ada", "three").is_some() && verify(&rec, "ada", "one").is_none());
+        assert_eq!(verify(&rec, "bob", "two"), Some(Role::Viewer));
+        assert_eq!(role_of(&rec, "bob"), Some(Role::Viewer));
     }
 
     #[test]
     fn names_and_passwords_are_refused_before_hashing() {
         let s = [0; SALT_LEN];
-        assert_eq!(line("", "p", &s), Err(Refusal::BadName));
-        assert_eq!(line("a:b", "p", &s), Err(Refusal::BadName));
-        assert_eq!(line(&"x".repeat(33), "p", &s), Err(Refusal::BadName));
-        assert_eq!(line("ok", "", &s), Err(Refusal::EmptyPassword));
+        assert_eq!(line("", "p", &s, Role::Admin), Err(Refusal::BadName));
+        assert_eq!(line("a:b", "p", &s, Role::Admin), Err(Refusal::BadName));
+        assert_eq!(
+            line(&"x".repeat(33), "p", &s, Role::Admin),
+            Err(Refusal::BadName)
+        );
+        assert_eq!(line("ok", "", &s, Role::Admin), Err(Refusal::EmptyPassword));
     }
 
     #[test]

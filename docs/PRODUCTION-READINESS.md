@@ -61,7 +61,7 @@ boots through OVMF, Linux skips firmware), idle CPU 0.0 vs 0.4-0.9 %, typed roun
 | Native 3A-class gaming | Not started | Needs the GPU stack, input latency work, and a userland that does not exist yet |
 | Virtualization (Aletheia as host) | Not started | No VMX/SVM/EL2 host support |
 | Silicon overclocking | Contract and grant-only band exist (ADR-076/184); no frequency or voltage ever changed on real silicon | QEMU has no actuator |
-| Per-user authority | Accounts gate the console, but every account holds the same capabilities | Least privilege between people |
+| Per-user authority | Fixed console roles since ADR-247 (admin / operator / viewer); no per-object permissions, and programs a session runs carry no account | Least privilege between people |
 | System-1 decision latency | Native runtime 1.8-2.3x slower per decision than torch (load 70x faster, memory lower) | A first-class runtime should not be the slower one |
 | Training | Fine-tuning still needs Python + torch | Only serving is native |
 | Userland | Seeded Rust programs over a small syscall ABI; no POSIX layer, no package manager | Workstation and development workloads need an ecosystem |

@@ -1271,6 +1271,13 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — console roles (ADR-247)
+
+- Account lines carry a role (`admin`, `operator`, `viewer`); `ShellAction::allowed_for(role)` gates
+  every console action before the machine's capabilities (`execute_as`); first account is admin;
+  only admins manage other accounts or roles; everyone may change their own password; `ls`/`find`
+  skip `.users`. Pre-role lines read as admin.
+
 ### 2026-10-08 — the lock covers the desktop; a pinned model is that model; v0.7.1 (ADR-246)
 
 - Post-release review of v0.7.0: a locked console still opened objects clicked in the desktop's

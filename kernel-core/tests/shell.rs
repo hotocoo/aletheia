@@ -1554,7 +1554,7 @@ fn accounts_lock_the_console_and_never_show_a_password() {
         &mut dev,
     );
     assert!(log.contains("welcome, ada"), "{log}");
-    assert!(log.contains("\r\nada\r\n"), "{log}");
+    assert!(log.contains("\r\nada (admin)\r\n"), "{log}");
     assert_eq!(
         log.matches("refused: .users holds this machine's console accounts")
             .count(),
@@ -1665,4 +1665,80 @@ fn a_locked_console_serves_the_desktop_nothing() {
     assert!(printed);
     assert!(log.contains("files: refused: .users holds this machine's console accounts"));
     assert_eq!(listed, ["secret"]);
+}
+
+/// ADR-247: roles. The first account is an admin; an admin creates an operator and a viewer; a
+/// viewer can only read; an operator can write but not halt; neither can touch another account.
+#[test]
+fn roles_limit_what_an_account_may_do() {
+    let host = AccountHost {
+        clock_secs: std::cell::Cell::new(10),
+    };
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let mut admin = Session::new();
+    let log = feed_as(
+        &host,
+        &mut admin,
+        "passwd root viewer\rpasswd root\ra\ra\rpasswd op operator\rb\rb\rpasswd eye viewer\rc\rc\rpasswd x superuser\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(
+        log.contains("passwd refused: the first account on a machine is an admin"),
+        "{log}"
+    );
+    assert!(log.contains("passwd: root set (admin)"), "{log}");
+    assert!(log.contains("passwd: op set (operator)"), "{log}");
+    assert!(log.contains("passwd: eye set (viewer)"), "{log}");
+    assert!(
+        log.contains("passwd refused: a role is admin, operator or viewer"),
+        "{log}"
+    );
+
+    let mut viewer = Session::new();
+    let log = feed_as(
+        &host,
+        &mut viewer,
+        "login eye\rc\rwhoami\rls\rwrite note hi\rhalt\rpasswd op\rpasswd eye admin\rpasswd eye\rd\rd\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(log.contains("welcome, eye (viewer)"), "{log}");
+    assert!(log.contains("\r\neye (viewer)\r\n"), "{log}");
+    assert!(
+        log.contains("permission denied: console.write (not for the viewer role)"),
+        "{log}"
+    );
+    assert!(
+        log.contains("permission denied: system.halt (not for the viewer role)"),
+        "{log}"
+    );
+    assert_eq!(
+        log.matches("only an admin sets another account's password or any role")
+            .count(),
+        2,
+        "{log}"
+    );
+    // Changing one's own password is allowed whatever the role, and keeps the role.
+    assert!(log.contains("passwd: eye set (viewer)"), "{log}");
+    // The account record is not listed.
+    assert!(!log.contains(".users"), "{log}");
+
+    let mut op = Session::new();
+    let log = feed_as(
+        &host,
+        &mut op,
+        "login op\rb\rwrite note hi\rcat note\rhalt\rpasswd op\rbb\rbb\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(log.contains("welcome, op (operator)"), "{log}");
+    assert!(log.contains("\r\nhi\r\n"), "{log}");
+    assert!(
+        log.contains("permission denied: system.halt (not for the operator role)"),
+        "{log}"
+    );
+    assert!(log.contains("passwd: op set (operator)"), "{log}");
 }

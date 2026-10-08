@@ -755,6 +755,20 @@ impl ShellAction {
     fn label(self) -> &'static str {
         self.capability()
     }
+
+    /// Whether an account with `role` may take this action at all (ADR-247), before the machine's
+    /// own capabilities are asked.
+    pub fn allowed_for(self, role: crate::login::Role) -> bool {
+        use crate::login::Role;
+        match role {
+            Role::Admin => true,
+            Role::Operator => !matches!(
+                self,
+                ShellAction::Reboot | ShellAction::Halt | ShellAction::Overclock
+            ),
+            Role::Viewer => self == ShellAction::Inspect,
+        }
+    }
 }
 
 /// Check one console action against explicit kernel capabilities.
@@ -1191,8 +1205,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("jobs", "every program left running in the background"),
     (
-        "passwd NAME",
-        "set NAME's console password (asked twice, not echoed); once one exists every session starts locked",
+        "passwd NAME [ROLE]",
+        "set NAME's console password (asked twice, not echoed) and role: admin, operator or viewer; once one exists every session starts locked",
     ),
     ("login NAME", "unlock this console as NAME (the password is asked for, not echoed)"),
     ("logout", "lock this console again"),
@@ -1473,7 +1487,21 @@ fn overclock(rest: &str, out: &mut dyn FnMut(&str)) {
     }
 }
 
-fn authorize<H: ShellHost>(host: &H, action: ShellAction, out: &mut dyn FnMut(&str)) -> bool {
+fn authorize<H: ShellHost>(
+    host: &H,
+    role: crate::login::Role,
+    action: ShellAction,
+    out: &mut dyn FnMut(&str),
+) -> bool {
+    if !action.allowed_for(role) {
+        outf!(
+            out,
+            "permission denied: {} (not for the {} role)",
+            action.label(),
+            role.name()
+        );
+        return false;
+    }
     if host.authorize(action) {
         true
     } else {
@@ -2164,6 +2192,31 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
     nav: &mut Navigator,
     out: &mut dyn FnMut(&str),
 ) -> Outcome {
+    execute_as(
+        line,
+        host,
+        fs,
+        dev,
+        history,
+        nav,
+        crate::login::Role::Admin,
+        out,
+    )
+}
+
+/// [`execute`] for an account holding `role` (ADR-247): every action is checked against the role
+/// before the machine's capabilities.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_as<H: ShellHost, D: BlockDevice>(
+    line: &str,
+    host: &H,
+    fs: &mut Filesystem,
+    dev: &mut D,
+    history: &[String],
+    nav: &mut Navigator,
+    role: crate::login::Role,
+    out: &mut dyn FnMut(&str),
+) -> Outcome {
     // The resident advisor ages with the machine, not with the boot (REQ-ML-003, ADR-056). Every
     // line a human types is a moment the machine is still up, so it is also a moment the cell census
     // must move on: this is what makes `mlstat`'s tick count and continuity span grow through a
@@ -2192,7 +2245,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "ver" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             out(VERSION);
@@ -2209,7 +2262,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             out("user-mode shell over a syscall ABI, and nothing here is production-ready.");
         }
         "arch" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             outf!(
@@ -2221,7 +2274,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             );
         }
         "uptime" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             let ns = host.uptime_ns();
@@ -2236,7 +2289,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             );
         }
         "mem" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             let (free, total) = (host.free_frames(), host.total_frames());
@@ -2265,7 +2318,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "date" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             match host.wall_clock() {
@@ -2287,13 +2340,13 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "display" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             report_display(out);
         }
         "resolution" => {
-            if !authorize(host, ShellAction::Display, out) {
+            if !authorize(host, role, ShellAction::Display, out) {
                 return Outcome::Continue;
             }
             let (mode, extra) = split_first(rest);
@@ -2312,7 +2365,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "autostart" => {
-            if !authorize(host, ShellAction::Schedule, out) {
+            if !authorize(host, role, ShellAction::Schedule, out) {
                 return Outcome::Continue;
             }
             let (op, name) = split_first(rest);
@@ -2362,7 +2415,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "persona" => {
-            if !authorize(host, ShellAction::Display, out) {
+            if !authorize(host, role, ShellAction::Display, out) {
                 return Outcome::Continue;
             }
             let arg = rest.trim();
@@ -2385,7 +2438,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "refresh" => {
-            if !authorize(host, ShellAction::Display, out) {
+            if !authorize(host, role, ShellAction::Display, out) {
                 return Outcome::Continue;
             }
             let arg = rest.trim();
@@ -2416,7 +2469,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "boot" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             match crate::boottime::recorded() {
@@ -2432,7 +2485,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "caps" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             let mut n = 0usize;
@@ -2457,7 +2510,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "net" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             match host.net_facts() {
@@ -2483,7 +2536,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "faults" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             outf!(
@@ -2497,7 +2550,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         // LIVE from the session the machine is running (ALET-P2-021's hardware rung, ADR-080).
         // A target with no desktop says so — absence is named, never rendered as zeros.
         "input" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             match host.input_facts() {
@@ -2604,13 +2657,13 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         // instead of a claim a README makes on its behalf (REQ-ML-003, ADR-056). Everything printed
         // is read live from the resident advisor at the moment the line is typed.
         "mlstat" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             report_risk_advisor(out);
         }
         "run" => {
-            if !authorize(host, ShellAction::Schedule, out) {
+            if !authorize(host, role, ShellAction::Schedule, out) {
                 return Outcome::Continue;
             }
             let (name, args) = split_first(rest);
@@ -2634,7 +2687,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "start" => {
-            if !authorize(host, ShellAction::Schedule, out) {
+            if !authorize(host, role, ShellAction::Schedule, out) {
                 return Outcome::Continue;
             }
             let (name, args) = split_first(rest);
@@ -2655,7 +2708,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "jobs" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             let mut any = false;
@@ -2675,7 +2728,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "weight" => {
-            if !authorize(host, ShellAction::Schedule, out) {
+            if !authorize(host, role, ShellAction::Schedule, out) {
                 return Outcome::Continue;
             }
             let (target, n) = split_first(rest);
@@ -2711,7 +2764,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "kill" => {
-            if !authorize(host, ShellAction::Schedule, out) {
+            if !authorize(host, role, ShellAction::Schedule, out) {
                 return Outcome::Continue;
             }
             let target = rest.trim();
@@ -2735,7 +2788,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "together" => {
-            if !authorize(host, ShellAction::Schedule, out) {
+            if !authorize(host, role, ShellAction::Schedule, out) {
                 return Outcome::Continue;
             }
             let names: Vec<&str> = rest.split_whitespace().collect();
@@ -2761,19 +2814,19 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "tasks" => {
-            if !authorize(host, ShellAction::Schedule, out) {
+            if !authorize(host, role, ShellAction::Schedule, out) {
                 return Outcome::Continue;
             }
             run_tasks(host, out);
         }
         "power" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             report_power(out);
         }
         "oc" => {
-            if !authorize(host, ShellAction::Overclock, out) {
+            if !authorize(host, role, ShellAction::Overclock, out) {
                 return Outcome::Continue;
             }
             overclock(rest, out);
@@ -2781,7 +2834,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         "tcp" => {
             // A network conversation is a WRITE to the world, not an inspection of this machine:
             // it announces this host to a peer that did not ask. Authorized as such.
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let (addr, tail) = split_first(rest);
@@ -2817,7 +2870,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         "tls" => {
             // A protected conversation is still a WRITE to the world: it announces this host to
             // a peer and sends it bytes. Authorized as such.
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let (addr, tail) = split_first(rest);
@@ -2874,7 +2927,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         "https" => {
             // An HTTP request is a protected conversation with a peer: a WRITE to the world, like
             // `tls`. Authorized as such.
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let (addr, tail) = split_first(rest);
@@ -2963,7 +3016,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             // A query announces this machine to a server, like `tcp`: authorized as a WRITE to the
             // world. The answer is printed, not trusted: `trust` still takes the address from the
             // operator, and TLS still checks the pinned root (ADR-176).
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let (name, tail) = split_first(rest);
@@ -3027,7 +3080,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             // Choosing whom to ask changes what this machine will be told: a WRITE, approved like one.
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let Some(ip) = parse_ipv4_address(addr) else {
@@ -3057,7 +3110,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         "trust" => {
             // Choosing whom to trust changes what this machine will speak to: a WRITE, approved
             // like one.
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let (name, tail) = split_first(rest);
@@ -3144,7 +3197,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "follow" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let Ok(n) = rest.trim().parse::<usize>() else {
@@ -3177,7 +3230,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "block" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let name = rest.trim();
@@ -3194,14 +3247,14 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "forget" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             nav.forget();
             out("forgotten: history, page and links; trust and block lists kept");
         }
         "go" | "back" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let resolved = if verb == "back" {
@@ -3241,7 +3294,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             browse(host, nav, resolved, out);
         }
         "lsblk" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             let n = dev.num_blocks();
@@ -3254,7 +3307,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             );
         }
         "df" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             match fs.free_blocks(dev) {
@@ -3268,12 +3321,16 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "ls" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             // Streamed, not collected (ADR-089): listing the namespace must not cost the heap.
             let mut seen = 0usize;
             match fs.for_each(dev, |name, _start, len| {
+                // The account record is nobody's to see from the console (ADR-247).
+                if name == crate::login::RECORD {
+                    return;
+                }
                 seen += 1;
                 outf!(out, "{:>8}  {}", len, name);
             }) {
@@ -3283,7 +3340,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "stat" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             if rest.is_empty() {
@@ -3303,7 +3360,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "cat" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             if rest.is_empty() {
@@ -3322,7 +3379,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "write" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let (name, text) = split_first(rest);
@@ -3338,7 +3395,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "rm" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             if rest.is_empty() {
@@ -3351,7 +3408,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "find" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             if rest.is_empty() {
@@ -3359,7 +3416,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             } else {
                 let mut seen = 0usize;
                 match fs.for_each(dev, |name, _start, len| {
-                    if name.starts_with(rest) {
+                    if name.starts_with(rest) && name != crate::login::RECORD {
                         seen += 1;
                         outf!(out, "{:>8}  {}", len, name);
                     }
@@ -3374,7 +3431,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "head" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             let (name, count) = split_first(rest);
@@ -3405,7 +3462,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "wc" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             if rest.is_empty() {
@@ -3431,7 +3488,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "grep" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             let (needle, name) = split_first(rest);
@@ -3459,7 +3516,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "hexdump" => {
-            if !authorize(host, ShellAction::Inspect, out) {
+            if !authorize(host, role, ShellAction::Inspect, out) {
                 return Outcome::Continue;
             }
             let (name, count) = split_first(rest);
@@ -3514,7 +3571,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "append" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let (name, text) = split_first(rest);
@@ -3550,7 +3607,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "touch" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             if rest.is_empty() {
@@ -3570,7 +3627,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "cp" | "mv" => {
-            if !authorize(host, ShellAction::Write, out) {
+            if !authorize(host, role, ShellAction::Write, out) {
                 return Outcome::Continue;
             }
             let (src, dst) = split_first(rest);
@@ -3604,7 +3661,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "sync" => {
-            if !authorize(host, ShellAction::Flush, out) {
+            if !authorize(host, role, ShellAction::Flush, out) {
                 return Outcome::Continue;
             }
             match dev.flush() {
@@ -3627,7 +3684,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         // that ignores them shows the sequence's effect as nothing rather than as garbage.
         "clear" => out("\x1b[2J\x1b[H"),
         "reboot" => {
-            if !authorize(host, ShellAction::Reboot, out) {
+            if !authorize(host, role, ShellAction::Reboot, out) {
                 return Outcome::Continue;
             }
             out("rebooting.");
@@ -3636,7 +3693,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
             }
         }
         "halt" => {
-            if !authorize(host, ShellAction::Halt, out) {
+            if !authorize(host, role, ShellAction::Halt, out) {
                 return Outcome::Continue;
             }
             out("halting.");
@@ -3659,6 +3716,8 @@ struct Auth {
     /// Accounts exist and nobody has logged in: only `login` is answered.
     locked: bool,
     user: Option<String>,
+    /// What this session may do (ADR-247): `Admin` on a machine with no accounts.
+    role: crate::login::Role,
     guard: crate::login::Guard,
     secret: Secret,
 }
@@ -3669,8 +3728,8 @@ enum Secret {
     #[default]
     None,
     Login(String),
-    New(String),
-    Confirm(String, String),
+    New(String, crate::login::Role),
+    Confirm(String, String, crate::login::Role),
 }
 
 /// A console session: the editor and the dispatcher wired together, driven one input byte at a
@@ -3851,13 +3910,14 @@ impl Session {
                 // BORROWED, not cloned: `to_vec()` here copied all 32 entries on every line, ~3.6 KB
                 // per command on a heap that never frees, and the console fuzz ran aarch64 out of
                 // heap after ~1100 commands (ADR-180).
-                let outcome = execute(
+                let outcome = execute_as(
                     line,
                     host,
                     fs,
                     dev,
                     self.editor.history(),
                     &mut self.navigator,
+                    self.auth.role,
                     &mut |s| {
                         out(s);
                         out("\r\n");
@@ -3904,6 +3964,7 @@ impl Session {
         out: &mut dyn FnMut(&str),
     ) -> Option<Outcome> {
         let line = self.editor.submitted();
+        let role = self.auth.role;
         let (verb, rest) = split_first(line);
         // Borrowed: only a line that starts a login or a passwd copies the name (storm discipline,
         // ADR-089: every other line costs this path nothing).
@@ -3931,6 +3992,7 @@ impl Session {
             }
             "logout" if !self.auth.locked => {
                 self.auth.user = None;
+                self.auth.role = crate::login::Role::Admin;
                 self.auth.locked = fs.read(dev, crate::login::RECORD).is_ok();
                 say(
                     out,
@@ -3942,16 +4004,51 @@ impl Session {
                 );
             }
             "whoami" if !self.auth.locked => match &self.auth.user {
-                Some(u) => outf!(&mut |s: &str| say(out, s), "{}", u),
+                Some(u) => outf!(&mut |s: &str| say(out, s), "{} ({})", u, role.name()),
                 None => say(
                     out,
                     "nobody: this machine has no accounts (`passwd NAME` creates one)",
                 ),
             },
             "passwd" if !self.auth.locked => {
-                if !authorize(host, ShellAction::Write, &mut |s: &str| say(out, s)) {
-                } else if name.is_empty() {
-                    say(out, "usage: passwd NAME");
+                let (target, wanted) = split_first(name);
+                let wanted = wanted.trim();
+                let name = target;
+                let record = fs
+                    .read(dev, crate::login::RECORD)
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned());
+                let own = self.auth.user.as_deref() == Some(name);
+                // The role the new line gets (ADR-247): the first account is an admin; an admin
+                // names any role (default: the account's current one, else operator); anyone else
+                // may only change their own password, keeping their role.
+                let decided: Result<crate::login::Role, &str> = match (&record, wanted) {
+                    (None, "" | "admin") => Ok(crate::login::Role::Admin),
+                    (None, _) => Err("the first account on a machine is an admin"),
+                    (Some(_), w)
+                        if role != crate::login::Role::Admin && (!own || !w.is_empty()) =>
+                    {
+                        Err("only an admin sets another account's password or any role")
+                    }
+                    (Some(r), "") => {
+                        Ok(crate::login::role_of(r, name).unwrap_or(crate::login::Role::Operator))
+                    }
+                    (Some(_), w) => {
+                        crate::login::Role::parse(w).ok_or("a role is admin, operator or viewer")
+                    }
+                };
+                // Changing one's own password is every account's right whatever its role; the
+                // machine must still grant the console write authority it is stored with.
+                let gate = if own && wanted.is_empty() {
+                    crate::login::Role::Admin
+                } else {
+                    role
+                };
+                if name.is_empty() {
+                    say(out, "usage: passwd NAME [admin|operator|viewer]");
+                } else if let Err(why) = decided {
+                    outf!(&mut |s: &str| say(out, s), "passwd refused: {}", why);
+                } else if !authorize(host, gate, ShellAction::Write, &mut |s: &str| say(out, s)) {
                 } else if let Err(why) = host.random(&mut [0u8; 1]) {
                     outf!(
                         &mut |s: &str| say(out, s),
@@ -3965,7 +4062,8 @@ impl Session {
                         crate::login::Refusal::BadName.name()
                     );
                 } else {
-                    self.auth.secret = Secret::New(String::from(name));
+                    let r = decided.unwrap_or_default();
+                    self.auth.secret = Secret::New(String::from(name), r);
                     out("password: ");
                     return Some(Outcome::Continue);
                 }
@@ -3999,28 +4097,29 @@ impl Session {
                     .ok()
                     .map(|b| String::from_utf8_lossy(&b).into_owned())
                     .unwrap_or_default();
-                let ok = crate::login::verify(&record, &name, &typed);
-                self.auth.guard.record(ok, now);
-                if ok {
-                    say(&alloc::format!("welcome, {name}"));
+                let opened = crate::login::verify(&record, &name, &typed);
+                self.auth.guard.record(opened.is_some(), now);
+                if let Some(r) = opened {
+                    say(&alloc::format!("welcome, {name} ({})", r.name()));
                     self.auth.user = Some(name);
+                    self.auth.role = r;
                     self.auth.locked = false;
                 } else {
                     say("login refused: that name and password do not match");
                 }
             }
-            Secret::New(name) => {
+            Secret::New(name, r) => {
                 if typed.is_empty() {
                     say(&alloc::format!(
                         "passwd refused: {}",
                         crate::login::Refusal::EmptyPassword.name()
                     ));
                 } else {
-                    self.auth.secret = Secret::Confirm(name, typed);
+                    self.auth.secret = Secret::Confirm(name, typed, r);
                     say("again, to confirm:");
                 }
             }
-            Secret::Confirm(name, first) => {
+            Secret::Confirm(name, first, r) => {
                 if !crate::login::same(first.as_bytes(), typed.as_bytes()) {
                     say("passwd refused: the two passwords differ; nothing changed");
                     return;
@@ -4030,7 +4129,7 @@ impl Session {
                     say(&alloc::format!("passwd refused: {why}"));
                     return;
                 }
-                let new_line = match crate::login::line(&name, &typed, &salt) {
+                let new_line = match crate::login::line(&name, &typed, &salt, r) {
                     Ok(l) => l,
                     Err(why) => {
                         say(&alloc::format!("passwd refused: {}", why.name()));
@@ -4046,10 +4145,12 @@ impl Session {
                 match fs.replace(dev, crate::login::RECORD, next.as_bytes()) {
                     Ok(_) => {
                         say(&alloc::format!(
-                            "passwd: {name} set; every console session on this machine now starts locked"
+                            "passwd: {name} set ({}); every console session on this machine now starts locked",
+                            r.name()
                         ));
                         if self.auth.user.is_none() {
                             self.auth.user = Some(name);
+                            self.auth.role = r;
                         }
                     }
                     Err(e) => say(&fs_error(e)),

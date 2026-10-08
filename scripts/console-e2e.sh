@@ -244,7 +244,7 @@ else:
 ' <<<"$log")"
     [ "$share" = ok ] || { echo "  FAIL [$label/first] background turns did not follow weights ($share)"; bad=1; }
     # Console accounts (ADR-244): the first `passwd` is accepted, asked twice, and not echoed.
-    grep -q "passwd: ada set; every console session on this machine now starts locked" <<<"$log" \
+    grep -q "passwd: ada set (admin); every console session on this machine now starts locked" <<<"$log" \
       && ! grep -q "Sesame-42" <<<"$log" \
       || { echo "  FAIL [$label/first] passwd did not set the account, or echoed the password"; bad=1; }
     # The anomaly watch (ADR-242): three programs faulting in one interval, on a machine whose
@@ -297,7 +297,7 @@ print("ok" if wall >= 9 and mono >= 0.8 * wall else "rtc %ds, uptime %.2fs" % (w
     # the password never appears on the line.
     grep -q "this console is locked: \`login NAME\`" <<<"$log" \
       && grep -q "login refused: that name and password do not match" <<<"$log" \
-      && grep -q "welcome, ada" <<<"$log" \
+      && grep -q "welcome, ada (admin)" <<<"$log" \
       && grep -q "refused: .users holds this machine's console accounts" <<<"$log" \
       && ! grep -q "Sesame-42\|wrong-guess" <<<"$log" \
       || { echo "  FAIL [$label/second] the console was not locked and opened by the account set in session one"; bad=1; }
