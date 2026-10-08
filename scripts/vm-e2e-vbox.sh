@@ -131,7 +131,7 @@ REQUIRED=(
   # a second implementation of each, written by someone other than QEMU. (NVMe is absent here:
   # VirtualBox's NVMe controller ships only in the Oracle Extension Pack - VERR_PDM_DEVICE_NOT_FOUND.)
   'ALL 6 E1000 INVARIANTS HOLD'
-  'ALL 25 AHCI INVARIANTS HOLD'
+  'ALL 24 AHCI INVARIANTS HOLD'
   'e2e\] PASS'
 )
 # SKIPPED-BY-HYPERVISOR: VirtualBox emulates no virtio-blk and this VM has no NIC, so the storage and

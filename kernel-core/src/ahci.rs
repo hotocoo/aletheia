@@ -370,6 +370,19 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
     }
 }
 
+/// A dropped disk's port stops: command engine, then FIS receive, so no unsolicited FIS is DMA
+/// nobody owns (ADR-228, the class of the e1000 fault in ADR-227).
+impl<H: VirtioHal, R: Regs> Drop for AhciDisk<H, R> {
+    fn drop(&mut self) {
+        let pb = self.port;
+        self.regs
+            .w32(pb + PX_CMD, self.regs.r32(pb + PX_CMD) & !CMD_ST);
+        let _ = wait::<H>(|| self.regs.r32(pb + PX_CMD) & CMD_CR == 0);
+        self.regs
+            .w32(pb + PX_CMD, self.regs.r32(pb + PX_CMD) & !CMD_FRE);
+    }
+}
+
 impl<H: VirtioHal, R: Regs> BlockDevice for AhciDisk<H, R> {
     fn num_blocks(&self) -> usize {
         (self.sectors / self.per_block()) as usize
@@ -436,10 +449,8 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
             }
         }};
     }
-    check!(
-        "ahci: at least two ATA disks identified (boot + scratch)",
-        disks.len() >= 2
-    );
+    // Read-only group: holds on any machine with any SATA disk (ADR-228).
+    check!("ahci: at least one ATA disk identified", !disks.is_empty());
     let mut sigs = 0;
     let mut reads = true;
     for d in disks.iter() {
@@ -449,8 +460,17 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     }
     check!("ahci: every disk reads its first sector", reads);
     check!(
-        "ahci: a disk written by another tool reads back its 0x55AA boot signature",
-        sigs >= 1
+        "ahci: every disk's DMA gate denies an unregistered address (list, table and data registered)",
+        disks.iter().all(|d| d.dma_gate_refuses_unregistered())
+    );
+    let mut over = [0u8; BLOCK_SIZE];
+    check!(
+        "ahci: a block past the end is refused without a command",
+        disks.iter().all(|d| {
+            let before = d.issued();
+            d.read_block(d.num_blocks(), &mut over) == Err(StorageError::OutOfRange)
+                && d.issued() == before
+        })
     );
     let mut refused = true;
     for d in disks.iter_mut().filter(|d| !d.is_scratch()) {
@@ -461,18 +481,18 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
         "ahci: a write to any disk not marked scratch is refused without a command",
         refused
     );
-    const SCRATCH: &str = "ahci: the scratch disk is attached";
-    check!(SCRATCH, disks.iter().any(|d| d.is_scratch()));
+    // Gate group: only where a disk carries the scratch serial. Elsewhere the read-only group is
+    // the whole suite, and each VM gate pins which count it expects.
     let Some(dev) = disks.iter_mut().find(|d| d.is_scratch()) else {
-        return Err((n, SCRATCH));
+        return Ok(n);
     };
+    check!(
+        "ahci: a disk written by another tool reads back its 0x55AA boot signature",
+        sigs >= 1
+    );
     check!(
         "ahci: scratch capacity matches the attached image geometry",
         dev.num_blocks() == expect_scratch_blocks
-    );
-    check!(
-        "ahci: the DMA gate denies an unregistered address (list, table and data registered)",
-        dev.dma_gate_refuses_unregistered()
     );
     let last = dev.num_blocks() - 1;
     let mut ok = true;
@@ -487,11 +507,6 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     check!(
         "ahci: write -> flush -> read-back (inner and LAST block) returns the bytes",
         ok
-    );
-    let mut over = [0u8; BLOCK_SIZE];
-    check!(
-        "ahci: a block past the end is refused without a command",
-        dev.read_block(last + 1, &mut over) == Err(StorageError::OutOfRange)
     );
     let (h1, h2) = (
         crate::storage::DATA_START + 10,

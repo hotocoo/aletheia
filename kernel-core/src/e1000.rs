@@ -475,7 +475,6 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
         "e1000: reset completed and the controller reports a unicast MAC",
         mac != [0; 6] && mac[0] & 1 == 0
     );
-    check!("e1000: the link is up", dev.link_up());
     check!(
         "e1000: the DMA gate denies an unregistered address (rings and buffers registered)",
         dev.dma_gate_refuses_unregistered()
@@ -484,7 +483,13 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
         "e1000: a frame longer than one MTU is refused before the ring",
         dev.send(&[0u8; MAX_FRAME + 1]) == Err(E1000Error::TooLong)
     );
+    // Wire group: only where the user-mode network's gateway (10.0.2.2) answers - the QEMU and
+    // VirtualBox gates. On any other network the local group above is the whole suite (ADR-228).
     let gw = dev.arp_resolve(GATEWAY_IP);
+    if gw.is_err() {
+        return Ok(n);
+    }
+    check!("e1000: the link is up", dev.link_up());
     check!(
         "e1000: an ARP request for the gateway is answered with its hardware address",
         matches!(gw, Ok(m) if m != [0; 6])

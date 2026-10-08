@@ -58,6 +58,7 @@ struct Geometry {
     css_nvm: bool,
     dstrd: u64,
     mqes: u64,
+    scratch: bool,
 }
 
 impl Geometry {
@@ -71,6 +72,7 @@ impl Geometry {
             css_nvm: true,
             dstrd: 0,
             mqes: 63,
+            scratch: true,
         }
     }
 }
@@ -177,6 +179,12 @@ impl Sim {
                 0x06 if c10 == 1 => {
                     let mut id = [0u8; 4096];
                     id[24..32].copy_from_slice(b"SIM NVME");
+                    let sn: &[u8] = if s.g.scratch {
+                        b"ALETHEIA-SCRATCH    "
+                    } else {
+                        b"S3EWNX0M123456      "
+                    };
+                    id[4..24].copy_from_slice(sn);
                     id[516..520].copy_from_slice(&1u32.to_le_bytes());
                     id[525] = s.g.vwc as u8;
                     unsafe { std::ptr::copy_nonoverlapping(id.as_ptr(), prp1 as *mut u8, 4096) };
@@ -345,6 +353,39 @@ fn open(g: Geometry, f: Faults) -> Result<Nvme<HostHal, Sim>, &'static str> {
 }
 
 const GATE_BLOCKS: u64 = 256;
+
+#[test]
+fn a_controller_not_marked_scratch_is_never_written() {
+    // Someone's SSD (ADR-228): the read-only group runs, the write group does not, and no write
+    // or flush command ever reaches the controller.
+    let g = Geometry {
+        scratch: false,
+        ..Geometry::healthy(9, 64)
+    };
+    let sim = Sim::new(g, Faults::default());
+    {
+        let (mut dev, _) = unsafe { Nvme::<HostHal, &Sim>::init(&sim) }.expect("init");
+        assert!(!dev.is_scratch());
+        assert_eq!(
+            dev.write_block(10, &[1u8; BLOCK_SIZE]),
+            Err(StorageError::Device)
+        );
+        assert_eq!(dev.flush(), Err(StorageError::Device));
+        let n = device_suite(&mut dev, 999, &mut |i, ok, name: &str| {
+            assert!(ok, "{i}: {name}")
+        })
+        .expect("read-only suite");
+        assert_eq!(n, 5, "read-only group count changed - update the gates");
+    }
+    let s = sim.st.borrow();
+    assert!(s.disk.iter().all(|&b| b == 0), "the disk must be untouched");
+    assert_eq!(s.flushes, 0);
+    assert_eq!(
+        s.cc & 1,
+        0,
+        "a dropped driver leaves the controller disabled"
+    );
+}
 
 #[test]
 fn the_suite_holds_over_a_512_byte_lba_namespace() {

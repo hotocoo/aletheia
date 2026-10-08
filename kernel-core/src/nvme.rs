@@ -186,9 +186,23 @@ pub struct Nvme<H: VirtioHal, R: NvmeRegs> {
     lbas_per_block: u64,
     namespace_lbas: u64,
     volatile_cache: bool,
+    /// Identify Controller's serial is exactly [`SCRATCH_SERIAL`]: the only controller written.
+    scratch: bool,
     dma: DmaRegistry,
     budget_ns: u64,
     _hal: PhantomData<H>,
+}
+
+/// The serial number that marks a controller this driver may write (ADR-228). A real machine's
+/// SSD holds someone's data; nothing without this mark is ever written.
+pub const SCRATCH_SERIAL: &[u8] = b"ALETHEIA-SCRATCH";
+const IDC_SN: usize = 4; // serial number, 20 ASCII bytes, space padded
+
+/// A disabled controller does no DMA: a driver nobody holds stops it (ADR-228).
+impl<H: VirtioHal, R: NvmeRegs> Drop for Nvme<H, R> {
+    fn drop(&mut self) {
+        self.regs.w32(REG_CC, 0);
+    }
 }
 
 fn wait_status<H: VirtioHal, R: NvmeRegs>(
@@ -313,6 +327,7 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
             lbas_per_block: 0,
             namespace_lbas: 0,
             volatile_cache: false,
+            scratch: false,
             dma,
             budget_ns: COMMAND_BUDGET_NS,
             _hal: PhantomData,
@@ -328,6 +343,15 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
         for (i, b) in model.iter_mut().enumerate() {
             *b = rd8(data + IDC_MN + i);
         }
+        let mut sn = [0u8; 20];
+        for (i, b) in sn.iter_mut().enumerate() {
+            *b = rd8(data + IDC_SN + i);
+        }
+        let sn_end = sn
+            .iter()
+            .rposition(|&c| c != b' ' && c != 0)
+            .map_or(0, |e| e + 1);
+        dev.scratch = &sn[..sn_end] == SCRATCH_SERIAL;
         if nn < NSID {
             return Err("nvme: controller reports no namespace 1");
         }
@@ -394,6 +418,11 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
         !self.dma.visible(0x7fff_0000_0000, 64)
             && !self.dma.visible(self.data, crate::dma::PAGE * 2)
             && self.dma.live_regions() == 5
+    }
+
+    /// Does this controller carry the scratch serial (the only kind this driver writes)?
+    pub fn is_scratch(&self) -> bool {
+        self.scratch
     }
 
     /// Bytes per logical block of namespace 1.
@@ -544,6 +573,9 @@ impl<H: VirtioHal, R: NvmeRegs> BlockDevice for Nvme<H, R> {
     }
 
     fn write_block(&mut self, idx: usize, buf: &[u8]) -> Result<(), StorageError> {
+        if !self.scratch {
+            return Err(StorageError::Device); // never write a controller not marked scratch
+        }
         self.check(idx, buf.len())?;
         // SAFETY: as above.
         let dst = unsafe { core::slice::from_raw_parts_mut(self.data as *mut u8, BLOCK_SIZE) };
@@ -552,6 +584,9 @@ impl<H: VirtioHal, R: NvmeRegs> BlockDevice for Nvme<H, R> {
     }
 
     fn flush(&mut self) -> Result<(), StorageError> {
+        if !self.scratch {
+            return Err(StorageError::Device);
+        }
         if !self.volatile_cache {
             // No volatile write cache: a completed write is already non-volatile (§5.15.2.1 VWC).
             return Ok(());
@@ -563,7 +598,7 @@ impl<H: VirtioHal, R: NvmeRegs> BlockDevice for Nvme<H, R> {
 }
 
 /// The invariant suite for a real NVMe namespace. `expect_blocks` is the geometry the VM gate
-/// attached. Destructive (the filesystem group reformats). Returns invariants proved.
+/// attached. Its write group (which reformats) runs ONLY on a scratch controller. Returns invariants proved.
 pub fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
     dev: &mut Nvme<H, R>,
     expect_blocks: usize,
@@ -585,10 +620,6 @@ pub fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
         dev.num_blocks() > 0
     );
     check!(
-        "nvme: namespace capacity matches the attached image geometry",
-        dev.num_blocks() == expect_blocks
-    );
-    check!(
         "nvme: the DMA gate denies an unregistered buffer address (queues and data registered)",
         dev.dma_gate_refuses_unregistered()
     );
@@ -599,6 +630,32 @@ pub fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
         refused
     );
     let last = dev.num_blocks() - 1;
+    let mut over = [0u8; BLOCK_SIZE];
+    check!(
+        "nvme: a block past the namespace end is refused without touching the device",
+        dev.read_block(last + 1, &mut over) == Err(StorageError::OutOfRange)
+    );
+    // More commands than queue entries, READS only so any disk can carry it: the tail, head and
+    // phase must wrap in step and every read return the same bytes.
+    let mut first = [0u8; BLOCK_SIZE];
+    let mut wrapped = dev.read_block(0, &mut first).is_ok();
+    for _ in 0..(3 * dev.depth as usize) {
+        let mut back = [0u8; BLOCK_SIZE];
+        wrapped &= dev.read_block(0, &mut back).is_ok() && back == first;
+    }
+    check!(
+        "nvme: queue tail, head and phase wrap in step over three full queue lengths",
+        wrapped
+    );
+    // Everything below WRITES. Only a controller marked scratch carries it (ADR-228); on any other
+    // machine the read-only group above is the whole suite, and each VM gate pins which count.
+    if !dev.is_scratch() {
+        return Ok(n);
+    }
+    check!(
+        "nvme: namespace capacity matches the attached image geometry",
+        dev.num_blocks() == expect_blocks
+    );
     let mut ok = true;
     for (i, blk) in [crate::storage::DATA_START + 5, last]
         .into_iter()
@@ -615,25 +672,6 @@ pub fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
     check!(
         "nvme: write -> flush -> read-back round-trip (inner and LAST block) returns the bytes",
         ok
-    );
-    let mut over = [0u8; BLOCK_SIZE];
-    check!(
-        "nvme: a block past the namespace end is refused without touching the device",
-        dev.read_block(last + 1, &mut over) == Err(StorageError::OutOfRange)
-    );
-    // More commands than queue entries: the tail, head and phase must wrap in step.
-    let mut wrapped = true;
-    let probe = crate::storage::DATA_START + 7;
-    for round in 0..(3 * dev.depth as usize) {
-        let pattern = [round as u8; BLOCK_SIZE];
-        let mut back = [0u8; BLOCK_SIZE];
-        wrapped &= dev.write_block(probe, &pattern).is_ok()
-            && dev.read_block(probe, &mut back).is_ok()
-            && back == pattern;
-    }
-    check!(
-        "nvme: queue tail, head and phase wrap in step over three full queue lengths",
-        wrapped
     );
     let h1 = crate::storage::DATA_START + 10;
     let h2 = crate::storage::DATA_START + 11;

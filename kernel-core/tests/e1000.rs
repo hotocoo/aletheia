@@ -31,6 +31,7 @@ struct Faults {
     rx_error: bool,
     tx_never_done: bool,
     mac_only_in_eeprom: bool,
+    no_gateway: bool,
 }
 
 struct St {
@@ -134,7 +135,8 @@ impl Regs for Sim {
             s.tdh = (s.tdh + 1) % RING as u32;
             s.sent += 1;
             // Gateway: answer an ARP request for 10.0.2.2.
-            if len >= 42
+            if !s.f.no_gateway
+                && len >= 42
                 && f[12..14] == [0x08, 0x06]
                 && f[20..22] == [0, 1]
                 && f[38..42] == [10, 0, 2, 2]
@@ -221,5 +223,17 @@ fn no_link_fails_the_suite_at_its_named_invariant() {
     })
     .unwrap();
     let err = device_suite(&dev, &mut |_, _, _: &str| {}).unwrap_err();
-    assert_eq!(err.0, 2);
+    assert_eq!(err.0, 4, "link is the first wire-group invariant");
+}
+
+#[test]
+fn a_network_without_the_gateway_gets_the_local_group_only() {
+    // A real LAN or the VMware package (ADR-228): no 10.0.2.2, so no wire claims, and no failure.
+    let dev = open(Faults {
+        no_gateway: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let n = device_suite(&dev, &mut |i, ok, name: &str| assert!(ok, "{i}: {name}")).unwrap();
+    assert_eq!(n, 3, "local group count changed - update the gates");
 }

@@ -242,12 +242,33 @@ fn the_suite_holds_and_never_writes_the_boot_disk() {
             assert!(ok, "{i}: {name}")
         })
         .unwrap();
-        assert_eq!(n, 25, "invariant count changed - update the VM gates");
+        assert_eq!(n, 24, "invariant count changed - update the VM gates");
         drop(d);
         let st = sim.0.borrow();
         assert_eq!(st.disks[0].writes, 0, "the boot disk must never be written");
         assert!(st.disks[1].writes > 0);
     }
+}
+
+#[test]
+fn a_machine_with_only_its_own_disk_gets_the_read_only_group_and_no_writes() {
+    // An ordinary one-disk PC or the VMware package (ADR-228): no scratch disk, so the suite is
+    // read-only, passes, and nothing is written.
+    let sim = Sim::new(Faults::default(), 512);
+    let mut d = vec![unsafe { AhciDisk::<HostHal, &Sim>::open(&sim, 0) }.expect("open")];
+    let n = device_suite(&mut d, 256, &mut |i, ok, name: &str| {
+        assert!(ok, "{i}: {name}")
+    })
+    .unwrap();
+    assert_eq!(n, 5, "read-only group count changed - update the gates");
+    drop(d);
+    let st = sim.0.borrow();
+    assert_eq!(st.disks[0].writes, 0);
+    assert_eq!(
+        st.r[&(PORT_BASE + PX_CMD)] & 0x11,
+        0,
+        "a dropped disk's port is stopped"
+    );
 }
 
 #[test]
