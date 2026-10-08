@@ -1,0 +1,15 @@
+{
+  "corpus": "bench5-long-5151.jsonl",
+  "rows": 3000,
+  "accuracy_all": 0.9843,
+  "accuracy": {
+    "schedule-advice": 0.998,
+    "schedule-composite": 0.957,
+    "schedule-donation": 0.998,
+    "schedule-fifo": 0.998
+  },
+  "threshold": 0.95,
+  "coverage_at_threshold": 0.91,
+  "accuracy_at_threshold": 0.9989,
+  "wrong_and_sure": 3
+}

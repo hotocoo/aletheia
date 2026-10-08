@@ -1,0 +1,31 @@
+{
+  "base": "run4",
+  "corpus": "corpus-v6.jsonl",
+  "rows": {
+    "train": 38162,
+    "calibration": 4971,
+    "test": 4867
+  },
+  "epochs": 2,
+  "lr": 3e-05,
+  "unfreeze": 20,
+  "seed": 187,
+  "temperatures": {
+    "choice:11+": 1.4000000000000001,
+    "choice:6-10": 1.8,
+    "choice:3-5": 1.4000000000000001,
+    "choice:2": 0.05
+  },
+  "test_accuracy": {
+    "schedule-advice": 1.0,
+    "schedule-composite": 0.9891,
+    "schedule-donation": 0.9966,
+    "schedule-fifo": 0.9966
+  },
+  "test_accuracy_all": 0.9934,
+  "threshold": 0.9,
+  "coverage_at_threshold": 0.9554,
+  "accuracy_at_threshold": 0.9972,
+  "wrong_and_sure": 13,
+  "minutes": 138.6
+}

@@ -245,8 +245,15 @@ fn esc(s: &str) -> String {
 
 /// What decided a row: inheritance, the advisory tiebreak, FIFO age among equals, or (only kept
 /// with `--all`) a unique highest base priority.
-const KINDS: [&str; 3] = ["schedule-donation", "schedule-advice", "schedule-fifo"];
-const WEIGHT: [usize; 3] = [2, 1, 1];
+/// `schedule-composite`: donation lifts a task into a tied top band, so the answer needs donation,
+/// then FIFO age, then the advisory tiebreak, in that order (ADR-231 run 4).
+const KINDS: [&str; 4] = [
+    "schedule-composite",
+    "schedule-donation",
+    "schedule-advice",
+    "schedule-fifo",
+];
+const WEIGHT: [usize; 4] = [4, 2, 1, 1];
 
 fn weight(kind: &str) -> usize {
     KINDS
@@ -260,7 +267,7 @@ struct Stats {
     rows: usize,
     episodes: usize,
     /// Rows per kind; without `--all` each of [`KINDS`] is capped at its [`WEIGHT`] share of
-    /// `--rows` (donation, the hardest, gets two shares).
+    /// `--rows` (composite gets four shares, donation two).
     per_kind: BTreeMap<&'static str, usize>,
     quota: usize,
     skipped_budget: usize,
@@ -476,10 +483,15 @@ fn episode(
             let by_advice = plain != Some(won);
             let top = e.m.effective(won);
             let tied = cands.iter().filter(|t| e.m.effective(**t) == top).count() > 1;
-            let kind = match (by_donation, by_advice, tied) {
-                (true, _, _) => Some(KINDS[0]),
-                (_, true, _) => Some(KINDS[1]),
-                (_, _, true) => Some(KINDS[2]),
+            let lifted_into_tie = tied
+                && cands
+                    .iter()
+                    .any(|t| e.m.effective(*t) == top && e.m.base[t] < top);
+            let kind = match (lifted_into_tie, by_donation, by_advice, tied) {
+                (true, _, _, _) => Some(KINDS[0]),
+                (_, true, _, _) => Some(KINDS[1]),
+                (_, _, true, _) => Some(KINDS[2]),
+                (_, _, _, true) => Some(KINDS[3]),
                 _ if keep_all => Some("schedule-priority"),
                 // A unique highest base priority answers itself.
                 _ => None,
