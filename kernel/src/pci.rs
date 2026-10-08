@@ -69,15 +69,21 @@ pub const BAR_ASSIGN_BASE: usize = 0x1000_0000 + 0x10_0000;
 /// # Safety
 /// The caller owns this function's configuration space at this moment.
 pub unsafe fn assign_bars(env: &Ecam, bdf: Bdf, cursor: &mut usize) -> Result<(), &'static str> {
+    let mut upper_half = false;
     for index in 0..6u8 {
-        let raw = unsafe { env.read32(bdf, virtiopci::CFG_BAR0 + index * 4) };
-        if raw == 0 {
-            continue; // unimplemented BAR
+        if core::mem::take(&mut upper_half) {
+            continue; // the high dword of the 64-bit BAR handled on the previous index
         }
+        let raw = unsafe { env.read32(bdf, virtiopci::CFG_BAR0 + index * 4) };
+        // A raw 0 is NOT "unimplemented": a 32-bit non-prefetchable memory BAR at base 0 reads
+        // 0 too (the e1000's BAR0, ADR-226). Only the size probe below can tell them apart.
         if raw & 1 != 0 {
-            return Err("I/O-space BAR - this driver speaks MMIO only");
+            // I/O-space BAR (legacy ports on e1000 and ich9-ahci, ADR-226): left unassigned, and
+            // never decoded - `enable_bus_master` sets memory space and bus master, not I/O space.
+            continue;
         }
         let size = unsafe { virtiopci::bar_size(env, bdf, index)? };
+        upper_half = (raw >> 1) & 3 == 2;
         if size == 0 {
             continue;
         }
@@ -209,4 +215,120 @@ pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
         Ok(n) => Ok(n as u32),
         Err((i, name)) => Err((i as u32, name)),
     }
+}
+
+/// Where e1000 and AHCI BARs land: 32 and 48 MiB above the virtio-blk-pci window (ADR-226).
+const E1000_BAR_BASE: usize = BAR_ASSIGN_BASE + 0x0200_0000;
+const AHCI_BAR_BASE: usize = BAR_ASSIGN_BASE + 0x0300_0000;
+
+/// Give `bdf` its memory BARs from `cursor`, enable decoding and bus master, return BAR `bar`'s
+/// base inside the identity window (at least `len` bytes).
+/// # Safety
+/// The caller owns this function's configuration space.
+unsafe fn open_bar(
+    env: &Ecam,
+    bdf: Bdf,
+    cursor: usize,
+    bar: u8,
+    len: usize,
+) -> Result<usize, &'static str> {
+    let mut c = cursor;
+    unsafe { assign_bars(env, bdf, &mut c)? };
+    unsafe { virtiopci::enable_bus_master(env, bdf) };
+    let pa = virtiopci::bar_base_pa(env, bdf, bar)?;
+    env.map_region(pa, len)
+        .ok_or("BAR is outside the identity window")
+}
+
+fn suite_log(n: usize, passed: bool, name: &str) {
+    if passed {
+        kprintln!("  [pass {:>2}] {}", n, name);
+    } else {
+        kprintln!("  [FAIL {:>2}] {}", n, name);
+    }
+}
+
+/// The shared e1000 driver on aarch64 (ADR-224, ADR-226). `Ok(0)` = no controller.
+pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
+    use kernel_core::e1000;
+    let Some(disc) = crate::smmu::discovery() else {
+        return Ok(0);
+    };
+    let env = Ecam::new(disc.pcie.ecam_base);
+    // SAFETY: walks ECAM only.
+    let found = unsafe { virtiopci::enumerate_bus0(&env) }
+        .into_iter()
+        .find(|&(_, v, d)| v == e1000::VENDOR_INTEL && e1000::DEVICE_IDS.contains(&d));
+    let Some((bdf, _, id)) = found else {
+        kprintln!("[e1000] no controller (skipped)");
+        return Ok(0);
+    };
+    // SAFETY: this boot owns the function; BAR0 is mapped device memory in the identity window.
+    let opened = unsafe {
+        open_bar(&env, bdf, E1000_BAR_BASE, 0, 0x6000).and_then(|b| {
+            e1000::E1000::<crate::virtio::Aarch64Virtio, _>::init(e1000::MmioRegs::new(b))
+        })
+    };
+    let dev = match opened {
+        Ok(d) => d,
+        Err(e) => {
+            kprintln!("[e1000] init refused: {}", e);
+            return Err((0, "e1000 controller initialization"));
+        }
+    };
+    let m = dev.mac();
+    kprintln!(
+        "[e1000] controller @ PCI {:02x}:{:02x}.{} id {:#06x} mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bdf.bus, bdf.device, bdf.function, id, m[0], m[1], m[2], m[3], m[4], m[5]
+    );
+    e1000::device_suite(&dev, &mut suite_log)
+        .map(|n| n as u32)
+        .map_err(|(i, name)| (i as u32, name))
+}
+
+/// The shared AHCI driver on aarch64 (ADR-225, ADR-226). `Ok(0)` = no controller.
+pub fn ahci_selftest() -> Result<u32, (u32, &'static str)> {
+    use kernel_core::ahci;
+    let Some(disc) = crate::smmu::discovery() else {
+        return Ok(0);
+    };
+    let env = Ecam::new(disc.pcie.ecam_base);
+    // SAFETY: walks ECAM only.
+    let Some(bdf) = (unsafe { virtiopci::find_class_nth(&env, 0x01_06_01, 0) }) else {
+        kprintln!("[ahci] no controller (skipped)");
+        return Ok(0);
+    };
+    // SAFETY: this boot owns the function; ABAR (BAR5) is mapped device memory.
+    let opened = unsafe {
+        open_bar(&env, bdf, AHCI_BAR_BASE, 5, 0x1100).and_then(|b| {
+            let regs = ahci::MmioRegs::new(b);
+            let mut disks = alloc::vec::Vec::new();
+            for p in ahci::disk_ports(&regs) {
+                let d = match ahci::AhciDisk::<crate::virtio::Aarch64Virtio, _>::open(regs, p) {
+                    Err(ahci::NOT_ATA) => continue, // a CD-ROM or other non-disk port
+                    r => r?,
+                };
+                kprintln!(
+                    "[ahci] port {} serial \"{}\" {} x {} B{}",
+                    p,
+                    core::str::from_utf8(d.serial()).unwrap_or("?").trim(),
+                    d.sectors(),
+                    d.sector_bytes(),
+                    if d.is_scratch() { " (scratch)" } else { "" }
+                );
+                disks.push(d);
+            }
+            Ok(disks)
+        })
+    };
+    let mut disks = match opened {
+        Ok(d) => d,
+        Err(e) => {
+            kprintln!("[ahci] init refused: {}", e);
+            return Err((0, "ahci controller initialization"));
+        }
+    };
+    ahci::device_suite(&mut disks, 256, &mut suite_log)
+        .map(|n| n as u32)
+        .map_err(|(i, name)| (i as u32, name))
 }

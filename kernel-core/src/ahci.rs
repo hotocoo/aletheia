@@ -100,7 +100,9 @@ impl Regs for MmioRegs {
     }
 }
 
-/// Enable AHCI mode and list the ports that have an ATA disk with an established link.
+/// Enable AHCI mode and list the implemented ports with an established link. Whether the device
+/// is an ATA disk is only known after [`AhciDisk::open`] starts FIS receive: PxSIG holds the first
+/// D2H FIS's signature (§3.3.9) and reads all-ones before one arrived.
 pub fn disk_ports<R: Regs>(regs: &R) -> alloc::vec::Vec<u8> {
     regs.w32(HBA_GHC, regs.r32(HBA_GHC) | GHC_AE);
     let pi = regs.r32(HBA_PI);
@@ -108,10 +110,14 @@ pub fn disk_ports<R: Regs>(regs: &R) -> alloc::vec::Vec<u8> {
         .filter(|&p| pi & (1 << p) != 0)
         .filter(|&p| {
             let b = PORT_BASE + p as usize * PORT_STRIDE;
-            regs.r32(b + PX_SSTS) & 0xF == SSTS_DET_PRESENT && regs.r32(b + PX_SIG) == SIG_ATA
+            regs.r32(b + PX_SSTS) & 0xF == SSTS_DET_PRESENT
         })
         .collect()
 }
+
+/// [`AhciDisk::open`]'s refusal for a port whose device is not an ATA disk (ATAPI, port
+/// multiplier): callers skip such a port rather than fail the controller.
+pub const NOT_ATA: &str = "ahci: the port's device is not an ATA disk";
 
 fn wait<H: VirtioHal>(mut done: impl FnMut() -> bool) -> bool {
     let started = H::now_ns();
@@ -194,6 +200,13 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
         regs.w32(pb + PX_CMD, regs.r32(pb + PX_CMD) | CMD_FRE);
         if !wait::<H>(|| regs.r32(pb + PX_TFD) & (TFD_BSY | TFD_DRQ) == 0) {
             return Err("ahci: the disk stayed busy");
+        }
+        // The signature arrives with the device's first D2H FIS, now that FRE is on.
+        // ponytail: the port's three frames stay allocated on this refusal (a few per boot, one per
+        // non-disk port); return them to the allocator if ports ever come and go at run time.
+        if !wait::<H>(|| regs.r32(pb + PX_SIG) != u32::MAX) || regs.r32(pb + PX_SIG) != SIG_ATA {
+            regs.w32(pb + PX_CMD, regs.r32(pb + PX_CMD) & !CMD_FRE);
+            return Err(NOT_ATA);
         }
         regs.w32(pb + PX_CMD, regs.r32(pb + PX_CMD) | CMD_ST);
 

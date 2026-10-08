@@ -182,6 +182,11 @@ impl Regs for Sim {
         if s.f.stays_busy && off >= PORT_BASE && (off - PORT_BASE) % PORT_STRIDE == PX_TFD {
             return 0x80;
         }
+        // Like the spec (and QEMU): no signature until FIS receive is on and a D2H FIS arrived.
+        if off >= PORT_BASE && (off - PORT_BASE) % PORT_STRIDE == PX_SIG {
+            let cmd = *s.r.get(&(off - PX_SIG + PX_CMD)).unwrap_or(&0);
+            return if cmd & (1 << 4) != 0 { v } else { u32::MAX };
+        }
         v
     }
     fn w32(&self, off: usize, v: u32) {
@@ -246,13 +251,17 @@ fn the_suite_holds_and_never_writes_the_boot_disk() {
 }
 
 #[test]
-fn ports_without_a_disk_signature_are_not_listed() {
+fn a_port_without_a_disk_signature_is_refused_by_name_at_open() {
     let sim = Sim::new(Faults::default(), 512);
     sim.0
         .borrow_mut()
         .r
         .insert(PORT_BASE + 2 * PORT_STRIDE + PX_SIG, 0xEB14_0101); // ATAPI
-    assert_eq!(disk_ports(&&sim), vec![0]);
+    assert_eq!(disk_ports(&&sim), vec![0, 2], "link up on both ports");
+    let e = unsafe { AhciDisk::<HostHal, &Sim>::open(&sim, 2) }
+        .err()
+        .unwrap();
+    assert_eq!(e, NOT_ATA);
 }
 
 #[test]

@@ -419,7 +419,10 @@ pub fn ahci_selftest() -> Result<u32, (u32, &'static str)> {
         let regs = unsafe { ahci::MmioRegs::new(base) };
         let mut disks = alloc::vec::Vec::new();
         for p in ahci::disk_ports(&regs) {
-            let d = unsafe { ahci::AhciDisk::<crate::virtio::X86Virtio, _>::open(regs, p)? };
+            let d = match unsafe { ahci::AhciDisk::<crate::virtio::X86Virtio, _>::open(regs, p) } {
+                Err(ahci::NOT_ATA) => continue, // a CD-ROM or other non-disk port
+                r => r?,
+            };
             kprintln!(
                 "[ahci] port {} serial \"{}\" model \"{}\" {} x {} B{}",
                 p,

@@ -880,6 +880,42 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // e1000 and AHCI (ADR-224..226): the same shared drivers as x86-64, BARs assigned here.
+    kprintln!("");
+    kprintln!(
+        "--- e1000 selftests (real PCI Intel 8254x NIC: reset + rings + ARP over the wire) ---"
+    );
+    match pci::e1000_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[e1000] ALL {} E1000 INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] e1000 suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("e1000")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[e1000] FAILED at e1000 invariant {}: {}", idx, name);
+            semihosting::exit(1140 + idx as i32);
+        }
+    }
+    kprintln!("");
+    kprintln!("--- ahci selftests (real PCI AHCI controller: identify + read boot disk + scratch suite) ---");
+    match pci::ahci_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[ahci] ALL {} AHCI INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] ahci suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("ahci")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[ahci] FAILED at ahci invariant {}: {}", idx, name);
+            semihosting::exit(1150 + idx as i32);
+        }
+    }
+
     // SMP: power on the other CPUs via PSCI and prove the cross-core substrate (REQ-SMP-002,
     // ADR-028). Skips green on a single-CPU machine (bare `cargo run`); the VM gate boots
     // `-smp 4` and asserts the invariant marker below.
