@@ -43,12 +43,33 @@ below the trainer's own held-out split, so run 2 is not overfitted to its episod
 FIFO and advice errors were mostly ties it could not order from scattered option text; the
 ready-pool line removed most of them. Reports: `docs/evidence/system1/sched/`.
 
+## Amendment: run 3 closes the donation gap (2026-10-08)
+
+Run 2's 43 donation errors on the three benchmark sets were holders compared by the waiter's own
+base instead of the donated priority, and chains two hops deep. The corpus now names, in each
+option, the waiters on every endpoint the task holds (`holds e4 (waited on by t4 p3)`), and
+donation rows get two shares of `--rows` (weights 2:1:1). Transitive donation is still left to
+the model; only direct waiters are named.
+
+Run 3: run 2 warm start, 36 000 rows (seed 57, 18 000 donation), 2 epochs, lr 3e-5, top 16 layers.
+
+| set | run 2 | run 3 | run 3 donation | run 3 at conf >= 0.9 | wrong and sure |
+|---|---|---|---|---|---|
+| held-out groups (trainer split) | 98.6 % | 98.9 % | 99.6 % | 99.7 % (cov. 96.5 %) | 12 / 3756 |
+| **seed 31337, untouched** | 99.5 % | **99.8 %** | **99.7 %** | 99.9 % (cov. 98.0 %) | **2 / 3000** |
+| seed 271828, untouched | - | 99.2 % | 99.1 % | 99.8 % (cov. 96.3 %) | 6 / 3000 |
+| seed 4242, `--steps 1000` | 99.2 % | 99.7 % | 99.5 % | 99.97 % (cov. 97.0 %) | 1 / 3000 |
+
+Seed 31337 is in the run 2 rendering (no waiter list) and run 3 still scores 99.8 % on it, so the
+model did not come to depend on the new field. Donation moved from the weakest kind to level with
+the others. Run 3 is the checkpoint this ADR stands on.
+
 ## What this is not
 
 The checkpoint is not in the dispatch path and is not a release asset. ADR-056 stands: no model
 decides what runs, and the resident forest (ADR-199) is still the scheduler's live System 1. This
 measures that a general System-1 model can reproduce the dispatch decision from a text rendering.
-Donation (transitive inheritance) is the weakest kind at 98.7 %. The workload shapes are those of
+Donation was the weakest kind at 98.7 % in run 2; see the amendment for run 3. The workload shapes are those of
 one generator; a trace from a real workload has not been tried.
 
 ## Consequences

@@ -204,7 +204,20 @@ impl Mirror {
             .holder
             .iter()
             .filter(|(_, h)| **h == t)
-            .map(|(e, _)| format!("e{e}"))
+            .map(|(e, _)| {
+                let ws: Vec<String> = self
+                    .waiters
+                    .get(e)
+                    .into_iter()
+                    .flatten()
+                    .map(|w| format!("t{w} p{}", self.base[w]))
+                    .collect();
+                if ws.is_empty() {
+                    format!("e{e}")
+                } else {
+                    format!("e{e} (waited on by {})", ws.join(", "))
+                }
+            })
             .collect();
         let holds = if held.is_empty() {
             "holds nothing".to_string()
@@ -233,12 +246,21 @@ fn esc(s: &str) -> String {
 /// What decided a row: inheritance, the advisory tiebreak, FIFO age among equals, or (only kept
 /// with `--all`) a unique highest base priority.
 const KINDS: [&str; 3] = ["schedule-donation", "schedule-advice", "schedule-fifo"];
+const WEIGHT: [usize; 3] = [2, 1, 1];
+
+fn weight(kind: &str) -> usize {
+    KINDS
+        .iter()
+        .position(|k| *k == kind)
+        .map_or(1, |i| WEIGHT[i])
+}
 
 #[derive(Default)]
 struct Stats {
     rows: usize,
     episodes: usize,
-    /// Rows per kind; without `--all` each of [`KINDS`] is capped at an equal share of `--rows`.
+    /// Rows per kind; without `--all` each of [`KINDS`] is capped at its [`WEIGHT`] share of
+    /// `--rows` (donation, the hardest, gets two shares).
     per_kind: BTreeMap<&'static str, usize>,
     quota: usize,
     skipped_budget: usize,
@@ -246,7 +268,7 @@ struct Stats {
 
 impl Stats {
     fn full(&self) -> bool {
-        self.rows >= self.quota * KINDS.len()
+        self.rows >= self.quota * WEIGHT.iter().sum::<usize>()
     }
 }
 
@@ -462,7 +484,9 @@ fn episode(
                 // A unique highest base priority answers itself.
                 _ => None,
             };
-            let room = |k: &&str| keep_all || st.per_kind.get(k).copied().unwrap_or(0) < st.quota;
+            let room = |k: &&str| {
+                keep_all || st.per_kind.get(k).copied().unwrap_or(0) < st.quota * weight(k)
+            };
             if let Some(kind) = kind.filter(room) {
                 writeln!(out, r#"{line}"t{won}", "kind": "{kind}"}}"#).expect("write row");
                 st.rows += 1;
@@ -498,7 +522,7 @@ fn main() {
         quota: if keep_all {
             rows
         } else {
-            rows.div_ceil(KINDS.len())
+            rows.div_ceil(WEIGHT.iter().sum())
         },
         ..Default::default()
     };
