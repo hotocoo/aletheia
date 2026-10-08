@@ -1,6 +1,6 @@
 [package]
 name = "aletheia"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Aletheia — AI-native OS. M1 hosted System-Core reference implementation."
 

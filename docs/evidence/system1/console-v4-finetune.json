@@ -1,0 +1,32 @@
+{
+ "base": "aletheia-console-s1 v2 (release v0.6.0 asset)",
+ "corpus": "docs/evidence/system1/console-corpus.jsonl: its 465 rows for the commands added since v2, plus 250 replayed paraphrase groups (3113 rows)",
+ "rows": {
+  "train": 2889,
+  "calibration": 271,
+  "test": 415
+ },
+ "epochs": 3,
+ "lr": 5e-05,
+ "unfreeze": 4,
+ "seed": 244,
+ "temperatures": {
+  "choice:11+": 1.25,
+  "choice:3-5": 0.05,
+  "choice:6-10": 0.05,
+  "choice:2": 0.05
+ },
+ "test_accuracy": {
+  "command": 0.9843,
+  "dst": 1.0,
+  "name": 1.0,
+  "src": 1.0,
+  "text": 1.0
+ },
+ "test_accuracy_all": 0.9904,
+ "threshold": 0.9,
+ "coverage_at_threshold": 0.9566,
+ "accuracy_at_threshold": 1.0,
+ "wrong_and_sure": 0,
+ "minutes": 21.2
+}

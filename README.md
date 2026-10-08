@@ -429,10 +429,10 @@ embedding server or vector database is required** for normal OS operation.
 
 Every stable version is a tag `vX.Y.Z`, and every tag publishes a ready-to-boot x86-64 package on
 the [releases page](https://github.com/hotocoo/aletheia/releases/latest), built and **booted from
-its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.6.0**.
+its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.0**.
 
-1. Download `aletheia-v0.6.0-x86_64-vmware.zip` and its `.sha256`, then check the digest:
-   `shasum -a 256 -c aletheia-v0.6.0-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
+1. Download `aletheia-v0.7.0-x86_64-vmware.zip` and its `.sha256`, then check the digest:
+   `shasum -a 256 -c aletheia-v0.7.0-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
 2. Unzip. It holds two UEFI disks, each with its `.vmx`:
    - `aletheia-x86_64.vmx`: the OS you sit in front of. It boots, proves its invariants, then
      opens the console (type `help`).
@@ -453,6 +453,21 @@ its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.6.0**.
    Homebrew ships the firmware as `/opt/homebrew/share/qemu/edk2-x86_64-code.fd` with vars
    `edk2-i386-vars.fd` beside it; Debian/Ubuntu as `/usr/share/OVMF/OVMF_CODE_4M.fd` and
    `OVMF_VARS_4M.fd` (package `ovmf`).
+
+**New in v0.7.0** (since v0.6.0; audit: `docs/PRODUCTION-READINESS.md`):
+
+- **Laya runs natively:** `aletheia-laya` serves the System-1 decision checkpoints with no Python
+  (candle, one binary, answer parity with the reference runtime measured on two checkpoints) and
+  `aletheiad model serve` supervises it: identity-checked, restarted with back-off, never outliving
+  its supervisor (ADR-240, ADR-241). The Linux x86-64 binary is a release asset.
+- **System 1 on the running machine:** memory pressure reclaims background programs in the
+  eviction forest's order (ADR-238); background programs share the CPU by weight with the risk
+  advisor ordering ties (`weight`, ADR-239); an anomaly watch flags bursts in the kernel's own
+  failure counters (`mlstat`, ADR-242); the block cache was measured against the optimum and
+  doubled (ADR-243).
+- **Console accounts:** `passwd NAME` locks every later session until `login` (PBKDF2, salted from
+  the entropy device, back-off on failures, the record unreadable from the console; ADR-244).
+- `ver` now reports the real version (it said 0.1.0 since the start).
 
 **New in v0.6.0** (since v0.5.0):
 

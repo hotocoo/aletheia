@@ -16,6 +16,26 @@ WITH_REDOX=1 WITH_FREEBSD=1 BOOT_SAMPLES=5 WORKLOAD_OPS=50 BOOT_TIMEOUT=400 ./sc
 ALETHEIA_PROPERTY_SEED=<hex> ALETHEIA_PROPERTY_CASES=1024 cargo test --release --test property_campaign   # in kernel-core
 ```
 
+## 000. Re-measured 2026-10-08 (v0.7.0, ADR-237..245)
+
+`BOOT_SAMPLES=3 WORKLOAD_OPS=25 ./scripts/comparative-bench.sh`, same host, `qemu-system-x86_64`
+TCG, no NIC on either leg (Redox and FreeBSD not re-run). Host load average about 5 of 16 cores:
+another session's model fine-tune was running on the GPU.
+
+| | Aletheia (x86-64) | Linux 6.12-lts |
+|---|---|---|
+| boot to prompt, no NIC (median of 3) | 2299 ms (2307/2210/2299) | 1841 ms (1856/1822/1841) |
+| idle host CPU at the prompt (median of 6, three guests) | 0.0 % (all samples) | 0.4-0.9 % |
+| 25 typed `echo` round-trips (three runs) | 68-80 ms (2-3 ms/op) | 688-702 ms (27-28 ms/op) |
+| bootable payload | 3,484,672 B | 14,208,432 B |
+| privileged source lines | 83,068 | ~40 million (not counted here) |
+
+Against section 00 (v0.6.0): boot median 128 ms earlier (2427 to 2299 ms; section 00 named its
+2811 ms first sample a host-load outlier, and this run had none), payload 101 KB larger (the
+anomaly watch, console accounts with PBKDF2, the reclaim and weight paths), idle CPU and the typed
+path unchanged. The System-1 runtime is measured in ADR-241 (decision latency, load time, memory
+against the Python reference); it is not part of a boot.
+
 ## 00. Re-measured 2026-10-08 (v0.6.0, ADR-229..235)
 
 `BOOT_SAMPLES=3 WORKLOAD_OPS=25 ./scripts/comparative-bench.sh` on the same Apple Silicon host,

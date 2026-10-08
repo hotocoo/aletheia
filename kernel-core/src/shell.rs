@@ -1252,7 +1252,13 @@ pub const COMMANDS: &[(&str, &str)] = &[
 
 /// What this system says about itself. One place, so the console and the boot banner cannot claim
 /// different things.
-pub const VERSION: &str = "Aletheia 0.1.0 — capability-secure microkernel";
+/// What `ver` prints first: the version is the crate's own, so it cannot drift from the release
+/// (it read 0.1.0 through v0.6.0).
+pub const VERSION: &str = concat!(
+    "Aletheia ",
+    env!("CARGO_PKG_VERSION"),
+    " — capability-secure microkernel"
+);
 
 /// Render a filesystem refusal as one line a human can act on. Every arm is named: an unmatched
 /// error would otherwise print as a debug blob at exactly the moment a user needs to understand it.

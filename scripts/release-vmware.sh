@@ -268,6 +268,13 @@ if rows:
                                      kv["id"], kv.get("archive_sha256", "?")))
     print()
 PYMODELS
+  echo "## Native System-1 runtime"
+  echo
+  echo "\`aletheia-laya-$VERSION-x86_64-linux.tar.gz\` (built by this workflow) serves a Laya decision"
+  echo "checkpoint without Python (ADR-241). Put \`aletheia-laya\` beside \`aletheiad\` (or on \`PATH\`);"
+  echo "\`aletheiad model serve\` prefers it over the Python sidecar. Other platforms build it from source:"
+  echo "\`cargo build --release --manifest-path aletheia-laya/Cargo.toml\`."
+  echo
   echo "Maturity: nothing here is production-ready — read \`docs/MATURITY.md\` before quoting a claim."
 } > "$OUT/RELEASE-NOTES.md"
 cp "$STAGE/SHA256SUMS" "$OUT/SHA256SUMS"

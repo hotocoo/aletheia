@@ -189,13 +189,16 @@ pub fn pull_archive(
     if entry.repo.is_empty() || entry.file.is_empty() {
         return Err(format!("{} names no repo/file to unpack under", entry.id));
     }
-    if let Some(p) = cached_file(cache_root, &entry.repo, &entry.file) {
-        return Ok(p);
-    }
     let snap = cache_root
         .join(ref_to_cache_dirname(&entry.repo))
         .join("snapshots")
         .join(&entry.archive_sha256[..12]);
+    // Only THIS archive's snapshot counts as pulled: an older version's snapshot of the same repo
+    // (v2 under a v4 manifest) must not stop the new one from being fetched.
+    let pinned = snap.join(&entry.file);
+    if pinned.exists() {
+        return Ok(pinned);
+    }
     std::fs::create_dir_all(&snap).map_err(|e| e.to_string())?;
     let archive = snap.with_extension("download");
     let ok = std::process::Command::new("curl")
@@ -229,8 +232,11 @@ pub fn pull_archive(
     if !ok {
         return Err("unpacking the archive failed".into());
     }
-    cached_file(cache_root, &entry.repo, &entry.file)
-        .ok_or_else(|| format!("the archive holds no {}", entry.file))
+    if pinned.exists() {
+        Ok(pinned)
+    } else {
+        Err(format!("the archive holds no {}", entry.file))
+    }
 }
 
 /// Verify one file against a pinned SHA-256 — the same four outcomes as [`verify_integrity`].

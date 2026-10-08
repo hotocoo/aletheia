@@ -149,6 +149,27 @@ fn a_published_archive_is_verified_then_unpacked_where_discovery_looks() {
     assert_eq!(aletheia::ai::runtime::pull_archive(&e, &cache).unwrap(), p);
 }
 
+/// A new version's archive is fetched even when an older version of the same repo is cached
+/// (v4 under a manifest that used to name v2): only the pinned snapshot counts as pulled.
+#[test]
+fn an_older_snapshot_does_not_stop_a_new_version_from_being_pulled() {
+    let (e, cache) = archive_entry("upgrade");
+    let old = cache
+        .join(aletheia::ai::runtime::ref_to_cache_dirname(&e.repo))
+        .join("snapshots")
+        .join("000000000000");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join(&e.file), b"old weights").unwrap();
+    let p = aletheia::ai::runtime::pull_archive(&e, &cache).expect("pull");
+    assert_eq!(std::fs::read(&p).unwrap(), b"weights");
+    assert!(p.starts_with(
+        cache
+            .join(aletheia::ai::runtime::ref_to_cache_dirname(&e.repo))
+            .join("snapshots")
+            .join(&e.archive_sha256[..12])
+    ));
+}
+
 #[test]
 fn an_archive_that_does_not_match_its_pin_unpacks_nothing() {
     let (mut e, cache) = archive_entry("bad");

@@ -37,6 +37,18 @@ jobs:
         run: ./scripts/release-vmware.sh --version "${TAG}"
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      - name: Build the native System-1 runtime (ADR-241) for Linux x86-64
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path aletheia-laya/Cargo.toml
+          name="aletheia-laya-${TAG}-x86_64-linux"
+          mkdir -p "dist/$name"
+          cp aletheia-laya/target/release/aletheia-laya "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
       - name: Keep the package as a workflow artifact too
         uses: actions/upload-artifact@v4
         with:
@@ -53,5 +65,5 @@ jobs:
           else
             gh release edit "$TAG" --notes-file dist/RELEASE-NOTES.md
           fi
-          gh release upload "$TAG" dist/*.zip dist/*.zip.sha256 dist/SHA256SUMS --clobber
+          gh release upload "$TAG" dist/*.zip dist/*.zip.sha256 dist/*.tar.gz dist/*.tar.gz.sha256 dist/SHA256SUMS --clobber
           gh release view "$TAG"
