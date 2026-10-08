@@ -1279,6 +1279,10 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - `model pull` counts only the pinned snapshot (a cached v2 had made a v4 pull a no-op).
 - Crates 0.7.0, `ver` prints the crate version; release workflow ships `aletheia-laya` for Linux
   x86-64; `docs/PRODUCTION-READINESS.md`; BENCHMARKS section 000.
+- **Published:** tag `v0.7.0` at `88d7355`; the release workflow booted the VMware package and
+  built `aletheia-laya` for Linux x86-64; `aletheia-console-s1-v4.tar` uploaded; a fresh
+  `aletheiad model pull aletheia-console-s1` from GitHub verified the archive digest and unpacked
+  the model whose SHA-256 the manifest pins; every asset's `.sha256` checked after download.
 
 ### 2026-10-08 — console accounts (ADR-244)
 
