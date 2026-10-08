@@ -8,7 +8,6 @@ use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{embedding, linear_no_bias, Embedding, LayerNorm, Linear, Module, VarBuilder};
 use serde::Deserialize;
 
-use core::f32;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
