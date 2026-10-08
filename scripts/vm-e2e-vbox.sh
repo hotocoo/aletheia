@@ -24,6 +24,7 @@ X86="$ROOT/kernel-x86_64"
 BUILD="$X86/build"
 IMG="$BUILD/aletheia-x86_64.img"
 VDI="$BUILD/aletheia-vbox.vdi"
+NVDI="$BUILD/aletheia-vbox-nvme.vdi"
 LOG="$BUILD/aletheia-vbox-serial.log"
 VM_NAME="${VM_NAME:-Aletheia-x86_64-e2e}"
 CPUS="${CPUS:-2}"
@@ -126,6 +127,10 @@ REQUIRED=(
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'
+  # The real-device-class drivers (ADR-223, ADR-224) against VirtualBox's OWN controller models -
+  # a second implementation of each, written by someone other than QEMU.
+  'ALL 23 NVME INVARIANTS HOLD'
+  'ALL 6 E1000 INVARIANTS HOLD'
   'e2e\] PASS'
 )
 # SKIPPED-BY-HYPERVISOR: VirtualBox emulates no virtio-blk and this VM has no NIC, so the storage and
@@ -135,7 +140,7 @@ SKIPPED=(
   'VIRTIO-BLK INVARIANTS HOLD   (VirtualBox emulates no virtio-blk device)'
   'DURABLE-STORE INVARIANTS HOLD   (needs the virtio-blk scratch disk)'
   'PERSISTENT MEDIUM cross-reboot proof   (needs the virtio-blk persistent disk)'
-  'NETWORK INVARIANTS HOLD   (this VM is provisioned with no NIC)'
+  'NETWORK INVARIANTS HOLD   (the VM NIC is an e1000, not virtio-net; the e1000 family runs instead)'
   'VIRTIO-GPU INVARIANTS HOLD   (VirtualBox emulates no virtio-gpu device)'
   'FRAMEBUFFER-CONSOLE INVARIANTS HOLD   (needs the virtio-gpu device)'
   'INPUT-HARDWARE INVARIANTS HOLD   (VirtualBox emulates no virtio-input device)'
@@ -171,6 +176,8 @@ cleanup() {
   vbm unregistervm "$VM_NAME" --delete >/dev/null
   vbm closemedium disk "$(hostpath "$VDI")" --delete >/dev/null
   rm -f "$VDI"
+  vbm closemedium disk "$(hostpath "$NVDI")" --delete >/dev/null
+  rm -f "$NVDI" "$BUILD/nvme-raw.img"
 }
 
 # Writes "pass"/"fail"/"" (watchdog) to stdout; everything human-facing goes to stderr so the caller
@@ -184,6 +191,10 @@ boot_once() {
   echo "==> [2/4] converting raw image -> VDI" >&2
   vbm convertfromraw "$(hostpath "$IMG")" "$(hostpath "$VDI")" --format VDI >/dev/null 2>&1 \
     || { echo "FAIL: convertfromraw" >&2; return 2; }
+  # NVMe namespace (ADR-223): 1 MiB = 256 blocks, the geometry the driver's suite expects.
+  dd if=/dev/zero of="$BUILD/nvme-raw.img" bs=1048576 count=1 2>/dev/null &&
+    vbm convertfromraw "$(hostpath "$BUILD/nvme-raw.img")" "$(hostpath "$NVDI")" --format VDI >/dev/null 2>&1 \
+    || { echo "FAIL: nvme convertfromraw" >&2; return 2; }
 
   echo "==> [3/4] provisioning VM (EFI firmware, SATA/AHCI, ${CPUS} vCPU, ${mem} MiB, serial -> file)" >&2
   {
@@ -191,7 +202,10 @@ boot_once() {
     # --firmware efi is not optional: VirtualBox defaults to legacy BIOS, which never loads
     # \EFI\BOOT\BOOTX64.EFI and would present as a silent hang rather than a configuration error.
     vbm modifyvm "$VM_NAME" --firmware efi --memory "$mem" --cpus "$CPUS" \
-        --graphicscontroller vmsvga --nic1 none --audio-driver none &&
+        --graphicscontroller vmsvga --nic1 nat --nictype1 82540EM --audio-driver none &&
+    vbm storagectl "$VM_NAME" --name NVMe --add pcie --controller NVMe --portcount 1 &&
+    vbm storageattach "$VM_NAME" --storagectl NVMe --port 0 --device 0 --type hdd \
+        --medium "$(hostpath "$NVDI")" &&
     vbm storagectl "$VM_NAME" --name SATA --add sata --controller IntelAhci --portcount 1 --bootable on &&
     vbm storageattach "$VM_NAME" --storagectl SATA --port 0 --device 0 --type hdd \
         --medium "$(hostpath "$VDI")" &&

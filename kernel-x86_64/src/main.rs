@@ -1306,6 +1306,26 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // e1000 (REQ-DRV-010, ADR-224): the Intel 8254x NIC family, polled, DMA-gated.
+    kprintln!("");
+    kprintln!(
+        "--- e1000 selftests (real PCI Intel 8254x NIC: reset + rings + ARP over the wire) ---"
+    );
+    match pci::e1000_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[e1000] ALL {} E1000 INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] e1000 suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("e1000")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[e1000] FAILED at e1000 invariant {}: {}", idx, name);
+            ActiveHal::exit(1140 + idx as i32);
+        }
+    }
+
     // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
     // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk
     // device (this target has no block driver yet — that is REQ-DRV-001 on x86-64, not a namespace

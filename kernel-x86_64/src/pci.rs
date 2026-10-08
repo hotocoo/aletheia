@@ -346,3 +346,50 @@ pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
         Err((i, name)) => Err((i as u32, name)),
     }
 }
+
+/// This target's e1000 driver (ADR-224) over firmware-assigned BAR0.
+pub type E1000 = kernel_core::e1000::E1000<crate::virtio::X86Virtio, kernel_core::e1000::MmioRegs>;
+
+/// Prove the shared e1000 driver against the first Intel 8254x on bus 0. `Ok(0)` = none attached.
+pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
+    use kernel_core::e1000;
+    // SAFETY: touches only configuration ports.
+    let found = unsafe { virtiopci::enumerate_bus0(&Ports) }
+        .into_iter()
+        .find(|&(_, v, d)| v == e1000::VENDOR_INTEL && e1000::DEVICE_IDS.contains(&d));
+    let Some((bdf, _, dev_id)) = found else {
+        kprintln!("[e1000] no controller (skipped)");
+        return Ok(0);
+    };
+    let opened = (|| {
+        // SAFETY: this boot owns the function; decoding + bus master on, BAR0 mapped as device memory.
+        unsafe { virtiopci::enable_bus_master(&Ports, bdf) };
+        let pa = virtiopci::bar_base_pa(&Ports, bdf, 0)?;
+        let base = Ports
+            .map_region(pa, 0x6000)
+            .ok_or("e1000 BAR0 could not be mapped as device memory")?;
+        unsafe { E1000::init(e1000::MmioRegs::new(base)) }
+    })();
+    let dev = match opened {
+        Ok(d) => d,
+        Err(e) => {
+            kprintln!("[e1000] init refused: {}", e);
+            return Err((0, "e1000 controller initialization"));
+        }
+    };
+    let m = dev.mac();
+    kprintln!(
+        "[e1000] controller @ PCI {:02x}:{:02x}.{} id {:#06x} mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bdf.bus, bdf.device, bdf.function, dev_id, m[0], m[1], m[2], m[3], m[4], m[5]
+    );
+    match e1000::device_suite(&dev, &mut |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => Ok(n as u32),
+        Err((i, name)) => Err((i as u32, name)),
+    }
+}

@@ -45,6 +45,7 @@ pub mod device;
 pub mod dhcp;
 pub mod dma;
 pub mod dns;
+pub mod e1000;
 pub mod ed25519;
 pub mod edid;
 pub mod elf;
