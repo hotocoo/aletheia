@@ -1271,6 +1271,11 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — RDRAND keys TLS where there is no virtio-rng; v0.6.0 prepared (ADR-236)
+
+- `kernel-x86_64/src/rdrand.rs`: the CPU generator as an `EntropySource` (CPUID-gated, ten bounded retries, refused by name); `fetch_tls` uses it only when the machine has no virtio-rng. `tls-e2e.sh` adds an x86-64 leg with no virtio-rng and `+rdrand`: a full TLS 1.3 conversation with OpenSSL.
+- Release preparation: the shipped `.vmx` carries an e1000 on NAT and the packager boots its disks with the same NIC (selftest e1000 suite 5/5, interactive prompt reached); crate versions 0.6.0; BENCHMARKS re-measured (section 00); a console-storm regression on e1000-only machines (`net` allocated a grant list) fixed.
+
 ### 2026-10-08 — the console speaks over the NIC the machine has (ADR-235)
 
 - One DHCP exchange for every NIC (`virtionet::take_lease`); the e1000 leases and speaks from its lease. DNS runs over any `Ipv4Link` (`tcpnet::udp_query`, `dns::resolve_over`).

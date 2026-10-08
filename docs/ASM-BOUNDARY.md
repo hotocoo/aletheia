@@ -57,6 +57,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel-riscv64/src/vm.rs` | 6 | satp load, sfence.vma shootdowns, fence.i |
 | `kernel-x86_64/src/hal.rs` | 2 | port-mapped I/O (in/out), cli/sti/hlt |
 | `kernel-x86_64/src/pci.rs` | 2 | legacy PCI config-space ports 0xCF8/0xCFC |
+| `kernel-x86_64/src/rdrand.rs` | 1 | `rdrand` + `setc`: the CPU generator as the TLS entropy source when no virtio-rng exists (ADR-236) |
 | `kernel-x86_64/src/hwpm.rs` | 2 | `rdmsr`/`wrmsr` for the architectural HWP performance registers |
 | `kernel-x86_64/src/smp.rs` | 3 | INIT-SIPI startup sequence, LAPIC EOI, pause |
 | `kernel-x86_64/src/usermode.rs` | 2 | syscall/sysret fast-path and iretq ring-3 frames |

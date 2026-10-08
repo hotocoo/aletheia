@@ -45,6 +45,7 @@ mod pci;
 mod pic;
 mod pit;
 mod ps2;
+mod rdrand;
 mod rtc;
 mod serial;
 mod shellio;

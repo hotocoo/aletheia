@@ -127,7 +127,7 @@ arm64 guests and cannot boot these disks; Aletheia's aarch64 kernel targets QEMU
 
 Open the .vmx in VMware (File > Open). Both VMs are configured with 256 MiB, 1 vCPU, UEFI
 firmware, a SATA disk, a serial port to a file, and an Intel e1000 on VMware NAT: the boot takes a
-DHCP lease and the console uses it (net, resolve, fetch; ADR-235; tls needs a virtio-rng). To capture more, add devices
+DHCP lease and the console uses it (net, resolve, fetch, and tls keyed by the CPU RDRAND; ADR-235, ADR-236). To capture more, add devices
 in VMware — a virtio input keyboard/tablet is what the live desktop rung (ADR-080) drives
 under QEMU; VMware exposes PS/2, which reaches the console.
 

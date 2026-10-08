@@ -287,9 +287,15 @@ pub fn fetch_tls(
                 }
                 _ => "the entropy device did not answer; refusing to make a key without it",
             })?,
-            None => return Err(
-                "this machine has no entropy device; a TLS key from a predictable seed is refused",
-            ),
+            // No virtio-rng (VMware, a real machine): the CPU's own generator (ADR-236).
+            None => match crate::rdrand::Rdrand::detect() {
+                Some(mut cpu) => entropy::tls_seed(&mut cpu).map_err(|_| {
+                    "the CPU's random number generator gave no entropy; refusing to make a key from it"
+                })?,
+                None => return Err(
+                    "this machine has no entropy device and no RDRAND; a TLS key from a predictable seed is refused",
+                ),
+            },
         };
     let (private, random) = tlsclient::ephemeral_material(&seed);
     // SAFETY: main thread only (the console's own thread); the pump and the handshake are built on

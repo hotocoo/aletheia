@@ -68,6 +68,5 @@ constant address, and the DNS client existed only as a virtio-net method.
 * Not booted in VMware itself here (no VMware on the build host); the package is boot-verified
   under QEMU with the same NIC model. VirtualBox's e1000 gate (`vm-e2e-vbox.sh`) is the other
   hypervisor evidence.
-* `tls` still refuses on VMware: it takes key material only from an entropy device, and VMware
-  offers no virtio-rng. RDRAND (x86-64) as a second entropy source is the next step.
+* `tls` needed an entropy device VMware does not have; ADR-236 adds RDRAND for that case.
 * No interrupt-driven receive and no DHCP renewal on either NIC.

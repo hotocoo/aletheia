@@ -216,8 +216,10 @@ mmio_leg() {
 
 # x86-64 (UEFI under OVMF, virtio-net-pci + virtio-rng-pci): the same session, the same checks.
 # Until 2026-09-25 this target ran the identical TLS code with no live peer at all.
+# `x86_leg LABEL RNG`: with RNG=rdrand the machine has no virtio-rng, as a VMware guest or a real
+# machine has, and the CPU offers RDRAND: the key must come from the CPU's generator (ADR-236).
 x86_leg() {
-  local label="x86-64" code="" vars=""
+  local label="${1:-x86-64}" rng="${2:-virtio}" code="" vars=""
   for c in "${OVMF_CODE:-}" /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
       /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd; do
     [ -n "$c" ] && [ -f "$c" ] && { code="$c"; break; }
@@ -241,14 +243,14 @@ x86_leg() {
   dd if=/dev/zero of="$work/scratch.img" bs=1048576 count=1 2>/dev/null
   dd if=/dev/zero of="$work/persist.img" bs=1048576 count=1 2>/dev/null
   cp "$vars" "$work/vars.fd"
-  SESSION_ARGV=(qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -nographic
+  SESSION_ARGV=(qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu "qemu64,+smep$([ "$rng" = rdrand ] && echo ,+rdrand)" -nographic
     -drive "if=pflash,format=raw,unit=0,file=$code,readonly=on"
     -drive "if=pflash,format=raw,unit=1,file=$work/vars.fd"
     -drive "format=raw,file=$img"
     -drive "if=none,format=raw,file=$work/scratch.img,id=blk0" -device virtio-blk-pci,drive=blk0
     -drive "if=none,format=raw,file=$work/persist.img,id=blk1" -device virtio-blk-pci,drive=blk1
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0
-    -device virtio-rng-pci,disable-legacy=on
+    $([ "$rng" = rdrand ] || echo "-device virtio-rng-pci,disable-legacy=on")
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot)
   local log="$work/serial.log"
   drive_session "$log" 400 "${SESSION_CMDS[@]}"
@@ -276,6 +278,14 @@ case "$x_rc" in
   0) RESULTS+=("x86-64  : PASS") ;;
   2) RESULTS+=("x86-64  : SKIP") ;;
   *) RESULTS+=("x86-64  : FAIL") ;;
+esac
+
+x86_leg "x86-64 rdrand" rdrand
+d_rc=$?
+case "$d_rc" in
+  0) RESULTS+=("x86-64 RDRAND, no virtio-rng : PASS") ;;
+  2) RESULTS+=("x86-64 RDRAND, no virtio-rng : SKIP") ;;
+  *) RESULTS+=("x86-64 RDRAND, no virtio-rng : FAIL") ;;
 esac
 
 printf '========================================================================\n'

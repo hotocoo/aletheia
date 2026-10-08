@@ -458,8 +458,9 @@ its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.6.0**.
 
 - **The network on the shipped VM:** the package's VMs now carry an Intel e1000 on VMware NAT. The
   machine takes a DHCP lease on any subnet (ADR-234) and the console uses the e1000 when there is
-  no virtio-net (ADR-235): `net`, `resolve` and `fetch` work in VMware. `tls` still refuses there:
-  it takes its keys only from an entropy device, and VMware offers no virtio-rng.
+  no virtio-net (ADR-235): `net`, `resolve`, `fetch` and `tls` are meant to
+  work in VMware (`tls` keys from the CPU's RDRAND when there is no virtio-rng, ADR-236). Proved
+  under QEMU with the same NIC and CPU feature; not yet booted in VMware itself.
 - **TCP that learns the path:** the retransmission timeout follows measured round trips (RFC 6298,
   ADR-233), so a slow link no longer costs a resend of every segment.
 - **Programs grow their memory:** `SYS_BRK` gives a running program up to 256 KiB of writable
