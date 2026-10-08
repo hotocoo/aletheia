@@ -33,7 +33,7 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-10-08, latest (A GAME, AND A CLOCK TO PACE IT — ADR-222; before it THE OPERATOR ADDS PROGRAMS TO THE BOOT — ADR-221; before it THE DESKTOP'S LOOK IS A SETTING — ADR-220; before it THE MACHINE KEEPS ITS SETTINGS — ADR-219; before it A PROGRAM DRAWS IN COLOUR — ADR-218; before it A PROGRAM FEELS THE POINTER OVER ITS WINDOW — ADR-217; before it A PROGRAM HEARS WHAT IS TYPED AT ITS WINDOW — ADR-216; before it A PROGRAM DRAWS INTO ITS OWN WINDOW — ADR-215; before it A PROGRAM'S WRITABLE MEMORY IS SEVERAL PAGES — ADR-214; before it PROGRAMS LEFT RUNNING IN THE BACKGROUND — ADR-213; before it PROGRAMS RUN TOGETHER — ADR-212; before it A PROGRAM LARGER THAN ONE PAGE — ADR-211; before it A PROGRAM HAS WRITABLE MEMORY — ADR-210; before it SYSTEM 1 V3, MEASURED AND NOT SHIPPED — ADR-209; before it THE COMPARISONS, RE-MEASURED — ADR-208; before it A PROGRAM READS THE NAMESPACE — ADR-207; before it A PROGRAM IS HANDED ITS ARGUMENTS — ADR-206; before it A PROGRAM WRITTEN IN RUST — ADR-205; before it A PROGRAM WRITES TO THE CONSOLE — ADR-204; before it A PROGRAM THAT NEVER YIELDS IS PREEMPTED — ADR-203; before it A PROGRAM CANNOT STOP THE MACHINE BY FAULTING — ADR-202; before it A PROGRAM FROM THE NAMESPACE RUNS — ADR-201; before it THE CLOCK KEEPS TIME WHILE THE MACHINE IDLES — ADR-200; before it THE SCHEDULER IS ADVISED WHILE THE MACHINE RUNS — ADR-199, see the dated section below; waves ADR-174..198 are recorded there too. Before it: THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
+**As of:** 2026-10-08, latest (DRIVERS FOR DEVICE CLASSES REAL MACHINES SHIP, AND v0.5.0 — ADR-223..228; before it A GAME, AND A CLOCK TO PACE IT — ADR-222; before it THE OPERATOR ADDS PROGRAMS TO THE BOOT — ADR-221; before it THE DESKTOP'S LOOK IS A SETTING — ADR-220; before it THE MACHINE KEEPS ITS SETTINGS — ADR-219; before it A PROGRAM DRAWS IN COLOUR — ADR-218; before it A PROGRAM FEELS THE POINTER OVER ITS WINDOW — ADR-217; before it A PROGRAM HEARS WHAT IS TYPED AT ITS WINDOW — ADR-216; before it A PROGRAM DRAWS INTO ITS OWN WINDOW — ADR-215; before it A PROGRAM'S WRITABLE MEMORY IS SEVERAL PAGES — ADR-214; before it PROGRAMS LEFT RUNNING IN THE BACKGROUND — ADR-213; before it PROGRAMS RUN TOGETHER — ADR-212; before it A PROGRAM LARGER THAN ONE PAGE — ADR-211; before it A PROGRAM HAS WRITABLE MEMORY — ADR-210; before it SYSTEM 1 V3, MEASURED AND NOT SHIPPED — ADR-209; before it THE COMPARISONS, RE-MEASURED — ADR-208; before it A PROGRAM READS THE NAMESPACE — ADR-207; before it A PROGRAM IS HANDED ITS ARGUMENTS — ADR-206; before it A PROGRAM WRITTEN IN RUST — ADR-205; before it A PROGRAM WRITES TO THE CONSOLE — ADR-204; before it A PROGRAM THAT NEVER YIELDS IS PREEMPTED — ADR-203; before it A PROGRAM CANNOT STOP THE MACHINE BY FAULTING — ADR-202; before it A PROGRAM FROM THE NAMESPACE RUNS — ADR-201; before it THE CLOCK KEEPS TIME WHILE THE MACHINE IDLES — ADR-200; before it THE SCHEDULER IS ADVISED WHILE THE MACHINE RUNS — ADR-199, see the dated section below; waves ADR-174..198 are recorded there too. Before it: THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
 advisor (`lethe=12`) and the resident governor on real timer interrupts (`lethed=15`) boot on all three CPUs, 4-7 ms each,
 with a live census gated on every target; conformance 383 -> **397**; attack surface measured against Linux and the boot
 gap attributed, each its own CI job. Before it: THE BROWSER WINDOW'S OWN KEYS — ADR-164. While the browser window holds focus,
@@ -1270,6 +1270,22 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-10-08 — drivers for device classes real machines ship; v0.5.0 (ADR-223..228)
+
+- NVMe (ADR-223), Intel 8254x e1000 (ADR-224) with the TCP stack over it (ADR-227), and AHCI
+  (ADR-225): shared drivers in `kernel-core`, found by PCI class or id, polled, DMA-gated, each
+  with a simulated-controller test suite. x86-64 and aarch64 gates attach QEMU's `nvme`, `e1000`
+  and SATA devices (`nvme=23`, `e1000=6`, `ahci=24`); the VirtualBox gate runs e1000 and AHCI
+  against VirtualBox's own controllers (`e1000=5`, `ahci=24`). VirtualBox NVMe needs the Oracle
+  Extension Pack and is not gated.
+- ADR-226: aarch64 BAR assignment size-probes every BAR and skips I/O-port BARs; the AHCI
+  signature is read after FIS receive starts.
+- ADR-228: storage is written only when its serial is `ALETHEIA-SCRATCH`; a missing scratch
+  disk or network shortens a suite instead of failing the boot (one-disk x86 jobs and the
+  VMware package had failed on the ADR-225 push); dropped drivers stop their devices.
+- Released **v0.5.0** (VMware package boot-verified, System 1 asset re-attached, SHA-256
+  checked). Not run on physical hardware.
 
 ### 2026-10-08 — a game, and a clock to pace it (ADR-222)
 

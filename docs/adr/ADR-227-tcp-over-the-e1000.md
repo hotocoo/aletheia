@@ -1,6 +1,7 @@
 # ADR-227 — TCP over the e1000
 
 **Status:** Accepted (2026-10-08)
+**Amended by:** ADR-228 (link state is now a precondition, not an invariant: counts are 6 on QEMU, 5 on VirtualBox)
 **Requirements:** REQ-DRV-010 (widened)
 **Builds on:** ADR-138..140 (the TCP pump and `Ipv4Link`), ADR-224 (e1000), ADR-226.
 
