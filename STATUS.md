@@ -1271,6 +1271,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — the OS keeps its thinking systems running (ADR-240)
+
+- `aletheia::ai::supervise`: identity preflight (already served / another model refused), bounded
+  restarts (500 ms..8 s back-off, crash loop = 5 exits in 60 s), ready = endpoint answers with the
+  manifest's `serve_id`, a POSIX `sh` tether so a server dies with its supervisor (SIGKILL too).
+  `model serve [<id>] [--pull]`.
+- Live with the shipped console checkpoint: SIGKILLed sidecar back in 500 ms + 22.5 s load;
+  SIGKILLed supervisor left port 8091 free. Laya still needs Python + `pip install laya`.
+
 ### 2026-10-08 — background programs share turns by weight (ADR-239)
 
 - `jobs::Jobs` is a stride scheduler: weight 1..=16 (default 4), lowest pass runs, newcomers start

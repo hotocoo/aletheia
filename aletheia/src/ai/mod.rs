@@ -37,6 +37,7 @@ pub mod dual;
 pub mod llama;
 pub mod registry;
 pub mod runtime;
+pub mod supervise;
 
 /// Build the configured `ModelProvider` (ADR-017). `local` + `llama_cpp` → `LlamaCppProvider`
 /// (which the pipeline falls back away from to the deterministic interpreter when the server is

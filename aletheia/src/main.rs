@@ -269,8 +269,8 @@ fn console_interpreter(
             return Box::new(dual);
         }
         eprintln!(
-            "interpreter: system1 {} not serving at {} — system2 only",
-            s1.entry.id, s1.endpoint
+            "interpreter: system1 {} not serving at {} — system2 only (keep it served: `aletheiad model serve {}`)",
+            s1.entry.id, s1.endpoint, s1.entry.id
         );
     }
     system2
@@ -788,7 +788,13 @@ fn model_cmd(args: &[String]) {
             }
         },
         Some("bench") => model_bench(dirp),
-        Some("serve") => model_serve(dirp, args.get(3).map(|s| s.as_str())),
+        Some("serve") => model_serve(
+            dirp,
+            args.get(3)
+                .map(|s| s.as_str())
+                .filter(|a| !a.starts_with("--")),
+            args.iter().any(|a| a == "--pull"),
+        ),
         // `model pull <id>`: one named model, whichever role it fills, from its hub or its
         // published archive (ADR-187).
         Some("pull") if args.get(3).is_some() => {
@@ -797,15 +803,7 @@ fn model_cmd(args: &[String]) {
                 eprintln!("no model `{id}` is registered — try `aletheiad model list`");
                 std::process::exit(1);
             };
-            let got = if e.url.is_empty() {
-                let mut cfg = aletheia::ai::config::AiConfig::resolve(Some(dirp));
-                cfg.model_ref = e.repo.clone();
-                cfg.entry = Some(e.clone());
-                aletheia::ai::runtime::ensure_model(&cfg)
-            } else {
-                aletheia::ai::runtime::pull_archive(&e, &aletheia::ai::registry::hf_hub_root())
-            };
-            match got {
+            match provision(dirp, &e) {
                 Ok(p) => println!("{} ready: {}", e.id, p.display()),
                 Err(err) => {
                     eprintln!("provisioning {} failed: {err}", e.id);
@@ -828,9 +826,32 @@ fn model_cmd(args: &[String]) {
     }
 }
 
-/// `aletheiad model serve [<id>]` (ADR-189): start the server for one named model, or for both
-/// selected systems, from their manifests, and stay in the foreground until one of them exits.
-fn model_serve(dir: &std::path::Path, id: Option<&str>) {
+/// Fetch one registered model into the local cache: from its hub, or from its published,
+/// digest-checked archive (ADR-187).
+fn provision(
+    dir: &std::path::Path,
+    e: &aletheia::ai::registry::ModelEntry,
+) -> Result<std::path::PathBuf, String> {
+    if e.url.is_empty() {
+        let mut cfg = aletheia::ai::config::AiConfig::resolve(Some(dir));
+        cfg.model_ref = e.repo.clone();
+        cfg.entry = Some(e.clone());
+        aletheia::ai::runtime::ensure_model(&cfg).map_err(|err| err.to_string())
+    } else {
+        aletheia::ai::runtime::pull_archive(e, &aletheia::ai::registry::hf_hub_root())
+            .map_err(|err| err.to_string())
+    }
+}
+
+/// `aletheiad model serve [<id>] [--pull]` (ADR-189, ADR-240): serve one named model, or both
+/// selected systems, from their manifests, and keep them served: a server that exits is started
+/// again after a back-off, a crash loop is given up by name, and a port another model answers is
+/// refused. `--pull` fetches absent weights first; without it an absent model is refused with the
+/// pull it needs, never downloaded unasked.
+fn model_serve(dir: &std::path::Path, id: Option<&str>, pull: bool) {
+    use aletheia::ai::supervise::{
+        preflight, Decision, Event, Preflight, RestartPolicy, Supervised,
+    };
     let mut want: Vec<(aletheia::ai::registry::ModelEntry, String)> = Vec::new();
     match id {
         Some(id) => {
@@ -861,40 +882,92 @@ fn model_serve(dir: &std::path::Path, id: Option<&str>) {
         }
     }
     let root = aletheia::ai::runtime::sidecar_root();
-    let mut children = Vec::new();
-    for (e, endpoint) in &want {
-        match aletheia::ai::runtime::serve_command(e, endpoint, &root) {
-            Ok(mut c) => match c.spawn() {
-                Ok(child) => {
-                    eprintln!(
-                        "serving {} ({}) at {} — pid {}",
-                        e.id,
-                        e.role.as_str(),
-                        endpoint,
-                        child.id()
-                    );
-                    children.push((e.id.clone(), child));
+    let mut servers = Vec::new();
+    let mut already = 0;
+    for (e, endpoint) in want {
+        let e = if e.path.as_ref().is_some_and(|p| p.exists()) || !pull {
+            e
+        } else {
+            eprintln!("{} is not on this machine; pulling it (--pull)", e.id);
+            match provision(dir, &e) {
+                Ok(p) => {
+                    eprintln!("{} ready: {}", e.id, p.display());
+                    aletheia::ai::registry::find(&e.id).unwrap_or(e)
                 }
-                Err(err) => eprintln!("could not start {}: {err}", e.id),
-            },
-            Err(err) => eprintln!("not serving {}: {err}", e.id),
+                Err(err) => {
+                    eprintln!("not serving {}: provisioning failed: {err}", e.id);
+                    continue;
+                }
+            }
+        };
+        if let Err(err) = aletheia::ai::runtime::serve_command(&e, &endpoint, &root) {
+            eprintln!("not serving {}: {err}", e.id);
+            continue;
         }
+        match preflight(&endpoint, &e.serve_id) {
+            Preflight::AlreadyServing => {
+                eprintln!("{} is already served at {endpoint}; starting nothing", e.id);
+                already += 1;
+                continue;
+            }
+            Preflight::Occupied(ids) => {
+                eprintln!(
+                    "not serving {}: {endpoint} already answers as {} — a port is not a model",
+                    e.id,
+                    ids.join(", ")
+                );
+                continue;
+            }
+            Preflight::Free => {}
+        }
+        let (entry, ep, sidecars) = (e.clone(), endpoint.clone(), root.clone());
+        servers.push(Supervised::new(
+            &e.id,
+            &endpoint,
+            &e.serve_id,
+            RestartPolicy::default(),
+            Box::new(move || aletheia::ai::runtime::serve_command(&entry, &ep, &sidecars)),
+        ));
     }
-    if children.is_empty() {
-        std::process::exit(1);
+    if servers.is_empty() {
+        std::process::exit(if already > 0 { 0 } else { 1 });
     }
-    // Foreground: the first server to exit ends the session, and says which one it was.
+    // Foreground supervision until every server has been given up on.
     loop {
-        for (id, child) in children.iter_mut() {
-            if let Ok(Some(status)) = child.try_wait() {
-                eprintln!("{id} exited: {status}");
-                for (_, other) in children.iter_mut() {
-                    let _ = other.kill();
+        for s in servers.iter_mut() {
+            match s.poll() {
+                Some(Event::Started { pid }) => eprintln!("{}: started, pid {pid}", s.id),
+                Some(Event::Ready { pid, after_ms }) => {
+                    eprintln!("{}: serving (pid {pid}, ready in {after_ms} ms)", s.id)
                 }
-                std::process::exit(status.code().unwrap_or(1));
+                Some(Event::Exited { code, decision }) => {
+                    eprintln!("{}: exited ({code:?}); {}", s.id, said(decision))
+                }
+                Some(Event::NotReady { after_ms, decision }) => eprintln!(
+                    "{}: did not answer as itself within {after_ms} ms; {}",
+                    s.id,
+                    said(decision)
+                ),
+                Some(Event::SpawnFailed { error, decision }) => {
+                    eprintln!("{}: could not start: {error}; {}", s.id, said(decision))
+                }
+                None => {}
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        if servers.iter().all(|s| s.gave_up()) {
+            std::process::exit(1);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    fn said(d: Decision) -> String {
+        match d {
+            Decision::Restart { after_ms } => format!("restarting in {after_ms} ms"),
+            Decision::GiveUp { exits, window_ms } => format!(
+                "crash loop: {exits} exits in {} s, giving up",
+                window_ms / 1000
+            ),
+        }
     }
 }
 
