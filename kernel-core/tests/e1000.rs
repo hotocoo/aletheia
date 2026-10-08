@@ -168,7 +168,7 @@ fn the_suite_holds_over_a_healthy_controller() {
     let dev = open(Faults::default()).expect("init");
     assert_eq!(dev.mac(), MAC);
     let n = device_suite(&dev, &mut |i, ok, name: &str| assert!(ok, "{i}: {name}")).unwrap();
-    assert_eq!(n, 6, "invariant count changed - update the VM gates");
+    assert_eq!(n, 5, "invariant count changed - update the VM gates");
 }
 
 #[test]
@@ -216,14 +216,14 @@ fn a_transmit_that_never_completes_is_a_timeout() {
 }
 
 #[test]
-fn no_link_fails_the_suite_at_its_named_invariant() {
+fn a_link_that_is_down_skips_the_wire_group_without_sending() {
     let dev = open(Faults {
         no_link: true,
         ..Default::default()
     })
     .unwrap();
-    let err = device_suite(&dev, &mut |_, _, _: &str| {}).unwrap_err();
-    assert_eq!(err.0, 4, "link is the first wire-group invariant");
+    let n = device_suite(&dev, &mut |i, ok, name: &str| assert!(ok, "{i}: {name}")).unwrap();
+    assert_eq!(n, 3);
 }
 
 #[test]

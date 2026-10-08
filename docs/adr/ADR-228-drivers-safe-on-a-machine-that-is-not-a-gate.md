@@ -30,11 +30,13 @@ the VMware package. Three defects followed from reusing the virtio pattern:
   the device: NVMe 5 read-only checks (enable and identify, DMA gate, unregistered PRP refused,
   out of range refused, queue wrap over reads), AHCI 5 (a disk identified, first sectors read,
   DMA gates, out of range, non-scratch writes refused), e1000 3 (MAC, DMA gate, MTU). The gate
-  group runs only when the gate's environment is there: scratch serial for storage, the
-  10.0.2.2 gateway answering ARP for e1000 (then link, ARP, ring wrap, and TCP when the echo
-  peer answers). Missing environment means a shorter suite, never a failed boot.
+  group runs only when the gate's environment is there: scratch serial for storage; for e1000 a
+  link that is up and the 10.0.2.2 gateway answering ARP (then ARP answered, ring wrap, and TCP
+  when the echo peer answers). Link state is a precondition, not an invariant: VirtualBox holds
+  an e1000 link down for 5 s after power-on (`LinkUpDelay`), which CI showed as a red
+  `e1000: the link is up`; the VirtualBox gate sets that delay to 0. Missing environment means a shorter suite, never a failed boot.
 * **Gates stay strict.** Each gate pins the full count in its marker map (`nvme=23`, `ahci=24`,
-  `e1000=7` on QEMU; `ahci=24`, `e1000=6` on VirtualBox), so a gate whose scratch disk or peer
+  `e1000=6` on QEMU; `ahci=24`, `e1000=5` on VirtualBox), so a gate whose scratch disk or peer
   went missing still fails.
 * **Drop stops the device.** `Nvme` clears `CC.EN`, `AhciDisk` stops `ST` then `FRE`, and the
   e1000 stops RX and TX (ADR-227).
@@ -43,9 +45,9 @@ the VMware package. Three defects followed from reusing the virtio pattern:
 
 * Hosted: a non-scratch NVMe controller gets 5 invariants, no write or flush reaches it, its
   disk stays all zero, and it is left disabled. A one-disk AHCI machine gets 5 with zero writes
-  and a stopped port. An e1000 network without the gateway gets 3.
+  and a stopped port. An e1000 network without the gateway, or with its link down, gets 3 and sends nothing on a down link.
 * `scripts/keyboard-e2e.sh` (one boot disk, no NVMe or e1000): `[ahci] ALL 5 AHCI INVARIANTS
-  HOLD`, `KEYBOARD-E2E: PASS`. Both QEMU gates: `nvme=23`, `ahci=24`, `e1000=7`, PASS.
+  HOLD`, `KEYBOARD-E2E: PASS`. Both QEMU gates: `nvme=23`, `ahci=24`, `e1000=6`, PASS.
 
 ## What this does not claim
 

@@ -130,7 +130,7 @@ REQUIRED=(
   # The real-device-class drivers (ADR-224, ADR-225) against VirtualBox's OWN controller models -
   # a second implementation of each, written by someone other than QEMU. (NVMe is absent here:
   # VirtualBox's NVMe controller ships only in the Oracle Extension Pack - VERR_PDM_DEVICE_NOT_FOUND.)
-  'ALL 6 E1000 INVARIANTS HOLD'
+  'ALL 5 E1000 INVARIANTS HOLD'
   'ALL 24 AHCI INVARIANTS HOLD'
   'e2e\] PASS'
 )
@@ -211,6 +211,9 @@ boot_once() {
     vbm storageattach "$VM_NAME" --storagectl SATA --port 1 --device 0 --type hdd \
         --medium "$(hostpath "$SVDI")" &&
     vbm setextradata "$VM_NAME" "VBoxInternal/Devices/ahci/0/Config/Port1/SerialNumber" "ALETHEIA-SCRATCH" &&
+    # VirtualBox holds an e1000 link down for 5 s after power-on by default; the kernel treats a
+    # down link as an absent network (ADR-228), so the gate removes the delay to keep the wire group.
+    vbm setextradata "$VM_NAME" "VBoxInternal/Devices/e1000/0/Config/LinkUpDelay" 0 &&
     # COM1 at the architectural 0x3F8/IRQ4, backed by a host file the gate greps.
     vbm modifyvm "$VM_NAME" --uart1 0x3F8 4 --uart-mode1 file "$(hostpath "$LOG")"
   } >/dev/null 2>&1 || { echo "FAIL: VM provisioning" >&2; return 2; }

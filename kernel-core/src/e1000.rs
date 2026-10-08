@@ -485,11 +485,15 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     );
     // Wire group: only where the user-mode network's gateway (10.0.2.2) answers - the QEMU and
     // VirtualBox gates. On any other network the local group above is the whole suite (ADR-228).
-    let gw = dev.arp_resolve(GATEWAY_IP);
+    // A link that is down (no cable, or a hypervisor's link-up delay) is an absent environment.
+    let gw = if dev.link_up() {
+        dev.arp_resolve(GATEWAY_IP)
+    } else {
+        Err(E1000Error::Timeout)
+    };
     if gw.is_err() {
         return Ok(n);
     }
-    check!("e1000: the link is up", dev.link_up());
     check!(
         "e1000: an ARP request for the gateway is answered with its hardware address",
         matches!(gw, Ok(m) if m != [0; 6])
