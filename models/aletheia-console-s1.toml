@@ -28,5 +28,5 @@ endpoint    = "http://127.0.0.1:8091"
 confidence  = 0.9
 
 [provision]
-url            = "https://github.com/hotocoo/aletheia/releases/download/v0.5.0/aletheia-console-s1-v2.tar"
+url            = "https://github.com/hotocoo/aletheia/releases/download/v0.6.0/aletheia-console-s1-v2.tar"
 archive_sha256 = "93d0b80bb6367c5838004dc90b4ac1ed6f20d6599c4afcc7a4258a8d1b969cc4"
