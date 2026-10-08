@@ -1271,6 +1271,11 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — v0.7.2 (ADR-247, ADR-248)
+
+- Crates 0.7.2: console roles and run reads, with the peer session's ADR-231 run 5 evidence
+  (729b862). CI green on the source commit before the tag.
+
 ### 2026-10-08 — a run of blocks in one request (ADR-248)
 
 - `BlockDevice::read_run` (default: per block); virtio-blk registers 6 data frames and serves runs

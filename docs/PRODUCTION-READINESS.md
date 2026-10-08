@@ -1,4 +1,4 @@
-# Production-readiness audit — Aletheia v0.7.1 (2026-10-08)
+# Production-readiness audit — Aletheia v0.7.2 (2026-10-08)
 
 **Verdict: a research operating system with production-grade discipline in its proofs, not a
 production operating system.** What is built is gated on every push, on three CPU architectures,
@@ -7,7 +7,7 @@ release answers to (a native System 1 everywhere, Laya shipped first-class, work
 graphics, virtualization and overclocking) is larger than what exists. `docs/MATURITY.md` grades
 every subsystem; this document is the release-level summary and the reproduction recipe.
 
-## What v0.7.x delivers (ADR-237..246)
+## What v0.7.x delivers (ADR-237..248)
 
 v0.7.1 supersedes v0.7.0: a review after publication found a locked console still serving the
 desktop's file panel and browser window, and an older cached checkpoint resolvable under the v4
@@ -32,7 +32,7 @@ Every command below ran for this release on an Apple M4 Max host (QEMU TCG guest
 gate set on every push (`.github/workflows/ci.yml`, 38 jobs).
 
 ```bash
-cd kernel-core && AI_PROVIDER=deterministic cargo test --release       # 946 passed
+cd kernel-core && AI_PROVIDER=deterministic cargo test --release       # 948 passed
 cd aletheia && cargo test                                                # 284 passed
 cd aletheia-laya && cargo test --release                                 # 8 passed (no checkpoint needed)
 ./scripts/vm-e2e.sh            # aarch64: 66 families, 858 boot invariants, three boots
