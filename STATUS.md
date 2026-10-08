@@ -1271,6 +1271,11 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-09 — the native runtime sizes its thread pool (ADR-251)
+
+- Default rayon pool = half the logical CPUs (measured optimum with BLAS threads and efficiency
+  cores): native CPU p50 129 -> 112 ms vs torch 102 ms (1.1x); parity 932/932.
+
 ### 2026-10-09 — operators own what they create (ADR-250)
 
 - `.owners` (private like `.users`): operators own objects they create and may change only their

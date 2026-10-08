@@ -49,6 +49,15 @@ fn main() {
     } else {
         candle_core::Device::Cpu
     };
+    // Elementwise kernels split across half the logical CPUs unless told otherwise (ADR-251): the
+    // BLAS library runs its own threads beside them, and on a machine with efficiency cores using
+    // every CPU was measured slower (16 threads 129 ms, 8 threads 112 ms per decision).
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        let n = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads((n / 2).max(1))
+            .build_global();
+    }
     let t0 = std::time::Instant::now();
     let laya = match Laya::load(std::path::Path::new(dir), dev) {
         Ok(l) => l,

@@ -62,7 +62,7 @@ boots through OVMF, Linux skips firmware), idle CPU 0.0 vs 0.4-0.9 %, typed roun
 | Virtualization (Aletheia as host) | Not started | No VMX/SVM/EL2 host support |
 | Silicon overclocking | Contract and grant-only band exist (ADR-076/184); no frequency or voltage ever changed on real silicon | QEMU has no actuator |
 | Per-user authority | Fixed console roles (ADR-247) and per-object ownership for operators (ADR-250); no read permissions or groups, and programs a session runs carry no account | Least privilege between people |
-| System-1 decision latency | Native runtime 1.3x (CPU) / 1.4x (Metal) slower per decision than torch since ADR-249 (was 2.3x); loads 70x faster, uses less memory | A first-class runtime should not be the slower one |
+| System-1 decision latency | Native runtime 1.1x (CPU, ADR-251) / 1.4x (Metal) slower per decision than torch (was 2.3x); loads 70x faster, uses less memory | A first-class runtime should not be the slower one |
 | Training | Fine-tuning still needs Python + torch | Only serving is native |
 | Userland | Seeded Rust programs over a small syscall ABI; no POSIX layer, no package manager | Workstation and development workloads need an ecosystem |
 
