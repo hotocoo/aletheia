@@ -861,6 +861,25 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // NVMe (REQ-DRV-009, ADR-223): a storage controller class real machines ship, found by PCI
+    // class code, polled, DMA-gated. Skips green when none is attached; the VM gate attaches one.
+    kprintln!("");
+    kprintln!("--- nvme selftests (real PCI NVMe controller: admin + I/O queues + journal + filesystem) ---");
+    match pci::nvme_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[nvme] ALL {} NVME INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] nvme suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("nvme")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[nvme] FAILED at nvme invariant {}: {}", idx, name);
+            semihosting::exit(1110 + idx as i32);
+        }
+    }
+
     // SMP: power on the other CPUs via PSCI and prove the cross-core substrate (REQ-SMP-002,
     // ADR-028). Skips green on a single-CPU machine (bare `cargo run`); the VM gate boots
     // `-smp 4` and asserts the invariant marker below.

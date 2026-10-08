@@ -48,6 +48,9 @@ dd if=/dev/zero of="$IMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create
 # enforcement. Fresh every run: this gate reformats it by design.
 PCIIMG="$KDIR/target/virtio-blk-pci-test.img"
 dd if=/dev/zero of="$PCIIMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create pci disk image"; exit 3; }
+# NVMe controller (ADR-223): a device class real machines ship; 1 MiB namespace, fresh each run.
+NVMEIMG="$KDIR/target/nvme-test.img"
+dd if=/dev/zero of="$NVMEIMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create nvme image"; exit 3; }
 
 PIMG="$KDIR/target/virtio-blk-persistent.img"
 rm -f "$PIMG"
@@ -80,6 +83,7 @@ qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -g
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
   -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device \
   -machine dumpdtb="$DTBRAW" >/dev/null 2>&1
@@ -100,6 +104,7 @@ OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
   -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
   -device virtio-gpu-device,xres=640,yres=240 \
@@ -156,6 +161,7 @@ echo "$OUT" | grep -E "abstaining workload: [0-9]+ tasks, 0 positions move" >/de
 echo "$OUT" | grep "ALL 21 MEMORY INVARIANTS HOLD" >/dev/null        || { echo "FAIL: memory invariants marker missing"; fail=1; }
 echo "$OUT" | grep "ALL 66 VIRTUAL-MEMORY INVARIANTS HOLD" >/dev/null || { echo "FAIL: virtual-memory invariants marker missing"; fail=1; }
 echo "$OUT" | grep "ALL 61 EL0-BOUNDARY INVARIANTS HOLD" >/dev/null  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
+echo "$OUT" | grep "ALL 23 NVME INVARIANTS HOLD" >/dev/null || { echo "FAIL: nvme invariants marker missing (controller attached, driver must run; ADR-223)"; fail=1; }
 echo "$OUT" | grep "VIRTIO-BLK INVARIANTS HOLD" >/dev/null    || { echo "FAIL: virtio-blk invariants marker missing (disk attached, driver must run)"; fail=1; }
 echo "$OUT" | grep "SMP INVARIANTS HOLD" >/dev/null           || { echo "FAIL: SMP invariants marker missing (-smp 4 boot, suite must run)"; fail=1; }
 echo "$OUT" | grep "ALL 15 FILESYSTEM INVARIANTS HOLD" >/dev/null || { echo "FAIL: filesystem invariants marker missing (REQ-FS-001)"; fail=1; }
@@ -204,7 +210,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 dns=9 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 net=9 persist=10 pm=14 reclaim=9 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=61 smmu=10 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=66"
+AARCH64_EXPECTED="bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 dns=9 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 nvme=23 net=9 persist=10 pm=14 reclaim=9 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=61 smmu=10 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=66"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
@@ -221,6 +227,7 @@ OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
   -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
   -device virtio-gpu-device,xres=640,yres=240 \
@@ -244,6 +251,7 @@ OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
   -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
   -device virtio-gpu-device,xres=640,yres=240 \
   -device virtio-keyboard-device -device virtio-tablet-device)"

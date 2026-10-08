@@ -22,7 +22,7 @@ measurement made here.
 | User programs | ELF from the namespace, Rust userland, args, console output, file read, contained faults, preemption, multi-page, writable data, several at once | ADR-201..212 |
 | GUI | Compositor, window manager, desktop, file panel, browser window, runtime resolution, a program's own window | ADR-078..085, ADR-194..197, ADR-215 |
 | Drivers | virtio (blk, net, gpu 2D, input, rng), i8042, PL011/16550, VT-d, HPET | MATURITY.md |
-| Real hardware | None. Every number is QEMU TCG (plus VMware/VirtualBox boot) | BENCHMARKS.md |
+| Real hardware | None. Every number is QEMU TCG (plus VMware/VirtualBox boot). First driver for a real device class: NVMe, proved on QEMU's model only | BENCHMARKS.md, ADR-223 |
 | AAA games | Not started | - |
 | GPU 3D | Not started | - |
 | Production-ready (MATURITY level X) | No subsystem is X | MATURITY.md |

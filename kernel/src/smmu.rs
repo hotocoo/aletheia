@@ -86,7 +86,7 @@ pub fn discover_early() {
     }
 }
 
-fn discovery() -> Option<&'static Discovery> {
+pub(crate) fn discovery() -> Option<&'static Discovery> {
     // SAFETY: written once before secondaries exist; read-only afterwards.
     unsafe { DISCOVERY }
 }

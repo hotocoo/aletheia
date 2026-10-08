@@ -164,6 +164,30 @@ pub unsafe fn find_virtio_nth(env: &impl PciEnv, ids: &[u16], nth: usize) -> Opt
     None
 }
 
+/// Class code register (revision 7:0, programming interface 15:8, subclass 23:16, class 31:24).
+pub const CFG_CLASS_REV: u8 = 0x08;
+/// Mass storage / non-volatile memory / NVM Express (PCI Code and ID Assignment spec, class 01h).
+pub const CLASS_NVME: u32 = 0x01_08_02;
+
+/// Scan bus 0 for the nth function whose 24-bit class code (class, subclass, prog-if) is `class`.
+/// Vendor-neutral: a device class real machines ship is found by what it IS, not who made it.
+/// # Safety
+/// Touches the configuration space of every bus-0 slot.
+pub unsafe fn find_class_nth(env: &impl PciEnv, class: u32, nth: usize) -> Option<Bdf> {
+    let funcs = unsafe { enumerate_bus0(env) };
+    let mut seen = 0usize;
+    for (bdf, _, _) in funcs {
+        if unsafe { env.read32(bdf, CFG_CLASS_REV) } >> 8 != class {
+            continue;
+        }
+        if seen == nth {
+            return Some(bdf);
+        }
+        seen += 1;
+    }
+    None
+}
+
 /// One resolved virtio capability region, mapped and ready.
 #[derive(Clone, Copy, Debug)]
 pub struct CapRegion {
@@ -264,7 +288,7 @@ pub unsafe fn resolve_virtio_regions(
 }
 
 /// A BAR's physical base as programmed (I/O-space BARs refuse: this driver speaks MMIO only).
-fn bar_base_pa(env: &impl PciEnv, bdf: Bdf, index: u8) -> Result<u64, &'static str> {
+pub fn bar_base_pa(env: &impl PciEnv, bdf: Bdf, index: u8) -> Result<u64, &'static str> {
     if index > 5 {
         return Err("virtio-pci capability names a BAR index > 5");
     }

@@ -301,3 +301,48 @@ pub unsafe fn enable_msix(bdf: Bdf, vector: u8) -> Result<usize, &'static str> {
     unsafe { env.write32(bdf, cap, cap_word) };
     Ok(count)
 }
+
+/// This target's NVMe driver (ADR-223): the shared driver over firmware-assigned BAR0.
+pub type Nvme = kernel_core::nvme::Nvme<crate::virtio::X86Virtio, kernel_core::nvme::MmioRegs>;
+
+/// Blocks on the NVMe image the VM gate attaches (1 MiB).
+const NVME_GATE_BLOCKS: usize = 256;
+
+/// Prove the shared NVMe driver against the first NVM Express function on bus 0 (found by class
+/// code, any vendor). `Ok(0)` = none attached. Firmware (UEFI) already assigned the BARs here.
+pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
+    // SAFETY: touches only configuration ports, then BAR0 of the function found.
+    let Some(bdf) = (unsafe { virtiopci::find_class_nth(&Ports, virtiopci::CLASS_NVME, 0) }) else {
+        kprintln!("[nvme] no controller (skipped)");
+        return Ok(0);
+    };
+    let opened = (|| {
+        // SAFETY: this boot owns the function; decoding + bus master on, BAR0 mapped as device memory.
+        unsafe { virtiopci::enable_bus_master(&Ports, bdf) };
+        let pa = virtiopci::bar_base_pa(&Ports, bdf, 0)?;
+        let base = Ports
+            .map_region(pa, 0x2000)
+            .ok_or("nvme BAR0 could not be mapped as device memory")?;
+        unsafe { Nvme::init(kernel_core::nvme::MmioRegs::new(base)) }
+    })();
+    let (mut dev, rep) = match opened {
+        Ok(t) => t,
+        Err(e) => {
+            kprintln!("[nvme] init refused: {}", e);
+            return Err((0, "nvme controller initialization"));
+        }
+    };
+    kernel_core::nvme::log_report(&rep, bdf.bus, bdf.device, bdf.function, &mut |s| {
+        kprintln!("{}", s)
+    });
+    match kernel_core::nvme::device_suite(&mut dev, NVME_GATE_BLOCKS, &mut |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => Ok(n as u32),
+        Err((i, name)) => Err((i as u32, name)),
+    }
+}

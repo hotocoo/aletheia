@@ -54,6 +54,9 @@ dd if=/dev/zero of="$SCRATCH" bs=1048576 count=1 2>/dev/null || { echo "FAIL: cr
 # boot medium is never written at all.
 PERSIST="$WORK/virtio-blk-persistent.img"
 dd if=/dev/zero of="$PERSIST" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create persistent disk"; exit 1; }
+# NVMe namespace (ADR-223): 1 MiB, fresh each run.
+NVMEIMG="$WORK/nvme-test.img"
+dd if=/dev/zero of="$NVMEIMG" bs=1048576 count=1 2>/dev/null || { echo "FAIL: create nvme image"; exit 1; }
 
 # The custody anchor (ALET-P1-034, ADR-072): a DETERMINISTIC 32-byte root delivered over the
 # firmware configuration ioports, outside every disk the vault protects. Fixed bytes keep the
@@ -86,6 +89,7 @@ boot_once() {
     -device virtio-blk-pci,drive=blk0,disable-legacy=on,iommu_platform=on \
     -drive if=none,format=raw,file="$PERSIST",id=blk1 \
     -device virtio-blk-pci,drive=blk1,disable-legacy=on,iommu_platform=on \
+    -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=aletheia-nvme0,drive=nvm0 \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on \
     -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
     -device virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=640,yres=240 \
@@ -178,7 +182,7 @@ if [ "$RC" -eq 33 ] \
   # the boot, or a count changing without the gate being told. Extra families fail too.
   # shellcheck disable=SC1091
   source "$HERE/../scripts/lib-markers.sh"
-  X86_EXPECTED="bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 ${DMAP} dns=9 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=22 net=9 persist=10 persona=8 filepanel=13 pm=14 ps2=5 reclaim=9 selftest=13 sha512=5 smp=23 soak=12 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=69 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=72"
+  X86_EXPECTED="bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 ${DMAP} dns=9 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=22 nvme=23 net=9 persist=10 persona=8 filepanel=13 pm=14 ps2=5 reclaim=9 selftest=13 sha512=5 smp=23 soak=12 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=69 vault=14 vinput=10 virtio=21 x25519=7 x509=9 vm=72"
   if ! markers_assert "$X86_EXPECTED" < "$LOG"; then
     echo "SMOKE TEST: FAIL (structured marker map)"
     exit 1

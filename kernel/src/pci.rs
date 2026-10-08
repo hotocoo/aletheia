@@ -142,3 +142,71 @@ pub unsafe fn open_block(pcie: &PcieDt) -> Option<PciBlk> {
     let (dev, _report) = unsafe { virtioblk::VirtioBlk::init(transport).ok()? };
     Some(PciBlk { dev, bdf })
 }
+
+/// Where the NVMe controller's BARs land: 16 MiB above the virtio-blk-pci assignments, so the two
+/// bump cursors can never hand out overlapping windows.
+const NVME_BAR_BASE: usize = BAR_ASSIGN_BASE + 0x0100_0000;
+
+/// This target's NVMe driver (ADR-223): the shared driver over BAR0 in the identity window.
+pub type Nvme = kernel_core::nvme::Nvme<crate::virtio::Aarch64Virtio, kernel_core::nvme::MmioRegs>;
+
+/// Find the first NVM Express function (by class code, any vendor), give it BARs, enable decoding
+/// and bus master, and initialize the shared driver. `None` = no controller (graceful skip);
+/// `Some(Err)` = a controller is present and was refused.
+/// # Safety
+/// Walks ECAM and programs the found function's BARs and command register exclusively.
+pub unsafe fn open_nvme(
+    pcie: &PcieDt,
+) -> Option<Result<(Nvme, kernel_core::nvme::NvmeReport, Bdf), &'static str>> {
+    let env = Ecam::new(pcie.ecam_base);
+    let bdf = unsafe { virtiopci::find_class_nth(&env, virtiopci::CLASS_NVME, 0) }?;
+    let mut cursor = NVME_BAR_BASE;
+    Some((|| {
+        unsafe { assign_bars(&env, bdf, &mut cursor)? };
+        unsafe { virtiopci::enable_bus_master(&env, bdf) };
+        let base = virtiopci::bar_base_pa(&env, bdf, 0)? as usize;
+        // BAR0 must hold the registers and the first doorbells (two pages at the minimum stride).
+        let base = env
+            .map_region(base as u64, 0x2000)
+            .ok_or("nvme BAR0 is outside the identity window")?;
+        let (dev, report) = unsafe { Nvme::init(kernel_core::nvme::MmioRegs::new(base))? };
+        Ok((dev, report, bdf))
+    })())
+}
+
+/// Blocks on the NVMe image the VM gate attaches (1 MiB).
+const NVME_GATE_BLOCKS: usize = 256;
+
+/// Prove the shared NVMe driver against this machine's controller. `Ok(0)` = none attached.
+pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
+    let Some(disc) = crate::smmu::discovery() else {
+        kprintln!("[nvme] no device tree PCIe declaration (skipped)");
+        return Ok(0);
+    };
+    // SAFETY: nothing else owns the NVMe function's configuration space during boot.
+    let opened = unsafe { open_nvme(&disc.pcie) };
+    let (mut dev, rep, bdf) = match opened {
+        None => {
+            kprintln!("[nvme] no controller (skipped)");
+            return Ok(0);
+        }
+        Some(Err(e)) => {
+            kprintln!("[nvme] init refused: {}", e);
+            return Err((0, "nvme controller initialization"));
+        }
+        Some(Ok(t)) => t,
+    };
+    kernel_core::nvme::log_report(&rep, bdf.bus, bdf.device, bdf.function, &mut |s| {
+        kprintln!("{}", s)
+    });
+    match kernel_core::nvme::device_suite(&mut dev, NVME_GATE_BLOCKS, &mut |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => Ok(n as u32),
+        Err((i, name)) => Err((i as u32, name)),
+    }
+}

@@ -1287,6 +1287,25 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // NVMe (REQ-DRV-009, ADR-223): found by PCI class code, polled, DMA-gated. Runs while the
+    // machine is quiet, before VT-d enforcement; the controller is idle afterwards.
+    kprintln!("");
+    kprintln!("--- nvme selftests (real PCI NVMe controller: admin + I/O queues + journal + filesystem) ---");
+    match pci::nvme_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[nvme] ALL {} NVME INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] nvme suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("nvme")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[nvme] FAILED at nvme invariant {}: {}", idx, name);
+            ActiveHal::exit(1110 + idx as i32);
+        }
+    }
+
     // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
     // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk
     // device (this target has no block driver yet — that is REQ-DRV-001 on x86-64, not a namespace
