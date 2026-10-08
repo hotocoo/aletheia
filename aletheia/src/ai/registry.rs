@@ -407,9 +407,15 @@ pub fn catalog_in(root: &Path) -> Vec<ModelEntry> {
                             .join(&m.file)
                     })
                     .filter(|p| p.exists());
-                if let Some(p) =
-                    pinned_snapshot.or_else(|| super::runtime::cached_file(root, &m.repo, &m.file))
-                {
+                // A manifest that pins an archive is satisfied by THAT snapshot only (ADR-246): an
+                // older version of the same repo in the cache is not this model, and serving it
+                // under this manifest would answer with weights the manifest does not name.
+                let found = if m.archive_sha256.len() == 64 {
+                    pinned_snapshot
+                } else {
+                    super::runtime::cached_file(root, &m.repo, &m.file)
+                };
+                if let Some(p) = found {
                     m.size_bytes = std::fs::metadata(&p).map(|x| x.len()).unwrap_or(0);
                     m.present = true;
                     m.path = Some(p);

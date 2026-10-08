@@ -3871,6 +3871,11 @@ impl Session {
         }
     }
 
+    /// Whether this session is locked: accounts exist and nobody has logged in (ADR-244/246).
+    pub fn locked(&self) -> bool {
+        self.auth.locked
+    }
+
     /// Look for the account record once, before the first prompt where the caller has the
     /// namespace at hand (ADR-244): if it exists, this session starts locked and says so.
     pub fn check_accounts<D: BlockDevice>(
@@ -4142,6 +4147,9 @@ pub enum ServicePhase {
     /// Nothing was typed. The hook runs on every idle turn, so it must do no device work unless
     /// something outside the console (a click in the desktop's file panel) asked for it.
     Idle,
+    /// The console is locked (ADR-246): a click in the desktop is consumed and refused, and
+    /// nothing is read, listed or printed until someone logs in.
+    Locked,
 }
 
 /// The service hook's shape, named so the three targets and this loop agree on it in one place:
@@ -4285,18 +4293,32 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
     apply_settings(host, fs, dev, out);
     // The first settle happens BEFORE the banner's prompt: a panel that opens with the desktop
     // shows the namespace as it is, not as it will be once the operator types something.
-    let _ = service(ServicePhase::Settled, fs, dev, &mut *out);
+    // The lock is decided BEFORE the desktop is served at all (ADR-246): a click latched while the
+    // machine booted must not be opened by the first settle of a locked console.
     session.check_accounts(fs, dev, out);
+    let first = if session.locked() {
+        ServicePhase::Locked
+    } else {
+        ServicePhase::Settled
+    };
+    let _ = service(first, fs, dev, &mut *out);
     session.prompt(out);
     loop {
         // The anomaly watch reads the machine's counters on every pass, typed or idle (ADR-242).
         watch_counters(host);
         let Some(byte) = getc() else {
-            if let Some(request) = (browser.take_navigation)() {
-                navigate_for_window(host, &mut session.navigator, request, browser.show_page);
-            }
-            if service(ServicePhase::Idle, fs, dev, &mut *out) {
-                session.prompt(out);
+            // A locked console serves the desktop nothing (ADR-246): the browser's request and a
+            // file-panel click are taken and dropped, so neither runs now nor after a later login.
+            if session.locked() {
+                let _ = (browser.take_navigation)();
+                let _ = service(ServicePhase::Locked, fs, dev, &mut *out);
+            } else {
+                if let Some(request) = (browser.take_navigation)() {
+                    navigate_for_window(host, &mut session.navigator, request, browser.show_page);
+                }
+                if service(ServicePhase::Idle, fs, dev, &mut *out) {
+                    session.prompt(out);
+                }
             }
             // Programs left running get the CPU while nobody types (ADR-213): one turn per pass,
             // so a key pressed during a turn is read as soon as that turn ends.
@@ -4329,7 +4351,12 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
         if session.feed(byte, host, fs, dev, out) == Outcome::Halt {
             return;
         }
-        if settles && service(ServicePhase::Settled, fs, dev, &mut *out) {
+        let phase = if session.locked() {
+            ServicePhase::Locked
+        } else {
+            ServicePhase::Settled
+        };
+        if settles && service(phase, fs, dev, &mut *out) {
             session.prompt(out);
         }
     }

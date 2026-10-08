@@ -1,6 +1,6 @@
 [package]
 name = "aletheia-laya"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "The native System-1 runtime for Laya decision checkpoints: one forward pass, on the Aletheia decision wire (ADR-241)"
 publish = false

@@ -149,6 +149,34 @@ fn a_published_archive_is_verified_then_unpacked_where_discovery_looks() {
     assert_eq!(aletheia::ai::runtime::pull_archive(&e, &cache).unwrap(), p);
 }
 
+/// ADR-246: a manifest that pins an archive is present only when THAT snapshot is cached; an older
+/// version of the same repo does not make it present, so it is never served under the new name.
+#[test]
+fn an_older_snapshot_does_not_make_a_pinned_model_present() {
+    let root = scratch("pinned-catalog");
+    let e = registry::find("aletheia-console-s1").expect("the shipped console manifest");
+    assert_eq!(e.archive_sha256.len(), 64);
+    let snaps = root
+        .join(aletheia::ai::runtime::ref_to_cache_dirname(&e.repo))
+        .join("snapshots");
+    std::fs::create_dir_all(snaps.join("000000000000")).unwrap();
+    std::fs::write(snaps.join("000000000000").join(&e.file), b"older weights").unwrap();
+    let present = |root: &std::path::Path| {
+        registry::catalog_in(root)
+            .into_iter()
+            .find(|m| m.id == e.id)
+            .is_some_and(|m| m.present)
+    };
+    assert!(
+        !present(&root),
+        "an older snapshot made the pinned model present"
+    );
+    let pinned = snaps.join(&e.archive_sha256[..12]);
+    std::fs::create_dir_all(&pinned).unwrap();
+    std::fs::write(pinned.join(&e.file), b"the pinned weights").unwrap();
+    assert!(present(&root));
+}
+
 /// A new version's archive is fetched even when an older version of the same repo is cached
 /// (v4 under a manifest that used to name v2): only the pinned snapshot counts as pulled.
 #[test]

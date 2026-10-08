@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "aletheia-laya"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "candle-core",
  "candle-nn",

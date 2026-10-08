@@ -376,6 +376,11 @@ pub fn service_panel<D: BlockDevice>(
     take_activation: &mut dyn FnMut() -> Option<[u8; NAME_CAP]>,
 ) -> bool {
     let opened = take_activation();
+    // Locked (ADR-246): the click is consumed, nothing is read or printed, the listing is not
+    // refreshed.
+    if phase == ServicePhase::Locked {
+        return false;
+    }
     if phase == ServicePhase::Idle && opened.is_none() {
         return false;
     }
@@ -403,6 +408,10 @@ fn publish_listing<D: BlockDevice>(
     let mut n = 0usize;
     let mut used = 0u32;
     let listed = fs.for_each(dev, |name, _start, len| {
+        // The account record is not the desktop's to show (ADR-246).
+        if name == crate::login::RECORD {
+            return;
+        }
         if n < rows.len() {
             let blocks = len.div_ceil(crate::storage::BLOCK_SIZE) as u32;
             used = used.saturating_add(blocks);
@@ -431,6 +440,10 @@ fn open_name<D: BlockDevice>(
         out("\r\nfiles: that name is not text\r\n");
         return true;
     };
+    if text == crate::login::RECORD {
+        out("\r\nfiles: refused: .users holds this machine's console accounts\r\n");
+        return true;
+    }
     out("\r\nfiles: ");
     out(text);
     match fs.read(dev, text) {

@@ -1569,3 +1569,100 @@ fn accounts_lock_the_console_and_never_show_a_password() {
     assert!(!log.contains("hunter2"), "{log}");
     assert!(!s2.history().iter().any(|l| l.contains("hunter2")));
 }
+
+/// ADR-246: a locked console serves the desktop nothing. The file panel's click and the browser's
+/// request reach the hook only as `Locked` (consumed, nothing printed), and once someone logs in
+/// the panel never lists or opens `.users`.
+#[test]
+fn a_locked_console_serves_the_desktop_nothing() {
+    use kernel_core::filepanel::{service_panel, NAME_CAP};
+    let host = AccountHost {
+        clock_secs: std::cell::Cell::new(10),
+    };
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let mut s1 = Session::new();
+    feed_as(
+        &host,
+        &mut s1,
+        "write secret classified\rpasswd ada\rpw\rpw\r",
+        &mut fs,
+        &mut dev,
+    );
+
+    // A new session: two idle turns (a panel click and a browser request pending), then `ls`.
+    let mut turns = 0u32;
+    let mut typed = b"ls\rlogin ada\rpw\rhalt\r".iter().copied();
+    let mut getc = move || {
+        turns += 1;
+        if turns <= 2 {
+            return None;
+        }
+        typed.next()
+    };
+    let mut phases = Vec::new();
+    let mut navigations_taken = 0;
+    let mut pages_shown = 0;
+    let mut log = String::new();
+    shell::run_loop_serviced(
+        &host,
+        &mut fs,
+        &mut dev,
+        &mut getc,
+        &mut |s| log.push_str(s),
+        &mut |phase, fs, dev, out| {
+            phases.push(phase);
+            // The panel's own service with a click on `secret` latched every time.
+            service_panel(phase, fs, dev, out, &mut |_, _, _| {}, &mut || {
+                let mut n = [0u8; NAME_CAP];
+                n[..6].copy_from_slice(b"secret");
+                Some(n)
+            })
+        },
+        &mut shell::BrowserHooks {
+            take_navigation: &mut || {
+                navigations_taken += 1;
+                Some(kernel_core::desktop::BrowserRequest::Back)
+            },
+            show_page: &mut |_| pages_shown += 1,
+        },
+    );
+    // Everything before the login: nothing printed, every service turn Locked, no page shown.
+    let before = &log[..log.find("welcome, ada").expect("logged in")];
+    assert!(
+        !before.contains("classified"),
+        "a locked console printed an object: {log}"
+    );
+    let unlocked_at = phases
+        .iter()
+        .skip(1)
+        .position(|p| *p != shell::ServicePhase::Locked)
+        .map_or(phases.len(), |i| i + 1);
+    assert!(unlocked_at >= 4, "{phases:?}");
+    assert!(navigations_taken >= 2);
+    assert_eq!(pages_shown + 2, navigations_taken.min(pages_shown + 2));
+
+    // Logged in, the panel neither lists nor opens the account record.
+    let mut listed: Vec<String> = Vec::new();
+    let printed = service_panel(
+        shell::ServicePhase::Settled,
+        &fs,
+        &mut dev,
+        &mut |s| log.push_str(s),
+        &mut |rows, _, _| {
+            listed = rows
+                .iter()
+                .map(|r| String::from_utf8_lossy(r.name()).into_owned())
+                .collect()
+        },
+        &mut || {
+            let mut n = [0u8; NAME_CAP];
+            n[..6].copy_from_slice(b".users");
+            Some(n)
+        },
+    );
+    assert!(printed);
+    assert!(log.contains("files: refused: .users holds this machine's console accounts"));
+    assert_eq!(listed, ["secret"]);
+}

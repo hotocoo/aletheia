@@ -1271,6 +1271,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — the lock covers the desktop; a pinned model is that model; v0.7.1 (ADR-246)
+
+- Post-release review of v0.7.0: a locked console still opened objects clicked in the desktop's
+  file panel and navigated the browser window, and its first settle served a click latched during
+  boot. Now the lock is decided before the desktop is served and a `Locked` service phase drops
+  both; the panel never lists or opens `.users`.
+- Discovery satisfies an archive-pinned manifest only from its own snapshot (an older cached v2
+  was served under the v4 manifest). kernel-core 946, aletheia 284 passed; boot, console, vinput,
+  keyboard, desktop gates pass. Crates 0.7.1.
+
 ### 2026-10-08 — console System 1 v4, and release v0.7.0 (ADR-245)
 
 - v4 = v2 warm-started on 465 new corpus rows (weight, passwd, login, logout, whoami) + 250

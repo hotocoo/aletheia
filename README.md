@@ -429,10 +429,10 @@ embedding server or vector database is required** for normal OS operation.
 
 Every stable version is a tag `vX.Y.Z`, and every tag publishes a ready-to-boot x86-64 package on
 the [releases page](https://github.com/hotocoo/aletheia/releases/latest), built and **booted from
-its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.0**.
+its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.1**.
 
-1. Download `aletheia-v0.7.0-x86_64-vmware.zip` and its `.sha256`, then check the digest:
-   `shasum -a 256 -c aletheia-v0.7.0-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
+1. Download `aletheia-v0.7.1-x86_64-vmware.zip` and its `.sha256`, then check the digest:
+   `shasum -a 256 -c aletheia-v0.7.1-x86_64-vmware.zip.sha256` (Linux: `sha256sum -c`).
 2. Unzip. It holds two UEFI disks, each with its `.vmx`:
    - `aletheia-x86_64.vmx`: the OS you sit in front of. It boots, proves its invariants, then
      opens the console (type `help`).
@@ -453,6 +453,10 @@ its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.0**.
    Homebrew ships the firmware as `/opt/homebrew/share/qemu/edk2-x86_64-code.fd` with vars
    `edk2-i386-vars.fd` beside it; Debian/Ubuntu as `/usr/share/OVMF/OVMF_CODE_4M.fd` and
    `OVMF_VARS_4M.fd` (package `ovmf`).
+
+**v0.7.1** fixes two defects found after v0.7.0 shipped (ADR-246): a locked console still served
+the desktop's file panel and browser window, and an older cached System-1 checkpoint could be
+served under the v4 manifest. Use v0.7.1, not v0.7.0.
 
 **New in v0.7.0** (since v0.6.0; audit: `docs/PRODUCTION-READINESS.md`):
 
