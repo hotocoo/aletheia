@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — the block cache, measured against the optimum (ADR-243)
+
+- Read traces of the namespace workload simulated under CLOCK (equal to the real cache), LRU,
+  S3-FIFO and Belady's optimum. At 16 blocks CLOCK 49 misses vs optimum 29; at 32 CLOCK = optimum
+  = 23 (compulsory). Console cache doubled to 32 blocks (128 KiB): 778 -> 23 device reads.
+- No learned eviction policy: on a 4x namespace the gap is request randomness (S3-FIFO saves 5
+  of 73). Row closed by measurement.
+
 ### 2026-10-08 — an anomaly watch over the kernel's own counters (ADR-242)
 
 - `kernel_core::anomaly`: one-second intervals over five counters (faults contained/escalated,

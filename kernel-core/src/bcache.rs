@@ -26,8 +26,11 @@ use alloc::vec::Vec;
 
 use crate::storage::{BlockDevice, StorageError, BLOCK_SIZE};
 
-/// Blocks the console's namespace cache holds: 64 KiB.
-pub const CONSOLE_BLOCKS: usize = 16;
+/// Blocks the console's namespace cache holds: 128 KiB. At 16 blocks CLOCK missed 49 of the
+/// namespace trace's 778 reads where the optimum (Belady, bypass allowed) misses 29; at 32 it misses
+/// 23, which is the optimum and the trace's compulsory misses (ADR-243). Doubling the cache beats
+/// any eviction policy, learned or not, at the old size.
+pub const CONSOLE_BLOCKS: usize = 32;
 
 struct Slot {
     idx: usize,
