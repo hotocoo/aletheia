@@ -1274,6 +1274,8 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 ### 2026-10-09 — v0.7.3 (ADR-249..251)
 
 - Crates 0.7.3; README and audit updated. Native Laya 1.1x of torch on CPU; operator ownership.
+- **Published:** tag `v0.7.3` at `668820e` (CI green; a clippy deprecation in the vendored encoder
+  had kept CI red since ADR-249 and was fixed first), latest; assets' `.sha256` checked.
 
 ### 2026-10-09 — the native runtime sizes its thread pool (ADR-251)
 
