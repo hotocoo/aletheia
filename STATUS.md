@@ -1275,6 +1275,8 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 
 - Crates 0.7.2: console roles and run reads, with the peer session's ADR-231 run 5 evidence
   (729b862). CI green on the source commit before the tag.
+- **Published:** tag `v0.7.2` at `a467d2c`, latest; VMware package booted by the release workflow;
+  `aletheia-laya` Linux asset built there; both `.sha256` checked after download.
 
 ### 2026-10-08 — a run of blocks in one request (ADR-248)
 
