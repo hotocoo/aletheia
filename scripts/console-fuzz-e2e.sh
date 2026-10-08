@@ -35,8 +35,11 @@ src = open(sys.argv[1]).read()
 table = src[src.index("pub const COMMANDS"):]
 table = table[:table.index("];")]
 names = sorted({m.split()[0] for m in re.findall(r'\(\s*"([^"]+)"\s*,', table)})
-# halt and reboot end the session: typed once, at the end, on purpose.
-print(" ".join(n for n in names if n not in ("halt", "reboot")))
+# halt and reboot end the session: typed once, at the end, on purpose. The account verbs change the
+# mode of the session (ADR-244): `login`/`passwd` make the next line a password, and a `passwd` whose two
+# lines happened to match would lock every later line, `halt` included; they are proved by the
+# console suite, the host transcript test and console-e2e instead.
+print(" ".join(n for n in names if n not in ("halt", "reboot", "login", "logout", "passwd")))
 PY
 )"
 
