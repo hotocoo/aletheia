@@ -70,6 +70,39 @@ impl Role {
     }
 }
 
+/// The namespace object that records who owns which object (ADR-250): `name:owner` lines.
+pub const OWNERS: &str = ".owners";
+
+/// Whether `name` is one of the machine's private records, which no console command reads,
+/// lists or changes except through the commands that own them.
+pub fn is_private(name: &str) -> bool {
+    name == RECORD || name == OWNERS
+}
+
+/// The account that owns `name` in an ownership record, if any.
+pub fn owner_of<'a>(record: &'a str, name: &str) -> Option<&'a str> {
+    record.lines().find_map(|l| {
+        let (n, o) = l.split_once(':')?;
+        (n == name && valid_name(o)).then_some(o)
+    })
+}
+
+/// The ownership record with `name` owned by `owner` (`None`: owned by nobody).
+pub fn with_owner(record: &str, name: &str, owner: Option<&str>) -> String {
+    let mut out: String = record
+        .lines()
+        .filter(|l| l.split_once(':').map(|(n, _)| n) != Some(name) && !l.trim().is_empty())
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    if let Some(o) = owner {
+        out.push_str(name);
+        out.push(':');
+        out.push_str(o);
+        out.push('\n');
+    }
+    out
+}
+
 /// PBKDF2-HMAC-SHA256 with one 32-byte output block (RFC 8018 section 5.2).
 pub fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
     let mut msg = [0u8; SALT_LEN + 4];
@@ -322,6 +355,19 @@ mod tests {
             Err(Refusal::BadName)
         );
         assert_eq!(line("ok", "", &s, Role::Admin), Err(Refusal::EmptyPassword));
+    }
+
+    #[test]
+    fn ownership_lines_are_set_moved_and_dropped() {
+        let r = with_owner("", "notes", Some("ada"));
+        let r = with_owner(&r, "plan", Some("bob"));
+        assert_eq!(owner_of(&r, "notes"), Some("ada"));
+        assert_eq!(owner_of(&r, "plan"), Some("bob"));
+        assert_eq!(owner_of(&r, "other"), None);
+        let r = with_owner(&r, "notes", None);
+        assert_eq!(owner_of(&r, "notes"), None);
+        assert_eq!(owner_of(&r, "plan"), Some("bob"));
+        assert!(is_private(".owners") && is_private(".users") && !is_private("plan"));
     }
 
     #[test]

@@ -2027,6 +2027,81 @@ fn watch_counters(host: &dyn ShellHost) {
     );
 }
 
+/// Per-object ownership for the console's write commands (ADR-250). An admin, and a machine with no
+/// accounts, change anything and record nothing, so they pay nothing. An operator may change an
+/// object it owns or one nobody owns, and owns what it creates.
+struct Owners<'a> {
+    role: crate::login::Role,
+    user: Option<&'a str>,
+}
+
+impl Owners<'_> {
+    /// The operator this rule applies to, if any.
+    fn operator(&self) -> Option<&str> {
+        match (self.role, self.user) {
+            (crate::login::Role::Admin, _) | (_, None) => None,
+            (_, Some(u)) => Some(u),
+        }
+    }
+
+    fn record<D: BlockDevice>(fs: &Filesystem, dev: &D) -> String {
+        fs.read(dev, crate::login::OWNERS)
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Whether `name` may be changed; says why not.
+    fn may_change<D: BlockDevice>(
+        &self,
+        fs: &Filesystem,
+        dev: &D,
+        name: &str,
+        out: &mut dyn FnMut(&str),
+    ) -> bool {
+        let Some(me) = self.operator() else {
+            return true;
+        };
+        let record = Self::record(fs, dev);
+        // A line left by an object an admin removed names nothing: only a live object is owned.
+        match crate::login::owner_of(&record, name) {
+            Some(o) if o != me && fs.stat(dev, name).is_ok() => {
+                outf!(out, "permission denied: {} belongs to {}", name, o);
+                false
+            }
+            _ => true,
+        }
+    }
+
+    fn set<D: BlockDevice>(
+        &self,
+        fs: &mut Filesystem,
+        dev: &mut D,
+        name: &str,
+        owner: Option<&str>,
+    ) {
+        let record = Self::record(fs, dev);
+        let next = crate::login::with_owner(&record, name, owner);
+        if next != record {
+            let _ = fs.replace(dev, crate::login::OWNERS, next.as_bytes());
+        }
+    }
+
+    /// An operator created `name`: it owns it.
+    fn created<D: BlockDevice>(&self, fs: &mut Filesystem, dev: &mut D, name: &str) {
+        if let Some(me) = self.operator() {
+            self.set(fs, dev, name, Some(me));
+        }
+    }
+
+    /// `name` is gone: so is its owner line.
+    fn removed<D: BlockDevice>(&self, fs: &mut Filesystem, dev: &mut D, name: &str) {
+        if self.operator().is_some() {
+            self.set(fs, dev, name, None);
+        }
+    }
+}
+
 /// A job named on the console line: a number is a job id; anything else is the name of a running
 /// job (the oldest started, if several share it).
 fn job_id(host: &dyn ShellHost, target: &str) -> Option<u32> {
@@ -2200,6 +2275,7 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
         history,
         nav,
         crate::login::Role::Admin,
+        None,
         out,
     )
 }
@@ -2215,8 +2291,11 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
     history: &[String],
     nav: &mut Navigator,
     role: crate::login::Role,
+    user: Option<&str>,
     out: &mut dyn FnMut(&str),
 ) -> Outcome {
+    // Who may change which object (ADR-250): an operator only what it owns or what nobody owns.
+    let owners = Owners { role, user };
     // The resident advisor ages with the machine, not with the boot (REQ-ML-003, ADR-056). Every
     // line a human types is a moment the machine is still up, so it is also a moment the cell census
     // must move on: this is what makes `mlstat`'s tick count and continuity span grow through a
@@ -2230,11 +2309,16 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
     }
     // The account record is nobody's to read or move from the console (ADR-244): its hashes are
     // what an offline guess needs. Any argument naming it, a redirect included, is refused.
-    if rest
+    if let Some(t) = rest
         .split_whitespace()
-        .any(|t| t.trim_start_matches('>') == crate::login::RECORD)
+        .map(|t| t.trim_start_matches('>'))
+        .find(|t| crate::login::is_private(t))
     {
-        out("refused: .users holds this machine's console accounts; only `passwd` changes it");
+        if t == crate::login::RECORD {
+            out("refused: .users holds this machine's console accounts; only `passwd` changes it");
+        } else {
+            out("refused: .owners records who owns each object; it changes only with the objects");
+        }
         return Outcome::Continue;
     }
     match verb {
@@ -3328,7 +3412,7 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
             let mut seen = 0usize;
             match fs.for_each(dev, |name, _start, len| {
                 // The account record is nobody's to see from the console (ADR-247).
-                if name == crate::login::RECORD {
+                if crate::login::is_private(name) {
                     return;
                 }
                 seen += 1;
@@ -3386,10 +3470,19 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
             if name.is_empty() {
                 out("usage: write NAME TEXT");
             } else {
+                if !owners.may_change(fs, dev, name, out) {
+                    return Outcome::Continue;
+                }
+                let new = fs.stat(dev, name).is_err();
                 // `replace` rather than remove+create: one transaction, so a crash mid-write leaves
                 // the old contents or the new ones, never a vanished name (ADR-035).
                 match fs.replace(dev, name, text.as_bytes()) {
-                    Ok(()) => outf!(out, "wrote {} bytes to {}", text.len(), name),
+                    Ok(()) => {
+                        if new {
+                            owners.created(fs, dev, name);
+                        }
+                        outf!(out, "wrote {} bytes to {}", text.len(), name)
+                    }
                     Err(e) => out(&fs_error(e)),
                 }
             }
@@ -3401,8 +3494,14 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
             if rest.is_empty() {
                 out("usage: rm NAME");
             } else {
+                if !owners.may_change(fs, dev, rest, out) {
+                    return Outcome::Continue;
+                }
                 match fs.remove(dev, rest) {
-                    Ok(()) => outf!(out, "removed {}", rest),
+                    Ok(()) => {
+                        owners.removed(fs, dev, rest);
+                        outf!(out, "removed {}", rest)
+                    }
                     Err(e) => out(&fs_error(e)),
                 }
             }
@@ -3416,7 +3515,7 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
             } else {
                 let mut seen = 0usize;
                 match fs.for_each(dev, |name, _start, len| {
-                    if name.starts_with(rest) && name != crate::login::RECORD {
+                    if name.starts_with(rest) && !crate::login::is_private(name) {
                         seen += 1;
                         outf!(out, "{:>8}  {}", len, name);
                     }
@@ -3578,6 +3677,9 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
             if name.is_empty() {
                 out("usage: append NAME TEXT");
             } else {
+                if !owners.may_change(fs, dev, name, out) {
+                    return Outcome::Continue;
+                }
                 // Read, extend, replace: ONE transaction for the write (ADR-035), so a crash leaves
                 // the old contents or the new ones. Appending in place would need an extent that
                 // may not be free, and would be a second failure mode for a command whose whole
@@ -3598,7 +3700,10 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                         let mut bytes = Vec::from(text.as_bytes());
                         bytes.push(b'\n');
                         match fs.create(dev, name, &bytes) {
-                            Ok(()) => outf!(out, "created {} ({} bytes)", name, bytes.len()),
+                            Ok(()) => {
+                                owners.created(fs, dev, name);
+                                outf!(out, "created {} ({} bytes)", name, bytes.len())
+                            }
                             Err(e) => out(&fs_error(e)),
                         }
                     }
@@ -3619,7 +3724,10 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                     // wearing the name of a harmless command.
                     Ok(e) => outf!(out, "{} exists ({} bytes)", e.name, e.len),
                     Err(FsError::NotFound) => match fs.create(dev, rest, b"") {
-                        Ok(()) => outf!(out, "created {}", rest),
+                        Ok(()) => {
+                            owners.created(fs, dev, rest);
+                            outf!(out, "created {}", rest)
+                        }
                         Err(e) => out(&fs_error(e)),
                     },
                     Err(e) => out(&fs_error(e)),
@@ -3635,17 +3743,27 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                 outf!(out, "usage: {} SRC DST", verb);
             } else if src == dst {
                 out("source and destination are the same name");
+            } else if !owners.may_change(fs, dev, dst, out)
+                || (verb == "mv" && !owners.may_change(fs, dev, src, out))
+            {
             } else {
+                let new = fs.stat(dev, dst).is_err();
                 match fs.read(dev, src) {
                     Ok(bytes) => match fs.replace(dev, dst, &bytes) {
                         Ok(()) => {
+                            if new {
+                                owners.created(fs, dev, dst);
+                            }
                             if verb == "mv" {
                                 // Copy-then-remove, in that order, and NOT one transaction: a crash
                                 // between them leaves both names, which is recoverable. The other
                                 // order loses the data. Said out loud because `mv` reads atomic and
                                 // is not.
                                 match fs.remove(dev, src) {
-                                    Ok(()) => outf!(out, "{} -> {}", src, dst),
+                                    Ok(()) => {
+                                        owners.removed(fs, dev, src);
+                                        outf!(out, "{} -> {}", src, dst)
+                                    }
                                     Err(e) => {
                                         outf!(out, "copied, but {} remains: {}", src, fs_error(e))
                                     }
@@ -3918,6 +4036,7 @@ impl Session {
                     self.editor.history(),
                     &mut self.navigator,
                     self.auth.role,
+                    self.auth.user.as_deref(),
                     &mut |s| {
                         out(s);
                         out("\r\n");

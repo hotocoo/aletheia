@@ -1742,3 +1742,82 @@ fn roles_limit_what_an_account_may_do() {
     );
     assert!(log.contains("passwd: op set (operator)"), "{log}");
 }
+
+/// ADR-250: per-object ownership. An operator owns what it creates and may not change another
+/// operator's objects; objects nobody owns stay shared; an admin changes anything; the ownership
+/// record is as private as the account record.
+#[test]
+fn operators_own_what_they_create() {
+    let host = AccountHost {
+        clock_secs: std::cell::Cell::new(10),
+    };
+    let mut dev = device();
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let mut admin = Session::new();
+    feed_as(
+        &host,
+        &mut admin,
+        "write shared everyone\rpasswd root\ra\ra\rpasswd ada operator\rb\rb\rpasswd bob operator\rc\rc\r",
+        &mut fs,
+        &mut dev,
+    );
+    let mut ada = Session::new();
+    let log = feed_as(
+        &host,
+        &mut ada,
+        "login ada\rb\rwrite plan ada's plan\rappend shared ada was here\rtouch draft\rcat .owners\rls\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(log.contains("wrote 10 bytes to plan"), "{log}");
+    assert!(log.contains("shared is now"), "{log}");
+    assert!(
+        log.contains("refused: .owners records who owns each object"),
+        "{log}"
+    );
+    assert!(
+        !log.contains(".owners  ") && !log.contains("  .owners"),
+        "{log}"
+    );
+
+    let mut bob = Session::new();
+    let log = feed_as(
+        &host,
+        &mut bob,
+        "login bob\rc\rwrite plan bob's now\rrm plan\rmv plan mine\rcp shared plan\rappend draft x\rcat plan\rwrite mine ok\rrm mine\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert_eq!(
+        log.matches("permission denied: plan belongs to ada")
+            .count(),
+        4,
+        "{log}"
+    );
+    assert!(
+        log.contains("permission denied: draft belongs to ada"),
+        "{log}"
+    );
+    assert!(log.contains("ada's plan"), "reading is not owning: {log}");
+    assert!(log.contains("removed mine"), "{log}");
+
+    // An admin changes anything; after it removes ada's object, the name is free again.
+    let mut root = Session::new();
+    let log = feed_as(
+        &host,
+        &mut root,
+        "login root\ra\rrm plan\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(log.contains("removed plan"), "{log}");
+    let log = feed_as(
+        &host,
+        &mut bob,
+        "write plan bob's plan\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(log.contains("wrote 10 bytes to plan"), "{log}");
+}

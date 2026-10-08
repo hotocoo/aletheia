@@ -409,7 +409,7 @@ fn publish_listing<D: BlockDevice>(
     let mut used = 0u32;
     let listed = fs.for_each(dev, |name, _start, len| {
         // The account record is not the desktop's to show (ADR-246).
-        if name == crate::login::RECORD {
+        if crate::login::is_private(name) {
             return;
         }
         if n < rows.len() {
@@ -440,7 +440,7 @@ fn open_name<D: BlockDevice>(
         out("\r\nfiles: that name is not text\r\n");
         return true;
     };
-    if text == crate::login::RECORD {
+    if crate::login::is_private(text) {
         out("\r\nfiles: refused: .users holds this machine's console accounts\r\n");
         return true;
     }
