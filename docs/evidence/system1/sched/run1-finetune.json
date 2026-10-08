@@ -1,0 +1,30 @@
+{
+  "base": "1c5edc17a7acd8701df6fc341c0d179f1c62c982",
+  "corpus": "corpus-v2.jsonl",
+  "rows": {
+    "train": 19468,
+    "calibration": 2537,
+    "test": 1995
+  },
+  "epochs": 4,
+  "lr": 5e-05,
+  "unfreeze": 12,
+  "seed": 187,
+  "temperatures": {
+    "choice:11+": 1.6500000000000001,
+    "choice:6-10": 1.9000000000000001,
+    "choice:3-5": 1.6,
+    "choice:2": 0.05
+  },
+  "test_accuracy": {
+    "schedule-advice": 0.9297,
+    "schedule-donation": 0.9798,
+    "schedule-fifo": 0.9167
+  },
+  "test_accuracy_all": 0.9444,
+  "threshold": 0.9,
+  "coverage_at_threshold": 0.8211,
+  "accuracy_at_threshold": 0.9951,
+  "wrong_and_sure": 8,
+  "minutes": 128.7
+}

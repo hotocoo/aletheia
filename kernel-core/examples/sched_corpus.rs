@@ -9,6 +9,7 @@
 //! here. An episode is a seeded workload built to confuse: few priority bands (ties everywhere),
 //! endpoint acquire/wait/release chains with transitive donation, wait cycles, waiters stranded by a
 //! holder that finished, advisory verdicts that reorder equals (ADR-056), and admissions mid-run.
+//! The state also lists the ready pool by base priority, oldest first (ADR-231).
 //! Before each dispatch with 2..=MAX_OPTIONS runnable tasks the machine is rendered and the question
 //! asked. Each row is then checked: the winner is recomputed from the rendered facts alone and must
 //! equal the scheduler's, so no row asks something its state does not answer.
@@ -165,6 +166,36 @@ impl Mirror {
             s.push(';');
         }
         s
+    }
+
+    /// The ready pool as the scheduler keeps it, but keyed by BASE priority: oldest first within
+    /// each band, the running task last. Donation is not applied here; the endpoint graph says it.
+    fn render_pool(&self, by_age: &[u64]) -> String {
+        let mut bands: BTreeMap<Reverse<u8>, Vec<String>> = BTreeMap::new();
+        for &t in by_age {
+            let word = match self.verdict.get(&t) {
+                Some(Verdict::Low) => "low",
+                Some(Verdict::Elevated) => "elevated",
+                _ => "none",
+            };
+            let run = if self.running == Some(t) {
+                " running"
+            } else {
+                ""
+            };
+            bands
+                .entry(Reverse(self.base[&t]))
+                .or_default()
+                .push(format!("t{t} {word}{run}"));
+        }
+        let parts: Vec<String> = bands
+            .iter()
+            .map(|(Reverse(p), ts)| format!("p{p}: {}", ts.join(", ")))
+            .collect();
+        format!(
+            "ready by base priority, oldest first: {}.",
+            parts.join("; ")
+        )
     }
 
     /// One runnable task: base priority, endpoints held, place in line among the runnable, advice.
@@ -355,7 +386,7 @@ impl Episode<'_> {
                 )
             })
             .collect();
-        let state = self.m.render_state();
+        let state = format!("{} {}", self.m.render_state(), self.m.render_pool(&by_age));
         if state.len() + opts.iter().map(String::len).sum::<usize>() > MAX_CHARS {
             st.skipped_budget += 1;
             return None;

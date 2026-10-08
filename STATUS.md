@@ -1297,6 +1297,12 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - `kernel_core::bcache::BlockCache`: 16 blocks, write-through, read-allocate, CLOCK eviction, nothing kept on a device error; under the capability guard in each CPU's console session.
 - Host proof: same answers, same device write sequence and bytes with and without it; namespace workload device reads 778 to 49 (94 % saved). Stale-read property over a failing, tearing device across 40 seeds.
 
+### 2026-10-08 — a System-1 checkpoint learns the scheduler's dispatch decision (ADR-231)
+
+- Scheduler corpus rows now render the ready pool by base priority (oldest first) and each task's held endpoints and place in line; the label self-check is unchanged. `scripts/system1/sched_bench.py` benchmarks any System-1 sidecar on it over `POST /v1/decide`.
+- Laya fine-tuned in two runs (30 000 rows in the second): **99.5 % on an untouched seed** (99.9 % at confidence >= 0.9, 3 wrong-and-sure of 3000), 99.2 % on longer episodes, 98.6 % on the trainer's held-out groups, so not overfitted. Donation is the weakest kind (98.7 %).
+- Not in the dispatch path and not released; the live scheduler System 1 is still the resident forest (ADR-056, ADR-199).
+
 ### 2026-10-08 — a program grows its writable memory at run time (ADR-230)
 
 - `SYS_BRK = 16`: zeroed writable pages mapped above what a program holds, up to 64 pages (256 KiB) above its stack with image and growth counted together; never shrinks; no capability (bounded by the program's own ceiling). Decided by `progout::admit_brk` (host test), served by each CPU's run loop like `SYS_FS_READ`, so reads, writes and frames reach grown pages unchanged.
