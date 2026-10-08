@@ -24,6 +24,7 @@
 
 extern crate alloc;
 
+pub mod ahci;
 pub mod appwin;
 pub mod arpcache;
 pub mod bench;

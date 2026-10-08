@@ -1326,6 +1326,24 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         }
     }
 
+    // AHCI (REQ-DRV-011, ADR-225): SATA disks; only the disk marked scratch is ever written.
+    kprintln!("");
+    kprintln!("--- ahci selftests (real PCI AHCI controller: identify + read boot disk + scratch suite) ---");
+    match pci::ahci_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[ahci] ALL {} AHCI INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] ahci suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("ahci")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[ahci] FAILED at ahci invariant {}: {}", idx, name);
+            ActiveHal::exit(1150 + idx as i32);
+        }
+    }
+
     // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
     // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk
     // device (this target has no block driver yet — that is REQ-DRV-001 on x86-64, not a namespace

@@ -26,8 +26,9 @@ there was proved only against QEMU's models.
   driver does not handle, so they are not claimed.
 * **x86-64 only in this ADR.** The 82540EM's BAR1 is an I/O-port BAR and the aarch64 BAR
   assigner refuses I/O BARs; aarch64 e1000 waits for a BAR0-only assignment path.
-* **The VirtualBox gate now attaches an 82540EM on NAT and an NVMe controller** with a 1 MiB
-  namespace, and requires `ALL 23 NVME INVARIANTS HOLD` and `ALL 6 E1000 INVARIANTS HOLD`.
+* **The VirtualBox gate now attaches an 82540EM on NAT** and requires
+  `ALL 6 E1000 INVARIANTS HOLD`. (An NVMe controller was attached too; CI showed VirtualBox's
+  NVMe ships only in the Oracle Extension Pack, so ADR-225 removed it.)
 
 ## Proof
 
@@ -39,7 +40,7 @@ there was proved only against QEMU's models.
 * `kernel-x86_64/scripts/smoke-test.sh` attaches `-device e1000` on its own user-mode network and
   requires `e1000=6`: unicast MAC after reset, link up, DMA gate, MTU limit, ARP answered by the
   gateway, both rings wrapping over three ring lengths. Measured on QEMU 11.1 TCG.
-* `scripts/vm-e2e-vbox.sh` runs both drivers against VirtualBox's own controllers (CI).
+* `scripts/vm-e2e-vbox.sh` runs the e1000 driver against VirtualBox's own controller (CI).
 
 ## What this does not claim
 

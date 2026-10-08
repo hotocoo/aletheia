@@ -24,7 +24,7 @@ X86="$ROOT/kernel-x86_64"
 BUILD="$X86/build"
 IMG="$BUILD/aletheia-x86_64.img"
 VDI="$BUILD/aletheia-vbox.vdi"
-NVDI="$BUILD/aletheia-vbox-nvme.vdi"
+SVDI="$BUILD/aletheia-vbox-sata-scratch.vdi"
 LOG="$BUILD/aletheia-vbox-serial.log"
 VM_NAME="${VM_NAME:-Aletheia-x86_64-e2e}"
 CPUS="${CPUS:-2}"
@@ -127,10 +127,11 @@ REQUIRED=(
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'
-  # The real-device-class drivers (ADR-223, ADR-224) against VirtualBox's OWN controller models -
-  # a second implementation of each, written by someone other than QEMU.
-  'ALL 23 NVME INVARIANTS HOLD'
+  # The real-device-class drivers (ADR-224, ADR-225) against VirtualBox's OWN controller models -
+  # a second implementation of each, written by someone other than QEMU. (NVMe is absent here:
+  # VirtualBox's NVMe controller ships only in the Oracle Extension Pack - VERR_PDM_DEVICE_NOT_FOUND.)
   'ALL 6 E1000 INVARIANTS HOLD'
+  'ALL 25 AHCI INVARIANTS HOLD'
   'e2e\] PASS'
 )
 # SKIPPED-BY-HYPERVISOR: VirtualBox emulates no virtio-blk and this VM has no NIC, so the storage and
@@ -176,8 +177,8 @@ cleanup() {
   vbm unregistervm "$VM_NAME" --delete >/dev/null
   vbm closemedium disk "$(hostpath "$VDI")" --delete >/dev/null
   rm -f "$VDI"
-  vbm closemedium disk "$(hostpath "$NVDI")" --delete >/dev/null
-  rm -f "$NVDI" "$BUILD/nvme-raw.img"
+  vbm closemedium disk "$(hostpath "$SVDI")" --delete >/dev/null
+  rm -f "$SVDI" "$BUILD/scratch-raw.img"
 }
 
 # Writes "pass"/"fail"/"" (watchdog) to stdout; everything human-facing goes to stderr so the caller
@@ -191,10 +192,10 @@ boot_once() {
   echo "==> [2/4] converting raw image -> VDI" >&2
   vbm convertfromraw "$(hostpath "$IMG")" "$(hostpath "$VDI")" --format VDI >/dev/null 2>&1 \
     || { echo "FAIL: convertfromraw" >&2; return 2; }
-  # NVMe namespace (ADR-223): 1 MiB = 256 blocks, the geometry the driver's suite expects.
-  dd if=/dev/zero of="$BUILD/nvme-raw.img" bs=1048576 count=1 2>/dev/null &&
-    vbm convertfromraw "$(hostpath "$BUILD/nvme-raw.img")" "$(hostpath "$NVDI")" --format VDI >/dev/null 2>&1 \
-    || { echo "FAIL: nvme convertfromraw" >&2; return 2; }
+  # SATA scratch disk (ADR-225): 1 MiB = 256 blocks, the geometry the AHCI suite expects.
+  dd if=/dev/zero of="$BUILD/scratch-raw.img" bs=1048576 count=1 2>/dev/null &&
+    vbm convertfromraw "$(hostpath "$BUILD/scratch-raw.img")" "$(hostpath "$SVDI")" --format VDI >/dev/null 2>&1 \
+    || { echo "FAIL: sata scratch convertfromraw" >&2; return 2; }
 
   echo "==> [3/4] provisioning VM (EFI firmware, SATA/AHCI, ${CPUS} vCPU, ${mem} MiB, serial -> file)" >&2
   {
@@ -203,12 +204,13 @@ boot_once() {
     # \EFI\BOOT\BOOTX64.EFI and would present as a silent hang rather than a configuration error.
     vbm modifyvm "$VM_NAME" --firmware efi --memory "$mem" --cpus "$CPUS" \
         --graphicscontroller vmsvga --nic1 nat --nictype1 82540EM --audio-driver none &&
-    vbm storagectl "$VM_NAME" --name NVMe --add pcie --controller NVMe --portcount 1 &&
-    vbm storageattach "$VM_NAME" --storagectl NVMe --port 0 --device 0 --type hdd \
-        --medium "$(hostpath "$NVDI")" &&
-    vbm storagectl "$VM_NAME" --name SATA --add sata --controller IntelAhci --portcount 1 --bootable on &&
+    vbm storagectl "$VM_NAME" --name SATA --add sata --controller IntelAhci --portcount 2 --bootable on &&
     vbm storageattach "$VM_NAME" --storagectl SATA --port 0 --device 0 --type hdd \
         --medium "$(hostpath "$VDI")" &&
+    # Port 1: the AHCI scratch disk (ADR-225), the only disk the driver may write - marked by serial.
+    vbm storageattach "$VM_NAME" --storagectl SATA --port 1 --device 0 --type hdd \
+        --medium "$(hostpath "$SVDI")" &&
+    vbm setextradata "$VM_NAME" "VBoxInternal/Devices/ahci/0/Config/Port1/SerialNumber" "ALETHEIA-SCRATCH" &&
     # COM1 at the architectural 0x3F8/IRQ4, backed by a host file the gate greps.
     vbm modifyvm "$VM_NAME" --uart1 0x3F8 4 --uart-mode1 file "$(hostpath "$LOG")"
   } >/dev/null 2>&1 || { echo "FAIL: VM provisioning" >&2; return 2; }

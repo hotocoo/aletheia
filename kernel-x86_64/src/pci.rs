@@ -393,3 +393,67 @@ pub fn e1000_selftest() -> Result<u32, (u32, &'static str)> {
         Err((i, name)) => Err((i as u32, name)),
     }
 }
+
+/// Mass storage / SATA / AHCI 1.0 (PCI class 01h, subclass 06h, programming interface 01h).
+const CLASS_AHCI: u32 = 0x01_06_01;
+/// Blocks on the scratch SATA image the VM gate attaches (1 MiB).
+const AHCI_SCRATCH_BLOCKS: usize = 256;
+
+/// Prove the shared AHCI driver against the first AHCI controller (ADR-225). Writes go ONLY to the
+/// disk whose serial is `ALETHEIA-SCRATCH`; the boot disk is read. `Ok(0)` = no controller.
+pub fn ahci_selftest() -> Result<u32, (u32, &'static str)> {
+    use kernel_core::ahci;
+    // SAFETY: touches only configuration ports.
+    let Some(bdf) = (unsafe { virtiopci::find_class_nth(&Ports, CLASS_AHCI, 0) }) else {
+        kprintln!("[ahci] no controller (skipped)");
+        return Ok(0);
+    };
+    let opened = (|| {
+        // SAFETY: this boot owns the function now (firmware handed it over at ExitBootServices).
+        unsafe { virtiopci::enable_bus_master(&Ports, bdf) };
+        let pa = virtiopci::bar_base_pa(&Ports, bdf, 5)?;
+        let base = Ports
+            .map_region(pa, 0x1100)
+            .ok_or("AHCI ABAR could not be mapped as device memory")?;
+        // SAFETY: base is the mapped ABAR.
+        let regs = unsafe { ahci::MmioRegs::new(base) };
+        let mut disks = alloc::vec::Vec::new();
+        for p in ahci::disk_ports(&regs) {
+            let d = unsafe { ahci::AhciDisk::<crate::virtio::X86Virtio, _>::open(regs, p)? };
+            kprintln!(
+                "[ahci] port {} serial \"{}\" model \"{}\" {} x {} B{}",
+                p,
+                core::str::from_utf8(d.serial()).unwrap_or("?").trim(),
+                core::str::from_utf8(d.model()).unwrap_or("?").trim(),
+                d.sectors(),
+                d.sector_bytes(),
+                if d.is_scratch() { " (scratch)" } else { "" }
+            );
+            disks.push(d);
+        }
+        Ok::<_, &'static str>(disks)
+    })();
+    let mut disks = match opened {
+        Ok(d) => d,
+        Err(e) => {
+            kprintln!("[ahci] init refused: {}", e);
+            return Err((0, "ahci controller initialization"));
+        }
+    };
+    kprintln!(
+        "[ahci] controller @ PCI {:02x}:{:02x}.{}",
+        bdf.bus,
+        bdf.device,
+        bdf.function
+    );
+    match ahci::device_suite(&mut disks, AHCI_SCRATCH_BLOCKS, &mut |n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => Ok(n as u32),
+        Err((i, name)) => Err((i as u32, name)),
+    }
+}
