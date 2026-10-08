@@ -860,6 +860,8 @@ pub struct NetFacts {
     pub mac: [u8; 6],
     pub ip: [u8; 4],
     pub gateway: [u8; 4],
+    /// The name server the DHCP lease named, if one was taken (ADR-234).
+    pub dns: Option<[u8; 4]>,
     /// Frames received that were not the answer being waited for.
     pub dropped: u64,
     /// Broadcast ARP requests put on the wire since init.
@@ -2845,7 +2847,8 @@ pub fn execute<H: ShellHost, D: BlockDevice>(
                 return Outcome::Continue;
             }
             let server = if server_text.is_empty() {
-                Some([10, 0, 2, 3])
+                // The lease's name server (ADR-234), else QEMU's user-network one.
+                Some(host.net_facts().and_then(|f| f.dns).unwrap_or([10, 0, 2, 3]))
             } else {
                 parse_ipv4_address(server_text)
             };

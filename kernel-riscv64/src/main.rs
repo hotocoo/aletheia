@@ -1185,6 +1185,25 @@ pub extern "C" fn kmain() -> ! {
         }) {
             Ok((n, dev)) => {
                 kprintln!("[net] ALL {} NETWORK INVARIANTS HOLD", n);
+                let a = dev.addressing();
+                let (ip, gw) = (a.ip, a.gateway);
+                kprintln!(
+                    "[net] lease {}.{}.{}.{} via {}.{}.{}.{} for {} s (dhcp {})",
+                    ip[0],
+                    ip[1],
+                    ip[2],
+                    ip[3],
+                    gw[0],
+                    gw[1],
+                    gw[2],
+                    gw[3],
+                    a.lease_secs.unwrap_or(0),
+                    if a.leased {
+                        "acknowledged"
+                    } else {
+                        "not taken"
+                    }
+                );
                 kprintln!(
                     "[boot] net suite: {} ms",
                     kernel_core::boottime::lap::<ActiveHal>("net")

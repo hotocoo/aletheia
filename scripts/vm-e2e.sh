@@ -262,7 +262,7 @@ OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   -global virtio-mmio.force-legacy=false \
   -drive if=none,format=raw,file="$IMG",id=blk0 -device virtio-blk-device,drive=blk0 \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
-  -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
+  -netdev user,id=n0,net=192.168.76.0/24 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
   -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
@@ -279,6 +279,9 @@ echo "third boot exit code: $CODE3"
 echo "$OUT3" | grep "PLATFORM ROOT ABSENT (RootNotProvided)" >/dev/null || { echo "FAIL: absent platform root was not refused by name"; fail=1; }
 echo "$OUT3" | grep "PERSISTENT MEDIUM: boot #3," >/dev/null || { echo "FAIL: third boot did not witness the durable store"; fail=1; }
 echo "$OUT3" | grep "\[e2e\] PASS" >/dev/null || { echo "FAIL: third boot did not reach e2e PASS (one sealed vault must not kill the machine)"; fail=1; }
+# The third boot's network is 192.168.76.0/24, not QEMU's default: the address is learned, not assumed (ADR-234).
+echo "$OUT3" | grep "\[net\] lease 192.168.76.15 via 192.168.76.2 for [1-9][0-9]* s (dhcp acknowledged)" >/dev/null || { echo "FAIL: third boot did not take a DHCP lease on its own subnet"; fail=1; }
+echo "$OUT" | grep "\[net\] lease 10.0.2.15 via 10.0.2.2 for [1-9][0-9]* s (dhcp acknowledged)" >/dev/null || { echo "FAIL: first boot did not take a DHCP lease"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then
   echo "VM-E2E: PASS"

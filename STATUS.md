@@ -1271,6 +1271,11 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — the machine takes a DHCP lease (ADR-234)
+
+- `dhcp.rs` REQUEST/ACK/NAK and option 6; `VirtioNet` holds a learned `Addressing` and speaks from it everywhere (ARP, ICMP, UDP, TCP, DNS next hop by mask); DISCOVER/REQUEST from 0.0.0.0.
+- vm-e2e third boot runs on `net=192.168.76.0/24` and must log `lease 192.168.76.15 via 192.168.76.2` with every invariant holding; all three boot gates pass. `resolve` defaults to the lease's name server. e1000 still uses the constant.
+
 ### 2026-10-08 — TCP learns its retransmission timeout (ADR-233)
 
 - `tcpconn::Connection` estimates its RTO per RFC 6298 (SRTT/RTTVAR, Karn's rule, back-off kept until a clean sample), floored at the caller's 200 ms and capped at 300 times it; data and FIN retransmissions now back off like the SYN.

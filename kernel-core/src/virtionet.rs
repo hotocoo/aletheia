@@ -74,6 +74,42 @@ const BROADCAST: [u8; 6] = [0xFF; 6];
 pub const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
 pub const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 
+/// Where this machine lives on its network (ADR-234): QEMU's user-network defaults until the
+/// network's DHCP server grants a lease, then what the lease says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Addressing {
+    pub ip: [u8; 4],
+    pub gateway: [u8; 4],
+    pub mask: [u8; 4],
+    /// The name server the lease named, if any.
+    pub dns: Option<[u8; 4]>,
+    /// The lease's length in seconds; `None` before a lease (or when the server gave none).
+    pub lease_secs: Option<u32>,
+    /// Whether these came from a DHCP ACK rather than the defaults.
+    pub leased: bool,
+}
+
+impl Addressing {
+    pub const QEMU_USER: Addressing = Addressing {
+        ip: GUEST_IP,
+        gateway: GATEWAY_IP,
+        mask: [255, 255, 255, 0],
+        dns: None,
+        lease_secs: None,
+        leased: false,
+    };
+
+    /// The next hop for `dst`: itself on this subnet, the gateway otherwise.
+    pub fn hop(&self, dst: [u8; 4]) -> [u8; 4] {
+        let same = (0..4).all(|i| dst[i] & self.mask[i] == self.ip[i] & self.mask[i]);
+        if same {
+            dst
+        } else {
+            self.gateway
+        }
+    }
+}
+
 /// Why a network operation failed. Each is a refusal with a reason; none is a silent drop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetError {
@@ -107,6 +143,8 @@ pub struct VirtioNet<H: VirtioHal, T: Transport> {
     /// nonzero count beside a failing wait distinguishes "the peer said nothing" from "the driver threw
     /// the answer away".
     dropped: core::cell::Cell<u64>,
+    /// Where this device's machine lives (ADR-234).
+    addr: core::cell::Cell<Addressing>,
     _hal: core::marker::PhantomData<H>,
 }
 
@@ -223,6 +261,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             arp_cache: core::cell::RefCell::new(ArpCache::new()),
             arp_wire_requests: core::cell::Cell::new(0),
             dropped: core::cell::Cell::new(0),
+            addr: core::cell::Cell::new(Addressing::QEMU_USER),
             _hal: core::marker::PhantomData,
         })
     }
@@ -230,6 +269,21 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
     /// The device's own MAC address.
     pub fn mac(&self) -> [u8; 6] {
         self.mac
+    }
+
+    /// Where this machine lives: the defaults, or the DHCP lease once taken (ADR-234).
+    pub fn addressing(&self) -> Addressing {
+        self.addr.get()
+    }
+
+    /// This machine's IPv4 address on the device's network.
+    pub fn ip(&self) -> [u8; 4] {
+        self.addr.get().ip
+    }
+
+    /// The router off this network.
+    pub fn gateway(&self) -> [u8; 4] {
+        self.addr.get().gateway
     }
 
     /// Frames received that were not the answer being waited for.
@@ -361,7 +415,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             a[5] = 4; // protocol address length
             put_be16(a, 6, 1); // operation: request
             a[8..14].copy_from_slice(&self.mac);
-            a[14..18].copy_from_slice(&GUEST_IP);
+            a[14..18].copy_from_slice(&self.ip());
             a[18..24].copy_from_slice(&[0u8; 6]); // target hardware address: the question itself
             a[24..28].copy_from_slice(&target);
         }
@@ -417,7 +471,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             ip[8] = 64; // TTL
             ip[9] = 1; // protocol: ICMP
             put_be16(ip, 10, 0); // checksum field zeroed before computing it
-            ip[12..16].copy_from_slice(&GUEST_IP);
+            ip[12..16].copy_from_slice(&self.ip());
             ip[16..20].copy_from_slice(&target);
             let ck = checksum(ip);
             put_be16(ip, 10, ck);
@@ -444,7 +498,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
                 return None; // not IPv4, or not ICMP
             }
             let ihl = (ip[0] & 0x0F) as usize * 4;
-            if ip[12..16] != target || ip[16..20] != GUEST_IP || f.len() < ETH_HDR_LEN + ihl + 8 {
+            if ip[12..16] != target || ip[16..20] != self.ip() || f.len() < ETH_HDR_LEN + ihl + 8 {
                 return None; // not from the peer we asked, or not addressed to us
             }
             let icmp = &f[ETH_HDR_LEN + ihl..];
@@ -511,7 +565,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             let Ok(ip) = udpv4::parse_ipv4(body) else {
                 return None;
             };
-            if ip.protocol != protocol || ip.dst != GUEST_IP {
+            if ip.protocol != protocol || ip.dst != self.ip() {
                 return None;
             }
             // The datagram's own declared length, not the frame's: Ethernet padding is not part of
@@ -560,7 +614,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         let wrote = udpv4::build_datagram(
             &mut frame[ETH_HDR_LEN..],
             ident,
-            GUEST_IP,
+            self.ip(),
             target,
             sport,
             dport,
@@ -581,7 +635,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
                 Ok(ip) => ip,
                 Err(_) => return None,
             };
-            if ip.src != target || ip.dst != GUEST_IP || ip.protocol != udpv4::PROTOCOL_UDP {
+            if ip.src != target || ip.dst != self.ip() || ip.protocol != udpv4::PROTOCOL_UDP {
                 return None;
             }
             let u = match udpv4::parse_udp(&ip) {
@@ -607,7 +661,44 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
     pub unsafe fn dhcp_discover(&self, xid: u32) -> Result<dhcp::Offer, NetError> {
         let mut disc = [0u8; dhcp::BOOTP_MIN_LEN];
         let question = dhcp::write_discover(&mut disc, self.mac, xid).ok_or(NetError::TooLong)?;
+        self.dhcp_round(xid, question, |reply| dhcp::parse_offer(reply, xid).ok())
+    }
 
+    /// Take a lease (ADR-234): DISCOVER, then REQUEST the address offered from the server that
+    /// offered it, and configure this device from the ACK, which must grant that same address.
+    /// Nothing changes unless the whole exchange succeeds.
+    ///
+    /// # Safety
+    /// The device must be live.
+    pub unsafe fn dhcp_lease(&self, xid: u32) -> Result<dhcp::Offer, NetError> {
+        let offer = self.dhcp_discover(xid)?;
+        let mut req = [0u8; dhcp::BOOTP_MIN_LEN];
+        let question =
+            dhcp::write_request(&mut req, self.mac, xid, &offer).ok_or(NetError::TooLong)?;
+        let ack = self.dhcp_round(xid, question, |reply| {
+            dhcp::parse_ack(reply, xid)
+                .ok()
+                .filter(|a| a.yiaddr == offer.yiaddr)
+        })?;
+        let old = self.addr.get();
+        self.addr.set(Addressing {
+            ip: ack.yiaddr,
+            gateway: ack.router.or(offer.router).unwrap_or(old.gateway),
+            mask: ack.subnet_mask.or(offer.subnet_mask).unwrap_or(old.mask),
+            dns: ack.dns.or(offer.dns),
+            lease_secs: ack.lease_secs,
+            leased: true,
+        });
+        Ok(ack)
+    }
+
+    /// Broadcast one DHCP message and wait for the reply `accept` takes (bound to `xid` by it).
+    unsafe fn dhcp_round(
+        &self,
+        xid: u32,
+        question: &[u8],
+        accept: impl Fn(&[u8]) -> Option<dhcp::Offer>,
+    ) -> Result<dhcp::Offer, NetError> {
         let mut frame =
             [0u8; ETH_HDR_LEN + udpv4::IPV4_HDR_MIN + udpv4::UDP_HDR_LEN + dhcp::BOOTP_MIN_LEN];
         frame[0..6].copy_from_slice(&BROADCAST); // the client has no peer MAC for a server yet
@@ -616,7 +707,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         let wrote = udpv4::build_datagram(
             &mut frame[ETH_HDR_LEN..],
             (xid >> 16) as u16,
-            GUEST_IP,
+            [0, 0, 0, 0], // RFC 2131 4.1: a client with no lease speaks from 0.0.0.0
             [255, 255, 255, 255], // limited broadcast: the question itself is addressless
             dhcp::CLIENT_PORT,
             dhcp::SERVER_PORT,
@@ -646,7 +737,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             }
             // A malformed offer is a DROPPED frame with a counted reason, not a kernel fault: the
             // wire is untrusted, and one bad packet must not stop the machine from asking again.
-            dhcp::parse_offer(u.payload, xid).ok()
+            accept(u.payload)
         })
     }
 }
@@ -692,11 +783,7 @@ pub unsafe fn resolve_name<H: VirtioHal, T: Transport>(
     let mut query = [0u8; crate::dns::MAX_NAME + 20];
     let qlen =
         crate::dns::write_query(&mut query, id, name).map_err(crate::dns::DnsError::describe)?;
-    let hop = if server[..3] == GUEST_IP[..3] {
-        server
-    } else {
-        GATEWAY_IP
-    };
+    let hop = dev.addressing().hop(server);
     let mac = dev
         .arp_resolve(hop)
         .map_err(|_| "no answer to the address resolution for the name server")?;
@@ -736,7 +823,7 @@ impl<H: VirtioHal, T: Transport> crate::tcpnet::Ipv4Link for NetLink<'_, H, T> {
     }
 
     fn local_ip(&self) -> [u8; 4] {
-        GUEST_IP
+        self.dev.ip()
     }
 }
 
@@ -782,7 +869,14 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     // 3 — ARP: the request went out AND an answer came back. This is the receive path's first proof, and
     //     it works only because the receive buffers were posted before DRIVER_OK.
     // SAFETY: the device is live and owned here.
-    let gw = unsafe { dev.arp_resolve(GATEWAY_IP) };
+    // The lease comes first (ADR-234): the gateway, and this machine's own address, are what the
+    // network says, so every exchange below speaks from the address it was granted.
+    // SAFETY: the device is live and owned here.
+    let lease = unsafe {
+        dev.dhcp_lease(0x1EA5_E000 ^ u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]))
+    };
+    let gateway = dev.gateway();
+    let gw = unsafe { dev.arp_resolve(gateway) };
     check!(
         "net: an ARP request for the gateway is answered with its hardware address",
         matches!(gw, Ok(m) if m != [0u8; 6])
@@ -793,7 +887,7 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     //     identifier, sequence and payload. A wrong checksum would be dropped by the peer in silence.
     let payload = b"aletheia-echo-01";
     // SAFETY: as above.
-    let echo = unsafe { dev.icmp_echo(GATEWAY_IP, gw_mac, 0xA1E7, 1, payload) };
+    let echo = unsafe { dev.icmp_echo(gateway, gw_mac, 0xA1E7, 1, payload) };
     check!(
         "net: an ICMP echo request is answered with a matching reply (both checksums verified)",
         matches!(&echo, Ok((buf, len)) if *len == payload.len() && buf[..*len] == payload[..])
@@ -802,7 +896,7 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     // 5 — a second echo is matched on ITS sequence, not the first one's: the driver reads the reply rather
     //     than assuming the next frame is the answer.
     // SAFETY: as above.
-    let echo2 = unsafe { dev.icmp_echo(GATEWAY_IP, gw_mac, 0xA1E7, 2, b"second") };
+    let echo2 = unsafe { dev.icmp_echo(gateway, gw_mac, 0xA1E7, 2, b"second") };
     check!(
         "net: a second echo is matched on its own sequence (replies are read, not assumed)",
         matches!(&echo2, Ok((buf, len)) if *len == 6 && &buf[..6] == b"second")
@@ -812,7 +906,7 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     //     same answer WITHOUT a second broadcast. The counter is the proof; a cache that "worked"
     //     while the wire still saw a request would be a cache in name only.
     // SAFETY: the device is live and owned here.
-    let gw_again = unsafe { dev.arp_resolve(GATEWAY_IP) };
+    let gw_again = unsafe { dev.arp_resolve(gateway) };
     check!(
         "net: a repeated ARP resolve is answered from the cache and puts no second request on the wire",
         matches!(gw_again, Ok(m) if m == gw_mac) && dev.arp_wire_requests() == 1
@@ -829,13 +923,13 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
         matches!(&offer, Ok(o) if o.yiaddr != [0u8; 4])
     );
 
-    // 8 — the address the network OFFERS is the address this driver CLAIMS. The constant was always
-    //     an assumption about the simulator; now it is cross-checked against the authority that
-    //     assigns addresses, so a change on either side fails this boot instead of going silent.
+    // 8 — the lease was taken (ADR-234): the network ACKed a REQUEST for the address it offers, and
+    //     that address is the one this driver now speaks from. Before ADR-234 this compared the
+    //     offer with a constant; now the constant is only the default before a lease.
     let offered = offer.unwrap_or_else(|_| dhcp::Offer::none());
     check!(
-        "net: the address the network offers IS the address the driver claims",
-        offered.yiaddr == GUEST_IP
+        "net: the network's lease is requested and acknowledged, and the driver speaks from the leased address",
+        matches!(&lease, Ok(l) if l.yiaddr == offered.yiaddr && dev.ip() == l.yiaddr && dev.addressing().leased)
     );
 
     // 9 — a NEW transaction id draws its OWN answer: replies are matched per-exchange, never
@@ -844,7 +938,7 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     let offer2 = unsafe { dev.dhcp_discover(XID ^ 0xFFFF_FFFF) };
     check!(
         "net: a second DISCOVER under a new transaction id draws its own fresh answer",
-        matches!(&offer2, Ok(o) if o.yiaddr == GUEST_IP)
+        matches!(&offer2, Ok(o) if o.yiaddr == dev.ip())
     );
 
     Ok((n, dev))

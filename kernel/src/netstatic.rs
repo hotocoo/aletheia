@@ -13,7 +13,7 @@ use kernel_core::tcpnet::{self, LinkError, Plan};
 use kernel_core::tlsclient::{self, TlsPump, TlsReport};
 use kernel_core::tlshandshake::Handshake;
 use kernel_core::trust::PinnedRoot;
-use kernel_core::virtionet::{NetLink, GUEST_IP};
+use kernel_core::virtionet::NetLink;
 use kernel_core::Hal;
 
 use crate::hal::ActiveHal;
@@ -61,8 +61,9 @@ pub fn facts() -> Option<kernel_core::shell::NetFacts> {
     };
     Some(kernel_core::shell::NetFacts {
         mac: dev.mac(),
-        ip: GUEST_IP,
-        gateway: kernel_core::virtionet::GATEWAY_IP,
+        ip: dev.ip(),
+        gateway: dev.gateway(),
+        dns: dev.addressing().dns,
         dropped: dev.dropped(),
         arp_requests: dev.arp_wire_requests(),
         dma_regions: dev.dma_regions(),
@@ -100,7 +101,7 @@ pub fn fetch(
     // A fifth of a second between retransmissions: long enough that a local answer arrives first,
     // short enough that a lost segment does not read as a hung console.
     let rto = (hz / 5).max(1);
-    let mut conn = Connection::new(GUEST_IP, lport, ip, port, rto);
+    let mut conn = Connection::new(dev.ip(), lport, ip, port, rto);
     // The initial sequence number must be unpredictable on a real network, so it comes from the
     // machine's clock rather than from a constant this kernel ships.
     let iss = (ActiveHal::timer_ticks() as u32) ^ ((lport as u32) << 16);
@@ -179,7 +180,7 @@ pub fn fetch_tls(
 
     let hz = ActiveHal::timer_freq_hz().max(1);
     let rto = (hz / 5).max(1);
-    let mut conn = Connection::new(GUEST_IP, lport, ip, port, rto);
+    let mut conn = Connection::new(dev.ip(), lport, ip, port, rto);
     let ticks = ActiveHal::timer_ticks();
     let iss = (ticks as u32) ^ ((lport as u32) << 16);
     // The key's material comes from the entropy device the boot suite proved, checked draw by

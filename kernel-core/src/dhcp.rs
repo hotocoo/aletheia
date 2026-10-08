@@ -17,8 +17,10 @@
 //! length with every step bounds-checked, PAD (0) and END (255) honored per RFC 2131 §4.1 — a walk
 //! that could run past the buffer would be an attacker-controlled loop in kernel space.
 //!
-//! Not implemented, on purpose: REQUEST/ACK (the lease is never TAKEN — the guest keeps its static
-//! configuration and uses the OFFER only as cross-evidence), renewal, option overload, relay agents.
+//! ADR-234 takes the lease: a REQUEST names the offered address and the offering server, and only
+//! an ACK bound to the same transaction, for that address, configures the machine. A NAK is a
+//! refusal by name. Not implemented: renewal (a lease outlives every session so far), option
+//! overload, relay agents.
 
 /// Ports DHCP speaks on (client 68 → server 67).
 pub const CLIENT_PORT: u16 = 68;
@@ -42,12 +44,18 @@ const OPT_PAD: u8 = 0;
 const OPT_END: u8 = 255;
 const OPT_SUBNET: u8 = 1;
 const OPT_ROUTER: u8 = 3;
+const OPT_DNS: u8 = 6;
+const OPT_REQUESTED_ADDR: u8 = 50;
+const OPT_PARAMS: u8 = 55;
 const OPT_LEASE_TIME: u8 = 51;
 const OPT_MSG_TYPE: u8 = 53;
 const OPT_SERVER_ID: u8 = 54;
 
 const MSG_DISCOVER: u8 = 1;
 const MSG_OFFER: u8 = 2;
+const MSG_REQUEST: u8 = 3;
+const MSG_ACK: u8 = 5;
+const MSG_NAK: u8 = 6;
 
 /// Why these bytes are not an acceptable OFFER. Every refusal names itself; none is a silent shrug.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,8 +69,10 @@ pub enum DhcpError {
     /// The transaction id belongs to some other exchange. Binding to the exact xid is what makes a
     /// late reply to an EARLIER ask unable to masquerade as this one's answer.
     XidMismatch,
-    /// No message-type option, or it is not OFFER(2).
+    /// No message-type option, or it is not the one this exchange waits for (OFFER, or ACK).
     NotAnOffer,
+    /// The server refused the REQUEST (DHCPNAK): the address is not ours to take.
+    Nak,
     /// An option's length runs past the end of the buffer — the walk refuses rather than reads.
     TruncatedOption,
     /// A well-formed OFFER that offers no address (yiaddr all zero).
@@ -81,8 +91,10 @@ pub struct Offer {
     pub subnet_mask: Option<[u8; 4]>,
     /// Option 3 — the router the server proposes.
     pub router: Option<[u8; 4]>,
-    /// Option 51 — how long the server claims the offer would live (seconds). NOT taken: see scope.
+    /// Option 51: how long the server says the lease lives (seconds).
     pub lease_secs: Option<u32>,
+    /// Option 6: the first name server the network names (ADR-234).
+    pub dns: Option<[u8; 4]>,
 }
 
 impl Offer {
@@ -94,6 +106,7 @@ impl Offer {
             subnet_mask: None,
             router: None,
             lease_secs: None,
+            dns: None,
         }
     }
 }
@@ -130,6 +143,47 @@ pub fn write_discover(buf: &mut [u8], chaddr: [u8; 6], xid: u32) -> Option<&[u8]
 /// cookie, transaction), then a bounds-checked option walk, then the semantic requirements (it IS an
 /// offer, and it offers AN ADDRESS).
 pub fn parse_offer(buf: &[u8], want_xid: u32) -> Result<Offer, DhcpError> {
+    parse_reply(buf, want_xid, MSG_OFFER)
+}
+
+/// Parse the server's answer to a REQUEST (ADR-234): an ACK bound to `want_xid`, carrying the
+/// address granted. A NAK is [`DhcpError::Nak`].
+pub fn parse_ack(buf: &[u8], want_xid: u32) -> Result<Offer, DhcpError> {
+    parse_reply(buf, want_xid, MSG_ACK)
+}
+
+/// Write a DHCPREQUEST for the address `offer` made (ADR-234): broadcast, naming the address
+/// (option 50) and the server that offered it (option 54), and asking for mask, router, name
+/// server and lease time (option 55). `None` when `buf` cannot hold the minimum packet.
+pub fn write_request<'a>(
+    buf: &'a mut [u8],
+    chaddr: [u8; 6],
+    xid: u32,
+    offer: &Offer,
+) -> Option<&'a [u8]> {
+    write_discover(buf, chaddr, xid)?;
+    let b = &mut buf[..BOOTP_MIN_LEN];
+    b[242] = MSG_REQUEST;
+    let mut at = 243;
+    let mut opt = |kind: u8, val: &[u8]| {
+        b[at] = kind;
+        b[at + 1] = val.len() as u8;
+        b[at + 2..at + 2 + val.len()].copy_from_slice(val);
+        at += 2 + val.len();
+    };
+    opt(OPT_REQUESTED_ADDR, &offer.yiaddr);
+    if let Some(server) = offer.server_id {
+        opt(OPT_SERVER_ID, &server);
+    }
+    opt(
+        OPT_PARAMS,
+        &[OPT_SUBNET, OPT_ROUTER, OPT_DNS, OPT_LEASE_TIME],
+    );
+    b[at] = OPT_END;
+    Some(b)
+}
+
+fn parse_reply(buf: &[u8], want_xid: u32, want: u8) -> Result<Offer, DhcpError> {
     if buf.len() < 240 {
         return Err(DhcpError::TooShort);
     }
@@ -186,6 +240,9 @@ pub fn parse_offer(buf: &[u8], want_xid: u32) -> Result<Offer, DhcpError> {
             OPT_ROUTER if len == 4 => {
                 o.router = Some([val[0], val[1], val[2], val[3]]);
             }
+            OPT_DNS if len >= 4 && len.is_multiple_of(4) => {
+                o.dns = Some([val[0], val[1], val[2], val[3]]);
+            }
             OPT_LEASE_TIME if len == 4 => {
                 o.lease_secs = Some(u32::from_be_bytes([val[0], val[1], val[2], val[3]]));
             }
@@ -199,7 +256,10 @@ pub fn parse_offer(buf: &[u8], want_xid: u32) -> Result<Offer, DhcpError> {
         // parser that accepts prefixes would accept one crafted to look finished.
         return Err(DhcpError::TruncatedOption);
     }
-    if msg_type != Some(MSG_OFFER) {
+    if want == MSG_ACK && msg_type == Some(MSG_NAK) {
+        return Err(DhcpError::Nak);
+    }
+    if msg_type != Some(want) {
         return Err(DhcpError::NotAnOffer);
     }
     o.yiaddr = [buf[16], buf[17], buf[18], buf[19]];
@@ -426,5 +486,79 @@ mod tests {
         );
         let o = parse_offer(&b, XID).expect("pads do not derail the walk");
         assert_eq!(o.server_id, Some([10, 0, 2, 2]));
+    }
+
+    #[test]
+    fn a_request_names_the_offered_address_and_the_server_that_offered_it() {
+        let offer = Offer {
+            yiaddr: [192, 168, 76, 15],
+            server_id: Some([192, 168, 76, 2]),
+            ..Offer::none()
+        };
+        let mut buf = [0u8; BOOTP_MIN_LEN];
+        let w = write_request(&mut buf, [2, 0, 0, 0, 0, 7], XID, &offer).unwrap();
+        assert_eq!(
+            (w[0], &w[4..8], &w[236..240]),
+            (OP_REQUEST, &XID.to_be_bytes()[..], &COOKIE[..])
+        );
+        assert_eq!(&w[240..243], &[OPT_MSG_TYPE, 1, MSG_REQUEST]);
+        assert_eq!(&w[243..249], &[OPT_REQUESTED_ADDR, 4, 192, 168, 76, 15]);
+        assert_eq!(&w[249..255], &[OPT_SERVER_ID, 4, 192, 168, 76, 2]);
+        assert_eq!(
+            &w[255..261],
+            &[
+                OPT_PARAMS,
+                4,
+                OPT_SUBNET,
+                OPT_ROUTER,
+                OPT_DNS,
+                OPT_LEASE_TIME
+            ]
+        );
+        assert_eq!(w[261], OPT_END);
+        assert!(write_request(&mut [0u8; 64], [0; 6], XID, &offer).is_none());
+    }
+
+    #[test]
+    fn only_an_ack_takes_the_lease_and_a_nak_is_refused_by_name() {
+        let ack = offer_bytes(
+            XID,
+            [192, 168, 76, 15],
+            &[
+                (OPT_MSG_TYPE, vec![MSG_ACK]),
+                (OPT_ROUTER, four([192, 168, 76, 2])),
+                (
+                    OPT_DNS,
+                    [four([192, 168, 76, 3]), four([1, 1, 1, 1])].concat(),
+                ),
+                (OPT_LEASE_TIME, vec![0, 1, 0x51, 0x80]),
+            ],
+        );
+        let l = parse_ack(&ack, XID).expect("an ACK parses");
+        assert_eq!(
+            (l.yiaddr, l.router, l.dns, l.lease_secs),
+            (
+                [192, 168, 76, 15],
+                Some([192, 168, 76, 2]),
+                Some([192, 168, 76, 3]),
+                Some(86_400)
+            )
+        );
+        assert_eq!(parse_offer(&ack, XID), Err(DhcpError::NotAnOffer));
+        assert_eq!(parse_ack(&ack, XID ^ 1), Err(DhcpError::XidMismatch));
+        let offer = offer_bytes(XID, [192, 168, 76, 15], &[(OPT_MSG_TYPE, vec![MSG_OFFER])]);
+        assert_eq!(parse_ack(&offer, XID), Err(DhcpError::NotAnOffer));
+        let nak = offer_bytes(XID, [0; 4], &[(OPT_MSG_TYPE, vec![MSG_NAK])]);
+        assert_eq!(parse_ack(&nak, XID), Err(DhcpError::Nak));
+        // A name-server option that is not whole addresses is skipped, not half-read.
+        let odd = offer_bytes(
+            XID,
+            [10, 0, 0, 9],
+            &[
+                (OPT_MSG_TYPE, vec![MSG_ACK]),
+                (OPT_DNS, vec![1, 2, 3, 4, 5]),
+            ],
+        );
+        assert_eq!(parse_ack(&odd, XID).map(|l| l.dns), Ok(None));
     }
 }
