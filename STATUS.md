@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-08 — an anomaly watch over the kernel's own counters (ADR-242)
+
+- `kernel_core::anomaly`: one-second intervals over five counters (faults contained/escalated,
+  refused admissions, pressure entries, programs reclaimed), fast + slow bias-corrected baselines,
+  flag above max(4x baseline, 2 events); fed by the console loop, reported by `mlstat`.
+- anomaly family = 7 on every CPU; live console-e2e: a whole session flags nothing until
+  `together trap trap trap`, then exactly one interval (`faults contained +3`) on all three CPUs.
+
 ### 2026-10-08 — Laya runs natively: the System-1 backend without Python (ADR-241)
 
 - New host crate `aletheia-laya` (candle ModernBERT + Laya head/scorer, decision wire on

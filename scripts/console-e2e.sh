@@ -243,6 +243,10 @@ else:
     print("ok" if d_old > 0 and d_new >= 2 * d_old else "weights not honoured: weight 1 +%d, weight 4 +%d" % (d_old, d_new))
 ' <<<"$log")"
     [ "$share" = ok ] || { echo "  FAIL [$label/first] background turns did not follow weights ($share)"; bad=1; }
+    # The anomaly watch (ADR-242): three programs faulting in one interval, on a machine whose
+    # faults so far came one at a time, break the contained-fault baseline, and `mlstat` says so.
+    grep -Eq "anomaly: [0-9]+ interval\(s\) watched, [1-9][0-9]* flagged; last: faults contained \+[3-9]" <<<"$log" \
+      || { echo "  FAIL [$label/first] three faults in one interval were not flagged by the anomaly watch"; bad=1; }
     # The desktop's refresh is a setting (ADR-219): set on a machine with a desktop, refused by name
     # on one booted without.
     grep -Eq "refresh: the desktop now redraws at 120 Hz|refresh refused: this machine has no" <<<"$log" \
@@ -340,7 +344,7 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "together trap trap trap" "+2" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
@@ -418,7 +422,7 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "together trap trap trap" "+2" "mlstat" "date" "uptime" "+10" "date" "uptime" "sync" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?

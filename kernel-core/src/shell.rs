@@ -1949,6 +1949,24 @@ fn report_run(name: &str, run: &ProgramRun, out: &mut dyn FnMut(&str)) {
     }
 }
 
+/// Feed the resident anomaly watch (ADR-242) what the machine counts right now: contained and
+/// escalated faults, refused admissions, pressure entries, programs reclaimed. A few reads and
+/// integer operations, no allocation; a new interval is judged once a second.
+fn watch_counters(host: &dyn ShellHost) {
+    let a = crate::mlsched::resident::stats().unwrap_or_default();
+    let evicted = crate::reclaim::resident::ledger().map_or(0, |l| l.evictions);
+    crate::anomaly::resident::observe(
+        host.uptime_ns() / 1_000_000_000,
+        [
+            host.supervisor_terminated() as u64,
+            host.supervisor_escalations() as u64,
+            a.memory_refusals + a.unmetered_refusals,
+            a.pressure_events,
+            evicted,
+        ],
+    );
+}
+
 /// A job named on the console line: a number is a job id; anything else is the name of a running
 /// job (the oldest started, if several share it).
 fn job_id(host: &dyn ShellHost, target: &str) -> Option<u32> {
@@ -2080,6 +2098,16 @@ pub fn report_risk_advisor(out: &mut dyn FnMut(&str)) {
                 );
             }
         }
+    }
+    // The anomaly watch (ADR-242): how many intervals it judged, how many broke a baseline.
+    let w = crate::anomaly::resident::stats();
+    match w.last {
+        None => outf!(out, "anomaly: {} interval(s) watched, none flagged", w.intervals),
+        Some(f) => outf!(out,
+            "anomaly: {} interval(s) watched, {} flagged; last: {} +{} at {} s (baseline {}.{:02} per s)",
+            w.intervals, w.flagged, crate::anomaly::SIGNALS[f.signal], f.increase, f.at_secs,
+            f.baseline_centi / 100, f.baseline_centi % 100
+        ),
     }
     // The running machine's reclaimer (ADR-238): what live pressure has taken back so far.
     if let Some(l) = crate::reclaim::resident::ledger() {
@@ -3983,6 +4011,8 @@ pub fn run_loop_serviced<H: ShellHost, D: BlockDevice>(
     let _ = service(ServicePhase::Settled, fs, dev, &mut *out);
     session.prompt(out);
     loop {
+        // The anomaly watch reads the machine's counters on every pass, typed or idle (ADR-242).
+        watch_counters(host);
         let Some(byte) = getc() else {
             if let Some(request) = (browser.take_navigation)() {
                 navigate_for_window(host, &mut session.navigator, request, browser.show_page);

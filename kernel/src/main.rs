@@ -681,6 +681,24 @@ pub extern "C" fn kmain() -> ! {
     // the same loader as the risk forest, the policy proved on synthetic candidates, then a REAL
     // storm on this machine's own allocator - frames taken until the meter is under the
     // watermark, the reclaimer asked, every frame back, the free count restored EXACTLY.
+    // The anomaly watch (ADR-242): the System-1 rate detector over the kernel's own counters,
+    // proved on deterministic streams before the console feeds it live ones.
+    kprintln!("");
+    kprintln!("--- anomaly watch (the rate of what goes wrong, against its own baseline) ---");
+    match kernel_core::anomaly::anomaly_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => kprintln!("[anomaly] ALL {} ANOMALY INVARIANTS HOLD", n),
+        Err((idx, name)) => {
+            kprintln!("[anomaly] FAILED at anomaly invariant {}: {}", idx, name);
+            semihosting::exit(1170 + idx as i32);
+        }
+    }
+
     kprintln!("");
     kprintln!("--- reclaim under pressure (the allocator triggers, the policy chooses, the forest advises) ---");
     {
