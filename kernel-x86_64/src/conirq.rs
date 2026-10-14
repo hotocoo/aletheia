@@ -47,6 +47,10 @@ static mut KEYS: Keymap = Keymap::new();
 ///
 /// Order matters. Unmasking the console before settling the PIT would still work; setting IF before
 /// either would not — the timer would fire first and keep firing.
+/// The console's tick while a USB keyboard is held (ADR-255).
+#[cfg(feature = "interactive")]
+const USB_POLL_HZ: u32 = 100;
+
 #[cfg(feature = "interactive")]
 pub fn init() {
     // The PIT is the live desktop's pump (ADR-080): a machine that installed a desktop keeps IRQ0
@@ -54,6 +58,12 @@ pub fn init() {
     // a console-only machine quiets it as before — a tick nobody consumes is interrupt entry for
     // nothing. `idt::restore_timer` already put the plain tick handler back after the ring-3 suite.
     if crate::desktop::is_live() {
+        crate::pic::unmask_timer();
+    } else if crate::usbkbd::is_armed() {
+        // A USB keyboard is polled, not interrupt-driven (ADR-255): the tick is what wakes the
+        // console to ask it for a byte. 100 Hz bounds keystroke latency at 10 ms, and is paid only
+        // on a machine that holds a USB keyboard.
+        crate::pit::set_rate(USB_POLL_HZ);
         crate::pic::unmask_timer();
     } else {
         crate::pic::mask_timer();

@@ -300,14 +300,17 @@ fn emit(s: &str) {
     crate::desktop::term_write(s.as_bytes());
 }
 
-/// The console's input: the serial/PS-2 ring first, then the terminal window's queue - the
-/// virtio keyboard's keystrokes that the input session routed to the focused window (ADR-083).
+/// The console's input: the serial/PS-2 ring first, then a kept USB keyboard (ADR-255), then the
+/// terminal window's queue - the virtio keyboard's keystrokes that the input session routed to the
+/// focused window (ADR-083).
 #[cfg(feature = "interactive")]
 fn getc() -> Option<u8> {
     // Service timer-deferred desktop work before consuming input. The PIT IRQ is intentionally
     // only a wakeup, keeping hard-IRQ latency bounded while the GUI gets a 1 ms service cadence.
     crate::desktop::service_pending();
-    crate::conirq::pop().or_else(crate::desktop::term_getc)
+    crate::conirq::pop()
+        .or_else(crate::usbkbd::getc)
+        .or_else(crate::desktop::term_getc)
 }
 
 /// Mount the console's namespace, formatting only a device that carries none. A device that mounts

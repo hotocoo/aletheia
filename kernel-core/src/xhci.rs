@@ -276,6 +276,17 @@ pub struct BootKeyboardDesc {
     pub interval: u8,
 }
 
+/// Which step of [`Xhci::bind_keyboard`] refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindStage {
+    /// Port reset, Enable Slot or Address Device.
+    Address,
+    /// Device or configuration descriptor.
+    Describe,
+    /// SET_CONFIGURATION, SET_PROTOCOL or Configure Endpoint.
+    Configure,
+}
+
 /// A configured boot keyboard: the device, its endpoint's context index, and the TRB in flight.
 #[derive(Debug)]
 pub struct Keyboard {
@@ -876,6 +887,33 @@ impl<H: VirtioHal, R: NvmeRegs> Xhci<H, R> {
         Ok(Some(r))
     }
 
+    /// Try each connected root port in turn and configure the first HID boot keyboard found. A
+    /// device that is not a boot keyboard (a mouse, a hub, a disk) is passed over, not failed:
+    /// this runs on machines that are not gates (ADR-228). `Ok(None)` = no keyboard connected; an
+    /// error names the stage that refused.
+    ///
+    /// # Safety
+    /// The controller must be running (after [`Self::init`]).
+    pub unsafe fn bind_keyboard(&mut self) -> Result<Option<Keyboard>, (BindStage, XhciError)> {
+        let connected: Vec<u8> = (1..=self.max_ports())
+            .filter(|&p| self.portsc(p) & PORTSC_CCS != 0)
+            .collect();
+        for port in connected {
+            let mut dev = self.address(port).map_err(|e| (BindStage::Address, e))?;
+            match self.find_boot_keyboard(&mut dev) {
+                Ok(desc) => {
+                    return self
+                        .configure_keyboard(dev, desc)
+                        .map(Some)
+                        .map_err(|e| (BindStage::Configure, e))
+                }
+                Err(XhciError::NotKeyboard) => {}
+                Err(e) => return Err((BindStage::Describe, e)),
+            }
+        }
+        Ok(None)
+    }
+
     /// Stop the controller and reset it, so nothing it was told about is touched after this
     /// (ADR-228: a driver leaves a machine quiet). Returns whether it halted within the budget.
     pub fn halt(&mut self) -> bool {
@@ -1087,50 +1125,25 @@ pub unsafe fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str
         "xhci: DMA gate refuses an address no structure registered",
         x.dma_gate_refuses_unregistered()
     );
-    // Every connected port is tried in turn; a device that is not a boot keyboard (a mouse, a hub,
-    // a disk) is passed over, not failed: this suite runs on machines that are not gates
-    // (ADR-228). A device that will not address or describe itself is a failure.
-    let mut outcome: Result<Option<(UsbDevice, BootKeyboardDesc)>, u8> = Ok(None);
-    let connected: Vec<u8> = (1..=x.max_ports())
-        .filter(|&p| x.portsc(p) & PORTSC_CCS != 0)
-        .collect();
-    for port in connected {
-        let Ok(mut dev) = x.address(port) else {
-            outcome = Err(3);
-            break;
-        };
-        match x.find_boot_keyboard(&mut dev) {
-            Ok(desc) => {
-                outcome = Ok(Some((dev, desc)));
-                break;
-            }
-            Err(XhciError::NotKeyboard) => {}
-            Err(_) => {
-                outcome = Err(4);
-                break;
-            }
-        }
-    }
-    if matches!(outcome, Ok(None)) {
+    let bound = x.bind_keyboard();
+    if matches!(bound, Ok(None)) {
         return Ok(0);
     }
     check!(
         "xhci: a connected root port resets enabled, a slot is enabled and the device addressed",
-        !matches!(outcome, Err(3))
+        !matches!(bound, Err((BindStage::Address, _)))
     );
     check!(
         "xhci: device and configuration descriptors read whole; a HID boot keyboard found",
-        outcome.is_ok()
+        !matches!(bound, Err((BindStage::Describe, _)))
     );
-    let Ok(Some((dev, desc))) = outcome else {
-        unreachable!()
-    };
-    let kb = x.configure_keyboard(dev, desc);
     check!(
         "xhci: configured in boot protocol, interrupt-IN endpoint Running, report transfer posted",
-        kb.is_ok()
+        bound.is_ok()
     );
-    let Ok(mut kb) = kb else { unreachable!() };
+    let Ok(Some(mut kb)) = bound else {
+        unreachable!()
+    };
     // An idle keyboard: whatever arrives in 20 ms must type nothing.
     let mut typed = Vec::new();
     let mut decoder = BootKeyboard::new();
@@ -1152,4 +1165,68 @@ pub unsafe fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str
         x.halt() && x.is_halted()
     );
     Ok(n)
+}
+
+/// A configured USB keyboard as console input (ADR-255): reports are polled from the controller
+/// when the console asks for a byte, decoded, and queued, so a key sequence (an arrow) is handed
+/// out whole and in order. Polled from the console's foreground loop, never from an interrupt
+/// handler (ADR-080: device draining stays out of hard-IRQ time). A controller that answers
+/// wrongly once is halted and the input reports nothing from then on; the error is kept for the
+/// operator to read.
+pub struct KeyboardInput<H: VirtioHal, R: NvmeRegs> {
+    x: Xhci<H, R>,
+    kb: Keyboard,
+    dec: BootKeyboard,
+    queue: alloc::collections::VecDeque<u8>,
+    failed: Option<XhciError>,
+}
+
+/// Reports drained per empty-queue poll: a burst is bounded, the rest wait for the next ask.
+const REPORTS_PER_POLL: usize = 8;
+
+impl<H: VirtioHal, R: NvmeRegs> KeyboardInput<H, R> {
+    pub fn new(x: Xhci<H, R>, kb: Keyboard) -> Self {
+        KeyboardInput {
+            x,
+            kb,
+            dec: BootKeyboard::new(),
+            queue: alloc::collections::VecDeque::new(),
+            failed: None,
+        }
+    }
+
+    /// The next byte the keyboard typed, polling the controller only when none is queued.
+    pub fn getc(&mut self) -> Option<u8> {
+        if self.queue.is_empty() && self.failed.is_none() {
+            let mut out = Vec::new();
+            for _ in 0..REPORTS_PER_POLL {
+                match self.x.poll_report(&mut self.kb) {
+                    Ok(Some(r)) => self.dec.feed(&r, &mut out),
+                    Ok(None) => break,
+                    Err(e) => {
+                        self.failed = Some(e);
+                        self.x.halt();
+                        break;
+                    }
+                }
+            }
+            self.queue.extend(out);
+        }
+        self.queue.pop_front()
+    }
+
+    /// Why the input stopped, if it did.
+    pub fn failed(&self) -> Option<XhciError> {
+        self.failed
+    }
+
+    /// The live grants, for an IOMMU table (ADR-075): the controller keeps fetching rings.
+    pub fn dma_grants(&self) -> Vec<crate::dma::Grant> {
+        self.x.dma_grants()
+    }
+
+    /// Phantom (rollover) reports refused so far.
+    pub fn rollover_refusals(&self) -> u64 {
+        self.dec.rollover_refusals()
+    }
 }

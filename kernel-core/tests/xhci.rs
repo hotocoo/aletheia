@@ -734,3 +734,31 @@ fn a_device_that_is_not_a_keyboard_is_passed_over_not_failed() {
         "and the controller is left halted"
     );
 }
+
+#[test]
+fn keyboard_input_hands_out_bytes_in_order_and_stops_on_a_lie() {
+    use kernel_core::xhci::KeyboardInput;
+    let (mut x, regs) = up(Faults::default());
+    let kb = keyboard(&mut x);
+    let mut input = KeyboardInput::new(x, kb);
+    assert_eq!(input.getc(), None, "nothing typed, nothing read");
+    regs.press([0, 0, 0x52, 0, 0, 0, 0, 0]); // Up: a three-byte sequence
+    regs.press([0, 0, 0, 0, 0, 0, 0, 0]);
+    regs.press([0, 0, 0x0B, 0, 0, 0, 0, 0]); // h
+    let mut got = vec![];
+    while let Some(b) = input.getc() {
+        got.push(b);
+    }
+    assert_eq!(
+        got, b"\x1b[Ah",
+        "the arrow arrives whole, before the letter"
+    );
+    // A transfer event for another slot: the input halts the controller and goes quiet.
+    regs.0.borrow_mut().f.xfer_slot_lie = true;
+    regs.press([0, 0, 0x04, 0, 0, 0, 0, 0]);
+    assert_eq!(input.getc(), None);
+    assert_eq!(input.failed(), Some(XhciError::Unexpected));
+    assert!(!regs.0.borrow().running);
+    regs.press([0, 0, 0x05, 0, 0, 0, 0, 0]);
+    assert_eq!(input.getc(), None, "a halted keyboard types nothing");
+}

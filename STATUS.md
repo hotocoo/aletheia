@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-15 — a USB keyboard at the console (ADR-255)
+
+- Interactive x86-64 keeps the first USB boot keyboard (`pci::xhci_keep`, `usbkbd`); the console's
+  `getc` polls it in the foreground after the serial/PS-2 ring; PIT at 100 Hz only while one is
+  held (idle 0.75 % vs 0.00 % without); its rings join the VT-d table.
+- New CI gate `scripts/usbkbd-e2e.sh`: keys routed by QMP to the USB keyboard alone type and run
+  commands (5/5); with the USB poll removed the same run fails (negative control).
+
 ### 2026-10-15 — the e1000 driver drives an 82574L (ADR-254)
 
 - `DEVICE_IDS_82574` (0x10D3): the unchanged e1000 driver over QEMU `e1000e` in legacy-descriptor

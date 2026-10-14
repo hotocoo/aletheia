@@ -55,7 +55,7 @@ boots through OVMF, Linux skips firmware), idle CPU 0.0 vs 0.4-0.9 %, typed roun
 
 | Gap | Status | Why it matters |
 |---|---|---|
-| Real hardware | Boots on emulated boards (QEMU virt, q35/OVMF, VirtualBox); VMware package unverified on VMware itself. Drivers for device classes real machines ship: NVMe, e1000 and e1000e (ADR-254), AHCI, and since ADR-253 xHCI with a USB boot keyboard (enumerated and configured; not yet the console's input) | A production OS runs on machines people own |
+| Real hardware | Boots on emulated boards (QEMU virt, q35/OVMF, VirtualBox); VMware package unverified on VMware itself. Drivers for device classes real machines ship: NVMe, e1000 and e1000e (ADR-254), AHCI, and since ADR-253 xHCI with a USB boot keyboard (the x86-64 console's input since ADR-255; not yet aarch64 or the desktop) | A production OS runs on machines people own |
 | Interrupt-driven, multi-queue I/O | Every driver polls; a virtio-blk request carries up to 6 blocks (ADR-248) and up to 4 requests are in flight behind one doorbell (ADR-252): 7-11x over one block per request on a 48-block read. Writes, NVMe and AHCI still one request at a time | Throughput and latency under load; an I/O System 1 has no queue to order |
 | GPU 3D, graphics stack | virtio-gpu 2D, 1-bit surfaces plus a colour plane for programs | No 3D, no Vulkan/GL, no media decode |
 | Native 3A-class gaming | Not started | Needs the GPU stack, input latency work, and a userland that does not exist yet |

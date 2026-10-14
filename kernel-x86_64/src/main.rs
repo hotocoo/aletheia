@@ -50,6 +50,8 @@ mod rtc;
 mod serial;
 mod shellio;
 mod smp;
+#[cfg(feature = "interactive")]
+mod usbkbd;
 mod usermode;
 mod virtio;
 mod vm;
@@ -1412,6 +1414,13 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             kprintln!("[xhci] FAILED at xhci invariant {}: {}", idx, name);
             ActiveHal::exit(1160 + idx as i32);
         }
+    }
+    // An interactive machine keeps the first USB boot keyboard as console input (ADR-255).
+    #[cfg(feature = "interactive")]
+    if let Some((bdf, input)) = pci::xhci_keep() {
+        // SAFETY: boot path, single-threaded, before any other context can reach the static.
+        unsafe { crate::usbkbd::keep(bdf, input) };
+        kprintln!("[xhci] USB keyboard kept as console input");
     }
 
     // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
@@ -2940,6 +2949,11 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
         unsafe { pci::find_e1000() },
         crate::netstatic::e1000_grants(),
     ) {
+        dma_grants.push(vtd::DeviceGrant::new(b, g));
+    }
+    // A USB keyboard kept as console input (ADR-255) keeps fetching its rings.
+    #[cfg(feature = "interactive")]
+    if let Some((b, g)) = crate::usbkbd::grants() {
         dma_grants.push(vtd::DeviceGrant::new(b, g));
     }
     // Quiet across the enable, like every device the suite meets; it listens again after.
