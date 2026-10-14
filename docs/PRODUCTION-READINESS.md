@@ -1,4 +1,4 @@
-# Production-readiness audit — Aletheia v0.7.3 (2026-10-09)
+# Production-readiness audit — Aletheia v0.8.0 (2026-10-15)
 
 **Verdict: a research operating system with production-grade discipline in its proofs, not a
 production operating system.** What is built is gated on every push, on three CPU architectures,

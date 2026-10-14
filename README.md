@@ -454,6 +454,14 @@ its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.3**.
    `edk2-i386-vars.fd` beside it; Debian/Ubuntu as `/usr/share/OVMF/OVMF_CODE_4M.fd` and
    `OVMF_VARS_4M.fd` (package `ovmf`).
 
+**v0.8.0** is a drivers release (ADR-252..261): an xHCI USB driver whose boot keyboard is the
+console's input on x86-64 and aarch64, the e1000 driver on the 82574L (e1000e), an HD Audio driver
+whose tone is captured and measured, four block reads in flight behind one doorbell, and block
+completions that wake the CPU through MSI-X, the GIC and the PLIC. Keeping the USB keyboard on
+aarch64 found that no PCI device could DMA under the SMMU since ADR-074 (illegal STEs, a misaligned
+stream table); both are fixed, the SMMU suite now proves enforcement from the device side, and its
+stream table is two-level.
+
 **v0.7.3**: the native Laya runtime is within 1.1x of the Python reference on CPU (was 2.3x;
 ADR-249, ADR-251), and operator accounts own the objects they create (ADR-250).
 
