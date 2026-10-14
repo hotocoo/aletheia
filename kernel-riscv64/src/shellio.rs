@@ -159,6 +159,10 @@ impl ShellHost for Host {
     fn input_facts(&self) -> Option<shell::InputFacts> {
         crate::desktop::facts()
     }
+    #[cfg(feature = "interactive")]
+    fn blk_irq_stats(&self) -> Option<(u64, u64, u64)> {
+        crate::conirq::blk_stats()
+    }
     /// `wfi` — safe here because this target's console is interrupt-driven through the PLIC
     /// (REQ-CON-002), and the UART's external interrupt is what ends the wait. On RISC-V `wfi` is
     /// permitted to return spuriously, which the surrounding `loop` already handles: a spurious wake
@@ -388,6 +392,12 @@ pub fn interactive() -> ! {
     kprintln!("========================================");
     match crate::virtio::persistent_device() {
         Some(mut disk) => {
+            // Block completions wake the CPU (ADR-261): the PLIC source is routed by
+            // `conirq::init`, and until then the wait spins.
+            if crate::virtio::persistent_base().is_some_and(crate::conirq::arm_blk) {
+                disk.set_completion_wait(Some(crate::conirq::blk_wait));
+                kprintln!("[console] block completions: PLIC interrupt, the CPU sleeps until the device answers");
+            }
             kprintln!(
                 "[console] namespace: the persistent virtio-blk device (writes survive reboot)"
             );

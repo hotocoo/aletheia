@@ -183,6 +183,13 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
 /// store on and never wipes. Two disks is what makes the cross-reboot claim provable: the boot gate
 /// boots the same image twice with the same persistent image file, and the second boot must FIND and
 /// verify what the first one wrote.
+/// The persistent device's transport base, for routing its interrupt (ADR-261).
+#[cfg(feature = "interactive")]
+pub fn persistent_base() -> Option<usize> {
+    // SAFETY: the slot addresses are mapped device memory; probing reads identification only.
+    unsafe { virtioblk::probe_nth(&LAYOUT, 1) }
+}
+
 pub fn persistent_device() -> Option<VirtioBlk> {
     // SAFETY: the slot addresses are mapped device memory; `MmioTransport::new` refuses anything that
     // is not a modern block device, and the frames handed to the device are identity-mapped and ours.

@@ -1271,6 +1271,13 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-15 — block completions wake the CPU on every CPU (ADR-261)
+
+- aarch64 (GIC SPI 48+n) and riscv64 (PLIC source 1+n) route the persistent virtio-mmio device's
+  interrupt, acknowledge it at the device, and sleep in `wfi`; a timer one-shot armed only while a
+  request waits bounds the sleep. `console-e2e.sh` asserts all three CPUs: aarch64 7/6/0, riscv64
+  6/6/0, x86-64 7/4/0 (interrupts/sleeps/bound wakes). aarch64 idle 0.00 %.
+
 ### 2026-10-15 — block completions wake the CPU (ADR-260)
 
 - `VirtioBlk::set_completion_wait`: a platform wait in place of the spin (boot suites still spin).

@@ -193,6 +193,13 @@ pub fn persistent_device() -> Option<VirtioBlk> {
     }
 }
 
+/// The persistent device's transport base, for routing its interrupt (ADR-261).
+#[cfg(feature = "interactive")]
+pub fn persistent_base() -> Option<usize> {
+    // SAFETY: the slot addresses are mapped device memory; probing reads identification only.
+    unsafe { virtioblk::probe_nth(&LAYOUT, 1) }
+}
+
 /// This target's concrete network device (REQ-NET-001, ADR-041): the shared driver, same transport.
 pub type Net = VirtioNet<Aarch64Virtio, MmioTransport>;
 

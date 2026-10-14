@@ -86,6 +86,20 @@ pub fn init() {
     // Threshold is a strict floor: a source is delivered only if its priority is GREATER than it.
     plic_w32(PLIC_THRESHOLD + 0x1000 * ctx, 0);
     console::rx_interrupt_enable();
+    // The persistent block device's source, and the timer that bounds its waits (ADR-261). The
+    // timer is cancelled until a wait arms it, so enabling STIE costs nothing idle.
+    // SAFETY: written once on the boot path before interrupts are enabled.
+    let blk = unsafe { BLK_SOURCE };
+    if blk != 0 {
+        plic_w32(PLIC_PRIORITY + 4 * blk as usize, 1);
+        let en = PLIC_ENABLE + 0x80 * ctx + (blk as usize / 32) * 4;
+        plic_w32(en, plic_r32(en) | (1 << (blk % 32)));
+        if !crate::desktop::is_live() {
+            crate::sbi::set_timer(u64::MAX);
+            // SAFETY: setting sie.STIE affects only this hart's interrupt enables.
+            unsafe { asm!("csrs sie, {}", in(reg) 1usize << 5, options(nomem, nostack)) };
+        }
+    }
     // The desktop's tick, if this machine brought a desktop up (ADR-085): `sie.STIE` plus the
     // first armed deadline. A machine with no desktop never enables it and never traps for it.
     if crate::desktop::is_live() {
@@ -139,11 +153,97 @@ pub fn timer_arm() {
 #[cfg(feature = "interactive")]
 pub fn on_timer_irq() -> bool {
     if !crate::desktop::is_live() {
-        return false;
+        // SAFETY: written once on the boot path before interrupts are enabled.
+        if unsafe { BLK_SOURCE } == 0 {
+            return false;
+        }
+        // A block wait's one-shot (ADR-261): cancel it, which also clears the pending bit.
+        crate::sbi::set_timer(u64::MAX);
+        BLK_BOUND_WAKES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return true;
     }
     timer_arm();
     crate::desktop::tick_pump();
     true
+}
+
+// --- block completions wake the CPU (ADR-261) ---------------------------------------------------------
+
+/// The persistent virtio-blk transport's base and PLIC source, once armed; 0 = polled.
+#[cfg(feature = "interactive")]
+static mut BLK_BASE: usize = 0;
+#[cfg(feature = "interactive")]
+static mut BLK_SOURCE: u32 = 0;
+#[cfg(feature = "interactive")]
+static BLK_IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "interactive")]
+static BLK_SLEEPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "interactive")]
+static BLK_BOUND_WAKES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// QEMU virt wires virtio-mmio slot `n` (base 0x1000_1000 + 0x1000 n) to PLIC source 1 + n.
+#[cfg(feature = "interactive")]
+const VIRTIO_MMIO_WINDOW: usize = 0x1000_1000;
+#[cfg(feature = "interactive")]
+const VIRTIO_MMIO_STRIDE: usize = 0x1000;
+#[cfg(feature = "interactive")]
+const MMIO_INTERRUPT_STATUS: usize = 0x060;
+#[cfg(feature = "interactive")]
+const MMIO_INTERRUPT_ACK: usize = 0x064;
+/// The one-shot bounding a block sleep: 1/60 s of the 10 MHz timebase.
+#[cfg(feature = "interactive")]
+const BLK_WAKE_TICKS: u64 = TIMEBASE_HZ / 60;
+
+/// Name the persistent block device's transport so `init` routes its PLIC source here (ADR-261).
+#[cfg(feature = "interactive")]
+pub fn arm_blk(base: usize) -> bool {
+    if !(VIRTIO_MMIO_WINDOW..VIRTIO_MMIO_WINDOW + 8 * VIRTIO_MMIO_STRIDE).contains(&base) {
+        return false;
+    }
+    // SAFETY: single-core boot path, before interrupts are enabled; written once.
+    unsafe {
+        BLK_BASE = base;
+        BLK_SOURCE = 1 + ((base - VIRTIO_MMIO_WINDOW) / VIRTIO_MMIO_STRIDE) as u32;
+    }
+    true
+}
+
+/// (completion interrupts, sleeps, sleeps the bounding timer ended), once armed.
+#[cfg(feature = "interactive")]
+pub fn blk_stats() -> Option<(u64, u64, u64)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: written once on the boot path.
+    (unsafe { BLK_SOURCE } != 0).then(|| {
+        (
+            BLK_IRQS.load(Relaxed),
+            BLK_SLEEPS.load(Relaxed),
+            BLK_BOUND_WAKES.load(Relaxed),
+        )
+    })
+}
+
+/// The block device's completion wait (ADR-261), the aarch64 shape: spin while interrupts are
+/// off; otherwise mask, check `ready`, arm a one-shot unless the desktop already ticks, `wfi`.
+#[cfg(feature = "interactive")]
+pub fn blk_wait(ready: &dyn Fn() -> bool) {
+    let were = mask_irqs();
+    // SAFETY: written once before interrupts are first enabled.
+    if !were || unsafe { BLK_SOURCE } == 0 {
+        restore_irqs(were);
+        core::hint::spin_loop();
+        return;
+    }
+    if !ready() {
+        if !crate::desktop::is_live() {
+            let now: u64;
+            // SAFETY: reading the `time` CSR is side-effect free.
+            unsafe { asm!("csrr {}, time", out(reg) now, options(nomem, nostack)) };
+            crate::sbi::set_timer(now + BLK_WAKE_TICKS);
+        }
+        BLK_SLEEPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // SAFETY: a hint with no memory effects; a pending interrupt ends it even with SIE clear.
+        unsafe { asm!("wfi", options(nomem, nostack, preserves_flags)) };
+    }
+    restore_irqs(were);
 }
 
 /// Clear `sstatus.SIE`, returning whether it had been set.
@@ -214,6 +314,20 @@ pub fn on_external_irq() -> bool {
     if source == 0 {
         // Nothing pending. Claiming zero owes no completion, and treating it as handled is right:
         // a spurious external interrupt is not a reason to kill the machine.
+        return true;
+    }
+    // The persistent block device completed (ADR-261): acknowledge at the device, count, complete.
+    #[cfg(feature = "interactive")]
+    // SAFETY: written once on the boot path before interrupts are enabled.
+    if source == unsafe { BLK_SOURCE } {
+        // SAFETY: BLK_BASE is the mapped virtio-mmio transport `arm_blk` validated.
+        unsafe {
+            let base = BLK_BASE;
+            let st = core::ptr::read_volatile((base + MMIO_INTERRUPT_STATUS) as *const u32);
+            core::ptr::write_volatile((base + MMIO_INTERRUPT_ACK) as *mut u32, st);
+        }
+        BLK_IRQS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        plic_w32(claim_reg, source);
         return true;
     }
     if source != UART_SOURCE {

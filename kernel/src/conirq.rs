@@ -58,6 +58,91 @@ fn ticking() -> bool {
     crate::desktop::is_live() || crate::usbkbd::is_armed()
 }
 
+// --- block completions wake the CPU (ADR-261) ---------------------------------------------------------
+
+/// The persistent virtio-blk transport's base and its GIC INTID, once armed; 0 = polled.
+#[cfg(feature = "interactive")]
+static mut BLK_BASE: usize = 0;
+#[cfg(feature = "interactive")]
+static mut BLK_INTID: u32 = 0;
+#[cfg(feature = "interactive")]
+static BLK_IRQS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "interactive")]
+static BLK_SLEEPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "interactive")]
+static BLK_BOUND_WAKES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// QEMU virt wires virtio-mmio slot `n` to SPI 16 + n, which is INTID 48 + n.
+#[cfg(feature = "interactive")]
+const VIRTIO_MMIO_FIRST_INTID: u32 = 48;
+#[cfg(feature = "interactive")]
+const VIRTIO_MMIO_WINDOW: usize = 0x0a00_0000;
+#[cfg(feature = "interactive")]
+const VIRTIO_MMIO_STRIDE: usize = 0x200;
+#[cfg(feature = "interactive")]
+const MMIO_INTERRUPT_STATUS: usize = 0x060;
+#[cfg(feature = "interactive")]
+const MMIO_INTERRUPT_ACK: usize = 0x064;
+
+/// Name the persistent block device's transport so `init` routes its interrupt to this CPU
+/// (ADR-261). Called on the boot path before `init`, with IRQs still masked.
+#[cfg(feature = "interactive")]
+pub fn arm_blk(base: usize) -> bool {
+    if !(VIRTIO_MMIO_WINDOW..VIRTIO_MMIO_WINDOW + 32 * VIRTIO_MMIO_STRIDE).contains(&base) {
+        return false;
+    }
+    // SAFETY: single-core boot path, before IRQs are unmasked; written once.
+    unsafe {
+        BLK_BASE = base;
+        BLK_INTID =
+            VIRTIO_MMIO_FIRST_INTID + ((base - VIRTIO_MMIO_WINDOW) / VIRTIO_MMIO_STRIDE) as u32;
+    }
+    true
+}
+
+/// (completion interrupts, sleeps, sleeps the bounding timer ended), once armed.
+#[cfg(feature = "interactive")]
+pub fn blk_stats() -> Option<(u64, u64, u64)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    // SAFETY: written once on the boot path.
+    (unsafe { BLK_INTID } != 0).then(|| {
+        (
+            BLK_IRQS.load(Relaxed),
+            BLK_SLEEPS.load(Relaxed),
+            BLK_BOUND_WAKES.load(Relaxed),
+        )
+    })
+}
+
+/// The block device's completion wait (ADR-261): with IRQs masked (the boot path, the mount before
+/// `init`) it spins; otherwise it masks, checks `ready` (a completion already in the ring is never
+/// slept on, ADR-180), arms the timer as a one-shot if nothing else keeps it running, and `wfi`s.
+#[cfg(feature = "interactive")]
+pub fn blk_wait(ready: &dyn Fn() -> bool) {
+    let were = mask_irqs();
+    // SAFETY: the flag is written once before IRQs are first unmasked.
+    if !were || unsafe { BLK_INTID } == 0 {
+        restore_irqs(were);
+        core::hint::spin_loop();
+        return;
+    }
+    if !ready() {
+        if !ticking() {
+            timer_arm();
+        }
+        BLK_SLEEPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // SAFETY: a hint with no memory effects; a pending IRQ ends it even while masked.
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
+    }
+    restore_irqs(were);
+}
+
+/// Stop the EL1 physical timer (a block-wait one-shot that fired).
+#[cfg(feature = "interactive")]
+fn timer_disarm() {
+    // SAFETY: CNTP_CTL_EL0 is accessible at EL1; ENABLE=0.
+    unsafe { asm!("msr cntp_ctl_el0, {v}", v = in(reg) 0u64, options(nomem, nostack)) };
+}
+
 /// Arm the EL1 physical timer for one slice.
 #[cfg(feature = "interactive")]
 fn timer_arm() {
@@ -148,7 +233,28 @@ pub fn init() {
     // CPU, so it is enabled in ISENABLER0 without a target register; its priority sits ABOVE the
     // console's, because a pump that misses its slice is a desktop that stutters while a
     // keystroke can wait one interrupt.
-    if ticking() {
+    // SAFETY: written once on the boot path before IRQs are unmasked.
+    let blk_intid = unsafe { BLK_INTID };
+    if blk_intid != 0 {
+        // SAFETY: IPRIORITYR and ITARGETSR are byte-addressed per INTID; both valid Device registers.
+        unsafe {
+            core::ptr::write_volatile(
+                (GICD_BASE + GICD_IPRIORITYR + blk_intid as usize) as *mut u8,
+                0x10,
+            );
+            core::ptr::write_volatile(
+                (GICD_BASE + GICD_ITARGETSR + blk_intid as usize) as *mut u8,
+                0x01,
+            );
+        }
+        gicd_w32(
+            GICD_ISENABLER + (blk_intid as usize / 32) * 4,
+            1 << (blk_intid % 32),
+        );
+    }
+    // The timer PPI also bounds a block wait (ADR-261), so it is enabled when either needs it; it
+    // is ARMED only while something is ticking or a block request is waiting.
+    if ticking() || blk_intid != 0 {
         // SAFETY: IPRIORITYR is byte-addressed per INTID and is a valid Device register.
         unsafe {
             core::ptr::write_volatile(
@@ -266,8 +372,29 @@ pub extern "C" fn el1_irq() {
     // then acknowledge. A machine with no desktop never enabled this PPI and never gets here.
     #[cfg(feature = "interactive")]
     if intid == TIMER_INTID {
-        timer_arm();
-        crate::desktop::tick_pump();
+        if ticking() {
+            timer_arm();
+            crate::desktop::tick_pump();
+        } else {
+            // Only a block wait's one-shot runs the timer on this machine (ADR-261).
+            timer_disarm();
+            BLK_BOUND_WAKES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        gicc_w32(GICC_EOIR, iar);
+        return;
+    }
+    // The persistent block device completed (ADR-261): acknowledge at the device (its line is
+    // level-triggered), count, EOI. The waiting foreground reads the used ring itself.
+    #[cfg(feature = "interactive")]
+    // SAFETY: written once on the boot path before IRQs are unmasked.
+    if unsafe { BLK_INTID } != 0 && intid == unsafe { BLK_INTID } {
+        // SAFETY: BLK_BASE is the mapped virtio-mmio transport `arm_blk` validated.
+        unsafe {
+            let base = BLK_BASE;
+            let st = core::ptr::read_volatile((base + MMIO_INTERRUPT_STATUS) as *const u32);
+            core::ptr::write_volatile((base + MMIO_INTERRUPT_ACK) as *mut u32, st);
+        }
+        BLK_IRQS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         gicc_w32(GICC_EOIR, iar);
         return;
     }

@@ -363,10 +363,19 @@ mmio_leg() {
   local s1=$?
 
   echo "--> session 2: a SECOND boot must still hold what the operator typed"
-  drive_session "$log" 180 "cat manifesto" "login ada" "wrong-guess" "login ada" "Sesame-42" "whoami" "cat .users" "ls" "cat manifesto" "cat backup" "grep work manifesto" "refresh" "persona" "+2" "halt"
+  drive_session "$log" 180 "cat manifesto" "login ada" "wrong-guess" "login ada" "Sesame-42" "whoami" "cat .users" "ls" "cat manifesto" "cat backup" "grep work manifesto" "refresh" "persona" "+2" "lsblk" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" second
   local s2=$?
+  # Block reads slept until the virtio-mmio interrupt (ADR-261).
+  if true; then
+    if grep -qE "completions: interrupt-driven, [1-9][0-9]* interrupts, [1-9][0-9]* sleeps, 0 bound wakes" "$log"; then
+      echo "  [pass] $label: block reads slept until the completion interrupt (no bound wakes)"
+    else
+      echo "  FAIL [$label] block completions were not interrupt-driven: $(grep -a 'completions:' "$log" | tail -1)"
+      s2=$((s2 + 1)); fail=1
+    fi
+  fi
 
   rm -f "$log"
   return $((s1 + s2))

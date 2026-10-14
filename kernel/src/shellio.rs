@@ -159,6 +159,10 @@ impl ShellHost for Host {
     fn input_facts(&self) -> Option<shell::InputFacts> {
         crate::desktop::facts()
     }
+    #[cfg(feature = "interactive")]
+    fn blk_irq_stats(&self) -> Option<(u64, u64, u64)> {
+        crate::conirq::blk_stats()
+    }
     /// `wfi` — safe here because this target's console is interrupt-driven (REQ-CON-002): the UART
     /// IRQ that fills the ring is exactly the event that ends the wait, and `scripts/console-e2e.sh`
     /// is what proves it, because a target that got this wrong stops answering the first thing typed
@@ -412,6 +416,12 @@ pub fn interactive() -> ! {
     crate::heap::TRACE.store(true, core::sync::atomic::Ordering::Relaxed);
     match crate::virtio::persistent_device() {
         Some(mut disk) => {
+            // Block completions wake the CPU (ADR-261): the transport's interrupt is routed by
+            // `conirq::init`, and until then the wait spins.
+            if crate::virtio::persistent_base().is_some_and(crate::conirq::arm_blk) {
+                disk.set_completion_wait(Some(crate::conirq::blk_wait));
+                kprintln!("[console] block completions: GIC interrupt, the CPU sleeps until the device answers");
+            }
             kprintln!(
                 "[console] namespace: the persistent virtio-blk device (writes survive reboot)"
             );

@@ -34,7 +34,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 |------|-------|--------------------------|
 | `kernel/src/arch.rs` | 3 | aarch64 system-register read/write, fence + wfe/sev, counter reads |
 | `kernel/src/bench.rs` | 4 | cycle-counter and barrier instructions for the boot benchmark family |
-| `kernel/src/conirq.rs` | 7 | GIC interrupt acknowledge/EOI sequencing for the console input path, plus the generic-timer PPI the live desktop is pumped from (ADR-085): CNTFRQ read, CNTP_TVAL/CNTP_CTL arm; and the console idle's `wfi`, issued with IRQs masked after the ring is checked empty (ADR-180) |
+| `kernel/src/conirq.rs` | 9 | GIC interrupt acknowledge/EOI sequencing for the console input path, plus the generic-timer PPI the live desktop is pumped from (ADR-085): CNTFRQ read, CNTP_TVAL/CNTP_CTL arm; the console idle's `wfi`, issued with IRQs masked after the ring is checked empty (ADR-180); and the block completion wait's `wfi` plus the timer disarm that ends its one-shot (ADR-261) |
 | `kernel/src/main.rs` | 2 | entry hand-off from the `_start` stub; boot stack/exception-level setup |
 | `kernel/src/semihosting.rs` | 2 | ARM semihosting call sequence (HLT instruction) |
 | `kernel/src/shellio.rs` | 1 | the PSCI `SYSTEM_RESET` call behind `reboot` (the idle's `wfi` moved to `conirq.rs`, ADR-180) |
@@ -45,7 +45,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel/src/heap.rs` | 4 | the `heaptrace` diagnostic feature (ADR-182): one read of x29 to start the frame-record walk, compiled out of gate builds; the freeing heap's interrupt mask (ADR-198): `mrs daif` + `msr daifset, #2` to save-and-mask, `msr daifclr, #2` to restore, so the timer interrupt never spins on a lock its own CPU holds |
 | `kernel-riscv64/src/heap.rs` | 2 | the freeing heap's interrupt mask (ADR-198): `csrrci sstatus, 2` to save-and-mask SIE, `csrsi sstatus, 2` to restore |
 | `kernel-riscv64/src/arch.rs` | 1 | csrrw/csrr system-register access |
-| `kernel-riscv64/src/conirq.rs` | 7 | PLIC claim/complete sequencing for console interrupts, plus the S-mode timer the live desktop is pumped from (ADR-085): the `time` CSR read and the `sie.STIE` enable; and the console idle's `wfi`, issued with `sstatus.SIE` clear after the ring is checked empty (ADR-180) |
+| `kernel-riscv64/src/conirq.rs` | 10 | PLIC claim/complete sequencing for console interrupts, plus the S-mode timer the live desktop is pumped from (ADR-085): the `time` CSR read and the `sie.STIE` enable; the console idle's `wfi`, issued with `sstatus.SIE` clear after the ring is checked empty (ADR-180); and the block completion wait's `time` read, `wfi`, and `sie.STIE` enable for its one-shot (ADR-261) |
 | `kernel-riscv64/src/exit.rs` | 1 | QEMU test-finish exit path |
 | `kernel-riscv64/src/main.rs` | 1 | entry hand-off from the SBI-booted start stub |
 | `kernel-riscv64/src/sbi.rs` | 2 | SBI ecall wrappers (console putchar, system reset) |
