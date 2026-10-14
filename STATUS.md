@@ -1271,6 +1271,13 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-15 — a two-level SMMU stream table (ADR-259)
+
+- aarch64 builds a two-level stream table (level-1 frame + four 64-STE level-2 frames, all 256
+  bus-0 ids) when IDR0.ST_LEVEL allows, else ADR-256's linear frame. The gate adds a ninth PCI
+  function (00:08.0) and moves the probe virtio-blk-pci to 00:09.0 (second level-2 frame): `smmu`
+  13/13 twice; 3 new host tests (19).
+
 ### 2026-10-15 — an HD Audio driver plays a tone (ADR-258)
 
 - `kernel_core::hda`: controller reset, CORB/RIRB, codec walk (AFG, converter, output pin),

@@ -87,9 +87,9 @@ qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -g
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,addr=0x9,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
-  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
+  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
   -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ahci.1,serial=ALETHEIA-SCRATCH \
   -device virtio-gpu-device,xres=640,yres=240 \
@@ -111,9 +111,9 @@ OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,addr=0x9,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
-  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
+  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
   -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ahci.1,serial=ALETHEIA-SCRATCH \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
@@ -237,9 +237,9 @@ OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,addr=0x9,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
-  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
+  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
   -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ahci.1,serial=ALETHEIA-SCRATCH \
   -fw_cfg name=opt/org.aletheia/capvault-root,file="$ROOTBIN" \
@@ -264,9 +264,9 @@ OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0,net=192.168.76.0/24 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,addr=0x9,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
-  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
+  -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
   -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ahci.1,serial=ALETHEIA-SCRATCH \
   -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \

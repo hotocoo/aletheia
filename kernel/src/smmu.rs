@@ -257,10 +257,12 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
     let image = crate::vm::protected_span();
     let spans = split_around_image(&ram_ranges(), image);
 
-    // One 4 KiB frame is exactly 64 STEs, naturally aligned to the table's size as a linear
-    // table must be (ADR-256). It covers requester ids 0..64 - devices 0..7 of bus 0; a function
-    // past it is refused by name below rather than written outside the frame.
-    const STRTAB_LOG2: u32 = 6;
+    // The stream table. A unit that offers two-level tables (IDR0.ST_LEVEL) gets one over all
+    // 256 bus-0 requester ids: a level-1 frame and four 64-STE level-2 frames (ADR-259). Otherwise
+    // one linear frame of 64 STEs, naturally aligned to its size (ADR-256), covering devices 0..7;
+    // a function past it is refused by name below rather than written outside the frame.
+    let two_level = rep.two_level();
+    let strtab_log2: u32 = if two_level { 8 } else { 6 };
     let alloc_frame = |what: &'static str| -> Result<usize, (u32, &'static str)> {
         match frames::alloc_zeroed_as(Owner::PAGETABLE) {
             Some(f) => Ok(f.addr()),
@@ -274,7 +276,22 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
             }
         }
     };
-    let strtab = alloc_frame("stream table")?;
+    let strtab = if two_level {
+        match smmu::build_strtab_2level(ctrl.table_mem(), strtab_log2, smmu::STRTAB_SPLIT) {
+            Ok(l1) => l1,
+            Err(e) => bail!(format_args!("two-level stream table {:?}", e), NAME_5),
+        }
+    } else {
+        alloc_frame("stream table")?
+    };
+    // One STE rewrite, whichever table this unit was given.
+    let write_ste = |mem: &mut OwnedFrames, sid: u32, e: Option<&smmu::Ste>| {
+        if two_level {
+            smmu::rewrite_ste_2level(mem, strtab, strtab_log2, sid, e)
+        } else {
+            smmu::rewrite_ste(mem, strtab, sid, e)
+        }
+    };
     let cmdq = alloc_frame("command queue")?;
     let evtq = alloc_frame("event queue")?;
 
@@ -342,7 +359,7 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
         let mem = ctrl.table_mem();
         for (f, vendor, devid) in &funcs {
             let r = rid(*f);
-            if r >= 1 << STRTAB_LOG2 {
+            if r >= 1 << strtab_log2 {
                 bail!(
                     format_args!("rid {:#x} lies past the one-frame stream table", r),
                     NAME_7
@@ -356,7 +373,7 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
                 ),
                 None => bail!(format_args!("rid {:#x} not behind this unit", r), NAME_7),
             }
-            if let Err(e) = smmu::rewrite_ste(&mut *mem, strtab, r, Some(&ste)) {
+            if let Err(e) = write_ste(&mut *mem, r, Some(&ste)) {
                 bail!(format_args!("grant refused {:?}", e), NAME_7);
             }
             kprintln!(
@@ -419,7 +436,17 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
     n += 1;
     const NAME_10: &str =
         "stream table adopted, queues live, enforcement ENABLED and latched over the registry";
-    if let Err(e) = ctrl.set_strtab(strtab, STRTAB_LOG2) {
+    let published = if two_level {
+        ctrl.set_strtab_2level(strtab, strtab_log2)
+    } else {
+        ctrl.set_strtab(strtab, strtab_log2)
+    };
+    kprintln!(
+        "[smmu] stream table: {} over {} requester ids",
+        if two_level { "two-level" } else { "linear" },
+        1u32 << strtab_log2
+    );
+    if let Err(e) = published {
         bail!(format_args!("set_strtab {:?}", e), NAME_10);
     }
     if let Err(e) = ctrl.set_queue(false, cmdq, &QueueGeom::new(6, smmu::CMDQ_ENTRY_BYTES)) {
@@ -498,7 +525,7 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
         use kernel_core::storage::BlockDevice;
         {
             let mem = ctrl.table_mem();
-            if let Err(e) = smmu::rewrite_ste(&mut *mem, strtab, probe_rid, None) {
+            if let Err(e) = write_ste(&mut *mem, probe_rid, None) {
                 bail!(format_args!("revoke refused {:?}", e), NAME_12);
             }
         }
@@ -528,7 +555,7 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
         use kernel_core::storage::BlockDevice;
         {
             let mem = ctrl.table_mem();
-            if let Err(e) = smmu::rewrite_ste(&mut *mem, strtab, probe_rid, Some(&ste)) {
+            if let Err(e) = write_ste(&mut *mem, probe_rid, Some(&ste)) {
                 bail!(format_args!("restore refused {:?}", e), NAME_13);
             }
         }

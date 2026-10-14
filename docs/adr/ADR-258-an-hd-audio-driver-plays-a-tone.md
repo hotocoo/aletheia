@@ -60,4 +60,4 @@ and QEMU share; ADR-223 queued it.
   EAPD/GPIO quirks this driver does not have.
 * **aarch64 stream table is now full.** With HDA at device 7 the one-frame table of ADR-256 covers
   every slot; the next PCI device on the aarch64 gate (igc, say) needs a two-level stream table
-  first, or the SMMU suite refuses it by name at invariant 7.
+  first, or the SMMU suite refuses it by name at invariant 7. (Done: ADR-259.)

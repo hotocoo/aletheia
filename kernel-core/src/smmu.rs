@@ -124,6 +124,10 @@ impl ProbeReport {
     pub fn ttf_aarch64(&self) -> bool {
         (self.idr[0] >> 2) & 0b11 == 0b10
     }
+    /// IDR0.ST_LEVEL (bits 28:27) != 0: two-level stream tables supported (ADR-259).
+    pub fn two_level(&self) -> bool {
+        (self.idr[0] >> 27) & 0b11 != 0
+    }
     /// IDR1.SIDSIZE: stream-id bits implemented. Bounds every SID we may program.
     pub fn sid_size(&self) -> u32 {
         self.idr[1] & 0x3F
@@ -499,6 +503,87 @@ pub fn rewrite_ste<M: TableMem>(
     entry: Option<&Ste>,
 ) -> Result<(), SmmuFault> {
     let slot = strtab_slot(strtab_pa, sid)?;
+    rewrite_ste_at(mem, slot, entry);
+    Ok(())
+}
+
+// --- two-level stream tables (SMMUv3 STRTAB_BASE_CFG.FMT = 0b01) -----------------------------------------
+
+/// Second-level span this kernel builds: 2^6 STEs = 4 KiB, one frame, naturally aligned (ADR-259).
+pub const STRTAB_SPLIT: u32 = 6;
+
+/// STRTAB_BASE_CFG for a TWO-LEVEL table: FMT=01b (bits 17:16), SPLIT (bits 10:6), LOG2SIZE (bits
+/// 5:0). The architecture allows SPLIT 6, 8 or 10 only.
+pub fn strtab_cfg_2level(log2size: u32, split: u32) -> Result<u32, SmmuFault> {
+    if !matches!(split, 6 | 8 | 10) || log2size <= split || log2size > 0x3F {
+        return Err(SmmuFault::MalformedRange);
+    }
+    Ok(1 << 16 | split << 6 | log2size)
+}
+
+/// One level-1 descriptor: L2Ptr (bits 51:6) and SPAN (bits 4:0) = split + 1, naming a level-2
+/// table of 2^split STEs. The level-2 table is aligned to its own size.
+pub fn l1_descriptor(l2_pa: usize, split: u32) -> Result<u64, SmmuFault> {
+    if !l2_pa.is_multiple_of(64usize << split) {
+        return Err(SmmuFault::MisalignedPointer);
+    }
+    Ok((l2_pa as u64 & 0x000F_FFFF_FFFF_FFC0) | (split + 1) as u64)
+}
+
+/// Build a two-level table over 2^log2size stream ids: one level-1 frame and one level-2 frame per
+/// descriptor, every frame from `mem`, every STE invalid. Returns the level-1 table's address.
+pub fn build_strtab_2level<M: TableMem>(
+    mem: &mut M,
+    log2size: u32,
+    split: u32,
+) -> Result<usize, SmmuFault> {
+    strtab_cfg_2level(log2size, split)?;
+    let l1_entries = 1usize << (log2size - split);
+    if l1_entries * 8 > crate::iommu::PAGE || 64usize << split > crate::iommu::PAGE {
+        return Err(SmmuFault::MalformedRange);
+    }
+    let l1 = mem.alloc_zeroed_page().ok_or(SmmuFault::NoSpace)?;
+    for i in 0..l1_entries {
+        let l2 = mem.alloc_zeroed_page().ok_or(SmmuFault::NoSpace)?;
+        mem.write_u64(l1 + 8 * i, l1_descriptor(l2, split)?);
+    }
+    Ok(l1)
+}
+
+/// Where `sid`'s STE lives in a two-level table: read through its level-1 descriptor.
+pub fn strtab2_slot<M: TableMem>(
+    mem: &M,
+    l1_pa: usize,
+    log2size: u32,
+    split: u32,
+    sid: u32,
+) -> Result<usize, SmmuFault> {
+    if log2size > 31 || sid >= 1 << log2size {
+        return Err(SmmuFault::MalformedRange);
+    }
+    let d = mem.read_u64(l1_pa + 8 * (sid >> split) as usize);
+    if d & 0x1F != (split + 1) as u64 {
+        return Err(SmmuFault::MalformedRange);
+    }
+    let l2 = (d & 0x000F_FFFF_FFFF_FFC0) as usize;
+    Ok(l2 + (sid & ((1 << split) - 1)) as usize * 64)
+}
+
+/// [`rewrite_ste`] for a two-level table.
+pub fn rewrite_ste_2level<M: TableMem>(
+    mem: &mut M,
+    l1_pa: usize,
+    log2size: u32,
+    sid: u32,
+    entry: Option<&Ste>,
+) -> Result<(), SmmuFault> {
+    let slot = strtab2_slot(&*mem, l1_pa, log2size, STRTAB_SPLIT, sid)?;
+    rewrite_ste_at(mem, slot, entry);
+    Ok(())
+}
+
+/// Write one STE at `slot`, never publishing a torn VALID bit.
+fn rewrite_ste_at<M: TableMem>(mem: &mut M, slot: usize, entry: Option<&Ste>) {
     match entry {
         Some(ste) => {
             mem.write_u64(slot, 0);
@@ -511,7 +596,6 @@ pub fn rewrite_ste<M: TableMem>(
             mem.write_u64(slot, 0);
         }
     }
-    Ok(())
 }
 
 // --- the stage-2 page-tree formats ------------------------------------------------------------------------
@@ -779,6 +863,23 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
 
     pub fn gerror(&mut self) -> u32 {
         self.regs.r32(REG_GERROR)
+    }
+
+    /// Publish a TWO-LEVEL stream table (ADR-259): `l1_pa` from [`build_strtab_2level`]. The
+    /// level-1 table is aligned to its size, at least 64 bytes.
+    pub fn set_strtab_2level(&mut self, l1_pa: usize, log2size: u32) -> Result<(), SmmuFault> {
+        if self.smmu_enabled() {
+            return Err(SmmuFault::ProgrammedWhileEnabled);
+        }
+        let cfg = strtab_cfg_2level(log2size, STRTAB_SPLIT)?;
+        let l1_bytes = (8usize << (log2size - STRTAB_SPLIT)).max(64);
+        if !l1_pa.is_multiple_of(l1_bytes) {
+            return Err(SmmuFault::MisalignedPointer);
+        }
+        self.regs
+            .w64(REG_STRTAB_BASE, l1_pa as u64 & 0x000F_FFFF_FFFF_FFC0);
+        self.regs.w32(REG_STRTAB_BASE_CFG, cfg);
+        Ok(())
     }
 
     /// Publish the LINEAR stream table. Only legal while enforcement is off - tables must not

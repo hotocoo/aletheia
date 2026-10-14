@@ -284,6 +284,8 @@ struct DeviceWalker<'a> {
     arena: &'a Arena,
     strtab_base: usize,
     strtab_log2size: u32,
+    /// Walk a two-level table (level-1 descriptors, then level-2 STEs) instead of a linear one.
+    two_level: bool,
 }
 
 impl<'a> DeviceWalker<'a> {
@@ -299,7 +301,30 @@ impl<'a> DeviceWalker<'a> {
                 class: 0,
             });
         }
-        let slot = strtab_slot(self.strtab_base, sid).expect("strtab aligned");
+        let slot = if self.two_level {
+            // An invalid level-1 descriptor (SPAN 0) is C_BAD_STE for every stream it covers.
+            match kernel_core::smmu::strtab2_slot(
+                self.arena,
+                self.strtab_base,
+                self.strtab_log2size,
+                kernel_core::smmu::STRTAB_SPLIT,
+                sid,
+            ) {
+                Ok(s) => s,
+                Err(_) => {
+                    return Err(EventRecord {
+                        kind: 0x04,
+                        sid,
+                        addr: 0,
+                        was_read: false,
+                        s2: false,
+                        class: 0,
+                    })
+                }
+            }
+        } else {
+            strtab_slot(self.strtab_base, sid).expect("strtab aligned")
+        };
         let mut ste = [0u64; 8];
         for (i, slot_word) in ste.iter_mut().enumerate() {
             *slot_word = TableMem::read_u64(self.arena, slot + i * 8);
@@ -437,6 +462,7 @@ fn walker_for<'a>(arena: &'a Arena, strtab: usize) -> DeviceWalker<'a> {
         arena,
         strtab_base: strtab,
         strtab_log2size: 8,
+        two_level: false,
     }
 }
 
@@ -804,4 +830,84 @@ fn a_stage_two_ste_carries_the_spec_config_value() {
         kernel_core::smmu::ste_s2_encode(&kernel_core::smmu::S2Geometry::standard(1), 0x4000_0000)
             .expect("encodes");
     assert_eq!(ste[0] as u32 & 0xF, 0b1101, "V=1, Config=0b110");
+}
+
+// ---- ADR-259: two-level stream tables ----------------------------------------------------------
+
+#[test]
+fn two_level_fields_are_the_architectural_encoding() {
+    use kernel_core::smmu::{l1_descriptor, strtab_cfg_2level};
+    // FMT=01b at bits 17:16, SPLIT=6 at bits 10:6, LOG2SIZE=8.
+    assert_eq!(strtab_cfg_2level(8, 6), Ok(1 << 16 | 6 << 6 | 8));
+    assert_eq!(
+        strtab_cfg_2level(8, 7),
+        Err(SmmuFault::MalformedRange),
+        "SPLIT is 6, 8 or 10"
+    );
+    assert_eq!(strtab_cfg_2level(6, 6), Err(SmmuFault::MalformedRange));
+    // SPAN = SPLIT + 1, and the level-2 table is aligned to its own 4 KiB.
+    assert_eq!(l1_descriptor(0x4000_3000, 6), Ok(0x4000_3000 | 7));
+    assert_eq!(
+        l1_descriptor(0x4000_3040, 6),
+        Err(SmmuFault::MisalignedPointer)
+    );
+}
+
+#[test]
+fn a_two_level_table_reaches_streams_past_the_first_level_two_frame() {
+    use kernel_core::smmu::{build_strtab_2level, rewrite_ste_2level, STRTAB_SPLIT};
+    let (arena, ttb, _stats) = build_domain();
+    let mut mem = arena.clone();
+    let l1 = build_strtab_2level(&mut mem, 8, STRTAB_SPLIT).expect("built");
+    let ste = ste_s2_encode(&geom(), ttb).expect("STE encodes");
+    // Device 9 (rid 0x48) lives in the SECOND level-2 frame; a one-frame linear table had no slot.
+    for sid in [0x08u32, 0x48, 0xF8] {
+        rewrite_ste_2level(&mut mem, l1, 8, sid, Some(&ste)).expect("grant lands");
+    }
+    drop(mem);
+    let walker = DeviceWalker {
+        arena: &arena,
+        strtab_base: l1,
+        strtab_log2size: 8,
+        two_level: true,
+    };
+    let va = 0x4020_0000usize;
+    for sid in [0x08u32, 0x48, 0xF8] {
+        assert_eq!(
+            walker.translate(sid, va, true).translated,
+            Some(va),
+            "sid {sid:#x}"
+        );
+    }
+    // An ungranted stream in a populated level-2 frame is C_BAD_STE by name.
+    let ev = walker.translate(0x50, va, false).event.expect("denied");
+    assert_eq!((ev.kind, ev.sid), (0x04, 0x50));
+    // Revoking 0x48 leaves its level-2 neighbours alone.
+    let mut mem = arena.clone();
+    rewrite_ste_2level(&mut mem, l1, 8, 0x48, None).expect("revoke");
+    drop(mem);
+    assert_eq!(
+        walker.translate(0x48, va, true).event.map(|e| e.kind),
+        Some(0x04)
+    );
+    assert_eq!(walker.translate(0x08, va, true).translated, Some(va));
+    // A stream id past the table is refused rather than read out of bounds.
+    let mut mem = arena.clone();
+    assert_eq!(
+        rewrite_ste_2level(&mut mem, l1, 8, 0x100, Some(&ste)),
+        Err(SmmuFault::MalformedRange)
+    );
+}
+
+#[test]
+fn the_controller_publishes_a_two_level_table_only_when_aligned() {
+    let arena = Arena::new(16);
+    let mut ctrl = Controller::new(SimUnit::new(&arena), Arena::new(4));
+    assert_eq!(
+        ctrl.set_strtab_2level(0x4010_0020, 8),
+        Err(SmmuFault::MisalignedPointer),
+        "a level-1 table is at least 64-byte aligned"
+    );
+    assert_eq!(ctrl.set_strtab_2level(0x4010_0000, 8), Ok(()));
+    assert_eq!(ctrl.strtab_base(), 0x4010_0000);
 }
