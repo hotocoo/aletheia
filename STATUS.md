@@ -1276,6 +1276,8 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Crates 0.8.0: the drivers release (xHCI + USB keyboard as console input, e1000e, HD Audio,
   in-flight block reads, interrupt-driven block completions on all three CPUs, the SMMU fix and
   two-level stream table). CI green on every wave before the tag.
+- **Published:** tag `v0.8.0` at `7706194`, latest; release workflow built and booted the VMware
+  package; the zip and `aletheia-laya` Linux asset both verified against their `.sha256`.
 
 ### 2026-10-15 — block completions wake the CPU on every CPU (ADR-261)
 
