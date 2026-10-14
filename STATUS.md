@@ -1271,6 +1271,14 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-15 — an HD Audio driver plays a tone (ADR-258)
+
+- `kernel_core::hda`: controller reset, CORB/RIRB, codec walk (AFG, converter, output pin),
+  48 kHz/16-bit/stereo, a 750 Hz tone on the first output stream from a two-entry IOC BDL. New
+  family `hda` = 6 on aarch64 and x86-64; 7 host tests against a lying simulator.
+- New CI gate `scripts/hda-e2e.sh`: QEMU's wav backend captures the tone; 0.243 s, RMS 3931,
+  1496 zero crossings/s (750 Hz). aarch64's one-frame stream table is now full (devices 0..7).
+
 ### 2026-10-15 — ARM IOMMU enforcement observed from the device (ADR-257)
 
 - `smmu` 10 -> 13 on aarch64: under the latched SMMU a granted virtio-blk-pci completes byte for

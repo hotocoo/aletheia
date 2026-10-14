@@ -435,3 +435,58 @@ pub fn xhci_keep() -> Option<
         }
     }
 }
+
+/// HDA BARs 96 MiB above the virtio-blk-pci window, clear of every other driver's (ADR-258).
+const HDA_BAR_BASE: usize = BAR_ASSIGN_BASE + 0x0600_0000;
+
+/// The shared HD Audio driver on aarch64 (ADR-258). `Ok(0)` = no controller, codec or output path.
+pub fn hda_selftest() -> Result<u32, (u32, &'static str)> {
+    use kernel_core::hda;
+    let Some(disc) = crate::smmu::discovery() else {
+        return Ok(0);
+    };
+    let env = Ecam::new(disc.pcie.ecam_base);
+    // SAFETY: walks ECAM only.
+    let Some(bdf) = (unsafe { virtiopci::find_class_nth(&env, hda::CLASS_HDA, 0) }) else {
+        kprintln!("[hda] no controller (skipped)");
+        return Ok(0);
+    };
+    // SAFETY: boot owns the function; BAR0 is mapped as device memory.
+    let base = match unsafe { open_bar(&env, bdf, HDA_BAR_BASE, 0, hda::MAP_LEN) } {
+        Ok(b) => b,
+        Err(e) => {
+            kprintln!("[hda] BAR refused: {}", e);
+            return Err((0, "hda controller BAR"));
+        }
+    };
+    kprintln!(
+        "[hda] controller @ PCI {:02x}:{:02x}.{}",
+        bdf.bus,
+        bdf.device,
+        bdf.function
+    );
+    // SAFETY: `base` is the mapped BAR0, MAP_LEN bytes; frames come from this kernel's allocator.
+    let r = unsafe {
+        hda::device_suite::<crate::virtio::Aarch64Virtio, _, _>(
+            hda::MmioRegs::new(base),
+            hda::MAP_LEN,
+            &mut suite_log,
+            &mut |rep, path, buffers| {
+                match path {
+                Some(p) => kprintln!(
+                    "[hda] gcap {:#06x} ({} in, {} out), codecs {:#x}; codec {} vendor {:#010x}: afg {} dac {} pin {}; {} buffers played",
+                    rep.gcap, rep.input_streams, rep.output_streams, rep.codecs, p.cad, p.vendor, p.afg, p.dac, p.pin, buffers
+                ),
+                None => kprintln!(
+                    "[hda] gcap {:#06x}, codecs {:#x}: no codec with an output path (skipped)",
+                    rep.gcap, rep.codecs
+                ),
+            }
+            },
+        )
+    };
+    match r {
+        Ok(n) => Ok(n as u32),
+        Err((i, name)) => Err((i as u32, name)),
+    }
+}

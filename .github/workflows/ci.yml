@@ -236,6 +236,22 @@ jobs:
       - name: Boot the interactive image and type on the USB keyboard
         run: ./scripts/usbkbd-e2e.sh
 
+  hda-e2e:
+    name: A tone the HD Audio driver plays, captured and measured (intel-hda -> wav backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU (aarch64)
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - name: Install Rust nightly + aarch64 target
+        run: |
+          rustup toolchain install nightly-2026-08-09 --profile minimal
+          rustup target add aarch64-unknown-none-softfloat --toolchain nightly-2026-08-09
+      # The boot suite plays a 750 Hz tone; QEMU's wav backend records it and the script measures
+      # the capture's level and zero-crossing rate (ADR-258).
+      - name: Boot with intel-hda recording to a WAV file and measure the tone
+        run: ./scripts/hda-e2e.sh
+
   vinput-e2e:
     name: The input hardware rung, LIVE (virtio-input -> decoder -> session -> cursor/focus)
     runs-on: ubuntu-latest

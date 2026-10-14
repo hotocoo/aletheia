@@ -986,6 +986,23 @@ pub extern "C" fn kmain() -> ! {
             semihosting::exit(1160 + idx as i32);
         }
     }
+    // HD Audio (REQ-DRV-017, ADR-258): the controller, a codec's output path, a tone played.
+    kprintln!("");
+    kprintln!("--- hda selftests (real PCI HD Audio controller: codec walk + a tone on the output stream) ---");
+    match pci::hda_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[hda] ALL {} HDA INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] hda suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("hda")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[hda] FAILED at hda invariant {}: {}", idx, name);
+            semihosting::exit(1190 + idx as i32);
+        }
+    }
     // An interactive machine keeps the first USB boot keyboard as console input (ADR-256).
     #[cfg(feature = "interactive")]
     if let Some(input) = pci::xhci_keep() {

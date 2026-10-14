@@ -563,3 +563,66 @@ pub fn xhci_keep() -> Option<(
         }
     }
 }
+
+/// Prove the shared HD Audio driver against the first HDA controller (ADR-258): reset, codec walk,
+/// a tone played on the first output stream, then the controller held in reset. `Ok(0)` = no
+/// controller, no codec, or no output path.
+pub fn hda_selftest() -> Result<u32, (u32, &'static str)> {
+    use kernel_core::hda;
+    // SAFETY: touches only config ports.
+    let Some(bdf) = (unsafe { virtiopci::find_class_nth(&Ports, hda::CLASS_HDA, 0) }) else {
+        kprintln!("[hda] no controller (skipped)");
+        return Ok(0);
+    };
+    // SAFETY: boot owns the function now (firmware handed it over at ExitBootServices).
+    unsafe { virtiopci::enable_bus_master(&Ports, bdf) };
+    let Some(base) = virtiopci::bar_base_pa(&Ports, bdf, 0)
+        .ok()
+        .and_then(|pa| Ports.map_region(pa, hda::MAP_LEN))
+    else {
+        return Err((0, "hda BAR0 could not be mapped as device memory"));
+    };
+    kprintln!(
+        "[hda] controller @ PCI {:02x}:{:02x}.{}",
+        bdf.bus,
+        bdf.device,
+        bdf.function
+    );
+    // SAFETY: `base` is the mapped BAR0, MAP_LEN bytes; frames come from this kernel's allocator.
+    let r = unsafe {
+        hda::device_suite::<crate::virtio::X86Virtio, _, _>(
+            hda::MmioRegs::new(base),
+            hda::MAP_LEN,
+            &mut |n, passed, name| {
+                if passed {
+                    kprintln!("  [pass {:>2}] {}", n, name);
+                } else {
+                    kprintln!("  [FAIL {:>2}] {}", n, name);
+                }
+            },
+            &mut hda_report,
+        )
+    };
+    match r {
+        Ok(0) => Ok(0),
+        Ok(n) => Ok(n as u32),
+        Err((i, name)) => Err((i as u32, name)),
+    }
+}
+
+fn hda_report(
+    rep: &kernel_core::hda::HdaReport,
+    path: Option<&kernel_core::hda::OutputPath>,
+    buffers: u32,
+) {
+    match path {
+        Some(p) => kprintln!(
+            "[hda] gcap {:#06x} ({} in, {} out), codecs {:#x}; codec {} vendor {:#010x}: afg {} dac {} pin {}; {} buffers played",
+            rep.gcap, rep.input_streams, rep.output_streams, rep.codecs, p.cad, p.vendor, p.afg, p.dac, p.pin, buffers
+        ),
+        None => kprintln!(
+            "[hda] gcap {:#06x}, codecs {:#x}: no codec with an output path (skipped)",
+            rep.gcap, rep.codecs
+        ),
+    }
+}
