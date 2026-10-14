@@ -159,6 +159,18 @@ impl ShellHost for Host {
     fn input_facts(&self) -> Option<shell::InputFacts> {
         crate::desktop::facts()
     }
+    #[cfg(feature = "interactive")]
+    fn blk_irq_stats(&self) -> Option<(u64, u64, u64)> {
+        BLK_WAITING
+            .load(core::sync::atomic::Ordering::Relaxed)
+            .then(|| {
+                (
+                    crate::idt::blk_msix_hits(),
+                    BLK_SLEEPS.load(core::sync::atomic::Ordering::Relaxed),
+                    crate::idt::blk_bound_wakes(),
+                )
+            })
+    }
     fn input_irq_stats(&self) -> Option<((u64, u64, u64, u64), (u64, u64, u64))> {
         #[cfg(feature = "input-msix")]
         {
@@ -406,6 +418,63 @@ fn session_on<D: BlockDevice>(dev: &mut D) -> ! {
     ActiveHal::exit(0)
 }
 
+#[cfg(feature = "interactive")]
+/// Whether the console's block device waits on its completion interrupt (ADR-260).
+static BLK_WAITING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "interactive")]
+/// Times a block wait slept in `hlt` for that interrupt.
+static BLK_SLEEPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "interactive")]
+/// LAPIC one-shot ticks (bus clock / 16) bounding one sleep: about 17 ms under QEMU's 1 GHz bus.
+const BLK_WAKE_TICKS: u32 = 1 << 20;
+
+#[cfg(feature = "interactive")]
+/// The block device's completion wait (ADR-260): with interrupts on, sleep in `hlt` until the
+/// completion interrupt (or the LAPIC one-shot that bounds the sleep) arrives, checking `ready`
+/// with IF clear first so a completion that already landed is never slept on (the ADR-180 rule).
+/// With interrupts off - the boot path, the mount before `conirq::init` - it spins, as before.
+fn blk_wait(ready: &dyn Fn() -> bool) {
+    use x86_64::instructions::interrupts;
+    if !interrupts::are_enabled() {
+        core::hint::spin_loop();
+        return;
+    }
+    interrupts::disable();
+    if ready() {
+        interrupts::enable();
+        return;
+    }
+    crate::smp::lapic_oneshot(crate::idt::BLK_TIMEOUT_VECTOR, BLK_WAKE_TICKS);
+    BLK_SLEEPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the canonical idle pair; `sti`'s shadow covers the `hlt`.
+    unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack, preserves_flags)) };
+    crate::smp::lapic_oneshot(crate::idt::BLK_TIMEOUT_VECTOR, 0);
+}
+
+#[cfg(feature = "interactive")]
+/// Route the persistent device's request queue to its own MSI-X vector and wait on it (ADR-260).
+/// Any refusal leaves the device polled, and says so.
+fn arm_blk_interrupt(disk: &mut crate::virtio::VirtioBlk) {
+    // SAFETY: config-port reads only; the persistent device is the second virtio-blk function.
+    let Some(bdf) = (unsafe { crate::pci::find_virtio_blk_nth(1) }) else {
+        return;
+    };
+    // SAFETY: the function is ours and idle (no request in flight).
+    let msix = crate::smp::enable_msi_target()
+        .then(|| unsafe { crate::pci::enable_msix(bdf, crate::idt::BLK_MSIX_VECTOR) })
+        .and_then(|r| r.ok());
+    if msix.is_some() && disk.bind_queue_interrupt(0) {
+        disk.set_completion_wait(Some(blk_wait));
+        BLK_WAITING.store(true, core::sync::atomic::Ordering::Relaxed);
+        kprintln!(
+            "[console] block completions: MSI-X vector {:#x}, the CPU sleeps until the device answers",
+            crate::idt::BLK_MSIX_VECTOR
+        );
+    } else {
+        kprintln!("[console] block completions: polled (no MSI-X binding)");
+    }
+}
+
 /// Enter the interactive console and never come back. The PERSISTENT disk is preferred when one is
 /// attached, so what a user writes survives the reboot; a RAM disk otherwise.
 #[cfg(feature = "interactive")]
@@ -427,6 +496,8 @@ pub fn interactive(disk_opt: Option<crate::virtio::VirtioBlk>) -> ! {
     // remapping unit, which the emulator mishandles (ADR-073).
     match disk_opt {
         Some(mut disk) => {
+            #[cfg(feature = "interactive")]
+            arm_blk_interrupt(&mut disk);
             kprintln!(
                 "[console] namespace: the persistent virtio-blk device (writes survive reboot)"
             );

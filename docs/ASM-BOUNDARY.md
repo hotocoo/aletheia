@@ -62,6 +62,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel-x86_64/src/smp.rs` | 3 | INIT-SIPI startup sequence, LAPIC EOI, pause |
 | `kernel-x86_64/src/usermode.rs` | 2 | syscall/sysret fast-path and iretq ring-3 frames |
 | `kernel-x86_64/src/virtio.rs` | 1 | MMIO notify write |
+| `kernel-x86_64/src/shellio.rs` | 1 | the block completion wait's `sti; hlt` (ADR-260), issued after IF was cleared and the used ring checked, with a LAPIC one-shot armed so a dead device still wakes the CPU |
 | `kernel-x86_64/src/conirq.rs` | 1 | the console idle's `sti; hlt`, issued after IF was cleared and the ring checked empty, so `sti`'s shadow cannot lose the wake-up (ADR-180) |
 
 ## Rules of the boundary

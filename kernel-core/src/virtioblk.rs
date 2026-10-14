@@ -479,8 +479,20 @@ pub struct VirtioBlk<H: VirtioHal, T: Transport> {
     /// timeout per kick when the platform loses completions) may tighten it without touching every
     /// other user.
     completion_budget_ns: u64,
+    /// How a submission waits for its completions (ADR-260): `None` spins, as every boot suite and
+    /// the fuzz sweep do; `Some(wait)` hands each look to the platform, which sleeps until an
+    /// interrupt unless `ready` already holds. The clock bound applies either way.
+    wait: Option<CompletionWait>,
+    /// Batches completed while sleeping on the platform's wait, and while spinning.
+    slept: core::cell::Cell<u64>,
+    polled: core::cell::Cell<u64>,
     _hal: PhantomData<H>,
 }
+
+/// A platform's completion wait: return when `ready()` holds or an interrupt arrived. It must not
+/// sleep when `ready()` already holds, and it must wake within the completion budget even if the
+/// device never answers (a timer), or a dead device would stop the machine.
+pub type CompletionWait = fn(ready: &dyn Fn() -> bool);
 
 /// The default bounded wait for one request completion: twenty seconds of the platform's clock.
 /// A healthy device finishes in microseconds and a starved emulator in well under a second, so
@@ -597,6 +609,9 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 flush_ok,
                 dma,
                 completion_budget_ns: SUBMIT_BUDGET_NS,
+                wait: None,
+                slept: core::cell::Cell::new(0),
+                polled: core::cell::Cell::new(0),
                 _hal: PhantomData,
             },
             InitReport {
@@ -618,6 +633,26 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
     /// stimulus.
     pub fn set_completion_budget_ns(&mut self, budget_ns: u64) {
         self.completion_budget_ns = budget_ns;
+    }
+
+    /// Wait for completions through `wait` (sleeping until an interrupt) instead of spinning, or
+    /// spin again with `None` (ADR-260).
+    pub fn set_completion_wait(&mut self, wait: Option<CompletionWait>) {
+        self.wait = wait;
+    }
+
+    /// Point the request queue's interrupt at MSI-X table entry `entry`, the device reading the
+    /// binding back (a refusal reads as the 0xFFFF sentinel and returns false). A transport with
+    /// no such binding (virtio-mmio's single interrupt line) returns false.
+    pub fn bind_queue_interrupt(&mut self, entry: u16) -> bool {
+        // SAFETY: the transport's registers are mapped; queue 0 is the only queue and no request
+        // is in flight while the caller rebinds it.
+        unsafe { self.transport.configure_queue_interrupt(0, entry) }
+    }
+
+    /// Batches completed while sleeping on the platform's wait, and while spinning.
+    pub fn completion_counts(&self) -> (u64, u64) {
+        (self.slept.get(), self.polled.get())
     }
 
     /// The completion-wait budget in force, in nanoseconds.
@@ -765,7 +800,11 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 if H::now_ns().wrapping_sub(started) > self.completion_budget_ns {
                     return Err(StorageError::Device);
                 }
-                core::hint::spin_loop();
+                match self.wait {
+                    // SAFETY (closure): the used index lies in this driver's ring frame.
+                    Some(wait) => wait(&|| unsafe { read_volatile(used_idx_ptr) } != seen),
+                    None => core::hint::spin_loop(),
+                }
             }
             H::barrier(); // used.idx observed before we read the entry the device wrote
 
@@ -782,6 +821,12 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 return Err(StorageError::Device);
             }
         }
+        let counter = if self.wait.is_some() {
+            &self.slept
+        } else {
+            &self.polled
+        };
+        counter.set(counter.get() + 1);
         Ok(())
     }
 

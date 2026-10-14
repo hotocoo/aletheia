@@ -26,6 +26,14 @@ pub const SERIAL_VECTOR: u8 = 0x24;
 /// Shared MSI-X vector for the virtio-input wake path. The hard handler only records a wake and
 /// acknowledges the LAPIC; queue harvesting/composition remains in foreground context.
 pub const INPUT_MSIX_VECTOR: u8 = 0x51;
+/// The console's virtio-blk request queue completes here (MSI-X, ADR-260). The handler counts and
+/// acknowledges; the waiting foreground reads the used ring itself.
+pub const BLK_MSIX_VECTOR: u8 = 0x52;
+/// The LAPIC one-shot that bounds an interrupt-driven block wait (ADR-260).
+pub const BLK_TIMEOUT_VECTOR: u8 = 0x53;
+
+static BLK_MSIX_HITS: AtomicU64 = AtomicU64::new(0);
+static BLK_BOUND_WAKES: AtomicU64 = AtomicU64::new(0);
 
 static INPUT_MSIX_HITS: AtomicU64 = AtomicU64::new(0);
 static INPUT_MSIX_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -95,6 +103,8 @@ pub fn init() {
         idt[SERIAL_VECTOR].set_handler_fn(serial);
         idt[KEYBOARD_VECTOR].set_handler_fn(keyboard);
         idt[INPUT_MSIX_VECTOR].set_handler_fn(input_msix);
+        idt[BLK_MSIX_VECTOR].set_handler_fn(blk_msix);
+        idt[BLK_TIMEOUT_VECTOR].set_handler_fn(blk_timeout);
         IDT.get().load();
     }
 }
@@ -113,6 +123,28 @@ extern "x86-interrupt" fn serial(_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn keyboard(_frame: InterruptStackFrame) {
     crate::conirq::on_keyboard_irq();
     crate::pic::eoi(KEYBOARD_VECTOR);
+}
+
+extern "x86-interrupt" fn blk_msix(_frame: InterruptStackFrame) {
+    BLK_MSIX_HITS.fetch_add(1, Ordering::Relaxed);
+    crate::smp::msi_eoi();
+}
+
+extern "x86-interrupt" fn blk_timeout(_frame: InterruptStackFrame) {
+    BLK_BOUND_WAKES.fetch_add(1, Ordering::Relaxed);
+    crate::smp::msi_eoi();
+}
+
+/// Block sleeps the LAPIC one-shot ended because no completion came first (ADR-260).
+#[cfg(feature = "interactive")]
+pub fn blk_bound_wakes() -> u64 {
+    BLK_BOUND_WAKES.load(Ordering::Relaxed)
+}
+
+/// Completion interrupts the console's block device has raised (ADR-260).
+#[cfg(feature = "interactive")]
+pub fn blk_msix_hits() -> u64 {
+    BLK_MSIX_HITS.load(Ordering::Relaxed)
 }
 
 extern "x86-interrupt" fn input_msix(_frame: InterruptStackFrame) {

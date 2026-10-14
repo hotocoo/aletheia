@@ -734,3 +734,48 @@ fn a_lying_batch_is_refused_and_never_touches_the_caller_buffer() {
         host_clock_step(2_000_000);
     }
 }
+
+// ---- ADR-260: a platform completion wait ---------------------------------------------------------
+
+static WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A platform wait that never sleeps on a ready condition and counts the looks it was asked for.
+fn counting_wait(ready: &dyn Fn() -> bool) {
+    if !ready() {
+        WAITS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn completions_are_counted_by_how_they_were_waited_for() {
+    let (mut blk, _r, _f) = mk_driver(CAP, Rc::new(RefCell::new(Faults::default())));
+    let b = [7u8; BLOCK_SIZE];
+    blk.write_block(4, &b).expect("polled write");
+    assert_eq!(blk.completion_counts(), (0, 1));
+    blk.set_completion_wait(Some(counting_wait));
+    let mut got = [0u8; BLOCK_SIZE];
+    blk.read_block(4, &mut got).expect("waited read");
+    assert_eq!(got, b);
+    assert_eq!(blk.completion_counts(), (1, 1));
+}
+
+#[test]
+fn a_silent_device_still_times_out_through_the_platform_wait() {
+    let (mut blk, _r, _f) = mk_driver(
+        CAP,
+        Rc::new(RefCell::new(Faults {
+            skip_completion: true,
+            ..Default::default()
+        })),
+    );
+    blk.set_completion_budget_ns(5_000_000);
+    blk.set_completion_wait(Some(counting_wait));
+    let before = WAITS.load(Ordering::Relaxed);
+    let mut got = [0u8; BLOCK_SIZE];
+    assert_eq!(blk.read_block(4, &mut got), Err(StorageError::Device));
+    assert!(
+        WAITS.load(Ordering::Relaxed) > before,
+        "the wait was asked, and the bound still fired"
+    );
+    host_clock_step(1_000);
+}

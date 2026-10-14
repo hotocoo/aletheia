@@ -108,6 +108,12 @@ const IA32_GS_BASE: u32 = 0xC000_0101;
 
 const LAPIC_ID: usize = 0x020;
 const LAPIC_EOI: usize = 0x0B0;
+#[cfg(feature = "input-msix")]
+const LAPIC_LVT_TIMER: usize = 0x320;
+#[cfg(feature = "input-msix")]
+const LAPIC_TIMER_INITIAL: usize = 0x380;
+#[cfg(feature = "input-msix")]
+const LAPIC_TIMER_DIVIDE: usize = 0x3E0;
 const LAPIC_SVR: usize = 0x0F0;
 const LAPIC_ICR_LO: usize = 0x300;
 const LAPIC_ICR_HI: usize = 0x310;
@@ -134,6 +140,20 @@ fn lapic_w(reg: usize, v: u32) {
 fn lapic_r(reg: usize) -> u32 {
     // SAFETY: xAPIC register in the identity-mapped LAPIC MMIO page.
     unsafe { core::ptr::read_volatile((LAPIC_BASE.load(Ordering::Relaxed) + reg) as *const u32) }
+}
+
+/// Arm (count > 0) or disarm (0) the calling CPU's LAPIC timer as a one-shot that raises `vector`
+/// after `count` ticks of the bus clock divided by 16 (ADR-260: the wake that bounds an
+/// interrupt-driven wait when the device never answers). Uncalibrated on purpose: the bound only
+/// needs a wake that comes, and the completion budget is measured on the platform clock.
+#[cfg(feature = "input-msix")]
+pub fn lapic_oneshot(vector: u8, count: u32) {
+    if LAPIC_BASE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    lapic_w(LAPIC_TIMER_DIVIDE, 0b0011);
+    lapic_w(LAPIC_LVT_TIMER, vector as u32);
+    lapic_w(LAPIC_TIMER_INITIAL, count);
 }
 
 /// Software-enable the calling CPU's LAPIC (SVR bit 8) with the spurious vector parked at 0xFF.

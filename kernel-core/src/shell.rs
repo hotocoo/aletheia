@@ -983,6 +983,11 @@ pub trait ShellHost {
     fn input_facts(&self) -> Option<InputFacts> {
         None
     }
+    /// The console block device's interrupt-driven waits (ADR-260): (completion interrupts taken,
+    /// sleeps waiting for one, sleeps the bounding timer ended instead). `None` when polled.
+    fn blk_irq_stats(&self) -> Option<(u64, u64, u64)> {
+        None
+    }
     /// Optional target-native interrupt telemetry: (MSI-X IRQ hits, sampled wakeups, total TSC
     /// cycles, maximum TSC cycles). The tuple is deliberately optional because non-x86 targets
     /// have different interrupt-controller domains and must not fabricate x86 counters.
@@ -3389,6 +3394,16 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                 BLOCK_SIZE,
                 (n * BLOCK_SIZE) / 1024
             );
+            match host.blk_irq_stats() {
+                Some((irqs, sleeps, bound)) => outf!(
+                    out,
+                    "completions: interrupt-driven, {} interrupts, {} sleeps, {} bound wakes",
+                    irqs,
+                    sleeps,
+                    bound
+                ),
+                None => out("completions: polled\n"),
+            }
         }
         "df" => {
             if !authorize(host, role, ShellAction::Inspect, out) {
