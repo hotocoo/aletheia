@@ -337,3 +337,50 @@ pub fn ahci_selftest() -> Result<u32, (u32, &'static str)> {
         .map(|n| n as u32)
         .map_err(|(i, name)| (i as u32, name))
 }
+
+/// xHCI BARs 64 MiB above the virtio-blk-pci window, clear of NVMe, e1000 and AHCI (ADR-253).
+const XHCI_BAR_BASE: usize = BAR_ASSIGN_BASE + 0x0400_0000;
+
+/// The shared xHCI driver on aarch64 (ADR-253). `Ok(0)` = no controller, or nothing connected.
+pub fn xhci_selftest() -> Result<u32, (u32, &'static str)> {
+    use kernel_core::xhci;
+    let Some(disc) = crate::smmu::discovery() else {
+        return Ok(0);
+    };
+    let env = Ecam::new(disc.pcie.ecam_base);
+    // SAFETY: walks ECAM only.
+    let Some(bdf) = (unsafe { virtiopci::find_class_nth(&env, xhci::CLASS_XHCI, 0) }) else {
+        kprintln!("[xhci] no controller (skipped)");
+        return Ok(0);
+    };
+    // SAFETY: boot owns the function; BAR0 is mapped as device memory.
+    let base = match unsafe { open_bar(&env, bdf, XHCI_BAR_BASE, 0, xhci::MAP_LEN) } {
+        Ok(b) => b,
+        Err(e) => {
+            kprintln!("[xhci] BAR refused: {}", e);
+            return Err((0, "xhci controller BAR"));
+        }
+    };
+    kprintln!(
+        "[xhci] controller @ PCI {:02x}:{:02x}.{}",
+        bdf.bus,
+        bdf.device,
+        bdf.function
+    );
+    // SAFETY: `base` is the mapped BAR0, MAP_LEN bytes; frames come from this kernel's allocator.
+    let r = unsafe {
+        xhci::device_suite::<crate::virtio::Aarch64Virtio, _, _>(
+            kernel_core::nvme::MmioRegs::new(base),
+            xhci::MAP_LEN,
+            &mut suite_log,
+        )
+    };
+    match r {
+        Ok(0) => {
+            kprintln!("[xhci] nothing connected (skipped)");
+            Ok(0)
+        }
+        Ok(n) => Ok(n as u32),
+        Err((i, name)) => Err((i as u32, name)),
+    }
+}

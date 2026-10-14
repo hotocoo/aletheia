@@ -64,5 +64,5 @@ vendor's SSD, so one driver covers a whole device class.
 ## Next drivers
 
 Queued, not claimed: xHCI (USB keyboards, mice and storage), e1000e/igc (wired network), AHCI
-(SATA), HD Audio. Each is a class or vendor family QEMU also models, so each can get the same
+(SATA), HD Audio. (Since landed: AHCI in ADR-225; xHCI's first rung, a boot keyboard, in ADR-253.) Each is a class or vendor family QEMU also models, so each can get the same
 simulated-controller tests plus a VM gate before any physical machine.

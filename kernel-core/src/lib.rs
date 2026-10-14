@@ -133,6 +133,7 @@ pub mod wm;
 pub mod wmstorm;
 pub mod x25519;
 pub mod x509;
+pub mod xhci;
 
 /// The storm's own measurement channel: the caller installs a reporter so the boot log can carry
 /// the two numbers behind the allocation claim (ADR-086). Absent, the claim is still enforced —

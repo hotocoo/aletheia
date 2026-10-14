@@ -1377,6 +1377,25 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             ActiveHal::exit(1150 + idx as i32);
         }
     }
+    // xHCI (REQ-DRV-012, ADR-253): the USB host controller and a boot keyboard on it.
+    kprintln!("");
+    kprintln!(
+        "--- xhci selftests (real PCI xHCI controller: enumerate + configure a USB keyboard) ---"
+    );
+    match pci::xhci_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[xhci] ALL {} XHCI INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] xhci suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("xhci")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[xhci] FAILED at xhci invariant {}: {}", idx, name);
+            ActiveHal::exit(1160 + idx as i32);
+        }
+    }
 
     // Filesystem: the named-object namespace over the journaled block store (REQ-FS-001, ADR-035).
     // The namespace is arch-independent, so every target proves the SAME behaviors over a RAM-disk

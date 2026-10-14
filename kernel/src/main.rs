@@ -948,6 +948,25 @@ pub extern "C" fn kmain() -> ! {
             semihosting::exit(1150 + idx as i32);
         }
     }
+    // xHCI (REQ-DRV-012, ADR-253): the USB host controller and a boot keyboard on it.
+    kprintln!("");
+    kprintln!(
+        "--- xhci selftests (real PCI xHCI controller: enumerate + configure a USB keyboard) ---"
+    );
+    match pci::xhci_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[xhci] ALL {} XHCI INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] xhci suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("xhci")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[xhci] FAILED at xhci invariant {}: {}", idx, name);
+            semihosting::exit(1160 + idx as i32);
+        }
+    }
 
     // SMP: power on the other CPUs via PSCI and prove the cross-core substrate (REQ-SMP-002,
     // ADR-028). Skips green on a single-CPU machine (bare `cargo run`); the VM gate boots
