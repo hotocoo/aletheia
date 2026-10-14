@@ -10,8 +10,8 @@
 
 use kernel_core::storage::{BlockDevice, MemBlockDevice, StorageError, BLOCK_SIZE};
 use kernel_core::virtioblk::{device_suite, InitReport, Transport, VirtioBlk, VirtioHal};
-use kernel_core::virtioblk::{SECTORS_PER_BLOCK, SECTOR_SIZE};
-use std::cell::RefCell;
+use kernel_core::virtioblk::{IN_FLIGHT, RUN_BLOCKS, SECTORS_PER_BLOCK, SECTOR_SIZE};
+use std::cell::{Cell, RefCell};
 extern crate alloc;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,10 +40,10 @@ fn the_shared_suite_proves_seventeen_invariants_over_a_device() {
     .expect("every invariant holds over a well-behaved device");
 
     assert_eq!(
-        n, 22,
+        n, 23,
         "the suite's invariant count changed - update both VM gates"
     );
-    assert_eq!(seen.len(), 22);
+    assert_eq!(seen.len(), 23);
     for (idx, (i, _)) in seen.iter().enumerate() {
         assert_eq!(*i, idx + 1, "invariant numbering has a gap at {i}");
     }
@@ -58,7 +58,8 @@ fn the_shared_suite_proves_seventeen_invariants_over_a_device() {
         seen[20]
             .1
             .contains("a run read answers what block reads answer")
-            && seen[21].1.contains("capability-gated I/O")
+            && seen[21].1.contains("runs in flight behind one doorbell")
+            && seen[22].1.contains("capability-gated I/O")
     );
 }
 
@@ -140,6 +141,12 @@ struct Faults {
     id_lie: Option<u32>,
     used_len: Option<u32>,
     status_byte: Option<u8>,
+    /// Publish the batch's completions last-first (honest: a device may finish in any order).
+    reverse: bool,
+    /// Answer the batch's first request twice, in place of its last one.
+    duplicate: bool,
+    /// Report the `n`th completion of a batch one byte short.
+    short_nth: Option<usize>,
 }
 
 struct MockDev {
@@ -147,6 +154,8 @@ struct MockDev {
     /// for reads, and the device mutates itself while serving them.
     st: RefCell<MockState>,
     faults: SharedFaults,
+    /// How many times the driver rang the doorbell.
+    notifies: Rc<Cell<u32>>,
 }
 
 struct MockState {
@@ -156,6 +165,7 @@ struct MockState {
     cfg_capacity: u64,
     q: Option<(usize, usize, usize)>, // desc, avail, used
     qsize: u32,
+    qmax: u32,
     disk: Vec<u8>,
     dev_avail: u16,
     dev_used: u16,
@@ -180,7 +190,7 @@ impl MockDev {
         unsafe { (a as *mut u16).write_volatile(v) }
     }
 
-    fn new(capacity_sectors: u64, faults: SharedFaults) -> Self {
+    fn new(capacity_sectors: u64, faults: SharedFaults, qmax: u32) -> Self {
         MockDev {
             st: RefCell::new(MockState {
                 regs: [0; 64],
@@ -189,22 +199,39 @@ impl MockDev {
                 cfg_capacity: capacity_sectors,
                 q: None,
                 qsize: 8,
+                qmax,
                 disk: vec![0u8; capacity_sectors as usize * 512],
                 dev_avail: 0,
                 dev_used: 0,
             }),
             faults,
+            notifies: Rc::new(Cell::new(0)),
         }
     }
 }
+
+/// The queue size QEMU's virtio-blk offers is far above what the driver asks for.
+const QMAX_ROOMY: u32 = 256;
 
 fn mk_driver(
     capacity_sectors: u64,
     faults: SharedFaults,
 ) -> (VirtioBlk<HostHal, MockDev>, InitReport, SharedFaults) {
-    let dev = MockDev::new(capacity_sectors, faults.clone());
-    let (blk, report) = unsafe { VirtioBlk::init(dev) }.expect("mock device inits");
+    let (blk, report, _n) = mk_driver_q(capacity_sectors, faults.clone(), QMAX_ROOMY);
     (blk, report, faults)
+}
+
+/// A driver over a device offering at most `qmax` queue entries; also hands back the doorbell
+/// counter.
+fn mk_driver_q(
+    capacity_sectors: u64,
+    faults: SharedFaults,
+    qmax: u32,
+) -> (VirtioBlk<HostHal, MockDev>, InitReport, Rc<Cell<u32>>) {
+    let dev = MockDev::new(capacity_sectors, faults, qmax);
+    let notifies = dev.notifies.clone();
+    let (blk, report) = unsafe { VirtioBlk::init(dev) }.expect("mock device inits");
+    (blk, report, notifies)
 }
 impl Transport for MockDev {
     fn identity(&self) -> (u32, u32) {
@@ -232,7 +259,7 @@ impl Transport for MockDev {
     }
     unsafe fn select_queue(&self, _queue: u16) {}
     unsafe fn queue_num_max(&self) -> u32 {
-        8
+        self.st.borrow().qmax
     }
     unsafe fn set_queue_num(&self, size: u32) {
         self.st.borrow_mut().qsize = size;
@@ -246,10 +273,12 @@ impl Transport for MockDev {
         self.st.borrow().cfg_capacity
     }
 
-    // THE DEVICE SIDE of one request: consume an avail entry, walk its chain,
-    // service the data against the backing medium, write the status byte, and
-    // publish the used-ring entry - honouring this run's programmed fault.
+    // THE DEVICE SIDE: consume EVERY avail entry published since the last doorbell, walk each
+    // chain (header, any number of data buffers, status), service the data against the backing
+    // medium, write each status byte, then publish the used-ring entries - honouring this run's
+    // programmed fault.
     unsafe fn notify(&self, _queue: u16) {
+        self.notifies.set(self.notifies.get() + 1);
         let f = self.faults.borrow().clone();
         if f.skip_completion {
             // A silent device never advances used.idx: the driver's poll bound fires.
@@ -260,9 +289,6 @@ impl Transport for MockDev {
             Some(q) => q,
             None => return,
         };
-
-        let head = MockDev::rd16(avail + 4 + 2 * (s.dev_avail % s.qsize as u16) as usize);
-        s.dev_avail = s.dev_avail.wrapping_add(1);
 
         fn rd_desc(desc: usize, i: usize) -> (u64, u32, u16, u16) {
             unsafe {
@@ -276,52 +302,76 @@ impl Transport for MockDev {
             }
         }
 
-        let (h_addr_u64, _, _, mut next) = rd_desc(desc, head as usize);
-        let h_addr = h_addr_u64 as usize;
-        let rtype = MockDev::rd32(h_addr);
-        let mut sector_bytes = [0u8; 8];
-        for (i, sb) in sector_bytes.iter_mut().enumerate() {
-            *sb = ((h_addr + 8 + i) as *const u8).read_volatile();
-        }
-        let sector = u64::from_le_bytes(sector_bytes);
+        let mut done: Vec<(u32, u32)> = vec![];
+        let avail_idx = MockDev::rd16(avail + 2);
+        while s.dev_avail != avail_idx {
+            let head = MockDev::rd16(avail + 4 + 2 * (s.dev_avail % s.qsize as u16) as usize);
+            s.dev_avail = s.dev_avail.wrapping_add(1);
 
-        let mut data_addr = 0usize;
-        let mut status_addr = 0usize;
-        // Classify by CHAIN POSITION: the first descriptor after the header is the
-        // data buffer (device-writable for a READ, device-readable for a WRITE),
-        // and the LAST descriptor is always the one-byte status.
-        while next != 0 {
-            let (addr, _len, _flags, nxt) = rd_desc(desc, next as usize);
-            if nxt == 0 {
-                status_addr = addr as usize;
+            let (h_addr_u64, _, _, mut next) = rd_desc(desc, head as usize);
+            let h_addr = h_addr_u64 as usize;
+            let rtype = MockDev::rd32(h_addr);
+            let mut sector_bytes = [0u8; 8];
+            for (i, sb) in sector_bytes.iter_mut().enumerate() {
+                *sb = ((h_addr + 8 + i) as *const u8).read_volatile();
+            }
+            let sector = u64::from_le_bytes(sector_bytes) as usize;
+
+            // Classify by CHAIN POSITION: every descriptor between the header and the last is a
+            // data buffer, in order; the LAST is always the one-byte status.
+            let mut data: Vec<usize> = vec![];
+            let mut status_addr = 0usize;
+            while next != 0 {
+                let (addr, _len, _flags, nxt) = rd_desc(desc, next as usize);
+                if nxt == 0 {
+                    status_addr = addr as usize;
+                } else {
+                    data.push(addr as usize);
+                }
+                next = nxt;
+            }
+
+            for (k, &d) in data.iter().enumerate() {
+                let at = sector * 512 + k * BLOCK_SIZE;
+                for i in 0..BLOCK_SIZE {
+                    if rtype == 1 {
+                        s.disk[at + i] = ((d + i) as *const u8).read_volatile();
+                    } else if rtype == 0 {
+                        ((d + i) as *mut u8).write_volatile(s.disk[at + i]);
+                    }
+                }
+            }
+
+            MockDev::wr8(status_addr, f.status_byte.unwrap_or(VIRTIO_S_OK));
+            // The completion length a device HONESTLY reports is the status byte plus every
+            // data buffer for a READ - unless a fault overrides it.
+            let honest_len = if rtype == 0 {
+                (data.len() * BLOCK_SIZE) as u32 + 1
             } else {
-                data_addr = addr as usize;
-            }
-            next = nxt;
+                1
+            };
+            done.push((
+                f.id_lie.unwrap_or(head as u32),
+                f.used_len.unwrap_or(honest_len),
+            ));
         }
 
-        if rtype == 1 {
-            for i in 0..BLOCK_SIZE {
-                let b = ((data_addr + i) as *const u8).read_volatile();
-                s.disk[sector as usize * 512 + i] = b;
-            }
-        } else if rtype == 0 {
-            for i in 0..BLOCK_SIZE {
-                s.disk[sector as usize * 512 + i] = ((data_addr + i) as *const u8).read_volatile();
-            }
+        if let Some(k) = f.short_nth.filter(|&k| k < done.len()) {
+            done[k].1 -= 1;
         }
-
-        let status_byte = f.status_byte.unwrap_or(VIRTIO_S_OK);
-        MockDev::wr8(status_addr, status_byte);
-
-        // The completion length a device HONESTLY reports is the status byte plus
-        // the whole data buffer for a READ - unless a fault overrides it.
-        let honest_len = if rtype == 0 { BLOCK_SIZE as u32 + 1 } else { 1 };
-        let wlen = f.used_len.unwrap_or(honest_len);
-        let entry = used + 4 + 8 * (s.dev_used % s.qsize as u16) as usize;
-        MockDev::wr32(entry, f.id_lie.unwrap_or(head as u32));
-        MockDev::wr32(entry + 4, wlen);
-        s.dev_used = s.dev_used.wrapping_add(1);
+        if f.duplicate && done.len() > 1 {
+            let last = done.len() - 1;
+            done[last] = done[0];
+        }
+        if f.reverse {
+            done.reverse();
+        }
+        for (id, wlen) in done {
+            let entry = used + 4 + 8 * (s.dev_used % s.qsize as u16) as usize;
+            MockDev::wr32(entry, id);
+            MockDev::wr32(entry + 4, wlen);
+            s.dev_used = s.dev_used.wrapping_add(1);
+        }
         MockDev::wr16(used + 2, s.dev_used);
     }
 }
@@ -585,5 +635,102 @@ fn a_fuzzed_completion_surface_never_yields_data_without_an_exact_match() {
                 );
             }
         }
+    }
+}
+
+// ---- ADR-252: several requests in flight behind one doorbell ----------------------------------
+
+/// Write `blocks` distinct blocks from `base` and hand back the bytes they hold.
+fn seed(blk: &mut VirtioBlk<HostHal, MockDev>, base: usize, blocks: usize) -> Vec<u8> {
+    let mut all = vec![0u8; blocks * BLOCK_SIZE];
+    for (i, b) in all.chunks_mut(BLOCK_SIZE).enumerate() {
+        b.iter_mut()
+            .enumerate()
+            .for_each(|(j, x)| *x = (i * 37 + j * 3 + 1) as u8);
+        blk.write_block(base + i, b).expect("seed write");
+    }
+    all
+}
+
+#[test]
+fn a_roomy_queue_carries_several_runs_behind_one_doorbell() {
+    let (mut blk, report, notifies) =
+        mk_driver_q(CAP, Rc::new(RefCell::new(Faults::default())), QMAX_ROOMY);
+    assert_eq!(report.qsize as usize, IN_FLIGHT * (RUN_BLOCKS + 2));
+    assert_eq!(blk.in_flight(), IN_FLIGHT);
+    assert_eq!(blk.dma_regions(), kernel_core::virtioblk::DMA_REGIONS);
+
+    let blocks = 2 * IN_FLIGHT * RUN_BLOCKS + 5; // two full batches and a short third
+    let want = seed(&mut blk, 40, blocks);
+    let before = notifies.get();
+    let mut got = vec![0u8; blocks * BLOCK_SIZE];
+    blk.read_run(40, &mut got).expect("run read");
+    assert!(got == want, "the batched run read returned other bytes");
+    assert_eq!(notifies.get() - before, 3, "one doorbell per batch");
+}
+
+#[test]
+fn a_small_queue_still_reads_one_request_at_a_time() {
+    let (mut blk, _r, notifies) = mk_driver_q(CAP, Rc::new(RefCell::new(Faults::default())), 8);
+    assert_eq!(blk.in_flight(), 1);
+    let want = seed(&mut blk, 40, 13);
+    let before = notifies.get();
+    let mut got = vec![0u8; 13 * BLOCK_SIZE];
+    blk.read_run(40, &mut got).expect("run read");
+    assert!(got == want);
+    assert_eq!(notifies.get() - before, 3, "runs of 6, 6, 1");
+}
+
+#[test]
+fn completions_in_any_order_are_matched_to_their_own_request() {
+    let f = Rc::new(RefCell::new(Faults::default()));
+    let (mut blk, _r, _n) = mk_driver_q(CAP, f.clone(), QMAX_ROOMY);
+    let want = seed(&mut blk, 40, IN_FLIGHT * RUN_BLOCKS - 2); // last run short: lengths differ
+    f.borrow_mut().reverse = true;
+    let mut got = vec![0u8; want.len()];
+    blk.read_run(40, &mut got)
+        .expect("reordered completions are honest");
+    assert!(got == want);
+}
+
+/// Every batch-level lie is refused, and the caller's buffer keeps what it held.
+#[test]
+fn a_lying_batch_is_refused_and_never_touches_the_caller_buffer() {
+    let lies = [
+        Faults {
+            duplicate: true,
+            ..Default::default()
+        },
+        Faults {
+            short_nth: Some(2),
+            ..Default::default()
+        },
+        Faults {
+            id_lie: Some(1), // a data descriptor, never a head
+            ..Default::default()
+        },
+        Faults {
+            status_byte: Some(1),
+            ..Default::default()
+        },
+        Faults {
+            skip_completion: true,
+            ..Default::default()
+        },
+    ];
+    for (k, lie) in lies.into_iter().enumerate() {
+        let f = Rc::new(RefCell::new(Faults::default()));
+        let (mut blk, _r, _n) = mk_driver_q(CAP, f.clone(), QMAX_ROOMY);
+        blk.set_completion_budget_ns(1_000_000);
+        seed(&mut blk, 40, IN_FLIGHT * RUN_BLOCKS);
+        *f.borrow_mut() = lie;
+        let mut got = vec![0xA5u8; IN_FLIGHT * RUN_BLOCKS * BLOCK_SIZE];
+        assert_eq!(
+            blk.read_run(40, &mut got),
+            Err(StorageError::Device),
+            "lie {k} was accepted"
+        );
+        assert!(got.iter().all(|&b| b == 0xA5), "lie {k} leaked bytes");
+        host_clock_step(2_000_000);
     }
 }

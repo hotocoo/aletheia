@@ -113,22 +113,23 @@ struct VirtqDesc {
 /// aligned, non-overlapping region (modern virtio allows split placement — that is what the three
 /// QueueDesc/Driver/Device address registers are for). The request header and status byte reuse the
 /// tail of the same frame, well clear of the rings at any queue size we pick.
-const OFF_DESC: usize = 0; // desc table:  N * 16 B  (N <= 8 -> <= 128 B)
-const OFF_AVAIL: usize = 256; // avail ring: 6 + 2N B
-const OFF_USED: usize = 512; // used ring:  6 + 8N B
-const OFF_HDR: usize = 1024; // 16-byte request header
-const OFF_STATUS: usize = 1040; // 1-byte status
+const OFF_DESC: usize = 0; // desc table: N * 16 B (N <= 32 -> <= 512 B)
+const OFF_AVAIL: usize = 512; // avail ring: 6 + 2N B
+const OFF_USED: usize = 1024; // used ring: 6 + 8N B
+const OFF_HDR: usize = 1536; // IN_FLIGHT 16-byte request headers
+const OFF_STATUS: usize = 1792; // IN_FLIGHT 1-byte statuses
 
-/// Queue size we request (capped by `QueueNumMax`). 8 is ample: one 3-descriptor request is ever in
-/// flight and it is polled to completion.
-const QSIZE_WANT: u16 = 8;
-/// Data frames beyond the first, so one request can carry a run of blocks (ADR-248): header +
-/// `RUN_BLOCKS` data descriptors + status fill the 8-entry queue.
-const RUN_EXTRA: usize = 5;
-/// Blocks one request may move.
-pub const RUN_BLOCKS: usize = 1 + RUN_EXTRA;
-/// DMA regions a live virtio-blk holds: the ring frame and `RUN_BLOCKS` data frames.
-pub const DMA_REGIONS: usize = 1 + RUN_BLOCKS;
+/// Queue size we request (capped by `QueueNumMax`): room for `IN_FLIGHT` requests of a header,
+/// `RUN_BLOCKS` data descriptors and a status each (ADR-252).
+const QSIZE_WANT: u16 = (IN_FLIGHT * (RUN_BLOCKS + 2)) as u16;
+/// Blocks one request may move (ADR-248).
+pub const RUN_BLOCKS: usize = 6;
+/// Requests the driver keeps in flight at once, behind one doorbell (ADR-252).
+pub const IN_FLIGHT: usize = 4;
+/// Data frames beyond the first: one per block of every request in flight.
+const RUN_EXTRA: usize = IN_FLIGHT * RUN_BLOCKS - 1;
+/// DMA regions a live virtio-blk holds: the ring frame and one data frame per block in flight.
+pub const DMA_REGIONS: usize = 1 + IN_FLIGHT * RUN_BLOCKS;
 
 /// How a bus exposes one virtio device's registers. Implemented by [`MmioTransport`] here, and by a
 /// target that must reach the device over a different bus (x86-64's virtio-pci, ADR-037).
@@ -723,50 +724,65 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         );
     }
 
-    /// Post the head descriptor to the avail ring, notify the device, and poll the used ring to
-    /// completion. Returns `(device status byte, bytes the device reported writing)`. The poll is
-    /// BOUNDED IN TIME: a device that has not answered within the budget returns `Err` rather than
-    /// spinning forever (the VM watchdog is only the backstop), and a device that answers late but
-    /// within it is a slow device, not a dead one. The used-ring entry's `id` is VALIDATED — a
-    /// device that names another descriptor's completion is lying about whose request finished.
-    unsafe fn submit(&self, head: u16) -> Result<(u8, u32), StorageError> {
+    /// Post every head in `reqs` to the avail ring, ring the doorbell ONCE, and poll the used ring
+    /// until each has completed (ADR-252; one entry is the single-request case). Each request is
+    /// `(head, bytes the device must report writing, its status byte's address)`. The poll is
+    /// BOUNDED IN TIME across the whole batch: a device that has not answered within the budget
+    /// returns `Err` rather than spinning forever (the VM watchdog is only the backstop), and a
+    /// device that answers late but within it is a slow device, not a dead one. Completions may
+    /// arrive in any order, but every used-ring entry is VALIDATED before it counts: its `id` must
+    /// name a head of THIS batch not already answered (a device naming another descriptor, or the
+    /// same one twice, is lying about whose request finished), its byte count must be exactly that
+    /// request's, and its status byte must be OK.
+    unsafe fn submit_batch(&self, reqs: &[(u16, u32, usize)]) -> Result<(), StorageError> {
+        if reqs.is_empty() || reqs.len() > IN_FLIGHT {
+            return Err(StorageError::Device);
+        }
         // avail ring layout: [flags:u16][idx:u16][ring:u16 * qsize][used_event:u16]
         let avail_idx_ptr = (self.avail + 2) as *mut u16;
         let avail_ring = (self.avail + 4) as *mut u16;
-        // used ring layout:  [flags:u16][idx:u16][ring:{id:u32,len:u32} * qsize][avail_event:u16]
+        // used ring layout:  [flags:u16][idx:u16][ring:{id:u32,len:u32} * qsize]
         let used_idx_ptr = (self.used + 2) as *const u16;
 
         let cur = read_volatile(avail_idx_ptr);
-        let old_used = read_volatile(used_idx_ptr);
-        write_volatile(avail_ring.add((cur % self.qsize) as usize), head);
+        let mut seen = read_volatile(used_idx_ptr);
+        for (i, &(head, _, _)) in reqs.iter().enumerate() {
+            let slot = cur.wrapping_add(i as u16) % self.qsize;
+            write_volatile(avail_ring.add(slot as usize), head);
+        }
         H::barrier(); // ring writes visible before we bump idx
-        write_volatile(avail_idx_ptr, cur.wrapping_add(1));
+        write_volatile(avail_idx_ptr, cur.wrapping_add(reqs.len() as u16));
         H::barrier(); // idx visible before we notify
 
         self.transport.notify(0);
 
-        // The bound is on the clock, not on a count: how many times this CPU can look in a second
+        // The bound is on the clock, not on a count: how many times the CPU can look in a second
         // depends on the emulator and the host's load, and neither says anything about the device.
         let started = H::now_ns();
-        while read_volatile(used_idx_ptr) == old_used {
-            if H::now_ns().wrapping_sub(started) > self.completion_budget_ns {
+        let mut answered = [false; IN_FLIGHT];
+        for _ in 0..reqs.len() {
+            while read_volatile(used_idx_ptr) == seen {
+                if H::now_ns().wrapping_sub(started) > self.completion_budget_ns {
+                    return Err(StorageError::Device);
+                }
+                core::hint::spin_loop();
+            }
+            H::barrier(); // used.idx observed before we read the entry the device wrote
+
+            // The completed entry lives at (seen % qsize): [id: u32][len: u32].
+            let entry = (self.used + 4 + 8 * (seen % self.qsize) as usize) as *const u32;
+            let id = read_volatile(entry);
+            let len = read_volatile(entry.add(1));
+            seen = seen.wrapping_add(1);
+            let Some(i) = (0..reqs.len()).find(|&i| reqs[i].0 as u32 == id && !answered[i]) else {
+                return Err(StorageError::Device);
+            };
+            answered[i] = true;
+            if len != reqs[i].1 || read_volatile(reqs[i].2 as *const u8) != VIRTIO_BLK_S_OK {
                 return Err(StorageError::Device);
             }
-            core::hint::spin_loop();
         }
-        H::barrier(); // used.idx observed before we read the entry the device wrote
-
-        // The completed entry lives at (old_used % qsize): [id: u32][len: u32]. A device that names
-        // a different head is answering a request we did not make — refuse it here rather than
-        // interpreting whatever status byte follows.
-        let entry = (self.used + 4 + 8 * (old_used % self.qsize) as usize) as *const u32;
-        let id = read_volatile(entry);
-        if id != head as u32 {
-            return Err(StorageError::Device);
-        }
-        let len = read_volatile(entry.add(1));
-
-        Ok((read_volatile(self.status as *const u8), len))
+        Ok(())
     }
 
     /// Issue one virtio-blk request. `has_data` builds the 3-descriptor chain (header, data, status);
@@ -824,10 +840,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         } else {
             1
         };
-        match self.submit(0)? {
-            (VIRTIO_BLK_S_OK, len) if len == expect_wlen => Ok(()),
-            _ => Err(StorageError::Device),
-        }
+        self.submit_batch(&[(0, expect_wlen, self.status)])
     }
 
     /// The data frame for block `k` of a run.
@@ -847,60 +860,118 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
             .max(1)
     }
 
-    /// One READ of `m` consecutive blocks (2 <= m <= `run_blocks`) from `sector`, into the run's
-    /// data frames: header, `m` device-writable data descriptors, status. Validated as `request`
-    /// validates a single block: every address gated, status OK, and the device's byte count
-    /// exactly `m` blocks plus the status byte.
-    unsafe fn request_run(&self, sector: u64, m: usize) -> Result<(), StorageError> {
-        if m < 2 || m > self.run_blocks() {
+    /// Requests this queue can hold at once, each a header, `run_blocks` data descriptors and a
+    /// status (ADR-252). A device offering a small queue gets one in flight, as before.
+    pub fn in_flight(&self) -> usize {
+        (self.qsize as usize / (self.run_blocks() + 2)).clamp(1, IN_FLIGHT)
+    }
+
+    /// Post (without ringing the doorbell) request slot `j`: a READ of `m` consecutive blocks
+    /// (1 <= m <= `run_blocks`) from `sector` into slot `j`'s data frames, as the chain header,
+    /// `m` device-writable data descriptors, status, starting at descriptor `j * (RUN_BLOCKS + 2)`.
+    /// Every address is gated first. Returns what [`Self::submit_batch`] validates the completion
+    /// against: the head, the exact byte count (`m` blocks plus the status byte), and the status
+    /// byte's address.
+    unsafe fn post_run(
+        &self,
+        j: usize,
+        sector: u64,
+        m: usize,
+    ) -> Result<(u16, u32, usize), StorageError> {
+        if j >= self.in_flight() || m == 0 || m > self.run_blocks() {
             return Err(StorageError::Device);
         }
-        for addr in [self.hdr, self.status] {
-            if !self.dma.visible(addr, 1) {
-                return Err(StorageError::Device);
-            }
+        let hdr = self.hdr + 16 * j;
+        let status = self.status + j;
+        if !self.dma.visible(hdr, 16) || !self.dma.visible(status, 1) {
+            return Err(StorageError::Device);
         }
         for k in 0..m {
-            if !self.dma.visible(self.run_frame(k), BLOCK_SIZE) {
+            if !self
+                .dma
+                .visible(self.run_frame(j * RUN_BLOCKS + k), BLOCK_SIZE)
+            {
                 return Err(StorageError::Device);
             }
         }
-        let h = self.hdr as *mut u32;
+        let h = hdr as *mut u32;
         write_volatile(h.add(0), VIRTIO_BLK_T_IN);
         write_volatile(h.add(1), 0);
-        write_volatile((self.hdr + 8) as *mut u64, sector);
-        write_volatile(self.status as *mut u8, 0xff);
-        self.set_desc(0, self.hdr as u64, 16, VIRTQ_DESC_F_NEXT, 1);
+        write_volatile((hdr + 8) as *mut u64, sector);
+        write_volatile(status as *mut u8, 0xff);
+        let d0 = j * (RUN_BLOCKS + 2);
+        self.set_desc(d0, hdr as u64, 16, VIRTQ_DESC_F_NEXT, (d0 + 1) as u16);
         for k in 0..m {
-            let d = k + 1;
+            let d = d0 + k + 1;
             self.set_desc(
                 d,
-                self.run_frame(k) as u64,
+                self.run_frame(j * RUN_BLOCKS + k) as u64,
                 BLOCK_SIZE as u32,
                 VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
                 (d + 1) as u16,
             );
         }
-        self.set_desc(m + 1, self.status as u64, 1, VIRTQ_DESC_F_WRITE, 0);
-        match self.submit(0)? {
-            (VIRTIO_BLK_S_OK, len) if len == (m * BLOCK_SIZE + 1) as u32 => Ok(()),
-            _ => Err(StorageError::Device),
-        }
+        self.set_desc(d0 + m + 1, status as u64, 1, VIRTQ_DESC_F_WRITE, 0);
+        Ok((d0 as u16, (m * BLOCK_SIZE + 1) as u32, status))
     }
 
-    /// Time reading `blocks` blocks from `start` one request per block, then as runs, in
-    /// nanoseconds of the HAL's clock (ADR-248). Reported, never gated: the numbers belong to the
-    /// emulator and the host as much as to the driver.
-    pub fn time_reads(&self, start: usize, blocks: usize) -> Option<(u64, u64)> {
+    /// Read `out` from block `start` in runs of `run_blocks`, `depth` requests behind each doorbell
+    /// (ADR-252). A batch's bytes reach `out` only once EVERY request in it has validated, so a
+    /// refused batch leaves its part of `out` untouched.
+    fn read_runs(&self, start: usize, out: &mut [u8], depth: usize) -> Result<(), StorageError> {
+        if !out.len().is_multiple_of(BLOCK_SIZE) {
+            return Err(StorageError::BadBlockSize);
+        }
+        let n = out.len() / BLOCK_SIZE;
+        if start + n > self.num_blocks() {
+            return Err(StorageError::OutOfRange);
+        }
+        let per = self.run_blocks();
+        let depth = depth.clamp(1, self.in_flight());
+        for (c, batch) in out.chunks_mut(depth * per * BLOCK_SIZE).enumerate() {
+            let first = start + c * depth * per;
+            let mut reqs = [(0u16, 0u32, 0usize); IN_FLIGHT];
+            let runs = batch.len().div_ceil(per * BLOCK_SIZE);
+            // SAFETY: requests are only in flight inside this call; each slot's header, status and
+            // data frames are ours and identity-mapped, and no two slots share a descriptor.
+            unsafe {
+                for (j, run) in batch.chunks(per * BLOCK_SIZE).enumerate() {
+                    let sector = (first + j * per) as u64 * SECTORS_PER_BLOCK;
+                    reqs[j] = self.post_run(j, sector, run.len() / BLOCK_SIZE)?;
+                }
+                self.submit_batch(&reqs[..runs])?;
+                for (b, blk) in batch.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
+                    let src = core::slice::from_raw_parts(
+                        self.run_frame((b / per) * RUN_BLOCKS + b % per) as *const u8,
+                        BLOCK_SIZE,
+                    );
+                    blk.copy_from_slice(src);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Time reading `blocks` blocks from `start` one request per block, then in runs one request
+    /// at a time (ADR-248), then in runs with `in_flight` requests behind each doorbell (ADR-252),
+    /// in nanoseconds of the HAL's clock. Reported, never gated: the numbers belong to the emulator
+    /// and the host as much as to the driver.
+    pub fn time_reads(&self, start: usize, blocks: usize) -> Option<(u64, u64, u64)> {
         let mut out = alloc::vec![0u8; blocks * BLOCK_SIZE];
         let t0 = H::now_ns();
         for (i, chunk) in out.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
             self.read_block(start + i, chunk).ok()?;
         }
         let t1 = H::now_ns();
-        self.read_run(start, &mut out).ok()?;
+        self.read_runs(start, &mut out, 1).ok()?;
         let t2 = H::now_ns();
-        Some((t1.wrapping_sub(t0), t2.wrapping_sub(t1)))
+        self.read_runs(start, &mut out, self.in_flight()).ok()?;
+        let t3 = H::now_ns();
+        Some((
+            t1.wrapping_sub(t0),
+            t2.wrapping_sub(t1),
+            t3.wrapping_sub(t2),
+        ))
     }
 
     #[inline]
@@ -942,32 +1013,7 @@ impl<H: VirtioHal, T: Transport> BlockDevice for VirtioBlk<H, T> {
     }
 
     fn read_run(&self, start: usize, out: &mut [u8]) -> Result<(), StorageError> {
-        if !out.len().is_multiple_of(BLOCK_SIZE) {
-            return Err(StorageError::BadBlockSize);
-        }
-        let n = out.len() / BLOCK_SIZE;
-        if start + n > self.num_blocks() {
-            return Err(StorageError::OutOfRange);
-        }
-        let per = self.run_blocks();
-        for (c, chunk) in out.chunks_mut(per * BLOCK_SIZE).enumerate() {
-            let first = start + c * per;
-            let m = chunk.len() / BLOCK_SIZE;
-            if m == 1 {
-                self.read_block(first, chunk)?;
-                continue;
-            }
-            // SAFETY: one request in flight; the run's data frames are ours and identity-mapped.
-            unsafe {
-                self.request_run(first as u64 * SECTORS_PER_BLOCK, m)?;
-                for (k, blk) in chunk.as_chunks_mut::<BLOCK_SIZE>().0.iter_mut().enumerate() {
-                    let src =
-                        core::slice::from_raw_parts(self.run_frame(k) as *const u8, BLOCK_SIZE);
-                    blk.copy_from_slice(src);
-                }
-            }
-        }
-        Ok(())
+        self.read_runs(start, out, IN_FLIGHT)
     }
 
     fn flush(&mut self) -> Result<(), StorageError> {
@@ -1106,6 +1152,33 @@ pub fn device_suite_gated<D: BlockDevice, F: FnMut(usize, bool, &str)>(
         ok &= dev.read_run(n - 1, &mut over) == Err(StorageError::OutOfRange);
         check!(
             "virtio-blk: a run read answers what block reads answer, and refuses a run off the device",
+            ok
+        );
+    }
+
+    // Several runs in flight behind one doorbell (ADR-252) answer what block reads answer: 31
+    // blocks are one full batch of four runs of six and a second batch of a six and a one, so
+    // both a full and a short batch, and a short run inside one, are read.
+    {
+        let base = crate::storage::DATA_START + 50;
+        let blocks = IN_FLIGHT * RUN_BLOCKS + RUN_BLOCKS + 1;
+        let mut ok = true;
+        for i in 0..blocks {
+            let mut b = [0u8; BLOCK_SIZE];
+            b.iter_mut()
+                .enumerate()
+                .for_each(|(j, x)| *x = (i * 53 + j * 7 + 11) as u8);
+            ok &= dev.write_block(base + i, &b).is_ok();
+        }
+        let mut runs = alloc::vec![0u8; blocks * BLOCK_SIZE];
+        ok &= dev.read_run(base, &mut runs).is_ok();
+        for i in 0..blocks {
+            let mut one = [0u8; BLOCK_SIZE];
+            ok &= dev.read_block(base + i, &mut one).is_ok()
+                && one[..] == runs[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
+        }
+        check!(
+            "virtio-blk: runs in flight behind one doorbell answer what block reads answer",
             ok
         );
     }

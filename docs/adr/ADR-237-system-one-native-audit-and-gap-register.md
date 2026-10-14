@@ -34,7 +34,7 @@ frozen forest does not answer a console question. Both are System 1, at differen
 | Power/performance | Lethe forest (`ALTH1`) as governor | `lethed::resident::on_timer_tick` | Yes, off the timer on all three CPUs |
 | Block cache | none (CLOCK, 16 blocks) | `bcache::BlockCache` | Cache live (ADR-232); no prediction, no prefetch |
 | Anomaly detection | none in kernel | supervisor counts faults (ADR-202), fuzz gates offline | No runtime detector |
-| I/O scheduling | none | drivers are polled, one request in flight | No queue to order |
+| I/O scheduling | none | drivers are polled; virtio-blk reads keep up to 4 requests in flight (ADR-252) | No queue of independent requests to order |
 | Console decisions | Laya fine-tune `aletheia-console-s1` (v2) | `aletheiad`, `ai/dual.rs` | Yes, when the operator starts the sidecar by hand |
 | Scheduler decision over the wire | ADR-231 checkpoint, 99.5 % on unseen seed | benchmark only | Not shipped, not in any path |
 

@@ -157,14 +157,18 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
     ) {
         Ok(n) => {
             // Run reads (ADR-248), timed on this machine: the same 48 blocks one request per
-            // block, then in runs. Reported, never gated.
-            if let Some((one, run)) = dev.time_reads(kernel_core::storage::DATA_START + 30, 48) {
+            // block, then in runs, then with runs in flight (ADR-252). Reported, never gated.
+            if let Some((one, run, deep)) =
+                dev.time_reads(kernel_core::storage::DATA_START + 30, 48)
+            {
                 kprintln!(
-                    "[virtio] 48 blocks: {} us one request per block, {} us in runs of {} ({}x)",
+                    "[virtio] 48 blocks: {} us one request per block, {} us in runs of {}, {} us with {} runs in flight ({}x)",
                     one / 1000,
                     run / 1000,
                     dev.run_blocks(),
-                    one / run.max(1)
+                    deep / 1000,
+                    dev.in_flight(),
+                    one / deep.max(1)
                 );
             }
             Ok(n as u32)

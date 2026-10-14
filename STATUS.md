@@ -1271,6 +1271,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-14 — several block requests in flight (ADR-252)
+
+- virtio-blk queue 8 -> 32 descriptors, 24 data frames; `read_run` posts up to 4 runs of 6 behind one
+  doorbell; `submit_batch` matches completions in any order and refuses unknown, duplicate or short
+  ones; a batch reaches the caller only when all of it validated. virtio-blk family 22 -> 23.
+- 48 blocks, per block / runs (ADR-248) / 4 in flight (QEMU TCG, two boots): aarch64 984/950,
+  214/211, 127/130 us; riscv64 1180/1072, 234/172, 107/108 us; x86-64 983/961, 232/224, 143/138 us.
+  Still polled; interrupt-driven completion is the next rung.
+
 ### 2026-10-09 — v0.7.3 (ADR-249..251)
 
 - Crates 0.7.3; README and audit updated. Native Laya 1.1x of torch on CPU; operator ownership.
