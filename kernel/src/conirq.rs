@@ -38,7 +38,24 @@ fn timer_slice() -> u64 {
     let freq: u64;
     // SAFETY: CNTFRQ_EL0 is readable at EL1 and has no side effects.
     unsafe { asm!("mrs {f}, cntfrq_el0", f = out(reg) freq, options(nomem, nostack)) };
-    (freq / kernel_core::settings::pump_hz() as u64).max(1)
+    // A console without a desktop ticks only to ask a held USB keyboard for keys (ADR-256).
+    let hz = if crate::desktop::is_live() {
+        kernel_core::settings::pump_hz() as u64
+    } else {
+        USB_POLL_HZ
+    };
+    (freq / hz).max(1)
+}
+
+/// The console's tick while a USB keyboard is held and no desktop is live (ADR-256): 10 ms bound on
+/// keystroke latency, paid only on a machine that holds one.
+#[cfg(feature = "interactive")]
+const USB_POLL_HZ: u64 = 100;
+
+/// Whether the timer runs under the console: a live desktop's pump, or a held USB keyboard.
+#[cfg(feature = "interactive")]
+fn ticking() -> bool {
+    crate::desktop::is_live() || crate::usbkbd::is_armed()
 }
 
 /// Arm the EL1 physical timer for one slice.
@@ -131,7 +148,7 @@ pub fn init() {
     // CPU, so it is enabled in ISENABLER0 without a target register; its priority sits ABOVE the
     // console's, because a pump that misses its slice is a desktop that stutters while a
     // keystroke can wait one interrupt.
-    if crate::desktop::is_live() {
+    if ticking() {
         // SAFETY: IPRIORITYR is byte-addressed per INTID and is a valid Device register.
         unsafe {
             core::ptr::write_volatile(
@@ -144,7 +161,7 @@ pub fn init() {
     gicc_w32(GICC_PMR, 0xF0);
     gicc_w32(GICC_CTLR, 1);
     uart::rx_interrupt_enable();
-    if crate::desktop::is_live() {
+    if ticking() {
         timer_arm();
     }
     // SAFETY: single-core console; the handler is installed at vector 0x280 by vectors.s.

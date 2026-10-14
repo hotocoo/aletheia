@@ -257,7 +257,10 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
     let image = crate::vm::protected_span();
     let spans = split_around_image(&ram_ranges(), image);
 
-    const STRTAB_LOG2: u32 = 8; // covers every bus-0 requester id with room to spare
+    // One 4 KiB frame is exactly 64 STEs, naturally aligned to the table's size as a linear
+    // table must be (ADR-256). It covers requester ids 0..64 - devices 0..7 of bus 0; a function
+    // past it is refused by name below rather than written outside the frame.
+    const STRTAB_LOG2: u32 = 6;
     let alloc_frame = |what: &'static str| -> Result<usize, (u32, &'static str)> {
         match frames::alloc_zeroed_as(Owner::PAGETABLE) {
             Some(f) => Ok(f.addr()),
@@ -339,6 +342,12 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
         let mem = ctrl.table_mem();
         for (f, vendor, devid) in &funcs {
             let r = rid(*f);
+            if r >= 1 << STRTAB_LOG2 {
+                bail!(
+                    format_args!("rid {:#x} lies past the one-frame stream table", r),
+                    NAME_7
+                );
+            }
             match disc.pcie.sid_for_rid(r) {
                 Some(sid) if sid == r => {} // identity binding, as the virt map declares
                 Some(sid) => bail!(

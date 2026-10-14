@@ -657,7 +657,7 @@ fn controller_end_to_end_against_the_simulated_unit() {
 
     let unit = SimUnit::new(&arena);
     let mut ctrl = Controller::new(unit, arena.clone());
-    ctrl.set_strtab(strtab, 8).expect("strtab published");
+    ctrl.set_strtab(strtab, 6).expect("strtab published");
     ctrl.set_queue(false, cmdq, &QueueGeom::new(6, CMDQ_ENTRY_BYTES))
         .expect("cmdq published");
     ctrl.set_queue(true, evtq, &QueueGeom::new(6, EVTQ_ENTRY_BYTES))
@@ -671,7 +671,7 @@ fn controller_end_to_end_against_the_simulated_unit() {
         .expect("commands consumed");
     // Programming while enabled refuses BY NAME - tables must not change under the walker.
     assert_eq!(
-        ctrl.set_strtab(strtab, 8),
+        ctrl.set_strtab(strtab, 6),
         Err(SmmuFault::ProgrammedWhileEnabled)
     );
     assert_eq!(
@@ -696,7 +696,7 @@ fn enable_handshake_requires_the_ack_and_refuses_twice() {
     let evtq = arena.raw_page();
     let strtab = arena.raw_page();
     let mut ctrl = Controller::new(SimUnit::new(&arena), arena.clone());
-    ctrl.set_strtab(strtab, 8).expect("strtab");
+    ctrl.set_strtab(strtab, 6).expect("strtab");
     ctrl.set_queue(false, cmdq, &QueueGeom::new(6, CMDQ_ENTRY_BYTES))
         .expect("cmdq");
     ctrl.set_queue(true, evtq, &QueueGeom::new(6, EVTQ_ENTRY_BYTES))
@@ -721,6 +721,13 @@ fn misaligned_publish_points_are_named_refusals() {
         ctrl.set_strtab(0x4010_0008, 8),
         Err(SmmuFault::MisalignedPointer),
         "stream table needs 64-byte alignment"
+    );
+    // A linear table is aligned to its own size: 256 entries need 16 KiB alignment, so a
+    // page-aligned base that is not 16 KiB-aligned is refused (ADR-256).
+    assert_eq!(
+        ctrl.set_strtab(0x4010_1000, 8),
+        Err(SmmuFault::MisalignedPointer),
+        "a 16 KiB table on a 4 KiB boundary"
     );
     assert_eq!(
         ctrl.set_queue(false, 0x4010_0010, &QueueGeom::new(6, CMDQ_ENTRY_BYTES)),
@@ -786,4 +793,15 @@ fn event_decode_roundtrips_field_positions_exactly() {
     assert!(ev.was_read);
     assert!(ev.s2);
     assert_eq!(ev.class, 0b01);
+}
+
+#[test]
+fn a_stage_two_ste_carries_the_spec_config_value() {
+    // SMMUv3 STE.Config (word0 bits 3:1): 0b110 is "stage 1 bypass, stage 2 translate". The
+    // reserved 0b010 this encoder once wrote made every STE illegal (C_BAD_STE, ADR-256), and a
+    // test that decoded with the same constant could never see it, so the value is pinned here.
+    let ste =
+        kernel_core::smmu::ste_s2_encode(&kernel_core::smmu::S2Geometry::standard(1), 0x4000_0000)
+            .expect("encodes");
+    assert_eq!(ste[0] as u32 & 0xF, 0b1101, "V=1, Config=0b110");
 }

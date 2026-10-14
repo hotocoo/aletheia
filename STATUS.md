@@ -1271,6 +1271,16 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-15 — the SMMU really translates; a USB keyboard types on aarch64 (ADR-256)
+
+- Found by keeping the USB keyboard on aarch64: every STE since ADR-074 was illegal
+  (`ste_cfg::S2_ONLY` was 0b010, the spec value is 0b110) and the 256-entry linear stream table sat
+  in one unaligned 4 KiB frame, so no PCI device could DMA once enforcement latched (QEMU:
+  `C_BAD_STE`, "invalid STE"). Fixed: spec Config values pinned by a host test, a 64-entry
+  one-frame table, `set_strtab` refuses a base not aligned to the table size.
+- aarch64 keeps the USB keyboard like x86-64; `usbkbd-e2e.sh` gains an aarch64 leg (5/5). Idle
+  with a keyboard held 0.70 % (0.00 % without). `smmu=10` unchanged, aarch64 gate green twice.
+
 ### 2026-10-15 — a USB keyboard at the console (ADR-255)
 
 - Interactive x86-64 keeps the first USB boot keyboard (`pci::xhci_keep`, `usbkbd`); the console's

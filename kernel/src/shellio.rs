@@ -285,11 +285,14 @@ fn emit(s: &str) {
     crate::desktop::term_write(s.as_bytes());
 }
 
-/// The console's input: the UART ring first, then the terminal window's queue — the virtio
-/// keyboard's keystrokes that the input session routed to the focused window (ADR-083/085).
+/// The console's input: the UART ring first, then a kept USB keyboard (ADR-256), then the terminal
+/// window's queue — the virtio keyboard's keystrokes that the input session routed to the focused
+/// window (ADR-083/085).
 #[cfg(feature = "interactive")]
 fn getc() -> Option<u8> {
-    crate::conirq::pop().or_else(crate::desktop::term_getc)
+    crate::conirq::pop()
+        .or_else(crate::usbkbd::getc)
+        .or_else(crate::desktop::term_getc)
 }
 
 #[cfg(feature = "interactive")]

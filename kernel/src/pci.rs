@@ -402,3 +402,36 @@ pub fn xhci_selftest() -> Result<u32, (u32, &'static str)> {
         Err((i, name)) => Err((i as u32, name)),
     }
 }
+
+/// Re-open the first xHCI controller after its suite halted it and keep its first boot keyboard
+/// as console input (ADR-256). `None` = no controller, no keyboard, or a refusal (printed).
+#[cfg(feature = "interactive")]
+pub fn xhci_keep() -> Option<
+    kernel_core::xhci::KeyboardInput<crate::virtio::Aarch64Virtio, kernel_core::nvme::MmioRegs>,
+> {
+    use kernel_core::xhci;
+    let disc = crate::smmu::discovery()?;
+    let env = Ecam::new(disc.pcie.ecam_base);
+    // SAFETY: walks ECAM only.
+    let bdf = unsafe { virtiopci::find_class_nth(&env, xhci::CLASS_XHCI, 0) }?;
+    // SAFETY: boot owns the function; the same BAR assignment the suite made, mapped again.
+    let base = unsafe { open_bar(&env, bdf, XHCI_BAR_BASE, 0, xhci::MAP_LEN) }.ok()?;
+    // SAFETY: `base` is the mapped BAR0; frames come from this kernel's allocator and are never
+    // freed while the controller holds them.
+    let bound = unsafe {
+        xhci::Xhci::<crate::virtio::Aarch64Virtio, _>::init(
+            kernel_core::nvme::MmioRegs::new(base),
+            xhci::MAP_LEN,
+        )
+        .map_err(|e| (xhci::BindStage::Address, e))
+        .and_then(|(mut x, _)| x.bind_keyboard().map(|kb| kb.map(|kb| (x, kb))))
+    };
+    match bound {
+        Ok(Some((x, kb))) => Some(xhci::KeyboardInput::new(x, kb)),
+        Ok(None) => None,
+        Err((stage, e)) => {
+            kprintln!("[xhci] keyboard not kept: {:?} refused ({:?})", stage, e);
+            None
+        }
+    }
+}

@@ -349,13 +349,16 @@ impl EventRecord {
 /// STE bytes as eight u64 slots (the TableMem grain). Slot N covers u32 words 2N and 2N+1.
 pub type Ste = [u64; 8];
 
-/// CONFIG field values (STE word0 bits [3:1]).
+/// CONFIG field values (STE word0 bits [3:1]; SMMUv3 spec, STE.Config). Bit 2 is set for every
+/// configuration that does not abort; 0b001..0b011 are RESERVED and make the STE illegal
+/// (C_BAD_STE). Until ADR-256 the translating values here omitted bit 2, so every STE the kernel
+/// wrote was refused and no PCI device could DMA once enforcement latched.
 pub mod ste_cfg {
     pub const ABORT: u32 = 0b000;
-    pub const S1_ONLY: u32 = 0b001;
-    pub const S2_ONLY: u32 = 0b010;
-    pub const S1_S2: u32 = 0b011;
     pub const BYPASS: u32 = 0b100;
+    pub const S1_ONLY: u32 = 0b101;
+    pub const S2_ONLY: u32 = 0b110;
+    pub const S1_S2: u32 = 0b111;
 }
 
 /// Why an STE or its geometry was refused.
@@ -784,7 +787,10 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
         if self.smmu_enabled() {
             return Err(SmmuFault::ProgrammedWhileEnabled);
         }
-        if !base_pa.is_multiple_of(64) {
+        // A linear table is aligned to its own size (SMMUv3 STRTAB_BASE): the unit ignores the
+        // base's low log2size+6 bits, so a table placed anywhere else is read from the wrong
+        // place (ADR-256: one 4 KiB frame declared as 256 entries put every STE out of reach).
+        if log2size > 0x3F || !base_pa.is_multiple_of(1usize << (log2size + 6).min(63)) {
             return Err(SmmuFault::MisalignedPointer);
         }
         self.regs

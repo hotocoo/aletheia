@@ -40,6 +40,8 @@ mod semihosting;
 mod shellio;
 mod smmu;
 mod smp;
+#[cfg(feature = "interactive")]
+mod usbkbd;
 mod usermode;
 mod virtio;
 mod vm;
@@ -983,6 +985,13 @@ pub extern "C" fn kmain() -> ! {
             kprintln!("[xhci] FAILED at xhci invariant {}: {}", idx, name);
             semihosting::exit(1160 + idx as i32);
         }
+    }
+    // An interactive machine keeps the first USB boot keyboard as console input (ADR-256).
+    #[cfg(feature = "interactive")]
+    if let Some(input) = pci::xhci_keep() {
+        // SAFETY: boot path, single-threaded, before any other context can reach the static.
+        unsafe { crate::usbkbd::keep(input) };
+        kprintln!("[xhci] USB keyboard kept as console input");
     }
 
     // SMP: power on the other CPUs via PSCI and prove the cross-core substrate (REQ-SMP-002,
