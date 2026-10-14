@@ -255,6 +255,25 @@ pub type E1000 =
 /// The shared e1000 driver on aarch64 (ADR-224, ADR-226). `Ok((0, None))` = no controller.
 /// The device is handed back when its suite holds, so the console can keep it (ADR-235).
 pub fn e1000_selftest() -> Result<(u32, Option<E1000>), (u32, &'static str)> {
+    intel_nic_selftest(&kernel_core::e1000::DEVICE_IDS, "e1000", E1000_BAR_BASE)
+}
+
+/// The same driver over an 82574L (QEMU `e1000e`, ADR-254), BARs 80 MiB above the virtio-blk-pci
+/// window. The device is dropped (quiesced) after its suite. `Ok(0)` = none attached.
+pub fn e1000e_selftest() -> Result<u32, (u32, &'static str)> {
+    intel_nic_selftest(
+        &kernel_core::e1000::DEVICE_IDS_82574,
+        "e1000e",
+        BAR_ASSIGN_BASE + 0x0500_0000,
+    )
+    .map(|(n, _)| n)
+}
+
+fn intel_nic_selftest(
+    ids: &[u16],
+    tag: &str,
+    bar_base: usize,
+) -> Result<(u32, Option<E1000>), (u32, &'static str)> {
     use kernel_core::e1000;
     let Some(disc) = crate::smmu::discovery() else {
         return Ok((0, None));
@@ -263,27 +282,26 @@ pub fn e1000_selftest() -> Result<(u32, Option<E1000>), (u32, &'static str)> {
     // SAFETY: walks ECAM only.
     let found = unsafe { virtiopci::enumerate_bus0(&env) }
         .into_iter()
-        .find(|&(_, v, d)| v == e1000::VENDOR_INTEL && e1000::DEVICE_IDS.contains(&d));
+        .find(|&(_, v, d)| v == e1000::VENDOR_INTEL && ids.contains(&d));
     let Some((bdf, _, id)) = found else {
-        kprintln!("[e1000] no controller (skipped)");
+        kprintln!("[{}] no controller (skipped)", tag);
         return Ok((0, None));
     };
     // SAFETY: this boot owns the function; BAR0 is mapped device memory in the identity window.
     let opened = unsafe {
-        open_bar(&env, bdf, E1000_BAR_BASE, 0, 0x6000)
-            .and_then(|b| E1000::init(e1000::MmioRegs::new(b)))
+        open_bar(&env, bdf, bar_base, 0, 0x6000).and_then(|b| E1000::init(e1000::MmioRegs::new(b)))
     };
     let dev = match opened {
         Ok(d) => d,
         Err(e) => {
-            kprintln!("[e1000] init refused: {}", e);
+            kprintln!("[{}] init refused: {}", tag, e);
             return Err((0, "e1000 controller initialization"));
         }
     };
     let m = dev.mac();
     kprintln!(
-        "[e1000] controller @ PCI {:02x}:{:02x}.{} id {:#06x} mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        bdf.bus, bdf.device, bdf.function, id, m[0], m[1], m[2], m[3], m[4], m[5]
+        "[{}] controller @ PCI {:02x}:{:02x}.{} id {:#06x} mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        tag, bdf.bus, bdf.device, bdf.function, id, m[0], m[1], m[2], m[3], m[4], m[5]
     );
     match e1000::device_suite(&dev, &mut suite_log) {
         Ok(n) => Ok((n as u32, Some(dev))),

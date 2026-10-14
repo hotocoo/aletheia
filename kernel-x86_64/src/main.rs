@@ -1359,6 +1359,23 @@ fn kmain(memory_map: &MemoryMapOwned) -> ! {
             ActiveHal::exit(1140 + idx as i32);
         }
     }
+    // e1000e (REQ-DRV-013, ADR-254): the same driver over an 82574L, on its own user network.
+    kprintln!("");
+    kprintln!("--- e1000e selftests (real PCI 82574L: same driver, ARP + ICMP + DHCP + TCP) ---");
+    match pci::e1000e_selftest() {
+        Ok(0) => {}
+        Ok(n) => {
+            kprintln!("[e1000e] ALL {} E1000E INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] e1000e suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("e1000e")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!("[e1000e] FAILED at e1000e invariant {}: {}", idx, name);
+            ActiveHal::exit(1180 + idx as i32);
+        }
+    }
 
     // AHCI (REQ-DRV-011, ADR-225): SATA disks; only the disk marked scratch is ever written.
     kprintln!("");

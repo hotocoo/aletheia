@@ -61,6 +61,10 @@ const RXD_STAT_EOP: u8 = 0x02;
 /// PCI ids this driver binds: 82540EM (QEMU `e1000`, VirtualBox default) and 82545EM (VMware).
 pub const VENDOR_INTEL: u16 = 0x8086;
 pub const DEVICE_IDS: [u16; 2] = [0x100E, 0x100F];
+/// 82574L (QEMU `e1000e`; many PCIe desktop boards): the PCIe successor, register-compatible with
+/// the 8254x in the legacy-descriptor mode this driver uses, and loads RA[0] with the address valid
+/// at reset (ADR-254).
+pub const DEVICE_IDS_82574: [u16; 1] = [0x10D3];
 
 /// Ring entries. RDLEN/TDLEN must be multiples of 128 bytes: 8 x 16-byte descriptors.
 pub const RING: usize = 8;
