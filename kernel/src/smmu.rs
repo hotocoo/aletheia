@@ -458,11 +458,99 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
     }
     pass!(NAME_10);
 
-    kprintln!(
-        "[smmu] translation REMAINS ON from here to halt; device-side walk probes stay open in"
-    );
-    kprintln!(
-        "[smmu] the gap register until an emulator revision attaches CLI-plugged PCI devices"
-    );
+    // --- 11..13: the unit ENFORCES, observed from the device side (ADR-257) ---------------------------------
+    // Until ADR-256 every STE was illegal, so nothing could DMA under enforcement and these were
+    // left unasserted. Now: a granted stream's DMA completes and the unit records nothing; the
+    // same stream with its STE revoked is denied BY NAME at its own stream id and the request
+    // never completes; restoring the STE (plus the device's own reset, since the denied DMA broke
+    // its queue) brings back the very bytes, with the unit quiet again.
+    let probe_rid = rid(blk.bdf);
+    let last = kernel_core::storage::BlockDevice::num_blocks(&blk.dev) - 1;
+    let pattern: [u8; kernel_core::storage::BLOCK_SIZE] =
+        core::array::from_fn(|i| (i.wrapping_mul(13) ^ 0xA5) as u8);
+    let mut seen = alloc::vec::Vec::new();
+
+    n += 1;
+    const NAME_11: &str =
+        "a granted function's DMA completes under enforcement, byte for byte, and the unit records nothing";
+    {
+        use kernel_core::storage::BlockDevice;
+        let _ = ctrl.drain_events(&mut seen);
+        seen.clear();
+        let mut back = [0u8; kernel_core::storage::BLOCK_SIZE];
+        let ok = blk.dev.write_block(last, &pattern).is_ok()
+            && blk.dev.read_block(last, &mut back).is_ok()
+            && back == pattern;
+        let quiet = ctrl.drain_events(&mut seen).is_ok() && seen.is_empty();
+        if !ok || !quiet {
+            bail!(
+                format_args!("completed={} events={}", ok, seen.len()),
+                NAME_11
+            );
+        }
+    }
+    pass!(NAME_11);
+
+    n += 1;
+    const NAME_12: &str =
+        "a revoked stream is denied by name (C_BAD_STE at its own stream id) and its request never completes";
+    {
+        use kernel_core::storage::BlockDevice;
+        {
+            let mem = ctrl.table_mem();
+            if let Err(e) = smmu::rewrite_ste(&mut *mem, strtab, probe_rid, None) {
+                bail!(format_args!("revoke refused {:?}", e), NAME_12);
+            }
+        }
+        if let Err(e) = ctrl.invalidate_stream(probe_rid, geom.vmid) {
+            bail!(format_args!("invalidate {:?}", e), NAME_12);
+        }
+        let mut back = [0u8; kernel_core::storage::BLOCK_SIZE];
+        let refused = blk.dev.read_block(last, &mut back).is_err() && back != pattern;
+        seen.clear();
+        let _ = ctrl.drain_events(&mut seen);
+        let named = seen
+            .iter()
+            .any(|e| e.kind == smmu::evt::C_BAD_STE && e.sid == probe_rid);
+        if !refused || !named {
+            bail!(
+                format_args!("refused={} events={}", refused, seen.len()),
+                NAME_12
+            );
+        }
+    }
+    pass!(NAME_12);
+
+    n += 1;
+    const NAME_13: &str =
+        "restoring the grant brings the device back: the same bytes, and the unit quiet again";
+    {
+        use kernel_core::storage::BlockDevice;
+        {
+            let mem = ctrl.table_mem();
+            if let Err(e) = smmu::rewrite_ste(&mut *mem, strtab, probe_rid, Some(&ste)) {
+                bail!(format_args!("restore refused {:?}", e), NAME_13);
+            }
+        }
+        if let Err(e) = ctrl.invalidate_stream(probe_rid, geom.vmid) {
+            bail!(format_args!("invalidate {:?}", e), NAME_13);
+        }
+        if let Err(e) = blk.dev.reset() {
+            bail!(format_args!("device reset {}", e), NAME_13);
+        }
+        let mut back = [0u8; kernel_core::storage::BLOCK_SIZE];
+        let ok = blk.dev.read_block(last, &mut back).is_ok() && back == pattern;
+        seen.clear();
+        let quiet = ctrl.drain_events(&mut seen).is_ok() && seen.is_empty();
+        if !ok || !quiet {
+            bail!(
+                format_args!("restored={} events={}", ok, seen.len()),
+                NAME_13
+            );
+        }
+    }
+    pass!(NAME_13);
+
+    kprintln!("[smmu] translation REMAINS ON from here to halt");
     Ok(n as u32)
 }

@@ -87,7 +87,7 @@ qemu-system-aarch64 -machine virt,iommu=smmuv3,highmem-ecam=off,gic-version=2 -g
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
   -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
@@ -111,7 +111,7 @@ OUT="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
   -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
@@ -157,7 +157,7 @@ echo "$OUT" | grep "ALL 5 CONSOLE-STORM INVARIANTS HOLD" >/dev/null || { echo "F
 # shows them, so the gate holds the live line, not just the suites.
 echo "$OUT" | grep "\[desktop\] LIVE: .* 5 managed windows" >/dev/null || { echo "FAIL: the live desktop did not come up with its managed windows (ALET-P2-021, ADR-085)"; fail=1; }
 echo "$OUT" | grep "ALL 10 INPUT-HARDWARE INVARIANTS HOLD" >/dev/null || { echo "FAIL: input-hardware invariants marker missing (ALET-P2-021, ADR-080)"; fail=1; }
-echo "$OUT" | grep "ALL 10 SMMUV3 INVARIANTS HOLD" >/dev/null || { echo "FAIL: smmuv3 invariants marker missing (ALET-P1-018, ADR-074)"; fail=1; }
+echo "$OUT" | grep "ALL 13 SMMUV3 INVARIANTS HOLD" >/dev/null || { echo "FAIL: smmuv3 invariants marker missing (ALET-P1-018, ADR-074)"; fail=1; }
 echo "$OUT" | grep "enforcement LIVE" >/dev/null || { echo "FAIL: smmuv3 enforcement never turned ON"; fail=1; }
 # Custody crosses the platform boundary (ALET-P1-034, ADR-072): the firmware-delivered root must
 # open, seal, reopen, rotate, rekey, and refuse every named impostor — on THIS machine.
@@ -221,7 +221,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="ahci=24 bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 dns=9 e1000=6 e1000e=6 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 nvme=23 net=9 persist=10 pm=14 reclaim=11 anomaly=7 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=62 smmu=10 vault=14 vinput=10 virtio=23 x25519=7 x509=9 vm=66 xhci=7"
+AARCH64_EXPECTED="ahci=24 bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 dns=9 e1000=6 e1000e=6 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 nvme=23 net=9 persist=10 pm=14 reclaim=11 anomaly=7 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=15 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=62 smmu=13 vault=14 vinput=10 virtio=23 x25519=7 x509=9 vm=66 xhci=7"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }
@@ -237,7 +237,7 @@ OUT2="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
   -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \
@@ -264,7 +264,7 @@ OUT3="$(perl -e 'alarm 300; exec @ARGV or die' \
   -drive if=none,format=raw,file="$PIMG",id=blk1 -device virtio-blk-device,drive=blk1 \
   -netdev user,id=n0,net=192.168.76.0/24 -device virtio-net-device,netdev=n0 \
   -device virtio-rng-device \
-  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+  -drive if=none,format=raw,file="$PCIIMG",id=pciblk0 -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
   -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
   -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device ich9-ahci,id=ahci -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 \
   -drive if=none,format=raw,file="$SIGIMG",id=sata0 -device ide-hd,drive=sata0,bus=ahci.0 \

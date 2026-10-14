@@ -227,7 +227,7 @@ if command -v qemu-system-aarch64 >/dev/null 2>&1; then
       -drive "if=none,format=raw,file=$A64/target/usbkbd-scratch.img,id=blk0" -device virtio-blk-device,drive=blk0 \
       -drive "if=none,format=raw,file=$A64/target/usbkbd-persist.img,id=blk1" -device virtio-blk-device,drive=blk1 \
       -drive "if=none,format=raw,file=$A64/target/usbkbd-pci.img,id=pciblk0" \
-      -device virtio-blk-pci,disable-legacy=on,drive=pciblk0 \
+      -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0 \
       -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 \
       -fw_cfg name=opt/org.aletheia/dtb,file="$DTBT" \
       -serial "file:$A64LOG" \

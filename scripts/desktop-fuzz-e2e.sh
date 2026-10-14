@@ -50,7 +50,7 @@ run_target() {
   printf 'aletheia-capvault-root-0123456789abcdef' | head -c 32 > "$rootbin"
   # The desktop's devices AND the network's, on one machine: the window path needs both.
   local -a devices=(-device virtio-gpu-device,xres=640,yres=240 -device virtio-keyboard-device -device virtio-tablet-device
-    -drive "if=none,format=raw,file=$pciimg,id=pciblk0" -device virtio-blk-pci,disable-legacy=on,drive=pciblk0
+    -drive "if=none,format=raw,file=$pciimg,id=pciblk0" -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0
     -netdev user,id=n0 -device virtio-net-device,netdev=n0 -device virtio-rng-device)
   args=("$qemu" -machine "$machine" -cpu "$cpu" -smp 4 -m 128M -display none -S
     -global virtio-mmio.force-legacy=false

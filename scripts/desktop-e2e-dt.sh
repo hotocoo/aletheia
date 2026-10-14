@@ -31,7 +31,7 @@ run_target() {
   local -a args=("$qemu" -machine "$machine" -cpu "$cpu" -smp 4 -m 128M -display none -S
     -global virtio-mmio.force-legacy=false
     -drive "if=none,format=raw,file=$img,id=blk0" -device virtio-blk-device,drive=blk0
-    -drive "if=none,format=raw,file=$pciimg,id=pciblk0" -device virtio-blk-pci,disable-legacy=on,drive=pciblk0
+    -drive "if=none,format=raw,file=$pciimg,id=pciblk0" -device virtio-blk-pci,disable-legacy=on,iommu_platform=on,drive=pciblk0
     -device virtio-gpu-device,xres=640,yres=240 -device virtio-keyboard-device -device virtio-tablet-device
     -kernel "$elf" -chardev "socket,id=ser0,path=$ser,server=on,wait=off" -serial chardev:ser0
     -qmp "unix:$qmp,server,nowait")

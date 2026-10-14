@@ -1271,6 +1271,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-15 — ARM IOMMU enforcement observed from the device (ADR-257)
+
+- `smmu` 10 -> 13 on aarch64: under the latched SMMU a granted virtio-blk-pci completes byte for
+  byte with the event queue empty; its revoked STE is `C_BAD_STE` at its own stream id and the read
+  fails; restoring the STE (and resetting the device) brings the bytes back with the unit quiet.
+- QEMU virtio-pci bypasses the IOMMU unless `iommu_platform=on`; every aarch64 gate now sets it
+  (vm-e2e, usbkbd-e2e, browser-e2e, desktop-e2e-dt, desktop-fuzz-e2e: all pass; browser-e2e SKIPs
+  on a host without python `cryptography`).
+
 ### 2026-10-15 — the SMMU really translates; a USB keyboard types on aarch64 (ADR-256)
 
 - Found by keeping the USB keyboard on aarch64: every STE since ADR-074 was illegal
