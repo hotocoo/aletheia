@@ -11,6 +11,8 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMG="${1:-$HERE/build/aletheia-x86_64.img}"
+# HDA_AUDIODEV: the HD Audio output's backend, `none` unless a gate records it
+# (scripts/hda-e2e.sh passes `wav,path=FILE`).
 [ -f "$IMG" ] || { echo "missing image: $IMG (run scripts/build-image.sh first)"; exit 1; }
 
 # Locate OVMF/edk2 UEFI firmware across hosts: macOS (Homebrew qemu) and Linux/CI (Debian/Ubuntu
@@ -93,7 +95,7 @@ boot_once() {
     -drive if=none,format=raw,file="$PERSIST",id=blk1 \
     -device virtio-blk-pci,drive=blk1,disable-legacy=on,iommu_platform=on \
     -drive if=none,format=raw,file="$NVMEIMG",id=nvm0 -device nvme,serial=ALETHEIA-SCRATCH,drive=nvm0 \
-    -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
+    -netdev user,id=n1,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000,netdev=n1 -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -netdev user,id=n2,guestfwd=tcp:10.0.2.100:7-cmd:cat -device e1000e,netdev=n2 -audiodev "${HDA_AUDIODEV:-none}",id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
     -drive if=none,format=raw,file="$SATAIMG",id=sata1 -device ide-hd,drive=sata1,bus=ide.1,serial=ALETHEIA-SCRATCH \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on \
     -device virtio-rng-pci,disable-legacy=on,iommu_platform=on \

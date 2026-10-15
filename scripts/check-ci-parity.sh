@@ -6,7 +6,7 @@
 # first-class architecture with a boot script on disk and a requirement row naming it, while no CI
 # job ever executed it — the claim was true on paper and unenforced in practice.
 #
-# This gate closes the loop with four mechanical checks:
+# This gate closes the loop with five mechanical checks:
 #
 #   [1] Architecture boot-gate coverage — every BOOTABLE kernel crate discovered on the filesystem
 #       (a directory with Cargo.toml + src/main.rs) must have a boot-gate script that CI executes.
@@ -27,6 +27,10 @@
 #
 #   [4] STATUS cross-check — every script CI executes must be named in STATUS.md, so the status
 #       document cannot describe a qualification story that omits a gate that really runs.
+#
+#   [5] Aggregate completeness — every *-e2e.sh gate CI executes is also a leg of scripts/e2e-all.sh,
+#       so the one local command that claims to run "every end-to-end gate" cannot fall behind CI
+#       when a new gate lands (ADR-262).
 #
 # No new toolchain dependency: pure bash + coreutils, so it runs unchanged in the `rust:latest` CI
 # image alongside the hosted-acceptance, VM-boot and traceability gates. Exit 0 = PASS.
@@ -221,6 +225,19 @@ while IFS= read -r s; do
   fi
 done <<<"$ci_set"
 [ "$missing_status" -eq 0 ] && echo "  PASS: STATUS.md documents every CI-executed script"
+
+# --- [5] e2e-all.sh runs every end-to-end gate CI runs ----------------------------------------
+echo "== [5] Aggregate completeness (scripts/e2e-all.sh names every CI-executed *-e2e.sh gate)"
+AGG="${E2E_ALL:-$ROOT/scripts/e2e-all.sh}"
+missing_agg=0
+while IFS= read -r s; do
+  case "$s" in scripts/*-e2e*.sh) ;; *) continue ;; esac
+  if ! grep -qw -- "$(basename "$s" .sh)" "$AGG"; then
+    echo "  FAIL: CI executes $s but scripts/e2e-all.sh does not run it"
+    fail=1; missing_agg=1
+  fi
+done <<<"$ci_set"
+[ "$missing_agg" -eq 0 ] && echo "  PASS: scripts/e2e-all.sh runs every CI-executed end-to-end gate"
 
 echo "----------------------------------------"
 if [ "$fail" -eq 0 ]; then

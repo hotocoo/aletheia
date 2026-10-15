@@ -723,7 +723,7 @@ believe, every number this repository quotes has a gate behind it:
 ```bash
 cd aletheia && cargo test        # full conformance + unit suite (deterministic; no model needed)
 cd kernel-core && cargo test     # the shared substrate's hosted proofs — 452 tests incl. soak + the self-benchmark suite
-./scripts/e2e-all.sh             # all three CPU targets + the VirtualBox rung, one aggregate pass/fail
+./scripts/e2e-all.sh             # every end-to-end gate CI runs (three CPUs, VirtualBox, GUI, console, network, input, audio), one pass/fail
 ./scripts/console-e2e.sh         # boot, type, halt, reboot, read it back — three targets
 ./scripts/comparative-bench.sh   # Aletheia vs Linux, Redox and FreeBSD on the SAME emulator:
                                  # boot, idle CPU, typed echo load, IPC round trip (docs/BENCHMARKS.md)

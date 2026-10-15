@@ -27,7 +27,7 @@ the code that runs and exits with a machine-checkable verdict).
 
 ```bash
 cd Aletheia
-./scripts/e2e-all.sh      # aarch64 + RISC-V QEMU gates + x86-64 disk-image smoke test -> one PASS/FAIL
+./scripts/e2e-all.sh      # the three boot gates + every other end-to-end gate CI runs -> one PASS/FAIL
 ```
 
 Individual hosted + per-target gates:
@@ -37,7 +37,7 @@ cd aletheia && cargo test          # hosted System Core suite (M1 + P2 + policy 
 ./scripts/vm-e2e.sh                # aarch64 microkernel in QEMU (spine + memory + virtual-memory + user-mode)
 ./scripts/vm-e2e-riscv.sh          # RISC-V/RV64GC first-class target (QEMU virt + OpenSBI, S-mode)
 ./scripts/vm-e2e-x86.sh            # x86-64/AMD64 first-class target (QEMU + OVMF UEFI, mtools ESP)
-./scripts/e2e-all.sh               # all three legs, one aggregate pass/fail
+./scripts/e2e-all.sh               # every end-to-end gate, one aggregate pass/fail (ADR-262)
 ./scripts/conformance.sh           # every target proves the SAME core semantic contract
 ./scripts/build-all.sh             # every crate, each with its own pinned toolchain/target
 ```

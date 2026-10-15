@@ -9,7 +9,12 @@
 # whose zero-crossing rate is 1500/s within 10 %. A driver that ran the stream over zeroed or
 # misaddressed buffers would pass the boot gate and fail here.
 #
-# Exit 0 PASS. SKIP (exit 0, never silent pass) when the host lacks qemu-system-aarch64/python3.
+# x86-64 is measured the same way (ADR-262): the full x86-64 boot gate (scripts/vm-e2e-x86.sh) runs
+# with the HDA output recorded to a WAV file instead of discarded, so the tone the x86-64 boot plays
+# at 00:08.0 is held to the same level and frequency checks.
+#
+# Exit 0 PASS. SKIP (exit 0, never silent pass) when the host lacks qemu-system-aarch64/python3;
+# the x86-64 leg SKIPs by name when the host lacks qemu-system-x86_64 + mtools + OVMF.
 set -uo pipefail
 
 if [ -x "$HOME/.cargo/bin/cargo" ]; then export PATH="$HOME/.cargo/bin:$PATH"; fi
@@ -55,7 +60,9 @@ perl -e 'alarm 300; exec @ARGV or die' qemu-system-aarch64 "${MACHINE[@]}" -disp
   -serial "file:$LOG" >/dev/null 2>&1
 echo "  boot exit code: $?"
 
-"$PY" - "$LOG" "$WAV" <<'PYEOF'
+# measure LOG WAV: the boot played its tone (LOG) and the capture (WAV) is that tone.
+measure() {
+"$PY" - "$1" "$2" <<'PYEOF'
 import struct, sys
 log_path, wav_path = sys.argv[1], sys.argv[2]
 fails = []
@@ -95,7 +102,32 @@ if fails:
     print('FAILED: ' + '; '.join(fails)); sys.exit(1)
 print('the driver\'s buffers reached the speaker as a 750 Hz tone')
 PYEOF
-rc=$?
+}
+measure "$LOG" "$WAV"
+a_rc=$?
+
+hr; echo "==> x86-64: the full boot gate with the HDA output recorded to a WAV file"; hr
+X86LOG="$T/hda-e2e-x86.log"
+X86WAV="$T/hda-e2e-x86.wav"
+rm -f "$X86LOG" "$X86WAV"
+have_ovmf=0
+for c in "${OVMF_CODE:-}" /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE_4M.fd \
+         /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd; do
+  [ -n "$c" ] && [ -f "$c" ] && { have_ovmf=1; break; }
+done
+if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && [ "$have_ovmf" = "1" ]; then
+  HDA_AUDIODEV="wav,path=$X86WAV" bash "$ROOT/scripts/vm-e2e-x86.sh" > "$X86LOG" 2>&1; g_rc=$?
+  grep -E 'VM-E2E-X86|SMOKE TEST' "$X86LOG"
+  if [ "$g_rc" -eq 0 ]; then measure "$X86LOG" "$X86WAV"; x_rc=$?; else x_rc=1; fi
+  x_res="$([ "$x_rc" -eq 0 ] && echo PASS || echo FAIL)"
+else
+  echo "  x86-64 leg unavailable on this host (needs qemu-system-x86_64 + mtools + OVMF) — SKIPPED (never a silent pass)."
+  x_rc=0; x_res="SKIP"
+fi
+
 hr
+echo "  aarch64 : $([ "$a_rc" -eq 0 ] && echo PASS || echo FAIL)"
+echo "  x86-64  : $x_res"
+rc=$(( a_rc != 0 || x_rc != 0 ))
 if [ "$rc" -eq 0 ]; then echo "HDA-E2E: PASS"; else echo "HDA-E2E: FAIL"; fi
 exit "$rc"

@@ -22,6 +22,15 @@
 #        verdict is the serial log with marker parity against the QEMU gate. SKIPs (never
 #        silent-passes) when VirtualBox is absent. Set REQUIRE_VBOX=1 to make a SKIP fatal.
 #
+#   6. every other end-to-end gate CI runs, each as one leg (ADR-262): the operator console, its
+#      hostile-input and crash campaigns, the model-driven console, the network conversations
+#      (TCP, TLS, HTTPS, DNS, the browser) and their hostile peer, the input devices (PS/2, USB,
+#      virtio-input, the desktop storm) and the HD Audio capture. A leg is classified from the
+#      gate's own verdict line: `NAME: PASS`, `NAME: SKIP`, or FAIL when it exits non-zero or names
+#      no verdict at all. A PASS whose transcript skipped a CPU or an arm is reported as
+#      `PASS (legs SKIPPED)`, so a host that ran half a gate never reads as one that ran all of it.
+#      Set REQUIRE_ALL=1 to make every SKIP, whole or partial, fatal.
+#
 # Exit 0 iff every leg that ran passed AND no required leg was skipped.
 set -uo pipefail
 
@@ -83,6 +92,26 @@ else
   desktop_res="FAIL"
 fi
 
+# Every CI-executed *-e2e.sh gate the legs above do not already run. scripts/check-ci-parity.sh
+# check [5] fails when CI runs an end-to-end gate this script does not.
+GATES="console-e2e console-fuzz-e2e console-ai-e2e console-agent-e2e crash-e2e
+  tcp-e2e tls-e2e https-e2e dns-e2e browser-e2e net-fuzz-e2e
+  keyboard-e2e usbkbd-e2e vinput-e2e desktop-fuzz-e2e hda-e2e"
+declare -a gate_res=()
+for g in $GATES; do
+  hr; echo "==> [6] $g"; hr
+  out="$(bash "$ROOT/scripts/$g.sh" 2>&1)"; rc=$?
+  printf '%s\n' "$out"
+  if [ "$rc" -ne 0 ]; then res="FAIL"
+  elif printf '%s\n' "$out" | grep -qi "^$g: SKIP"; then res="SKIP"
+  elif printf '%s\n' "$out" | grep -qi "^$g: PASS"; then
+    res="PASS"
+    printf '%s\n' "$out" | grep -qE '(^|[^A-Z])SKIP([^A-Z]|$)|SKIPPED \(never' && res="PASS (legs SKIPPED)"
+  else res="FAIL (no verdict line)"
+  fi
+  gate_res+=("$(printf '  %-20s: %s' "$g" "$res")")
+done
+
 hr; echo "E2E SUMMARY"; hr
 printf '  aarch64 (full)      : %s\n' "$aarch64_res"
 printf '  riscv64 (full)      : %s\n' "$riscv_res"
@@ -91,6 +120,7 @@ printf '  x86-64  (image)     : %s\n' "$x86_res"
 # fail the run and does not appear here is a leg whose SKIP reads as "not attempted".
 printf '  x86-64  (VirtualBox): %s\n' "$vbox_res"
 printf '  live GUI (DT targets): %s\n' "$desktop_res"
+printf '%s\n' "${gate_res[@]}"
 hr
 
 fail=0
@@ -111,5 +141,13 @@ case "$desktop_res" in
   SKIP*) [ "${REQUIRE_DESKTOP:-0}" = "1" ] && { echo "live GUI skipped but REQUIRE_DESKTOP=1 -> fail"; fail=1; } ;;
   *) fail=1 ;;
 esac
+
+for r in "${gate_res[@]}"; do
+  case "$r" in
+    *": PASS") ;;
+    *SKIP*) [ "${REQUIRE_ALL:-0}" = "1" ] && { echo "${r#  } but REQUIRE_ALL=1 -> fail"; fail=1; } ;;
+    *) fail=1 ;;
+  esac
+done
 
 if [ "$fail" -eq 0 ]; then echo "E2E-ALL: PASS"; exit 0; else echo "E2E-ALL: FAIL"; exit 1; fi

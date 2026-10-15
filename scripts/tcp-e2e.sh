@@ -145,6 +145,8 @@ drive_session() {
 
 fail=0
 declare -a RESULTS=()
+PEER_SEEN=0
+SESSION_CMDS=("tcp 10.0.2.2 1 nobody-listens-here" "tcp 10.0.2.2 $PEER_PORT $REQUEST" "halt")
 
 check_transcript() {
   local label="$1" log="$2" bad=0
@@ -157,7 +159,10 @@ check_transcript() {
   grep -q "tcp: the peer"                <<<"$log" || { echo "  FAIL [$label] dialing a dead port did not refuse by name"; bad=1; }
   # And the peer must have SEEN the request: without this, a console that printed its own input
   # would pass.
-  grep -q "peer received: b'$REQUEST'" "$PEER_LOG" || { echo "  FAIL [$label] the peer never received the request"; bad=1; }
+  # Counted against the leg's own starting point: the peer log is shared by every leg, so a bare
+  # grep would let a later leg pass on an earlier leg's conversation.
+  [ "$(grep -c "peer received: b'$REQUEST'" "$PEER_LOG")" -gt "$PEER_SEEN" ] \
+    || { echo "  FAIL [$label] the peer never received the request"; bad=1; }
   [ "$bad" -eq 0 ] || fail=1
   return $bad
 }
@@ -183,12 +188,59 @@ mmio_leg() {
   local log; log="$(mktemp)"
 
   # A dead port first (the refusal must be named), then the live peer.
-  drive_session "$log" 240 "tcp 10.0.2.2 1 nobody-listens-here" \
-    "tcp 10.0.2.2 $PEER_PORT $REQUEST" "halt"
+  PEER_SEEN="$(grep -c "peer received: b'$REQUEST'" "$PEER_LOG")"
+  drive_session "$log" 240 "${SESSION_CMDS[@]}"
   sed -n '/interactive console/,$p' "$log"
   check_transcript "$label" "$(cat "$log")"
   local rc=$?
   rm -f "$log"
+  return $rc
+}
+
+# x86-64 (UEFI under OVMF): the same session, the same checks. `x86_leg LABEL NIC`: with `e1000`
+# the machine has no virtio-net at all, as a VMware guest or a real machine has, so the connection
+# must ride the NIC the boot kept (ADR-227, ADR-235).
+x86_leg() {
+  local label="${1:-x86-64}" nic="${2:-virtio-net-pci}" code="" vars=""
+  for c in "${OVMF_CODE:-}" /opt/homebrew/share/qemu/edk2-x86_64-code.fd \
+      /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd; do
+    [ -n "$c" ] && [ -f "$c" ] && { code="$c"; break; }
+  done
+  for v in "${OVMF_VARS:-}" /opt/homebrew/share/qemu/edk2-i386-vars.fd \
+      /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
+    [ -n "$v" ] && [ -f "$v" ] && { vars="$v"; break; }
+  done
+  if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v mformat >/dev/null 2>&1 \
+      || [ -z "$code" ] || [ -z "$vars" ]; then
+    echo "  x86-64 leg unavailable on this host (needs qemu-system-x86_64 + mtools + OVMF) — SKIPPED (never a silent pass)."
+    return 2
+  fi
+  printf '========================================================================\n'
+  echo "==> $label: building the UEFI image WITH the interactive console"
+  printf '========================================================================\n'
+  local img="$ROOT/kernel-x86_64/build/aletheia-x86_64-interactive.img"
+  CARGO_FEATURES=interactive IMG="$img" "$ROOT/kernel-x86_64/scripts/build-image-linux.sh" \
+    || { echo "  FAIL [$label] build"; fail=1; return 1; }
+  local work; work="$(mktemp -d)"
+  dd if=/dev/zero of="$work/scratch.img" bs=1048576 count=1 2>/dev/null
+  dd if=/dev/zero of="$work/persist.img" bs=1048576 count=1 2>/dev/null
+  cp "$vars" "$work/vars.fd"
+  SESSION_ARGV=(qemu-system-x86_64 -machine q35 -m 256 -smp 4 -cpu qemu64,+smep -nographic
+    -drive "if=pflash,format=raw,unit=0,file=$code,readonly=on"
+    -drive "if=pflash,format=raw,unit=1,file=$work/vars.fd"
+    -drive "format=raw,file=$img"
+    -drive "if=none,format=raw,file=$work/scratch.img,id=blk0" -device virtio-blk-pci,drive=blk0
+    -drive "if=none,format=raw,file=$work/persist.img,id=blk1" -device virtio-blk-pci,drive=blk1
+    -netdev user,id=n0 -device "$nic",netdev=n0
+    -device virtio-rng-pci,disable-legacy=on
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 -no-reboot)
+  local log="$work/serial.log"
+  PEER_SEEN="$(grep -c "peer received: b'$REQUEST'" "$PEER_LOG")"
+  drive_session "$log" 400 "${SESSION_CMDS[@]}"
+  sed -n '/interactive console/,$p' "$log"
+  check_transcript "$label" "$(cat "$log")"
+  local rc=$?
+  rm -rf "$work"
   return $rc
 }
 
@@ -202,6 +254,15 @@ mmio_leg "riscv64" kernel-riscv64 riscv64gc-unknown-none-elf aletheia-kernel-ris
   qemu-system-riscv64 -machine virt -cpu rv64 -smp 4 -m 128M -nographic -bios default
 r_rc=$?
 RESULTS+=("riscv64 : $([ "$r_rc" -eq 0 ] && echo PASS || echo FAIL)")
+
+for nic in virtio-net-pci e1000; do
+  x86_leg "x86-64 $nic" "$nic"
+  case $? in
+    0) RESULTS+=("x86-64 $nic : PASS") ;;
+    2) RESULTS+=("x86-64 $nic : SKIP") ;;
+    *) RESULTS+=("x86-64 $nic : FAIL") ;;
+  esac
+done
 
 printf '========================================================================\n'
 echo "PEER TRANSCRIPT"

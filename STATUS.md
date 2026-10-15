@@ -1271,6 +1271,22 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-10-15 — one command runs every end-to-end gate (ADR-262)
+
+- `scripts/e2e-all.sh` leg 6 runs the 16 CI end-to-end gates its boot legs did not (console,
+  fuzz, crash, model-driven console, TCP, TLS, HTTPS, DNS, browser, hostile peer, PS/2, USB,
+  virtio-input, desktop storm, HD Audio), classified PASS / `PASS (legs SKIPPED)` / SKIP / FAIL;
+  `REQUIRE_ALL=1` makes any skip fatal. `check-ci-parity.sh` check [5] fails when CI runs a
+  `*-e2e.sh` gate the aggregate does not (negative control: dropping `hda-e2e` fails it).
+- `tcp-e2e.sh` gains x86-64 legs (virtio-net-pci, and an e1000 alone): 4/4 PASS; the peer check
+  now counts per leg. `hda-e2e.sh` measures the x86-64 tone too (`HDA_AUDIODEV` in
+  `smoke-test.sh`): aarch64 and x86-64 both 1499 crossings/s, RMS 3929.
+- Local run on a loaded host (Blender at ~7 cores, load 12): first pass aarch64 third boot (exit
+  237), `usbkbd-e2e`, `desktop-fuzz-e2e` and `hda-e2e` failed on timing; each re-run alone PASS.
+  `tls`/`https`/`browser`/`net-fuzz` SKIP without python `cryptography`; with it, all PASS, 0 skips.
+  Result: every leg PASS except VirtualBox (SKIP, arm64 host) and the model arms of
+  `console-ai-e2e`/`console-agent-e2e` (no model served).
+
 ### 2026-10-15 — v0.8.0 (ADR-252..261)
 
 - Crates 0.8.0: the drivers release (xHCI + USB keyboard as console input, e1000e, HD Audio,
