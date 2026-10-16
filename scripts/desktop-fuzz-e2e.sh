@@ -230,6 +230,19 @@ def chord(mod, k):
     time.sleep(.05)
 for _ in range(6):
     chord('alt', 'f10'); chord('alt', 'f10'); chord('alt', 'tab')
+# The namespace block cache (ADR-232/243) takes a 4 KiB slot the first time each block is read,
+# up to CONSOLE_BLOCKS. A file the storm opens from the panel for the first time inside the
+# measured window would pay that bounded growth there, so every object is read once here.
+def console(cmd, tag):
+    mark = len(txt()); s.sendall(('\r%s\recho %s\r' % (cmd, tag)).encode()); end = time.time() + 30
+    while ('\n%s\r' % tag) not in txt()[mark:]:
+        if time.time() > end: raise SystemExit('FAIL: warm-up `%s` got no answer' % cmd)
+        time.sleep(.05)
+    return txt()[mark:]
+names = re.findall(r'^ *\d+  (\S+)', console('ls', 'DF-LS'), re.M)
+if not names: raise SystemExit('FAIL: warm-up `ls` listed no objects to read')
+for i, name in enumerate(names):
+    console('cat ' + name, 'DF-CAT-%d' % i)
 sent = 0; n = 0; t0 = time.time()
 # The first two thirds are WARM-UP, not measured: buffers that grow to a high-water mark once (a
 # resize double-buffer, a history filling to its 32 entries, the spare surface pool, an event

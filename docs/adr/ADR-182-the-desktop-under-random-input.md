@@ -55,3 +55,13 @@ margin; the gate takes about 75 s per CPU for 9,000 events.
 
 **Not claimed.** The plateau is measured, not proved: a path the storm never reaches can still pay
 its first use later. `heaptrace` exists on aarch64 only.
+
+## Addendum (2026-10-16): the block cache's first use
+
+The namespace block cache (ADR-232/243) arrived after this gate and takes a 4 KiB slot the first
+time each block is read, up to `CONSOLE_BLOCKS`. A file the storm first opened from the panel inside
+the measured third paid that bounded growth there: aarch64 failed at +16,960 B (bound 16,384) in the
+ADR-262 aggregate. `heaptrace` showed a +8,832 B window triggered by a panel open
+(`Filesystem::read` under `filepanel::service_panel`, freed after the preview); what stayed was two
+new 4,096 B cache slots. The warm-up now runs `ls` and `cat`s every object
+before measuring; the same seed then grows +256 B on aarch64, +448 B on riscv64 and 0 on x86-64.
