@@ -160,3 +160,14 @@ covers has somewhere to surface. It is also the first x86-64 boot gate that runs
   failure with the log dumped, so a hang is diagnosable rather than mute.
 * **A developer without VirtualBox installed gets a SKIP**, printed and re-named in the summary — the
   same treatment an absent `cargo-audit` gets in the quality gate.
+
+## Addendum 2026-10-22: VirtualBox comes from Oracle's repository in CI
+
+The runner's HWE kernel moved to `7.0.0-1017-azure`, and Ubuntu's archive still ships
+`virtualbox-dkms 7.0.16`, whose module build fails against it (`Bad return status for module build
+on kernel: 7.0.0-1017-azure`). Every `aletheia-ci` run from `d161131` to `9e5cbd6` went red on this
+job before the gate ran a single boot. The job now installs `virtualbox-7.2` from
+`download.virtualbox.org` (signed by Oracle's 2016 key, pinned by `signed-by`), the series that
+follows new host kernels (initial 7.0 support since 7.2.8). A failed module build prints
+`/var/log/vbox-setup.log` and fails the step. `VBOX_REQUIRED=1` is unchanged: a VirtualBox that
+cannot load is still a failure, never a SKIP.
