@@ -281,20 +281,72 @@ fn indices(va: usize) -> (usize, usize, usize) {
     ((va >> 30) & 0x1ff, (va >> 21) & 0x1ff, (va >> 12) & 0x1ff)
 }
 
+/// Tables an identity build may take: the root, the device split, the RAM table and the few
+/// image/guard splits; a build needing more is refused rather than unaccounted for.
+const IDENTITY_TABLES_MAX: usize = 16;
+
 /// Build an identity-mapping table tree from fresh frames and return the L1 root physical
 /// address. Maps the peripheral GiB (0..1 GiB, Device) and the 128 MiB of RAM (Normal). Returns
 /// `None` if the frame allocator is exhausted. Tables live in RAM, so they remain reachable at
 /// their identity address once the MMU is on.
 pub fn build_identity() -> Option<usize> {
-    let l1 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    // Every table taken so far: a build that runs out of frames part-way gives them all back,
+    // since a half-built tree is not linked enough for `destroy_space` to find them.
+    let mut taken = [0usize; IDENTITY_TABLES_MAX];
+    let mut n = 0usize;
+    let built = fill_identity(&mut || {
+        if n == taken.len() {
+            return None;
+        }
+        let t = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+        taken[n] = t;
+        n += 1;
+        Some(t)
+    });
+    let Some(l1) = built else {
+        for &t in &taken[..n] {
+            frames::free_addr_as(t, Owner::PAGETABLE);
+        }
+        return None;
+    };
+
+    // REQ-MM-007/008, ALET-P2-033: the two splits above are what make VA 0 and the stack guard dead,
+    // and every DERIVED per-process space comes out of this same builder — so the property is checked
+    // here, at the one place it is established, rather than assumed of each space that inherits it. A
+    // tree that fails yields no space at all and returns its frames, because handing out a space that
+    // can reach the guard is worse than failing to build one.
+    if !audit_dead(l1).clean() {
+        destroy_space(l1);
+        return None;
+    }
+    Some(l1)
+}
+
+/// Two identity spaces for a two-process suite, or neither: when the second cannot be built the
+/// first is destroyed, not left holding its frames.
+pub fn build_identity_pair() -> (Option<usize>, Option<usize>) {
+    match (build_identity(), build_identity()) {
+        (Some(a), Some(b)) => (Some(a), Some(b)),
+        (a, b) => {
+            for root in [a, b].into_iter().flatten() {
+                destroy_space(root);
+            }
+            (None, None)
+        }
+    }
+}
+
+/// The identity tree itself, every table taken from `table`.
+fn fill_identity(table: &mut dyn FnMut() -> Option<usize>) -> Option<usize> {
+    let l1 = table()?;
 
     // L1[0] -> peripheral GiB (0..1 GiB), 2 MiB Device blocks (covers the PL011 UART).
-    let l2_dev = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    let l2_dev = table()?;
     // The FIRST block is split into 4 KiB pages so VA 0 can be left with NO descriptor (REQ-MM-008,
     // ALET-P1-006). `vmaddr` already refuses mapping the null page through the mapping APIs, but the boot
     // identity map covered it as device memory — so a kernel null dereference read or WROTE an MMIO
     // register instead of faulting. That is the one address that must never translate.
-    let l3_dev0 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    let l3_dev0 = table()?;
     for j in 1..512 {
         let page = (j * vmaddr::PAGE_SIZE) as u64;
         // SAFETY: `l3_dev0` is a fresh, in-RAM, identity-accessible frame; `j` < 512 entries.
@@ -311,7 +363,7 @@ pub fn build_identity() -> Option<usize> {
     unsafe { write_entry(l1, 0, (l2_dev as u64) | DESC_TABLE) };
 
     // L1[1] -> the RAM GiB (1..2 GiB). RAM occupies 0x4000_0000..RAM_END => L2 blocks 0..N.
-    let l2_ram = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    let l2_ram = table()?;
     let ram_blocks = (frames::RAM_END - RAM_BASE) / BLOCK_2M;
     let (text_start, _, rodata_end) = image_spans();
     let guard = stack_guard_page();
@@ -321,7 +373,7 @@ pub fn build_identity() -> Option<usize> {
             // The block holding the stack guard page becomes a table of 4 KiB pages so that ONE page can
             // be left invalid (REQ-MM-007). A 2 MiB block cannot have a hole in it, which is why the
             // split is necessary rather than merely tidy.
-            let l3 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+            let l3 = table()?;
             for j in 0..512 {
                 let page = pa + j * vmaddr::PAGE_SIZE;
                 let desc = if page == guard {
@@ -338,7 +390,7 @@ pub fn build_identity() -> Option<usize> {
             // This block spans kernel text and/or rodata, so it becomes a table of 4 KiB pages: one
             // block descriptor cannot be read-only+executable for text and writable for data at the
             // same time, and being both is exactly the W^X violation (REQ-MM-006, ADR-034).
-            let l3 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+            let l3 = table()?;
             for j in 0..512 {
                 let page = pa + j * vmaddr::PAGE_SIZE;
                 // SAFETY: `l3` is a fresh, in-RAM, identity-accessible frame; `j` < 512 entries.
@@ -353,16 +405,6 @@ pub fn build_identity() -> Option<usize> {
     }
     // SAFETY: RAM_BASE is in L1 index 1 (0x4000_0000 >> 30 == 1).
     unsafe { write_entry(l1, 1, (l2_ram as u64) | DESC_TABLE) };
-
-    // REQ-MM-007/008, ALET-P2-033: the two splits above are what make VA 0 and the stack guard dead,
-    // and every DERIVED per-process space comes out of this same builder — so the property is checked
-    // here, at the one place it is established, rather than assumed of each space that inherits it. A
-    // tree that fails yields no space at all and returns its frames, because handing out a space that
-    // can reach the guard is worse than failing to build one.
-    if !audit_dead(l1).clean() {
-        destroy_space(l1);
-        return None;
-    }
     Some(l1)
 }
 

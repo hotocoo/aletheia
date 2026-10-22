@@ -159,6 +159,11 @@ if [ "$VERIFY" -eq 0 ]; then
   echo "SKIP: verify step disabled by --no-verify (the package is UNVERIFIED)"; verify_skip=1
 elif ! command -v qemu-system-x86_64 >/dev/null 2>&1 || [ -z "$OVMF_CODE_PATH" ] || [ -z "$OVMF_VARS_PATH" ]; then
   echo "SKIP: verify needs qemu-system-x86_64 + OVMF (the package is UNVERIFIED on this host)"; verify_skip=1
+fi
+# A published release must have booted: the release job sets REQUIRE_VERIFY=1, so a runner that
+# lost QEMU or OVMF fails instead of uploading an unbooted package under a stable tag.
+if [ "$verify_skip" -eq 1 ]; then
+  if [ "${REQUIRE_VERIFY:-0}" = 1 ]; then fail "REQUIRE_VERIFY=1 but the packaged disks were not booted"; fi
 else
   VARS="$BUILD/release-verify-vars.fd"
   # Launch one packaged disk in the background; the caller decides how long to let it run. The

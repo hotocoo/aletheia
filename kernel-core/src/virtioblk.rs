@@ -486,6 +486,10 @@ pub struct VirtioBlk<H: VirtioHal, T: Transport> {
     /// Batches completed while sleeping on the platform's wait, and while spinning.
     slept: core::cell::Cell<u64>,
     polled: core::cell::Cell<u64>,
+    /// A posted batch failed after the doorbell: the device may still own its buffers and answer
+    /// it late, where the next request would take that answer (or that DMA) for its own. Every
+    /// request refuses until [`reset`](Self::reset) brings both sides' rings back to zero.
+    wedged: core::cell::Cell<bool>,
     _hal: PhantomData<H>,
 }
 
@@ -612,6 +616,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 wait: None,
                 slept: core::cell::Cell::new(0),
                 polled: core::cell::Cell::new(0),
+                wedged: core::cell::Cell::new(false),
                 _hal: PhantomData,
             },
             InitReport {
@@ -714,6 +719,10 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
                 return Err("reset: queue 0 unavailable (QueueNumMax == 0)");
             }
             self.transport.set_queue_num(self.qsize as u32);
+            // The indices live in OUR memory: a device reset restarts its own count at zero, so
+            // ours must too, or it would replay every chain posted before the reset.
+            core::ptr::write_volatile((self.avail + 2) as *mut u16, 0);
+            core::ptr::write_volatile((self.used + 2) as *mut u16, 0);
             self.transport
                 .set_queue_addrs(self.desc as u64, self.avail as u64, self.used as u64);
             H::barrier();
@@ -722,6 +731,7 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
             status |= S_DRIVER_OK;
             self.transport.set_status(status);
         }
+        self.wedged.set(false);
         Ok(())
     }
 
@@ -770,9 +780,14 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
     /// same one twice, is lying about whose request finished), its byte count must be exactly that
     /// request's, and its status byte must be OK.
     unsafe fn submit_batch(&self, reqs: &[(u16, u32, usize)]) -> Result<(), StorageError> {
-        if reqs.is_empty() || reqs.len() > IN_FLIGHT {
+        if reqs.is_empty() || reqs.len() > IN_FLIGHT || self.wedged.get() {
             return Err(StorageError::Device);
         }
+        self.await_batch(reqs)
+    }
+
+    /// The body of [`submit_batch`](Self::submit_batch): post, notify, validate every completion.
+    unsafe fn await_batch(&self, reqs: &[(u16, u32, usize)]) -> Result<(), StorageError> {
         // avail ring layout: [flags:u16][idx:u16][ring:u16 * qsize][used_event:u16]
         let avail_idx_ptr = (self.avail + 2) as *mut u16;
         let avail_ring = (self.avail + 4) as *mut u16;
@@ -795,9 +810,11 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         // depends on the emulator and the host's load, and neither says anything about the device.
         let started = H::now_ns();
         let mut answered = [false; IN_FLIGHT];
+        let mut failed = false;
         for _ in 0..reqs.len() {
             while read_volatile(used_idx_ptr) == seen {
                 if H::now_ns().wrapping_sub(started) > self.completion_budget_ns {
+                    self.wedged.set(true);
                     return Err(StorageError::Device);
                 }
                 match self.wait {
@@ -814,12 +831,18 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
             let len = read_volatile(entry.add(1));
             seen = seen.wrapping_add(1);
             let Some(i) = (0..reqs.len()).find(|&i| reqs[i].0 as u32 == id && !answered[i]) else {
+                self.wedged.set(true);
                 return Err(StorageError::Device);
             };
             answered[i] = true;
             if len != reqs[i].1 || read_volatile(reqs[i].2 as *const u8) != VIRTIO_BLK_S_OK {
-                return Err(StorageError::Device);
+                // Answered, so nothing of it is left in flight; the rest of the batch still is,
+                // and is drained before the error is reported.
+                failed = true;
             }
+        }
+        if failed {
+            return Err(StorageError::Device);
         }
         let counter = if self.wait.is_some() {
             &self.slept

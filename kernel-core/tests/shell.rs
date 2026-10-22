@@ -1459,7 +1459,7 @@ fn feed_as(
     session: &mut Session,
     input: &str,
     fs: &mut Filesystem,
-    dev: &mut MemBlockDevice,
+    dev: &mut impl kernel_core::storage::BlockDevice,
 ) -> String {
     let mut log = String::new();
     for b in input.bytes() {
@@ -1820,4 +1820,64 @@ fn operators_own_what_they_create() {
         &mut dev,
     );
     assert!(log.contains("wrote 10 bytes to plan"), "{log}");
+}
+
+/// A device whose reads can be made to fail: storage errors, not absence.
+struct FailingReads {
+    inner: MemBlockDevice,
+    failing: std::cell::Cell<bool>,
+}
+
+impl kernel_core::storage::BlockDevice for FailingReads {
+    fn num_blocks(&self) -> usize {
+        self.inner.num_blocks()
+    }
+    fn read_block(
+        &self,
+        idx: usize,
+        buf: &mut [u8],
+    ) -> Result<(), kernel_core::storage::StorageError> {
+        if self.failing.get() {
+            return Err(kernel_core::storage::StorageError::OutOfRange);
+        }
+        self.inner.read_block(idx, buf)
+    }
+    fn write_block(
+        &mut self,
+        idx: usize,
+        buf: &[u8],
+    ) -> Result<(), kernel_core::storage::StorageError> {
+        self.inner.write_block(idx, buf)
+    }
+    fn flush(&mut self) -> Result<(), kernel_core::storage::StorageError> {
+        self.inner.flush()
+    }
+}
+
+/// An account record that exists but cannot be read is not "no accounts": the console stays
+/// locked, and `passwd` refuses rather than rewriting the record as a lone admin.
+#[test]
+fn an_unreadable_account_record_keeps_the_console_locked() {
+    let host = AccountHost {
+        clock_secs: std::cell::Cell::new(100),
+    };
+    let mut dev = FailingReads {
+        inner: device(),
+        failing: std::cell::Cell::new(false),
+    };
+    Filesystem::format(&mut dev).unwrap();
+    let mut fs = Filesystem::mount(&mut dev).unwrap();
+    let log = feed_as(
+        &host,
+        &mut Session::new(),
+        "passwd ada\rlong enough\rlong enough\r",
+        &mut fs,
+        &mut dev,
+    );
+    assert!(log.contains("passwd: ada set"), "{log}");
+
+    dev.failing.set(true);
+    let log = feed_as(&host, &mut Session::new(), "whoami\r", &mut fs, &mut dev);
+    assert!(log.contains("this console is locked"), "{log}");
+    assert!(!log.contains("nobody"), "{log}");
 }

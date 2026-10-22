@@ -2257,7 +2257,7 @@ fn run_ipc_pingpong(n: u64) -> (bool, u64, isize) {
     use crate::hal::{ActiveHal, Hal};
     const RECV_VA: usize = USER_CODE_VA + 2 * frames::FRAME_SIZE;
     let root_main = vm::active_root();
-    let (Some(root_a), Some(root_b)) = (vm::build_identity(), vm::build_identity()) else {
+    let (Some(root_a), Some(root_b)) = vm::build_identity_pair() else {
         return (false, 0, 0);
     };
     let mut pages: [(usize, usize, Option<frames::PhysFrame>); 6] = [
@@ -2579,7 +2579,7 @@ const SHARED_VA: usize = 0x5000_5000;
 ///
 /// Returns `(cap_gated, shared_across_spaces, revoke_unmaps)`.
 fn run_shared_memory() -> (bool, bool, bool) {
-    let (root_a, root_b) = match (vm::build_identity(), vm::build_identity()) {
+    let (root_a, root_b) = match vm::build_identity_pair() {
         (Some(a), Some(b)) => (a, b),
         _ => return (false, false, false),
     };

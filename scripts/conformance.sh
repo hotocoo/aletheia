@@ -622,8 +622,10 @@ CONTRACT=(
 hr() { printf '========================================================================\n'; }
 
 hr; echo "==> Booting all three targets to capture their live invariant logs"; hr
-echo "--> aarch64 …";  AOUT="$(bash "$ROOT/scripts/vm-e2e.sh" 2>&1)"
-echo "--> RISC-V …";   ROUT="$(bash "$ROOT/scripts/vm-e2e-riscv.sh" 2>&1)"
+# Each leg's exit status counts too: a target that prints every marker and then fails its own gate
+# has not passed.
+echo "--> aarch64 …";  AOUT="$(bash "$ROOT/scripts/vm-e2e.sh" 2>&1)"; ARC=$?
+echo "--> RISC-V …";   ROUT="$(bash "$ROOT/scripts/vm-e2e-riscv.sh" 2>&1)"; RRC=$?
 echo "--> x86-64 …"
 # Drive the portable leg (scripts/vm-e2e-x86.sh: mtools ESP, no hdiutil/root) so the x86-64 column
 # is really compared on Linux/CI too, not only on a macOS workstation. It builds the .efi from HEAD
@@ -635,7 +637,7 @@ for c in /opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/share/OVMF/OVMF_CODE_
   [ -f "$c" ] && { have_ovmf=1; break; }
 done
 if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && [ "$have_ovmf" = "1" ]; then
-  XOUT="$(bash "$ROOT/scripts/vm-e2e-x86.sh" 2>&1)"
+  XOUT="$(bash "$ROOT/scripts/vm-e2e-x86.sh" 2>&1)"; XRC=$?
   x86_ran=1
 else
   XOUT=""
@@ -644,8 +646,12 @@ fi
 
 fail=0
 report_target() {
-  # $1 = label, $2 = the captured log
-  local label="$1" log="$2" b missing=0
+  # $1 = label, $2 = the captured log, $3 = the leg's exit status
+  local label="$1" log="$2" rc="$3" b missing=0
+  if [ "$rc" -ne 0 ]; then
+    echo "  FAIL [$label] its boot gate exited $rc"
+    missing=1; fail=1
+  fi
   for b in "${CONTRACT[@]}"; do
     if ! grep -qF "$b" <<<"$log"; then
       echo "  FAIL [$label] missing core behavior: $b"
@@ -661,10 +667,14 @@ report_target() {
 }
 
 hr; echo "CONFORMANCE — core contract (${#CONTRACT[@]} named behaviors) across targets"; hr
-report_target "aarch64" "$AOUT"
-report_target "riscv64" "$ROUT"
+report_target "aarch64" "$AOUT" "$ARC"
+report_target "riscv64" "$ROUT" "$RRC"
 if [ "$x86_ran" -eq 1 ]; then
-  report_target "x86-64 " "$XOUT"
+  report_target "x86-64 " "$XOUT" "$XRC"
+elif [ "${REQUIRE_X86:-0}" = 1 ]; then
+  # CI sets this: a runner image that lost OVMF must not turn "all three targets" into two.
+  echo "  FAIL [x86-64 ] REQUIRE_X86=1 but this host cannot boot it"
+  fail=1
 else
   echo "  SKIP [x86-64 ] not booted on this host"
 fi

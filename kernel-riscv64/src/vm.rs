@@ -288,21 +288,73 @@ fn indices(va: usize) -> (usize, usize, usize) {
     ((va >> 30) & 0x1ff, (va >> 21) & 0x1ff, (va >> 12) & 0x1ff)
 }
 
+/// Tables an identity build may take: the root, the device split, the RAM table and the few
+/// image/guard splits; a build needing more is refused rather than unaccounted for.
+const IDENTITY_TABLES_MAX: usize = 16;
+
 /// Build an identity-mapping Sv39 table tree from fresh frames and return the level-2 root
 /// physical address. Maps the peripheral GiB (0..1 GiB) as ONE device gigapage leaf (covers the
 /// NS16550A UART, CLINT, PLIC, and SiFive-test) and the 128 MiB of RAM as 2 MiB megapage leaves.
 /// Returns `None` if the frame allocator is exhausted. Tables live in RAM, so they stay reachable
 /// at their identity address once paging is on.
 pub fn build_identity() -> Option<usize> {
-    let root = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    // Every table taken so far: a build that runs out of frames part-way gives them all back,
+    // since a half-built tree is not linked enough for `destroy_space` to find them.
+    let mut taken = [0usize; IDENTITY_TABLES_MAX];
+    let mut n = 0usize;
+    let built = fill_identity(&mut || {
+        if n == taken.len() {
+            return None;
+        }
+        let t = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+        taken[n] = t;
+        n += 1;
+        Some(t)
+    });
+    let Some(root) = built else {
+        for &t in &taken[..n] {
+            frames::free_addr_as(t, Owner::PAGETABLE);
+        }
+        return None;
+    };
+
+    // REQ-MM-007/008, ALET-P2-033: the splits above are what make VA 0 and the stack guard dead, and
+    // every DERIVED per-process space comes out of this same builder — so the property is checked
+    // here, at the one place it is established, rather than assumed of each space that inherits it. A
+    // tree that fails yields no space at all and returns its frames, because handing out a space that
+    // can reach the guard is worse than failing to build one.
+    if !audit_dead(root).clean() {
+        destroy_space(root);
+        return None;
+    }
+    Some(root)
+}
+
+/// Two identity spaces for a two-process suite, or neither: when the second cannot be built the
+/// first is destroyed, not left holding its frames.
+pub fn build_identity_pair() -> (Option<usize>, Option<usize>) {
+    match (build_identity(), build_identity()) {
+        (Some(a), Some(b)) => (Some(a), Some(b)),
+        (a, b) => {
+            for root in [a, b].into_iter().flatten() {
+                destroy_space(root);
+            }
+            (None, None)
+        }
+    }
+}
+
+/// The identity tree itself, every table taken from `table`.
+fn fill_identity(table: &mut dyn FnMut() -> Option<usize>) -> Option<usize> {
+    let root = table()?;
 
     // Root[0] -> peripheral GiB (0..1 GiB), Device. The FIRST megapage of it is split into 4 KiB pages so
     // VA 0 can be left with NO leaf (REQ-MM-008, ALET-P1-006): `vmaddr` already refuses mapping the null
     // page through the mapping APIs, but the boot identity map covered it as device memory, so a kernel
     // null dereference read or WROTE an MMIO register instead of faulting. A gigapage cannot have a hole,
     // hence two levels of split here — level-1 table for the GiB, level-0 table for its first megapage.
-    let l1_dev = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
-    let l0_dev0 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    let l1_dev = table()?;
+    let l0_dev0 = table()?;
     for j in 1..512 {
         let page = j * vmaddr::PAGE_SIZE;
         // SAFETY: `l0_dev0` is a fresh, in-RAM, identity-accessible frame; `j` < 512 entries.
@@ -322,7 +374,7 @@ pub fn build_identity() -> Option<usize> {
     // Root[2] -> a level-1 table of RAM megapages. RAM occupies 0x8000_0000.., which lands in
     // level-2 index 2 (0x8000_0000 >> 30 == 2); within that gigabyte the RAM megapages start at
     // level-1 index 0.
-    let l1 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+    let l1 = table()?;
     let ram_megs = (frames::RAM_END - RAM_BASE) / MEG_2M;
     let (text_start, _, rodata_end) = image_spans();
     let guard = stack_guard_page();
@@ -331,7 +383,7 @@ pub fn build_identity() -> Option<usize> {
         if pa <= guard && guard < pa + MEG_2M {
             // The megapage holding the stack guard page becomes a level-0 table so ONE page can be left
             // invalid (REQ-MM-007): a megapage cannot have a hole, which is why the split is necessary.
-            let l0 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+            let l0 = table()?;
             for j in 0..512 {
                 let page = pa + j * vmaddr::PAGE_SIZE;
                 let entry = if page == guard {
@@ -348,7 +400,7 @@ pub fn build_identity() -> Option<usize> {
             // This megapage spans kernel text and/or rodata, so it becomes a level-0 table of 4 KiB
             // pages: one leaf cannot be read-only+executable for text and writable for data at the
             // same time, and being both is exactly the W^X violation (REQ-MM-006, ADR-034).
-            let l0 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr();
+            let l0 = table()?;
             for j in 0..512 {
                 let page = pa + j * vmaddr::PAGE_SIZE;
                 // SAFETY: `l0` is a fresh, in-RAM, identity-accessible frame; `j` < 512 entries.
@@ -364,16 +416,6 @@ pub fn build_identity() -> Option<usize> {
     }
     // SAFETY: RAM_BASE is in level-2 index 2; `l1` is a pointer PTE (only V set -> next level).
     unsafe { write_entry(root, (RAM_BASE >> 30) & 0x1ff, pte(l1, PTE_V)) };
-
-    // REQ-MM-007/008, ALET-P2-033: the splits above are what make VA 0 and the stack guard dead, and
-    // every DERIVED per-process space comes out of this same builder — so the property is checked
-    // here, at the one place it is established, rather than assumed of each space that inherits it. A
-    // tree that fails yields no space at all and returns its frames, because handing out a space that
-    // can reach the guard is worse than failing to build one.
-    if !audit_dead(root).clean() {
-        destroy_space(root);
-        return None;
-    }
     Some(root)
 }
 

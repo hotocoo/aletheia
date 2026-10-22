@@ -143,7 +143,7 @@ impl Virtqueue {
         // THE GATE (REQ-DRV-006, ADR-043): a device is only ever told about memory a driver registered for
         // it. An address that was never registered — a miscalculation, a stale pointer, a corrupted field —
         // is refused HERE, before it becomes a descriptor the device will act on.
-        if !self.dma.visible(addr as usize, len as usize) {
+        if slot >= self.qsize || !self.dma.visible(addr as usize, len as usize) {
             return Err(DmaFault::Malformed);
         }
         let d = (self.desc + slot as usize * core::mem::size_of::<Desc>()) as *mut Desc;

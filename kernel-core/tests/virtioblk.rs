@@ -255,7 +255,13 @@ impl Transport for MockDev {
         self.st.borrow().regs[0x070 / 4]
     }
     unsafe fn set_status(&self, value: u32) {
-        self.st.borrow_mut().regs[0x070 / 4] = value;
+        let mut s = self.st.borrow_mut();
+        s.regs[0x070 / 4] = value;
+        if value == 0 {
+            // A device reset forgets where it was in the rings, as real hardware does.
+            s.dev_avail = 0;
+            s.dev_used = 0;
+        }
     }
     unsafe fn select_queue(&self, _queue: u16) {}
     unsafe fn queue_num_max(&self) -> u32 {
@@ -778,4 +784,33 @@ fn a_silent_device_still_times_out_through_the_platform_wait() {
         "the wait was asked, and the bound still fired"
     );
     host_clock_step(1_000);
+}
+
+/// A batch that timed out may still be answered late: until a reset, the driver must not take
+/// that late answer (or the device's late DMA into the shared data frame) for a new request's.
+#[test]
+fn after_a_timeout_every_request_refuses_until_a_reset() {
+    let faults = Rc::new(RefCell::new(Faults {
+        skip_completion: true,
+        ..Default::default()
+    }));
+    let (mut blk, _r, _f) = mk_driver(CAP, faults.clone());
+    blk.set_completion_budget_ns(1_000_000);
+    host_clock_step(1_000);
+    let mut buf = [0u8; BLOCK_SIZE];
+    assert!(matches!(
+        blk.read_block(0, &mut buf),
+        Err(StorageError::Device)
+    ));
+
+    faults.borrow_mut().skip_completion = false;
+    assert!(
+        matches!(blk.read_block(0, &mut buf), Err(StorageError::Device)),
+        "a healthy-looking device is still refused while a request may be in flight"
+    );
+    blk.reset().unwrap();
+    let data = [0x5au8; BLOCK_SIZE];
+    blk.write_block(3, &data).unwrap();
+    blk.read_block(3, &mut buf).unwrap();
+    assert_eq!(buf, data);
 }

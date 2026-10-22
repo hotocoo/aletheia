@@ -172,3 +172,14 @@ fn the_declared_length_bounds_decoding_before_any_output_exists() {
         Err(DecompressError::Underrun) | Err(DecompressError::Overrun)
     ));
 }
+
+/// A declaration within MAX_OUTPUT that the payload could never expand to is refused before the
+/// output is allocated: on a 16 MiB kernel heap that allocation alone would abort the machine.
+#[test]
+fn a_declared_length_the_payload_cannot_reach_allocates_nothing() {
+    let text = b"the quick brown fox jumps over the lazy dog. ".repeat(64);
+    let mut env = compress(&text);
+    assert_eq!(env[4], 1, "the test needs an LZSS envelope");
+    env[OFF_ORIG..OFF_ORIG + 4].copy_from_slice(&(MAX_OUTPUT as u32).to_le_bytes());
+    assert_eq!(decompress(&env), Err(DecompressError::Truncated));
+}

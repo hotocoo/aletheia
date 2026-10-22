@@ -996,7 +996,7 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
         self.post_raw(&cmd_sync())
     }
 
-    /// Drain every pending event oldest-first into out, retiring each slot as it is read, so a
+    /// Drain pending events (up to one queue's worth) oldest-first into out, retiring each slot as it is read, so a
     /// later quiet check is EVIDENCE of a clean walk rather than residue of older records.
     pub fn drain_events(
         &mut self,
@@ -1006,7 +1006,9 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
             Some(q) => q,
             None => return Err(SmmuFault::NoQueue),
         };
-        loop {
+        // At most one queue's worth per call: a device faulting as fast as this drains must not
+        // keep the loop, and `out`, growing without end.
+        for _ in 0..g.slots() {
             let prod = self.regs.r32(REG_EVENTQ_PROD);
             let cons = self.regs.r32(REG_EVENTQ_CONS);
             if g.is_empty(prod, cons) {
@@ -1023,6 +1025,7 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
             out.push(EventRecord::decode(&words));
             self.regs.w32(REG_EVENTQ_CONS, g.advance(cons));
         }
+        Ok(())
     }
 
     /// True when no event is pending.

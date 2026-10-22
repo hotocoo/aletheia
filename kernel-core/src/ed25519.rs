@@ -302,6 +302,12 @@ pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(),
     }
     let a = Point::decompress(&a_bytes).ok_or(SignatureRefusal::BadPublicKey)?;
     let r = Point::decompress(&r_bytes).ok_or(SignatureRefusal::BadSignaturePoint)?;
+    let eight = |p: Point| p.double().double().double();
+    // A small-order key is annihilated by the cofactor: with R the identity and S zero it would
+    // verify every message. No honest key has small order.
+    if eight(a).compress() == Point::IDENTITY.compress() {
+        return Err(SignatureRefusal::BadPublicKey);
+    }
 
     // k = SHA-512(R || A || M), used unreduced: the cofactored equation below depends only on
     // k mod L once torsion is annihilated (module docs).
@@ -314,7 +320,6 @@ pub fn verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(),
     let k = hasher.finalize();
 
     // [8S]B  ==  [8]R + [8k]A
-    let eight = |p: Point| p.double().double().double();
     let left = eight(BASE.mul_scalar(&s_bytes));
     let right = eight(r).add_points(eight(a.mul_scalar(&k)));
     if left.compress() == right.compress() {

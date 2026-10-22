@@ -438,6 +438,11 @@ impl<H: VirtioHal, T: Transport + ConfigWrite> VirtioInput<H, T> {
                 return None;
             }
         };
+        if slot >= self.eventq.len() {
+            // An id the driver never posted: nothing to re-post, and no buffer it names.
+            self.local_refusals.set(self.local_refusals.get() + 1);
+            return None;
+        }
         let addr = self.events_frame + slot as usize * EVENT_SIZE;
         if written as usize != EVENT_SIZE {
             // A device that writes the wrong amount into an event buffer is a device whose

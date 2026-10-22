@@ -1330,7 +1330,7 @@ fn run_ipc() -> (bool, bool, bool) {
 pub fn run_ipc_pingpong(n: u64) -> (bool, u64, isize) {
     use crate::hal::{ActiveHal, Hal};
     let root_main = vm::active_root();
-    let (Some(root_a), Some(root_b)) = (vm::build_identity(), vm::build_identity()) else {
+    let (Some(root_a), Some(root_b)) = vm::build_identity_pair() else {
         return (false, 0, 0);
     };
     let a_code = map_user_code(root_a, USER_CODE_VA, &STUB_SYSCALL);
@@ -2580,7 +2580,7 @@ fn run_preemptive() -> (bool, bool) {
 /// `(recv_blocked, send_woke_and_delivered, receiver_resumed_with_body)`.
 fn run_blocking_ipc() -> (bool, bool, bool) {
     let root_main = vm::active_root();
-    let (root_r, root_s) = match (vm::build_identity(), vm::build_identity()) {
+    let (root_r, root_s) = match vm::build_identity_pair() {
         (Some(r), Some(s)) => (r, s),
         _ => return (false, false, false),
     };
@@ -2711,7 +2711,7 @@ fn run_blocking_ipc() -> (bool, bool, bool) {
 /// execution). Returns `(inversion_avoided, low_serviced, high_received)`.
 fn run_priority_ipc() -> (bool, bool, bool) {
     let root_main = vm::active_root();
-    let (root_h, root_l) = match (vm::build_identity(), vm::build_identity()) {
+    let (root_h, root_l) = match vm::build_identity_pair() {
         (Some(h), Some(l)) => (h, l),
         _ => return (false, false, false),
     };
@@ -2861,7 +2861,7 @@ const SHARED_VA: usize = 0x5000_5000;
 ///
 /// Returns `(cap_gated, shared_across_spaces, revoke_unmaps)`.
 fn run_shared_memory() -> (bool, bool, bool) {
-    let (root_a, root_b) = match (vm::build_identity(), vm::build_identity()) {
+    let (root_a, root_b) = match vm::build_identity_pair() {
         (Some(a), Some(b)) => (a, b),
         _ => return (false, false, false),
     };

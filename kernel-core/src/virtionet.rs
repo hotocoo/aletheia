@@ -357,7 +357,10 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         for _ in 0..spins {
             if let Some((slot, written)) = self.rx.poll_used::<H>() {
                 let idx = slot as usize;
-                if idx >= self.rx_bufs.len() || (written as usize) < NET_HDR_LEN + ETH_HDR_LEN {
+                if idx >= self.rx_bufs.len()
+                    || (written as usize) < NET_HDR_LEN + ETH_HDR_LEN
+                    || written as usize > RX_BUF_LEN
+                {
                     // Re-post and continue: a malformed completion must not wedge the queue.
                     if idx < self.rx_bufs.len() {
                         let _ = self.rx.add::<H>(
@@ -556,7 +559,6 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         out: &mut [u8],
     ) -> Result<usize, NetError> {
         let mut taken = 0usize;
-        let mut too_long = false;
         let got = self.recv_until(spins, |f| {
             if f.len() < ETH_HDR_LEN || be16(f, 12) != ETHERTYPE_IPV4 {
                 return None;
@@ -575,15 +577,15 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
                 return None;
             }
             if total > out.len() {
-                too_long = true;
-                return Some(());
+                // Dropped like any frame not for this caller (recv_until counts it): one oversize
+                // datagram from anyone on the link must not end the exchange waiting for its own.
+                return None;
             }
             out[..total].copy_from_slice(&body[..total]);
             taken = total;
             Some(())
         });
         match got {
-            Ok(()) if too_long => Err(NetError::TooLong),
             Ok(()) => Ok(taken),
             Err(NetError::Timeout) => Ok(0),
             Err(e) => Err(e),

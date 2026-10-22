@@ -161,3 +161,19 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
+
+/// A small-order public key is annihilated by the cofactored check: the identity key with R the
+/// identity and S zero would otherwise verify every message.
+#[test]
+fn a_small_order_public_key_is_refused() {
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut sig = [0u8; 64];
+    sig[0] = 1;
+    for msg in [&b""[..], b"anything at all"] {
+        assert_eq!(
+            verify(&identity, msg, &sig),
+            Err(SignatureRefusal::BadPublicKey)
+        );
+    }
+}

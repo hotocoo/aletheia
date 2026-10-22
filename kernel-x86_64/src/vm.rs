@@ -1163,7 +1163,11 @@ pub fn build_space() -> Option<u64> {
 /// claim, not a property.
 pub fn build_space_from(cur: u64) -> Option<u64> {
     let pml4 = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
-    let pdpt = frames::alloc_zeroed_as(Owner::PAGETABLE)?.addr() as u64;
+    let Some(pdpt) = frames::alloc_zeroed_as(Owner::PAGETABLE) else {
+        frames::free_addr_as(pml4 as usize, Owner::PAGETABLE);
+        return None;
+    };
+    let pdpt = pdpt.addr() as u64;
     // SAFETY: PML4/PDPT frames are 4 KiB and identity-accessible under OVMF's map; single-core.
     unsafe {
         let src = cur as *const u64;

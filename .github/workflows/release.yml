@@ -36,6 +36,7 @@ jobs:
       - name: Build the package and BOOT it from its own VMDKs
         run: ./scripts/release-vmware.sh --version "${TAG}"
         env:
+          REQUIRE_VERIFY: 1
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
       - name: Build the native System-1 runtime (ADR-241) for Linux x86-64
         run: |

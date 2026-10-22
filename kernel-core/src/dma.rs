@@ -116,7 +116,7 @@ impl DmaRegistry {
 
     fn overlaps_image(&self, addr: usize, len: usize) -> bool {
         let (s, e) = self.image;
-        e > s && addr < e && s < addr + len
+        e > s && addr < e && s < addr.saturating_add(len)
     }
 
     /// Register `[addr, addr+len)` as device-visible, owned by `owner`.
@@ -126,7 +126,7 @@ impl DmaRegistry {
         len: usize,
         owner: &'static str,
     ) -> Result<Handle, DmaFault> {
-        if len == 0 || !addr.is_multiple_of(PAGE) {
+        if len == 0 || !addr.is_multiple_of(PAGE) || addr.checked_add(len).is_none() {
             self.refusals += 1;
             return Err(DmaFault::Malformed);
         }
@@ -166,7 +166,7 @@ impl DmaRegistry {
             && self
                 .regions
                 .iter()
-                .any(|r| r.live && addr >= r.addr && addr + len <= r.addr + r.len)
+                .any(|r| r.live && addr >= r.addr && len <= r.len && addr - r.addr <= r.len - len)
     }
 
     /// End visibility.
@@ -301,6 +301,20 @@ pub fn selftest<F: FnMut(usize, bool, &str)>(mut log: F) -> Result<usize, (usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_span_that_wraps_the_address_space_is_never_visible_or_registered() {
+        let mut d = DmaRegistry::new();
+        let last = (usize::MAX & !(PAGE - 1)) - PAGE;
+        assert_eq!(d.register(last, 2 * PAGE, "t"), Err(DmaFault::Malformed));
+        d.register(last, PAGE, "t").unwrap();
+        assert!(d.visible(last, PAGE));
+        assert!(!d.visible(last, 2 * PAGE), "past the region's end");
+        assert!(
+            !d.visible(last + 8, usize::MAX),
+            "addr + len wraps past zero"
+        );
+    }
 
     #[test]
     fn the_suite_holds() {

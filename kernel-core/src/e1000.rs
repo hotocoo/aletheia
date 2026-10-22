@@ -460,7 +460,6 @@ impl<H: VirtioHal, R: Regs> crate::tcpnet::Ipv4Link for E1000Link<'_, H, R> {
         protocol: u8,
         out: &mut [u8],
     ) -> Result<usize, crate::tcpnet::LinkError> {
-        let mut too_long = false;
         let got = self.dev.recv_until(spins, |f| {
             if f.len() < ETH_HDR_LEN || be16(f, 12) != 0x0800 {
                 return None;
@@ -476,14 +475,13 @@ impl<H: VirtioHal, R: Regs> crate::tcpnet::Ipv4Link for E1000Link<'_, H, R> {
                 return None;
             }
             if total > out.len() {
-                too_long = true;
-                return Some(0);
+                // Dropped, not fatal: an oversize datagram from anyone must not end the exchange.
+                return None;
             }
             out[..total].copy_from_slice(&body[..total]);
             Some(total)
         });
         match got {
-            Ok(_) if too_long => Err(crate::tcpnet::LinkError::TooLong),
             Ok(n) => Ok(n),
             Err(E1000Error::Timeout) => Ok(0),
             Err(_) => Err(crate::tcpnet::LinkError::Device),

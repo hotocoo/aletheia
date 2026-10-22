@@ -2040,6 +2040,34 @@ struct Owners<'a> {
     user: Option<&'a str>,
 }
 
+/// Bytes from a peer or a file, as text the console may print: valid UTF-8 carrying no control
+/// character but tab, newline and the CR of a CRLF. An escape sequence, a bare CR or a backspace
+/// would drive the operator's terminal (clear it, overwrite a line, fake a prompt), so it is
+/// reported as not text, never printed.
+fn terminal_text(bytes: &[u8]) -> Result<&str, ()> {
+    let s = core::str::from_utf8(bytes).map_err(|_| ())?;
+    let safe = s.char_indices().all(|(i, c)| match c {
+        '\n' | '\t' => true,
+        '\r' => s[i + 1..].starts_with('\n'),
+        c => !c.is_control(),
+    });
+    if safe {
+        Ok(s)
+    } else {
+        Err(())
+    }
+}
+
+/// A machine record (`.users`, `.owners`): `Some(None)` when absent, `None` when it exists but
+/// cannot be read. Only absence means "no record": a storage error must fail closed.
+fn read_record<D: BlockDevice>(fs: &Filesystem, dev: &D, name: &str) -> Option<Option<String>> {
+    match fs.read(dev, name) {
+        Ok(b) => Some(Some(String::from_utf8_lossy(&b).into_owned())),
+        Err(crate::fs::FsError::NotFound) => Some(None),
+        Err(_) => None,
+    }
+}
+
 impl Owners<'_> {
     /// The operator this rule applies to, if any.
     fn operator(&self) -> Option<&str> {
@@ -2049,11 +2077,10 @@ impl Owners<'_> {
         }
     }
 
-    fn record<D: BlockDevice>(fs: &Filesystem, dev: &D) -> String {
-        fs.read(dev, crate::login::OWNERS)
-            .ok()
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .unwrap_or_default()
+    /// The ownership record; `None` when it exists but cannot be read, which denies changes
+    /// rather than treating every object as unowned or rewriting the record from nothing.
+    fn record<D: BlockDevice>(fs: &Filesystem, dev: &D) -> Option<String> {
+        read_record(fs, dev, crate::login::OWNERS).map(Option::unwrap_or_default)
     }
 
     /// Whether `name` may be changed; says why not.
@@ -2067,7 +2094,13 @@ impl Owners<'_> {
         let Some(me) = self.operator() else {
             return true;
         };
-        let record = Self::record(fs, dev);
+        let Some(record) = Self::record(fs, dev) else {
+            outf!(
+                out,
+                "permission denied: the ownership record cannot be read"
+            );
+            return false;
+        };
         // A line left by an object an admin removed names nothing: only a live object is owned.
         match crate::login::owner_of(&record, name) {
             Some(o) if o != me && fs.stat(dev, name).is_ok() => {
@@ -2085,7 +2118,9 @@ impl Owners<'_> {
         name: &str,
         owner: Option<&str>,
     ) {
-        let record = Self::record(fs, dev);
+        let Some(record) = Self::record(fs, dev) else {
+            return;
+        };
         let next = crate::login::with_owner(&record, name, owner);
         if next != record {
             let _ = fs.replace(dev, crate::login::OWNERS, next.as_bytes());
@@ -2946,7 +2981,7 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
             match host.tcp_fetch(ip, port, text.as_bytes(), &mut reply) {
                 Ok(n) => {
                     outf!(out, "tcp {}: {} byte(s) back", port, n);
-                    match core::str::from_utf8(&reply[..n]) {
+                    match terminal_text(&reply[..n]) {
                         Ok(answer) => out(answer),
                         // A peer may answer with anything at all. Bytes that would drive the
                         // terminal are shown, never executed (the same rule the file panel keeps).
@@ -3005,7 +3040,7 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                         report.records_out,
                         report.received
                     );
-                    match core::str::from_utf8(&reply[..report.received]) {
+                    match terminal_text(&reply[..report.received]) {
                         Ok(answer) => out(answer),
                         Err(_) => out("(the answer is not text)"),
                     }
@@ -3086,7 +3121,7 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                                 if response.chunked { " (chunked)" } else { "" },
                                 if response.truncated { " (truncated)" } else { "" }
                             );
-                            match core::str::from_utf8(&body[..response.body_len]) {
+                            match terminal_text(&body[..response.body_len]) {
                                 Ok(text) => out(text),
                                 Err(_) => out("(the body is not text)"),
                             }
@@ -3469,7 +3504,7 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                     // Contents came from a device, so they are NOT assumed to be text: bytes that
                     // are not valid UTF-8 are reported as a count rather than sprayed at a terminal
                     // that would interpret them as escape sequences.
-                    Ok(bytes) => match core::str::from_utf8(&bytes) {
+                    Ok(bytes) => match terminal_text(&bytes) {
                         Ok(s) => out(s),
                         Err(_) => outf!(out, "<{} bytes, not text>", bytes.len()),
                     },
@@ -3562,7 +3597,7 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                 match n {
                     None => out("head: N must be a number"),
                     Some(n) => match fs.read(dev, name) {
-                        Ok(bytes) => match core::str::from_utf8(&bytes) {
+                        Ok(bytes) => match terminal_text(&bytes) {
                             Ok(s) => {
                                 for line in s.lines().take(n) {
                                     out(line);
@@ -3610,7 +3645,7 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                 out("usage: grep TEXT NAME");
             } else {
                 match fs.read(dev, name) {
-                    Ok(bytes) => match core::str::from_utf8(&bytes) {
+                    Ok(bytes) => match terminal_text(&bytes) {
                         Ok(s) => {
                             let mut hits = 0usize;
                             for (i, line) in s.lines().enumerate() {
@@ -4082,7 +4117,10 @@ impl Session {
             return;
         }
         self.auth.checked = true;
-        self.auth.locked = fs.read(dev, crate::login::RECORD).is_ok();
+        self.auth.locked = !matches!(
+            fs.read(dev, crate::login::RECORD),
+            Err(crate::fs::FsError::NotFound)
+        );
         if self.auth.locked {
             out("this console is locked: `login NAME`\r\n");
         }
@@ -4127,7 +4165,10 @@ impl Session {
             "logout" if !self.auth.locked => {
                 self.auth.user = None;
                 self.auth.role = crate::login::Role::Admin;
-                self.auth.locked = fs.read(dev, crate::login::RECORD).is_ok();
+                self.auth.locked = !matches!(
+                    fs.read(dev, crate::login::RECORD),
+                    Err(crate::fs::FsError::NotFound)
+                );
                 say(
                     out,
                     if self.auth.locked {
@@ -4148,10 +4189,11 @@ impl Session {
                 let (target, wanted) = split_first(name);
                 let wanted = wanted.trim();
                 let name = target;
-                let record = fs
-                    .read(dev, crate::login::RECORD)
-                    .ok()
-                    .map(|b| String::from_utf8_lossy(&b).into_owned());
+                let Some(record) = read_record(fs, dev, crate::login::RECORD) else {
+                    say(out, "passwd refused: the account record cannot be read");
+                    out(PROMPT);
+                    return Some(Outcome::Continue);
+                };
                 let own = self.auth.user.as_deref() == Some(name);
                 // The role the new line gets (ADR-247): the first account is an admin; an admin
                 // names any role (default: the account's current one, else operator); anyone else
@@ -4270,11 +4312,13 @@ impl Session {
                         return;
                     }
                 };
-                let record = fs
-                    .read(dev, crate::login::RECORD)
-                    .ok()
-                    .map(|b| String::from_utf8_lossy(&b).into_owned())
-                    .unwrap_or_default();
+                // Rewritten whole: a record that exists but cannot be read must not become one
+                // holding only this account.
+                let Some(record) = read_record(fs, dev, crate::login::RECORD) else {
+                    say("passwd refused: the account record cannot be read");
+                    return;
+                };
+                let record = record.unwrap_or_default();
                 let next = crate::login::upsert(&record, &name, &new_line);
                 match fs.replace(dev, crate::login::RECORD, next.as_bytes()) {
                     Ok(_) => {
@@ -5364,3 +5408,25 @@ pub fn console_suite<H: ShellHost, D: BlockDevice, F: FnMut(u32, bool, &str)>(
     Ok(n)
 }
 type InputIrqStats = ((u64, u64, u64, u64), (u64, u64, u64));
+
+#[cfg(test)]
+mod terminal_text_tests {
+    use super::terminal_text;
+
+    #[test]
+    fn bytes_that_would_drive_the_terminal_are_not_text() {
+        assert_eq!(
+            terminal_text(b"plain\tline\r\nnext\n"),
+            Ok("plain\tline\r\nnext\n")
+        );
+        for evil in [
+            &b"\x1b[2J"[..],
+            b"over\rwrite",
+            b"back\x08",
+            "\u{9b}2J".as_bytes(),
+            b"\xff",
+        ] {
+            assert!(terminal_text(evil).is_err(), "{evil:?}");
+        }
+    }
+}

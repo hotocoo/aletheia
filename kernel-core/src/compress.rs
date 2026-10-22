@@ -242,6 +242,11 @@ fn lzss(data: &[u8]) -> Vec<u8> {
 /// every write is checked against it, and finishing short is an error. A corrupt token stream
 /// therefore cannot allocate or produce more than the envelope declared.
 fn lzss_decode(payload: &[u8], orig_len: usize) -> Result<Vec<u8>, DecompressError> {
+    // The most a payload can expand: every 2-byte token a MAX_MATCH copy. A declared size past
+    // that is a lie, refused BEFORE it becomes an allocation the heap cannot hold.
+    if orig_len > payload.len() / 2 * MAX_MATCH {
+        return Err(DecompressError::Truncated);
+    }
     let mut out = Vec::with_capacity(orig_len);
     let mut p = 0usize;
     while p < payload.len() {

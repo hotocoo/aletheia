@@ -82,7 +82,8 @@ pub fn is_private(name: &str) -> bool {
 /// The account that owns `name` in an ownership record, if any.
 pub fn owner_of<'a>(record: &'a str, name: &str) -> Option<&'a str> {
     record.lines().find_map(|l| {
-        let (n, o) = l.split_once(':')?;
+        // Object names may hold ':'; account names never do, so the owner follows the last one.
+        let (n, o) = l.rsplit_once(':')?;
         (n == name && valid_name(o)).then_some(o)
     })
 }
@@ -91,7 +92,7 @@ pub fn owner_of<'a>(record: &'a str, name: &str) -> Option<&'a str> {
 pub fn with_owner(record: &str, name: &str, owner: Option<&str>) -> String {
     let mut out: String = record
         .lines()
-        .filter(|l| l.split_once(':').map(|(n, _)| n) != Some(name) && !l.trim().is_empty())
+        .filter(|l| l.rsplit_once(':').map(|(n, _)| n) != Some(name) && !l.trim().is_empty())
         .flat_map(|l| [l, "\n"])
         .collect();
     if let Some(o) = owner {
@@ -368,6 +369,20 @@ mod tests {
         assert_eq!(owner_of(&r, "notes"), None);
         assert_eq!(owner_of(&r, "plan"), Some("bob"));
         assert!(is_private(".owners") && is_private(".users") && !is_private("plan"));
+    }
+
+    #[test]
+    fn an_object_name_with_a_colon_keeps_its_owner() {
+        let r = with_owner("", "a:b", Some("bob"));
+        assert_eq!(owner_of(&r, "a:b"), Some("bob"));
+        assert_eq!(owner_of(&r, "a"), None);
+        let r = with_owner(&r, "a", Some("ada"));
+        assert_eq!(
+            owner_of(&r, "a:b"),
+            Some("bob"),
+            "another name must not drop it"
+        );
+        assert_eq!(owner_of(&with_owner(&r, "a:b", None), "a:b"), None);
     }
 
     #[test]
