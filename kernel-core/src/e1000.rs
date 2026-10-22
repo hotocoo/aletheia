@@ -557,7 +557,12 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     );
     // The TCP stack over this NIC, when the gate placed an echo peer on the wire (ADR-227). The
     // family count says which: 7 with the peer, 6 without, and each gate pins its own.
-    if let Ok(peer_mac) = dev.arp_resolve(ECHO_PEER) {
+    let diag_t0 = H::now_ns();
+    log(0, true, "DIAG about to ARP for the echo peer");
+    let diag_arp = dev.arp_resolve(ECHO_PEER);
+    log(0, diag_arp.is_ok(), "DIAG echo-peer ARP answered (true) or not (false)");
+    log((H::now_ns().wrapping_sub(diag_t0) / 1_000_000) as usize, true, "DIAG ms spent on the echo-peer ARP");
+    if let Ok(peer_mac) = diag_arp {
         let link = E1000Link { dev, peer_mac };
         let mut conn =
             crate::tcpconn::Connection::new(dev.ip(), 49_700, ECHO_PEER, ECHO_PORT, 200_000_000);
@@ -575,6 +580,8 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
             &mut reply,
             &mut H::now_ns,
         );
+        log((H::now_ns().wrapping_sub(diag_t0) / 1_000_000) as usize, got.is_ok(), "DIAG ms until the exchange returned (ok?)");
+        if let Err(e) = got { log(e as usize, false, "DIAG exchange error discriminant"); }
         check!(
             "e1000: a TCP conversation over the NIC reaches the echo peer and its bytes come back",
             got.is_ok_and(|e| e.received == 14) && &reply[..14] == b"ALETHEIA-E1000"
