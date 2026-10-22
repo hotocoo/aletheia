@@ -232,6 +232,17 @@ boot_once() {
     if grep -q 'e2e\] PASS' "$LOG" 2>/dev/null; then v="pass"; break; fi
     if grep -Eq 'FAILED at|FATAL|KERNEL PANIC' "$LOG" 2>/dev/null; then v="fail"; break; fi
   done
+  if [ -z "$v" ]; then
+    # A watchdog verdict says only "no marker in time". Record where the guest IS before the
+    # power-off destroys it: three register samples a second apart tell a spin from a halt, and
+    # RIP minus the loaded image base the kernel printed is the offset to symbolize.
+    echo "==> watchdog: guest state before power-off" >&2
+    vbm showvminfo "$VM_NAME" --machinereadable 2>/dev/null | grep -E '^VMState=' >&2
+    for i in 1 2 3; do
+      vbm debugvm "$VM_NAME" getregisters rip rsp rflags cr3 >&2 2>&1 || echo "  (getregisters refused)" >&2
+      sleep 1
+    done
+  fi
   vbm controlvm "$VM_NAME" poweroff >/dev/null 2>&1
   sleep 1
   printf '%s' "$v"
