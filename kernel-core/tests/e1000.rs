@@ -32,6 +32,9 @@ struct Faults {
     tx_never_done: bool,
     mac_only_in_eeprom: bool,
     no_gateway: bool,
+    /// The wire never goes quiet: a stray frame follows every transmit and every receive
+    /// descriptor handed back (VirtualBox 7.2's NAT, 2026-10-22).
+    chatty: bool,
 }
 
 struct St {
@@ -116,6 +119,9 @@ impl Regs for Sim {
     fn w32(&self, off: usize, v: u32) {
         let mut s = self.0.borrow_mut();
         s.r.insert(off, v);
+        if off == REG_RDT && s.f.chatty {
+            Sim::deliver(&mut s, &[0xAAu8; 60]);
+        }
         if off != REG_TDT || s.f.tx_never_done {
             return;
         }
@@ -134,6 +140,9 @@ impl Regs for Sim {
             unsafe { ((d + 12) as *mut u32).write_volatile(1) };
             s.tdh = (s.tdh + 1) % RING as u32;
             s.sent += 1;
+            if s.f.chatty {
+                Sim::deliver(&mut s, &[0xAAu8; 60]);
+            }
             // Gateway: answer an ARP request for 10.0.2.2.
             if !s.f.no_gateway
                 && len >= 42
@@ -199,6 +208,19 @@ fn a_reset_that_never_completes_is_refused() {
 fn errored_frames_are_never_handed_up_and_no_answer_is_a_timeout() {
     let dev = open(Faults {
         rx_error: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(dev.arp_resolve([10, 0, 2, 2]), Err(E1000Error::Timeout));
+}
+
+#[test]
+fn a_wire_that_never_goes_quiet_still_ends_an_unanswered_wait() {
+    // The VirtualBox gate hung here: frames the driver did not ask for kept arriving, and the
+    // receive loop only looked at its deadline when the ring was empty.
+    let dev = open(Faults {
+        chatty: true,
+        no_gateway: true,
         ..Default::default()
     })
     .unwrap();

@@ -43,3 +43,13 @@ INTERRUPT_ACK) as well as at the interrupt controller.
 * The INTID and source are derived from QEMU virt's wiring, not read from the device tree's
   `interrupts` property; a board that wires virtio-mmio differently gets a polled device (the
   window check refuses a base outside QEMU's layout).
+
+## Addendum 2026-10-22: the sleep is judged over both boots
+
+`console-e2e.sh` went red on the CI runner with `completions: interrupt-driven, 7 interrupts, 0
+sleeps, 0 bound wakes` on aarch64: every completion arrived before the CPU looked, so it never
+needed to sleep. Whether one boot sleeps is a race with QEMU's I/O thread, so a single boot's sleep
+count is not a verdict. The first boot now also prints `lsblk` after its write burst and `sync`, and
+the gate (`completion_proof`) requires each boot's readout to be interrupt-driven with at least one
+interrupt and no bound wakes, and at least one sleep across the two. A polled device, a bound wake,
+or two boots without a single sleep still fail. The x86-64 leg (ADR-260) uses the same check.

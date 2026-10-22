@@ -325,6 +325,27 @@ hr() { printf '=================================================================
 # ---------------------------------------------------------------------------------------------
 # aarch64 and RISC-V: direct `-kernel` boots, serial on stdio, exit code straight from the guest
 # ---------------------------------------------------------------------------------------------
+# The completion-interrupt proof (ADR-260/261) over BOTH boots' `lsblk` readouts: each boot's
+# completions came by interrupt (at least one, and the bounding timer never woke the CPU), and the
+# CPU slept for a completion at least once across the two. Whether one boot sleeps at all is a race
+# with the emulator's I/O thread (a fast host answers a read before the CPU looks), so a single
+# boot's sleep count is not a verdict; the first boot's write burst and sync make the pair one.
+completion_proof() {
+  local label="$1" r1="$2" r2="$3" sleeps=0 r
+  for r in "$r1" "$r2"; do
+    if ! [[ "$r" =~ completions:\ interrupt-driven,\ ([1-9][0-9]*)\ interrupts,\ ([0-9]+)\ sleeps,\ 0\ bound\ wakes ]]; then
+      echo "  FAIL [$label] block completions were not interrupt-driven: ${r:-no lsblk readout}"
+      return 1
+    fi
+    sleeps=$((sleeps + BASH_REMATCH[2]))
+  done
+  if [ "$sleeps" -eq 0 ]; then
+    echo "  FAIL [$label] the CPU never slept for a completion across both boots: $r1 / $r2"
+    return 1
+  fi
+  echo "  [pass] $label: block reads slept until the completion interrupt ($sleeps sleeps over two boots, no bound wakes)"
+}
+
 mmio_leg() {
   # $1 = label, $2 = crate dir, $3 = target triple, $4 = binary name, then the qemu argv prefix.
   local label="$1" dir="$2" triple="$3" bin="$4"; shift 4
@@ -357,10 +378,11 @@ mmio_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "together trap trap trap" "+2" "mlstat" "date" "uptime" "+10" "date" "uptime" "passwd ada" "Sesame-42" "Sesame-42" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "together trap trap trap" "+2" "mlstat" "date" "uptime" "+10" "date" "uptime" "passwd ada" "Sesame-42" "Sesame-42" "sync" "lsblk" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" first
   local s1=$?
+  local r1; r1="$(grep -a 'completions:' "$log" | tail -1)"
 
   echo "--> session 2: a SECOND boot must still hold what the operator typed"
   drive_session "$log" 180 "cat manifesto" "login ada" "wrong-guess" "login ada" "Sesame-42" "whoami" "cat .users" "ls" "cat manifesto" "cat backup" "grep work manifesto" "refresh" "persona" "+2" "lsblk" "halt"
@@ -368,14 +390,7 @@ mmio_leg() {
   check_session "$label" "$CONSOLE_RC" 0 "$(cat "$log")" second
   local s2=$?
   # Block reads slept until the virtio-mmio interrupt (ADR-261).
-  if true; then
-    if grep -qE "completions: interrupt-driven, [1-9][0-9]* interrupts, [1-9][0-9]* sleeps, 0 bound wakes" "$log"; then
-      echo "  [pass] $label: block reads slept until the completion interrupt (no bound wakes)"
-    else
-      echo "  FAIL [$label] block completions were not interrupt-driven: $(grep -a 'completions:' "$log" | tail -1)"
-      s2=$((s2 + 1)); fail=1
-    fi
-  fi
+  completion_proof "$label" "$r1" "$(grep -a 'completions:' "$log" | tail -1)" || { s2=$((s2 + 1)); fail=1; }
 
   rm -f "$log"
   return $((s1 + s2))
@@ -444,10 +459,11 @@ x86_leg() {
   echo "--> session 1: an operator writes an object through the console"
   drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
-    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "together trap trap trap" "+2" "mlstat" "date" "uptime" "+10" "date" "uptime" "passwd ada" "Sesame-42" "Sesame-42" "sync" "halt"
+    "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "together trap trap trap" "+2" "mlstat" "date" "uptime" "+10" "date" "uptime" "passwd ada" "Sesame-42" "Sesame-42" "sync" "lsblk" "halt"
   sed -n '/interactive console/,$p' "$log"
   check_session "$label" "$CONSOLE_RC" 33 "$(cat "$log")" first
   local s1=$?
+  local r1; r1="$(grep -a 'completions:' "$log" | tail -1)"
 
   echo "--> session 2: a SECOND boot must still hold what the operator typed"
   cp "$vars" "$work/vars.fd"
@@ -457,12 +473,7 @@ x86_leg() {
   local s2=$?
   # The console's reads after boot slept until the device's completion interrupt woke the CPU, and
   # the bounding timer never had to (ADR-260): every sleep ended by a completion.
-  if grep -qE "completions: interrupt-driven, [1-9][0-9]* interrupts, [1-9][0-9]* sleeps, 0 bound wakes" "$log"; then
-    echo "  [pass] $label: block reads slept until the completion interrupt (no bound wakes)"
-  else
-    echo "  FAIL [$label] block completions were not interrupt-driven: $(grep -a 'completions:' "$log" | tail -1)"
-    s2=$((s2 + 1)); fail=1
-  fi
+  completion_proof "$label" "$r1" "$(grep -a 'completions:' "$log" | tail -1)" || { s2=$((s2 + 1)); fail=1; }
 
   rm -rf "$work"
   RESULTS+=("x86-64  : $([ $((s1 + s2)) -eq 0 ] && echo PASS || echo FAIL)")

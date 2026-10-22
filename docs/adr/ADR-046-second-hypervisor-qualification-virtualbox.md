@@ -171,3 +171,11 @@ job before the gate ran a single boot. The job now installs `virtualbox-7.2` fro
 follows new host kernels (initial 7.0 support since 7.2.8). A failed module build prints
 `/var/log/vbox-setup.log` and fails the step. `VBOX_REQUIRED=1` is unchanged: a VirtualBox that
 cannot load is still a failure, never a SKIP.
+
+With 7.2 installed the gate booted and then hung after e1000 invariant 5 (`watchdog — no PASS ...
+within 180s`). The kernel was asking for the TCP echo peer `10.0.2.100`, which VirtualBox's NAT does
+not provide, while 7.2's NAT kept delivering frames to the guest. `E1000::recv_until` looked at its
+deadline only when the receive ring was empty, so a wire that never went quiet kept an unanswered
+ARP waiting forever. The deadline is now checked after every look, frame or not.
+`a_wire_that_never_goes_quiet_still_ends_an_unanswered_wait` (kernel-core/tests/e1000.rs) hangs
+without the fix and passes with it.

@@ -381,12 +381,14 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
                 if let Some(t) = taken {
                     return Ok(t);
                 }
-                continue;
+            } else {
+                core::hint::spin_loop();
             }
+            // Checked after every look, frame or not: a wire that never goes quiet with frames
+            // `accept` refuses must still end the wait (VirtualBox 7.2's NAT held the boot here).
             if H::now_ns().wrapping_sub(started) > BUDGET_NS {
                 return Err(E1000Error::Timeout);
             }
-            core::hint::spin_loop();
         }
         Err(E1000Error::Timeout)
     }
