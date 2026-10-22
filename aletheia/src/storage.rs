@@ -186,24 +186,37 @@ impl Store {
     fn rewrite_log(&mut self) -> Result<()> {
         let tmp = self.log_path.with_extension("alog.tmp");
         std::fs::remove_file(&tmp).ok();
-        self.frames_per_version.clear();
-        self.frame_seq = 0;
+        // Live state changes only once the new log is in place: a failure part-way leaves the
+        // old log AND the counters that describe it, so the next append still seals in order.
+        let written = self.write_rewritten(&tmp).and_then(|frames| {
+            std::fs::rename(&tmp, &self.log_path)
+                .map_err(|e| AlethError::persistence(&e.to_string()))?;
+            Ok(frames)
+        });
+        match written {
+            Ok(frames) => {
+                self.frames_per_version.clear();
+                self.frames_per_version
+                    .insert(self.atrest.current_version(), frames);
+                self.frame_seq = self.journal.len() as u64;
+                Ok(())
+            }
+            Err(e) => {
+                std::fs::remove_file(&tmp).ok();
+                Err(e)
+            }
+        }
+    }
+
+    /// Seal the whole journal into `tmp` under the current key and fsync it; the frame count.
+    fn write_rewritten(&mut self, tmp: &std::path::Path) -> Result<u64> {
         for (seq, rec) in self.journal.iter().enumerate() {
             let plain =
                 serde_json::to_vec(rec).map_err(|e| AlethError::internal(&e.to_string()))?;
             let frame = self.atrest.seal_frame(seq as u64, &plain)?;
-            *self
-                .frames_per_version
-                .entry(self.atrest.current_version())
-                .or_insert(0) += 1;
-            atrest::append_frame(&tmp, &frame)?;
+            atrest::append_frame(tmp, &frame)?;
         }
-        self.frame_seq = self.journal.len() as u64;
-        // fsync the temp before it becomes the log, then swap.
-        if let Ok(f) = std::fs::File::open(&tmp) {
-            f.sync_all().ok();
-        }
-        std::fs::rename(&tmp, &self.log_path).map_err(|e| AlethError::persistence(&e.to_string()))
+        Ok(self.journal.len() as u64)
     }
 
     fn apply(&mut self, rec: Record) {

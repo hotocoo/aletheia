@@ -345,28 +345,24 @@ impl CoreService {
                 serde_json::to_value(self.core.search(&caps, &query, limit)).unwrap_or(Value::Null),
             ),
             Request::QueryCapabilities { caps } => {
-                if matches!(
-                    self.core.caps().evaluate(
-                        "audit.read",
-                        &crate::capabilities::Target::default(),
-                        &caps
-                    ),
-                    crate::capabilities::Decision::Deny(_)
-                ) {
+                if self.core.caps().evaluate(
+                    "audit.read",
+                    &crate::capabilities::Target::default(),
+                    &caps,
+                ) != crate::capabilities::Decision::Allow
+                {
                     Response::err("not permitted to inspect capabilities")
                 } else {
                     Response::ok(Value::Array(self.core.caps().inspect()))
                 }
             }
             Request::QueryPerformance { caps } => {
-                if matches!(
-                    self.core.caps().evaluate(
-                        "audit.read",
-                        &crate::capabilities::Target::default(),
-                        &caps,
-                    ),
-                    crate::capabilities::Decision::Deny(_)
-                ) {
+                if self.core.caps().evaluate(
+                    "audit.read",
+                    &crate::capabilities::Target::default(),
+                    &caps,
+                ) != crate::capabilities::Decision::Allow
+                {
                     Response::err("not permitted to inspect performance telemetry")
                 } else {
                     Response::ok(self.perf.snapshot())
@@ -414,7 +410,8 @@ impl CoreService {
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 /// Per-connection read timeout: a client that stalls mid-frame is dropped rather than blocking the
 /// (sequential) accept loop forever (slow-loris mitigation). Bounds reading REQUEST bytes, not
-/// request processing, so a long model interpretation is unaffected.
+/// request processing, so a long model interpretation is unaffected. Writes get the same bound, so
+/// a client that never reads its response is dropped too.
 const CONN_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub fn serve(mut svc: CoreService, path: &str) -> std::io::Result<()> {
@@ -422,6 +419,7 @@ pub fn serve(mut svc: CoreService, path: &str) -> std::io::Result<()> {
     loop {
         let mut conn = listener.accept()?;
         let _ = conn.set_read_timeout(Some(CONN_READ_TIMEOUT));
+        let _ = conn.set_write_timeout(Some(CONN_READ_TIMEOUT));
         while let Ok(Some(bytes)) = read_frame(&mut conn) {
             let resp = match serde_json::from_slice::<Request>(&bytes) {
                 Ok(req) => svc.handle(req),

@@ -227,6 +227,12 @@ impl AtRest {
     /// entries are retained: existing frames must stay readable until a rekey retires them.
     pub fn rotate(&mut self) -> Result<u32> {
         let v = self.current_version() + 1;
+        // A frame names its key in one byte (`seal_frame`): version 256 would read back as 0.
+        if v > u8::MAX as u32 {
+            return Err(AlethError::conflict(
+                "key version limit reached: a frame names its key in one byte",
+            ));
+        }
         self.entries.push(KeyEntry {
             version: v,
             key: crate::crypto::random_key(),
@@ -410,7 +416,8 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
         }
         f.write_all(bytes)
             .map_err(|e| AlethError::persistence(&e.to_string()))?;
-        f.sync_all().ok();
+        f.sync_all()
+            .map_err(|e| AlethError::persistence(&e.to_string()))?;
     }
     std::fs::rename(&tmp, path).map_err(|e| AlethError::persistence(&e.to_string()))?;
     Ok(())
@@ -439,8 +446,8 @@ pub(crate) fn append_frame(path: &Path, frame: &[u8]) -> Result<()> {
     f.write_all(&len)
         .and_then(|_| f.write_all(frame))
         .map_err(|e| AlethError::persistence(&e.to_string()))?;
-    f.sync_all().ok();
-    Ok(())
+    f.sync_all()
+        .map_err(|e| AlethError::persistence(&e.to_string()))
 }
 
 #[cfg(test)]

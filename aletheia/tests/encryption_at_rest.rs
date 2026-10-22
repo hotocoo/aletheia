@@ -406,3 +406,43 @@ fn pre_adr069_legacy_log_is_detected_by_authentication_and_migrated_transparentl
     assert_eq!(s.get_blob(&hash).unwrap(), &blob_content.to_vec());
     std::fs::remove_dir_all(&d).ok();
 }
+
+/// A rekey that fails part-way must leave the live log AND the counters that describe it: the
+/// next append still seals at the right frame position, so the store reopens.
+#[test]
+fn a_rekey_that_fails_midway_leaves_the_store_openable() {
+    let d = dir("rekey-fail");
+    {
+        let mut s = Store::open(&d).unwrap();
+        s.put_event(&event("before")).unwrap();
+        s.rotate_encryption_keys().unwrap();
+        // A directory where the rewrite's temp file goes makes every frame write fail.
+        std::fs::create_dir_all(d.join("store.alog.tmp")).unwrap();
+        assert!(s.rekey_log().is_err(), "rekey must report the failed write");
+        s.put_event(&event("after")).unwrap();
+    }
+    let s = Store::open(&d).expect("the old log plus one more frame still opens");
+    let lines: Vec<_> = s
+        .events()
+        .iter()
+        .map(|e| e.payload["line"].clone())
+        .collect();
+    assert_eq!(lines, vec!["before", "after"]);
+}
+
+/// A frame names its key version in one byte; minting version 256 would alias version 0.
+#[test]
+fn key_rotation_stops_at_the_last_version_a_frame_can_name() {
+    let d = dir("rotate-cap");
+    let mut s = Store::open(&d).unwrap();
+    for want in 2..=255u32 {
+        assert_eq!(s.rotate_encryption_keys().unwrap(), want);
+    }
+    assert!(
+        s.rotate_encryption_keys().is_err(),
+        "version 256 must be refused"
+    );
+    s.put_event(&event("v255")).unwrap();
+    drop(s);
+    assert_eq!(Store::open(&d).unwrap().events().len(), 1);
+}

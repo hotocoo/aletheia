@@ -314,3 +314,78 @@ fn an_empty_entity_scope_is_a_legal_narrowing_of_anything() {
         )
         .is_err());
 }
+
+/// An approval-constrained capability is authority that needs a human: neither its holder's
+/// inline `approve` nor the holder resolving its own pending approval may stand in for one.
+#[test]
+fn an_approval_constrained_holder_cannot_approve_itself() {
+    let mut core = SysCore::open(dir(), det()).unwrap();
+    let t = owner(&mut core);
+    let e = core
+        .create_entity(
+            &t,
+            "human:owner",
+            EntityType::Document,
+            b"x",
+            serde_json::json!({}),
+        )
+        .unwrap();
+    let cap = core
+        .grant_to(
+            &t,
+            "agent:a",
+            "entity.delete",
+            Scope::Entities(vec![e.id.clone()]),
+            Constraints::approval(),
+        )
+        .unwrap();
+    let held = vec![cap.token];
+    let delete = Intent {
+        subject: "agent:a".into(),
+        verb: Verb::Delete { id: e.id.clone() },
+    };
+    let tr = core.handle_intent(&held, delete, true);
+    let pending = tr
+        .approval_id
+        .clone()
+        .expect("inline approve must not bypass the human");
+    assert!(tr.approval.starts_with("pending"), "{}", tr.approval);
+    assert!(
+        core.resolve_approval(&held, &pending, true).is_err(),
+        "the requester must not resolve its own approval"
+    );
+    assert!(core.resolve_approval(&t, &pending, true).unwrap().ok);
+}
+
+/// `RequireApproval` is not `Allow`: an approval-constrained grant or audit capability reads
+/// nothing and revokes nothing on its own.
+#[test]
+fn approval_constrained_caps_do_not_pass_boundary_gates() {
+    let mut core = SysCore::open(dir(), det()).unwrap();
+    let t = owner(&mut core);
+    let grant = core
+        .grant_to(
+            &t,
+            "agent:a",
+            "capability.grant",
+            Scope::All,
+            Constraints::approval(),
+        )
+        .unwrap();
+    let audit = core
+        .grant_to(
+            &t,
+            "agent:a",
+            "audit.read",
+            Scope::All,
+            Constraints::approval(),
+        )
+        .unwrap();
+    assert!(core.revoke_capability(&[grant.token], &t[0]).is_err());
+    assert!(core.query_audit(std::slice::from_ref(&audit.token), 10).is_err());
+    assert!(core.list_pending_approvals(&[audit.token]).is_err());
+    assert!(
+        core.query_audit(&t, 10).is_ok(),
+        "the owner still reads the log"
+    );
+}

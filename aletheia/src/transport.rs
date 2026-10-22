@@ -29,6 +29,8 @@ pub trait Conn: Read + Write + Send {
     /// Bound how long a stalled peer may hold the (sequential) accept loop. Best-effort: a backend
     /// that cannot express a timeout returns `Ok(())` rather than failing the connection.
     fn set_read_timeout(&mut self, dur: Option<Duration>) -> std::io::Result<()>;
+    /// The same bound on writes: a peer that never reads its responses must not hold the loop.
+    fn set_write_timeout(&mut self, dur: Option<Duration>) -> std::io::Result<()>;
 }
 
 /// A bound endpoint that yields connections. Dropping it releases the endpoint's name.
@@ -71,6 +73,9 @@ mod imp {
         fn set_read_timeout(&mut self, dur: Option<Duration>) -> std::io::Result<()> {
             UnixStream::set_read_timeout(self, dur)
         }
+        fn set_write_timeout(&mut self, dur: Option<Duration>) -> std::io::Result<()> {
+            UnixStream::set_write_timeout(self, dur)
+        }
     }
 
     struct UnixEndpoint {
@@ -94,8 +99,21 @@ mod imp {
     }
 
     pub fn bind(path: &str) -> std::io::Result<Box<dyn Listener>> {
-        let _ = std::fs::remove_file(path);
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        // Clear only a stale socket: a regular file or symlink at a mistyped path is not ours.
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_socket() => std::fs::remove_file(path)?,
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("{path} exists and is not a socket; refusing to replace it"),
+                ))
+            }
+            Err(_) => {}
+        }
         let listener = UnixListener::bind(path)?;
+        // Permissions are the only bound on who may connect (module doc): owner only.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         Ok(Box::new(UnixEndpoint {
             listener,
             path: path.to_string(),
@@ -128,6 +146,9 @@ mod imp {
     impl Conn for TcpStream {
         fn set_read_timeout(&mut self, dur: Option<Duration>) -> std::io::Result<()> {
             TcpStream::set_read_timeout(self, dur)
+        }
+        fn set_write_timeout(&mut self, dur: Option<Duration>) -> std::io::Result<()> {
+            TcpStream::set_write_timeout(self, dur)
         }
     }
 

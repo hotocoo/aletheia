@@ -153,6 +153,12 @@ impl SysCore {
     }
 
     fn emit(&mut self, etype: &str, corr: &Id, actor: &str, payload: Value) {
+        let _ = self.try_emit(etype, corr, actor, payload);
+    }
+
+    /// `emit` for the events the approval lifecycle replays from (ADR-015): their loss would
+    /// drop a pending approval on restart or let a resolved one be resolved again.
+    fn try_emit(&mut self, etype: &str, corr: &Id, actor: &str, payload: Value) -> Result<()> {
         let ev = EventRecord {
             id: new_id(),
             etype: etype.to_string(),
@@ -161,7 +167,7 @@ impl SysCore {
             actor: actor.to_string(),
             payload,
         };
-        let _ = self.store.put_event(&ev);
+        self.store.put_event(&ev)
     }
 
     /// Mint the human owner's root capability. Authority still comes from a HELD capability, not from
@@ -1019,16 +1025,20 @@ impl SysCore {
     /// Record a durable pending approval bound to the exact intent. The immutable event log is the
     /// source of truth (`ApprovalRequested` carries the full serialized record); the in-memory
     /// registry is a replayable projection of it.
-    fn record_pending_approval(&mut self, intent: &Intent, reason: &str) -> PendingApproval {
+    fn record_pending_approval(
+        &mut self,
+        intent: &Intent,
+        reason: &str,
+    ) -> Result<PendingApproval> {
         let pa = PendingApproval::new(&intent.subject, intent.clone(), reason);
-        self.approvals.insert(pa.clone());
-        self.emit(
+        self.try_emit(
             "ApprovalRequested",
             &new_id(),
             &pa.subject,
             serde_json::to_value(&pa).unwrap_or(Value::Null),
-        );
-        pa
+        )?;
+        self.approvals.insert(pa.clone());
+        Ok(pa)
     }
 
     /// A human grants or denies a pending approval. Granting re-runs the EXACT bound intent with
@@ -1059,18 +1069,21 @@ impl SysCore {
             );
             return Err(AlethError::conflict("approval expired"));
         }
-        // Authorization: only a principal who could perform the bound action may resolve its
-        // approval — grant OR deny (INV-011). Approval is a second gate, never an escape from
+        // Authorization: only a principal who could perform the bound action WITHOUT approval may
+        // resolve its approval (an approval-constrained holder cannot approve itself) — grant OR deny (INV-011). Approval is a second gate, never an escape from
         // capabilities, and a zero-capability caller must not be able to force-deny (DoS) either.
         let (action, target) = self.authz_of_intent(&pa.intent);
-        if matches!(
-            self.caps.evaluate(action, &target, offered),
-            Decision::Deny(_)
-        ) {
+        if self.caps.evaluate(action, &target, offered) != Decision::Allow {
             return Err(AlethError::authorization(
                 "not permitted to resolve this approval",
             ));
         }
+        self.try_emit(
+            "ApprovalResolved",
+            &new_id(),
+            &pa.subject,
+            json!({"approval": approval_id, "granted": granted}),
+        )?;
         self.approvals.mark_state(
             approval_id,
             if granted {
@@ -1078,12 +1091,6 @@ impl SysCore {
             } else {
                 ApprovalState::Denied
             },
-        );
-        self.emit(
-            "ApprovalResolved",
-            &new_id(),
-            &pa.subject,
-            json!({"approval": approval_id, "granted": granted}),
         );
         if !granted {
             let mut trace = Trace::new(&pa.subject, new_id());
@@ -1100,11 +1107,11 @@ impl SysCore {
     /// (`audit.read`): pending approvals reveal subjects + bound intents, so an unauthenticated
     /// caller is denied.
     pub fn list_pending_approvals(&self, offered: &[String]) -> Result<Vec<PendingApproval>> {
-        if matches!(
-            self.caps
-                .evaluate("audit.read", &Target::default(), offered),
-            Decision::Deny(_)
-        ) {
+        if self
+            .caps
+            .evaluate("audit.read", &Target::default(), offered)
+            != Decision::Allow
+        {
             return Err(AlethError::authorization("not permitted to list approvals"));
         }
         Ok(self.approvals.list_pending(now()))
@@ -1179,9 +1186,7 @@ impl SysCore {
             ApprovalVerdict::NotRequired => Err(AlethError::validation(
                 "approval requested for a line policy does not gate",
             )),
-            ApprovalVerdict::Required { reason } => {
-                Ok(self.record_pending_approval(&intent, &reason))
-            }
+            ApprovalVerdict::Required { reason } => self.record_pending_approval(&intent, &reason),
         }
     }
 
@@ -1282,11 +1287,11 @@ impl SysCore {
     /// Read the tail of the immutable audit log. Capability-gated (`audit.read`): the log carries
     /// provenance, not a public feed — a caller with no covering capability is denied (fail-closed).
     pub fn query_audit(&self, offered: &[String], limit: usize) -> Result<Vec<EventRecord>> {
-        if matches!(
-            self.caps
-                .evaluate("audit.read", &Target::default(), offered),
-            Decision::Deny(_)
-        ) {
+        if self
+            .caps
+            .evaluate("audit.read", &Target::default(), offered)
+            != Decision::Allow
+        {
             return Err(AlethError::authorization("not permitted to read audit"));
         }
         Ok(self
@@ -1302,11 +1307,11 @@ impl SysCore {
     /// Revoke a capability through the boundary — capability-gated (requires `capability.grant`
     /// authority). Prevents an unauthenticated caller from revoking the root cap (owner lockout).
     pub fn revoke_capability(&mut self, offered: &[String], token: &str) -> Result<()> {
-        if matches!(
-            self.caps
-                .evaluate("capability.grant", &Target::default(), offered),
-            Decision::Deny(_)
-        ) {
+        if self
+            .caps
+            .evaluate("capability.grant", &Target::default(), offered)
+            != Decision::Allow
+        {
             return Err(AlethError::authorization("not permitted to revoke"));
         }
         self.revoke(token)
@@ -1563,7 +1568,9 @@ impl SysCore {
             match self.policy.evaluate(&decision, meta.risk) {
                 ApprovalVerdict::NotRequired => trace.approval = "not required".into(),
                 ApprovalVerdict::Required { reason } => {
-                    if approve {
+                    // Inline consent is the authority holder's own: an approval-constrained cap
+                    // (`RequireApproval`) cannot consent for itself, so it always goes pending.
+                    if approve && decision == Decision::Allow {
                         trace.approval = format!("approved ({})", reason);
                         // Durable approval provenance for the synchronous path — the audit log is the
                         // source of truth (ADR-015), so a policy-required action carries a record even
@@ -1577,7 +1584,14 @@ impl SysCore {
                     } else {
                         // Record a durable pending approval bound to this exact intent; stop with no
                         // effect. A human later grants/denies it via `resolve_approval`.
-                        let pa = self.record_pending_approval(&intent, &reason);
+                        let pa = match self.record_pending_approval(&intent, &reason) {
+                            Ok(pa) => pa,
+                            Err(e) => {
+                                trace.error = Some(e);
+                                self.tasks.insert(task_id.clone(), TaskState::Failed);
+                                return trace;
+                            }
+                        };
                         trace.approval = format!("pending [{}] — {}", pa.id, reason);
                         trace.approval_id = Some(pa.id.clone());
                         self.tasks
