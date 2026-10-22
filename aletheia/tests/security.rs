@@ -382,7 +382,9 @@ fn approval_constrained_caps_do_not_pass_boundary_gates() {
         )
         .unwrap();
     assert!(core.revoke_capability(&[grant.token], &t[0]).is_err());
-    assert!(core.query_audit(std::slice::from_ref(&audit.token), 10).is_err());
+    assert!(core
+        .query_audit(std::slice::from_ref(&audit.token), 10)
+        .is_err());
     assert!(core.list_pending_approvals(&[audit.token]).is_err());
     assert!(
         core.query_audit(&t, 10).is_ok(),

@@ -54,6 +54,9 @@ reading the code; each fix carries a test that fails on the old code where a hos
 
 * `release.yml` sets `REQUIRE_VERIFY=1`: a package that was not booted fails the release.
 * `conformance.sh` counts each leg's exit status; CI sets `REQUIRE_X86=1`.
+* `quality-gate.sh` ignores RUSTSEC-2026-0367/0368/0369 for `aletheia-laya` only, with the reason in
+  the script: they are all in `zip`'s `extract`, which candle (the only path to `zip`, pinned below
+  9 in every release) never calls. Accepted risk, removed when candle moves to `zip` 9.
 
 ## Evidence
 

@@ -82,11 +82,17 @@ step "[3] advisories — cargo audit"
 if command -v cargo-audit >/dev/null 2>&1 || cargo audit --version >/dev/null 2>&1; then
   for c in aletheia component-sdk aletheia-laya; do
     [ -f "$c/Cargo.lock" ] || continue
-    if cargo audit --file "$c/Cargo.lock" >/dev/null 2>&1; then
+    ignore=()
+    # zip 7.x reaches aletheia-laya only through candle-core (every candle release pins zip < 9).
+    # RUSTSEC-2026-0367/0368/0369 are all in ZipArchive/ZipStreamReader::extract; candle only opens
+    # archives and reads entries by name (npy.rs, pickle.rs), and laya loads safetensors. Drop these
+    # the day candle moves to zip >= 9 (ADR-263).
+    [ "$c" = aletheia-laya ] && ignore=(--ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369)
+    if cargo audit ${ignore[@]+"${ignore[@]}"} --file "$c/Cargo.lock" >/dev/null 2>&1; then
       echo "  PASS audit: $c/Cargo.lock"
     else
       echo "  FAIL audit: $c/Cargo.lock"
-      cargo audit --file "$c/Cargo.lock" 2>&1 | tail -25
+      cargo audit ${ignore[@]+"${ignore[@]}"} --file "$c/Cargo.lock" 2>&1 | tail -25
       fail=1
     fi
   done
