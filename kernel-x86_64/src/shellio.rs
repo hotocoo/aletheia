@@ -167,7 +167,7 @@ impl ShellHost for Host {
                 (
                     crate::idt::blk_msix_hits(),
                     BLK_SLEEPS.load(core::sync::atomic::Ordering::Relaxed),
-                    crate::idt::blk_bound_wakes(),
+                    BLK_TIMER_ENDED.load(core::sync::atomic::Ordering::Relaxed),
                 )
             })
     }
@@ -425,8 +425,15 @@ static BLK_WAITING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 /// Times a block wait slept in `hlt` for that interrupt.
 static BLK_SLEEPS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "interactive")]
-/// LAPIC one-shot ticks (bus clock / 16) bounding one sleep: about 17 ms under QEMU's 1 GHz bus.
-const BLK_WAKE_TICKS: u32 = 1 << 20;
+/// Sleeps the one-shot ended while the device had not interrupted: the dead-interrupt signature.
+/// Counted here, not in the timer's handler, so a one-shot that expires in the instant after a
+/// completion interrupt already woke the CPU (before the disarm) is not mistaken for one.
+static BLK_TIMER_ENDED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "interactive")]
+/// LAPIC one-shot ticks (bus clock / 16) bounding one sleep: about 134 ms under QEMU's 1 GHz bus.
+/// The bound only matters when the interrupt is dead; 17 ms (ADR-260's first value) was shorter
+/// than a loaded CI runner's slowest emulated read and counted live completions as bound wakes.
+const BLK_WAKE_TICKS: u32 = 1 << 23;
 
 #[cfg(feature = "interactive")]
 /// The block device's completion wait (ADR-260): with interrupts on, sleep in `hlt` until the
@@ -444,11 +451,17 @@ fn blk_wait(ready: &dyn Fn() -> bool) {
         interrupts::enable();
         return;
     }
+    let (hits, fired) = (crate::idt::blk_msix_hits(), crate::idt::blk_bound_wakes());
     crate::smp::lapic_oneshot(crate::idt::BLK_TIMEOUT_VECTOR, BLK_WAKE_TICKS);
     BLK_SLEEPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // SAFETY: the canonical idle pair; `sti`'s shadow covers the `hlt`.
     unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack, preserves_flags)) };
+    interrupts::disable();
     crate::smp::lapic_oneshot(crate::idt::BLK_TIMEOUT_VECTOR, 0);
+    if crate::idt::blk_bound_wakes() != fired && crate::idt::blk_msix_hits() == hits {
+        BLK_TIMER_ENDED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    interrupts::enable();
 }
 
 #[cfg(feature = "interactive")]

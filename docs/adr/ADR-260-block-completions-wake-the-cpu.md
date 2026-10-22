@@ -52,3 +52,20 @@ the device never answers, and ADR-150's clock bound could not fire.
 * NVMe and AHCI still poll; writes still go one block per request (the journal's design).
 * One caller's wait becoming interrupt-driven, not an I/O scheduler: nothing yet queues independent
   requests from different callers.
+
+## Addendum 2026-10-23: a bound wake is judged by the waiter, and the bound is longer
+
+`console-e2e.sh` went red on a CI run with `90 interrupts, 94 sleeps, 6 bound wakes` on x86-64. Two
+causes, both fixed in `kernel-x86_64/src/shellio.rs`:
+
+* **The count.** The LAPIC one-shot's handler counted every expiry, including one that fires in the
+  window after a completion interrupt has already woken the CPU but before `blk_wait` disarms it.
+  `blk_wait` now disables interrupts, disarms, and counts a bound wake only when the one-shot fired
+  during that sleep and the device did NOT interrupt (`BLK_TIMER_ENDED`), which is the
+  dead-interrupt signature the gate exists to catch.
+* **The bound.** `1 << 20` LAPIC ticks (about 17 ms under QEMU) was shorter than a loaded runner's
+  slowest emulated read, so a live completion could lose the race to the timer. The bound only
+  costs anything when the interrupt is dead; it is now `1 << 23` (about 134 ms).
+
+A dead interrupt still fails the gate: every sleep then ends by the one-shot with no device
+interrupt, and the readout shows those bound wakes.
