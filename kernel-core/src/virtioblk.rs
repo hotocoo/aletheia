@@ -783,11 +783,6 @@ impl<H: VirtioHal, T: Transport> VirtioBlk<H, T> {
         if reqs.is_empty() || reqs.len() > IN_FLIGHT || self.wedged.get() {
             return Err(StorageError::Device);
         }
-        self.await_batch(reqs)
-    }
-
-    /// The body of [`submit_batch`](Self::submit_batch): post, notify, validate every completion.
-    unsafe fn await_batch(&self, reqs: &[(u16, u32, usize)]) -> Result<(), StorageError> {
         // avail ring layout: [flags:u16][idx:u16][ring:u16 * qsize][used_event:u16]
         let avail_idx_ptr = (self.avail + 2) as *mut u16;
         let avail_ring = (self.avail + 4) as *mut u16;

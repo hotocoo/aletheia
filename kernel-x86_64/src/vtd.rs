@@ -615,6 +615,9 @@ pub fn dmar_suite(
     // two bounded legacy zero-write artifacts this emulator generation emits (ADR-075 addendum).
     let mut legacy_artifacts = 0u32;
     for attempt in 0..4u32 {
+        // Each stimulus starts from fresh rings: a kick the unit swallowed leaves its request in
+        // flight, and the driver refuses to post over it until reset (ADR-263).
+        let _ = dev.reset();
         let served = dev.write_block(last, &pattern);
         kprintln!(
             "[dmar] kick {} outcome (informational): {:?}",
@@ -683,6 +686,7 @@ pub fn dmar_suite(
     let mut hit = None;
     let mut artifacts12 = 0u32;
     for attempt in 0..5u32 {
+        let _ = dev.reset();
         let denied_kick = dev.write_block(last, &pattern);
         kprintln!(
             "[dmar] revoked-kick {} (informational): {:?}",
@@ -765,6 +769,7 @@ pub fn dmar_suite(
     // window walked clean, not residue of the revocation record.
     let _ = ctrl.clear_fault_record(&lay, fri);
     for _ in 0..2u32 {
+        let _ = dev.reset();
         let _ = dev.write_block(last, &pattern);
         if scan_faults(&mut ctrl, &lay).is_some() {
             break;
