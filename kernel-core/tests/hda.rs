@@ -249,7 +249,7 @@ fn the_boot_suite_plays_a_tone_over_a_healthy_controller() {
     }
     .expect("every invariant holds");
     assert_eq!(
-        n, 6,
+        n, 7,
         "the suite's invariant count changed - update both VM gates"
     );
     let (path, done) = seen.expect("reported");
@@ -352,9 +352,39 @@ fn codec_answers_that_lie_are_refused_by_name() {
         ),
     ];
     for (f, want) in cases {
-        let (mut h, _) = unsafe { Driver::init(SimRegs::new(f), MAP_LEN) }.expect("init");
+        let regs = SimRegs::new(f);
+        let (mut h, _) = unsafe { Driver::init(regs.clone(), MAP_LEN) }.expect("init");
         assert_eq!(h.find_output(0), Err(want));
+        // ADR-268: the codec still owes the answer, so the controller is wedged and writes no verb.
+        assert!(h.is_wedged());
+        let sent = regs.0.borrow().verbs.len();
+        assert_eq!(h.find_output(0), Err(HdaError::Wedged));
+        assert_eq!(
+            regs.0.borrow().verbs.len(),
+            sent,
+            "a wedged controller writes no verb"
+        );
     }
+}
+
+/// A codec that owed an answer and was reset answers the next verb with ITS answer: the link
+/// reset restarted both ring pointers, so nothing the old verb was owed can land where the new
+/// one waits.
+#[test]
+fn a_link_reset_brings_a_wedged_controller_back() {
+    let regs = SimRegs::new(Faults {
+        silent: true,
+        ..Default::default()
+    });
+    let (mut h, _) = unsafe { Driver::init(regs.clone(), MAP_LEN) }.expect("init");
+    assert_eq!(h.find_output(0), Err(HdaError::Timeout));
+    assert!(h.is_wedged());
+    regs.0.borrow_mut().f.silent = false;
+    assert_eq!(h.find_output(0), Err(HdaError::Wedged));
+    h.reset().expect("link reset");
+    assert!(!h.is_wedged());
+    let path = h.find_output(0).expect("the codec answers after the reset");
+    assert_eq!((path.afg, path.dac, path.pin), (1, 2, 3));
 }
 
 #[test]

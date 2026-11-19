@@ -185,6 +185,8 @@ pub enum HdaError {
     NoOutputPath,
     /// The stream ran but its position never advanced, or no buffer completed.
     StreamStalled,
+    /// A codec still owes a response, so no verb is sent until [`Hda::reset`] (ADR-268).
+    Wedged,
 }
 
 /// What init observed.
@@ -215,6 +217,9 @@ pub struct Hda<H: VirtioHal, R: HdaRegs> {
     sd: usize,
     dma: DmaRegistry,
     budget_ns: u64,
+    /// A verb's response never came, or another response came in its place (ADR-268): the codec
+    /// still owes it, and it would land in the RIRB entry the next verb waits on.
+    wedged: bool,
     _hal: PhantomData<H>,
 }
 
@@ -264,46 +269,11 @@ impl<H: VirtioHal, R: HdaRegs> Hda<H, R> {
             sd: SD_BASE + SD_STRIDE * iss as usize,
             dma: DmaRegistry::new(),
             budget_ns: BUDGET_NS,
+            wedged: false,
             _hal: PhantomData,
         };
-        // Stop the rings before reset (spec §4.2): a controller firmware left running must not
-        // DMA into frames this kernel is about to reuse.
-        h.regs.w8(CORBCTL, 0);
-        h.regs.w8(RIRBCTL, 0);
-        h.regs.w32(GCTL, h.regs.r32(GCTL) & !GCTL_CRST);
-        h.wait(|r| r.r32(GCTL) & GCTL_CRST == 0)?;
-        h.regs.w32(GCTL, h.regs.r32(GCTL) | GCTL_CRST);
-        h.wait(|r| r.r32(GCTL) & GCTL_CRST != 0)?;
-        // Codecs announce themselves in STATESTS within 521 us of reset leaving (spec §4.3); give
-        // them a millisecond of the platform's clock.
-        let t0 = H::now_ns();
-        while H::now_ns().wrapping_sub(t0) < 1_000_000 {
-            core::hint::spin_loop();
-        }
-        let codecs = h.regs.r16(STATESTS) & 0x7FFF;
-        h.regs.w32(INTCTL, 0);
-
         h.rings = frame::<H>(&mut h.dma, "hda.corb-rirb")?;
-        let corb = h.rings as u64;
-        let rirb = (h.rings + 2048) as u64;
-        h.regs.w32(CORBLBASE, corb as u32);
-        h.regs.w32(CORBUBASE, (corb >> 32) as u32);
-        h.regs.w8(CORBSIZE, RING_256);
-        h.regs.w16(CORBWP, 0);
-        // CORBRP reset handshake (spec §4.4.1.3): set the bit, see it set, clear it, see it clear.
-        // Some controllers never show the bit set; only the clearing is required.
-        h.regs.w16(CORBRP, CORBRP_RST);
-        let _ = h.wait(|r| r.r16(CORBRP) & CORBRP_RST != 0);
-        h.regs.w16(CORBRP, 0);
-        h.wait(|r| r.r16(CORBRP) & CORBRP_RST == 0)?;
-        h.regs.w32(RIRBLBASE, rirb as u32);
-        h.regs.w32(RIRBUBASE, (rirb >> 32) as u32);
-        h.regs.w8(RIRBSIZE, RING_256);
-        h.regs.w16(RIRBWP, RIRBWP_RST);
-        h.regs.w16(RINTCNT, 1);
-        h.regs.w8(RIRBSTS, RIRBSTS_CLEAR);
-        h.regs.w8(RIRBCTL, RIRBCTL_DMAEN | RIRBCTL_RINTCTL);
-        h.regs.w8(CORBCTL, CORBCTL_RUN);
+        let codecs = h.start()?;
         let report = HdaReport {
             gcap,
             input_streams: iss,
@@ -336,8 +306,81 @@ impl<H: VirtioHal, R: HdaRegs> Hda<H, R> {
         self.dma.grants()
     }
 
+    /// Link reset (CRST low then high), codec discovery, CORB and RIRB programmed on this
+    /// controller's ring frame and running, interrupts off. Shared by `init` and `reset`. Returns the
+    /// codecs that announced themselves.
+    fn start(&mut self) -> Result<u16, HdaError> {
+        // Stop the rings before reset (spec §4.2): a controller firmware left running must not
+        // DMA into frames this kernel is about to reuse.
+        self.regs.w8(CORBCTL, 0);
+        self.regs.w8(RIRBCTL, 0);
+        self.regs.w32(GCTL, self.regs.r32(GCTL) & !GCTL_CRST);
+        self.wait(|r| r.r32(GCTL) & GCTL_CRST == 0)?;
+        self.regs.w32(GCTL, self.regs.r32(GCTL) | GCTL_CRST);
+        self.wait(|r| r.r32(GCTL) & GCTL_CRST != 0)?;
+        // Codecs announce themselves in STATESTS within 521 us of reset leaving (spec §4.3); give
+        // them a millisecond of the platform's clock.
+        let t0 = H::now_ns();
+        while H::now_ns().wrapping_sub(t0) < 1_000_000 {
+            core::hint::spin_loop();
+        }
+        let codecs = self.regs.r16(STATESTS) & 0x7FFF;
+        // A link reset restarts both ring pointers, so ours restart with them.
+        self.corb_wp = 0;
+        self.rirb_rp = 0;
+        self.regs.w32(INTCTL, 0);
+
+        let corb = self.rings as u64;
+        let rirb = (self.rings + 2048) as u64;
+        self.regs.w32(CORBLBASE, corb as u32);
+        self.regs.w32(CORBUBASE, (corb >> 32) as u32);
+        self.regs.w8(CORBSIZE, RING_256);
+        self.regs.w16(CORBWP, 0);
+        // CORBRP reset handshake (spec §4.4.1.3): set the bit, see it set, clear it, see it clear.
+        // Some controllers never show the bit set; only the clearing is required.
+        self.regs.w16(CORBRP, CORBRP_RST);
+        let _ = self.wait(|r| r.r16(CORBRP) & CORBRP_RST != 0);
+        self.regs.w16(CORBRP, 0);
+        self.wait(|r| r.r16(CORBRP) & CORBRP_RST == 0)?;
+        self.regs.w32(RIRBLBASE, rirb as u32);
+        self.regs.w32(RIRBUBASE, (rirb >> 32) as u32);
+        self.regs.w8(RIRBSIZE, RING_256);
+        self.regs.w16(RIRBWP, RIRBWP_RST);
+        self.regs.w16(RINTCNT, 1);
+        self.regs.w8(RIRBSTS, RIRBSTS_CLEAR);
+        self.regs.w8(RIRBCTL, RIRBCTL_DMAEN | RIRBCTL_RINTCTL);
+        self.regs.w8(CORBCTL, CORBCTL_RUN);
+        Ok(codecs)
+    }
+
+    /// Bring a wedged (or healthy) controller back on its ring frame (ADR-268): the stream stops,
+    /// the link resets (which ends every verb a codec still owed and restarts both ring
+    /// pointers), and CORB and RIRB run again from entry 0. Nothing is allocated; a codec's widget
+    /// state is reset too, so the output path is configured again after this. A reset that fails
+    /// leaves the controller wedged.
+    pub fn reset(&mut self) -> Result<(), HdaError> {
+        self.wedged = true;
+        self.stop_stream();
+        self.start()?;
+        self.wedged = false;
+        Ok(())
+    }
+
+    /// Whether every verb is refused until [`Self::reset`].
+    pub fn is_wedged(&self) -> bool {
+        self.wedged
+    }
+
+    /// Verbs written to the CORB since the last link reset.
+    pub fn verbs_sent(&self) -> u16 {
+        self.corb_wp
+    }
+
     /// Send one verb through CORB and wait for its solicited response from the same codec.
     pub fn verb(&mut self, cad: u8, nid: u8, payload: u32) -> Result<u32, HdaError> {
+        if self.wedged {
+            return Err(HdaError::Wedged);
+        }
         let v = (cad as u32 & 0xF) << 28 | (nid as u32 & 0x7F) << 20 | (payload & 0xF_FFFF);
         let wp = (self.corb_wp + 1) & 0xFF;
         // SAFETY: CORB entry `wp` lies in the rings frame this controller owns.
@@ -346,7 +389,11 @@ impl<H: VirtioHal, R: HdaRegs> Hda<H, R> {
         self.corb_wp = wp;
         self.regs.w16(CORBWP, wp);
         let want = (self.rirb_rp + 1) & 0xFF;
-        self.wait(|r| r.r16(RIRBWP) & 0xFF == want)?;
+        if let Err(e) = self.wait(|r| r.r16(RIRBWP) & 0xFF == want) {
+            // The response is still owed: it would land at `want`, where the next verb waits.
+            self.wedged = true;
+            return Err(e);
+        }
         H::barrier();
         let e = self.rings + 2048 + 8 * want as usize;
         // SAFETY: RIRB entry `want` lies in the rings frame this controller owns.
@@ -359,10 +406,14 @@ impl<H: VirtioHal, R: HdaRegs> Hda<H, R> {
         self.rirb_rp = want;
         // Clearing the response status lets the controller take the next verb (RINTCNT = 1).
         self.regs.w8(RIRBSTS, RIRBSTS_CLEAR);
+        // Either way this entry was not our answer, which is still owed and would arrive one
+        // entry later, as the next verb's.
         if ex & RIRB_UNSOL != 0 {
+            self.wedged = true;
             return Err(HdaError::Unsolicited);
         }
         if ex & 0xF != cad as u32 & 0xF {
+            self.wedged = true;
             return Err(HdaError::WrongCodec);
         }
         Ok(resp)
@@ -602,6 +653,17 @@ pub unsafe fn device_suite<H: VirtioHal, R: HdaRegs, F: FnMut(usize, bool, &str)
         path.is_ok()
     );
     let Ok(path) = path else { unreachable!() };
+    // ADR-268: a wedged controller writes no verb until a link reset on the same ring frame, after
+    // which the codec answers again. The wedge is set directly: a verb whose response never came
+    // is what sets it, and provoking one would race the codec.
+    h.wedged = true;
+    let sent = h.verbs_sent();
+    let refused = h.param(cad, 0, P_VENDOR_ID) == Err(HdaError::Wedged) && h.verbs_sent() == sent;
+    let back = h.reset().is_ok() && !h.is_wedged();
+    check!(
+        "hda: a wedged controller sends no verb until a link reset on the same rings, and the codec answers after it",
+        refused && back && h.param(cad, 0, P_VENDOR_ID) == Ok(path.vendor)
+    );
     check!(
         "hda: path powered, 48 kHz 16-bit stereo set, stream tagged, pin output enabled, amps unmuted",
         h.configure(&path).is_ok()

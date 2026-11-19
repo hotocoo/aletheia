@@ -72,7 +72,7 @@ def check(ok, name):
         fails.append(name)
 
 log = open(log_path, 'rb').read().decode('utf-8', 'replace')
-check('ALL 6 HDA INVARIANTS HOLD' in log, 'hda: the boot suite played its tone')
+check('ALL 7 HDA INVARIANTS HOLD' in log, 'hda: the boot suite played its tone')
 # The guest ends the run through semihosting, so QEMU never rewrites the RIFF and data sizes it
 # left at zero; the format fields are read from the canonical 44-byte header and the data runs to
 # the end of the file.
