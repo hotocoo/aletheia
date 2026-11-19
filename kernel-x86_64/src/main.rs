@@ -30,6 +30,7 @@ mod acpi;
 mod cell;
 mod conirq;
 mod desktop;
+mod devirq;
 mod exit;
 mod framebuffer;
 mod frames;

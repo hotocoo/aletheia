@@ -368,6 +368,12 @@ pub extern "C" fn el1_irq() {
     if intid == SPURIOUS {
         return; // the GIC's "nothing to see here" — no EOI is owed for a spurious read
     }
+    // A storage controller's completion message (ADR-264): counted by the platform module, which
+    // owns the counters; acknowledged here like every other source.
+    if crate::devirq::on_irq(intid) {
+        gicc_w32(GICC_EOIR, iar);
+        return;
+    }
     // The desktop's tick: rearm first (so a slow pump cannot silently stop the clock), pump,
     // then acknowledge. A machine with no desktop never enabled this PPI and never gets here.
     #[cfg(feature = "interactive")]

@@ -51,8 +51,10 @@ target, host property tests with crash sweeps at every prefix — and none of th
    a user task on purpose and then running another one. What remains: restart policy / supervision trees
    (REQ-REL-001, still architecture only), quotas and rate limits, and a production TCB/task lifecycle.
 2. **DMA isolation.** Enforced by the real VT-d unit on x86-64 from the vt-d gate to halt (ADR-073) and narrowed to PER-DEVICE WINDOWS - each function translates only its own registry-granted frames, page-revocation denied by name with measured reason 6 (ADR-075); the virt targets still hand devices raw physical addresses under the software registry alone (P1-018 SMMUv3 window rung open).
-3. **Interrupt-driven I/O.** Every driver polls. That is provable and slow, and it does not survive real
-   device latencies.
+3. **Interrupt-driven I/O.** The console's virtio-blk (ADR-260/261) and the boot suites' NVMe and AHCI
+   (ADR-264, x86-64 and aarch64, over MSI-X / MSI / GICv2m) complete by interrupt, one command in flight;
+   every other driver polls, and nothing queues independent requests. Proved under QEMU only, and on real
+   device latencies not at all.
 4. **Real hardware variety.** Everything is proved under QEMU. Firmware quirks, cache maintenance for
    non-coherent DMA, and errata are untouched.
 5. **Soak and fault injection at scale** (P2-008/009/010): the crash sweeps are exhaustive but short. **Soak volume landed 2026-08-23 (ADR-063):** four lifecycle campaigns run under repetition on all three targets and the host, with the allocation-free churn window gated on each target's own heap meter — wall-clock soak duration remains bounded by the boot watchdog, while **P2-010's broader property campaign landed 2026-09-08:** 64 deterministic generated shapes gate every push/PR, 512 run nightly, seeds are captured, and failing shapes are minimized and retained as artifacts.

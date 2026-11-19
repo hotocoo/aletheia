@@ -131,7 +131,12 @@ REQUIRED=(
   # a second implementation of each, written by someone other than QEMU. (NVMe is absent here:
   # VirtualBox's NVMe controller ships only in the Oracle Extension Pack - VERR_PDM_DEVICE_NOT_FOUND.)
   'ALL 5 E1000 INVARIANTS HOLD'
-  'ALL 24 AHCI INVARIANTS HOLD'
+  # ADR-264: 24 polled invariants, then EITHER the 7 interrupt ones (VirtualBox's AHCI exposes MSI,
+  # 31) OR the one that proves a named polled fallback (no MSI capability on the default chipset,
+  # 25). Both are accepted here because only this rung can tell which VirtualBox does; the line
+  # below pins that the choice was printed, so a fallback is never silent.
+  'ALL (25|31) AHCI INVARIANTS HOLD'
+  '\[ahci\] completions: (interrupt-driven \(MSI vector 0x55\)|POLLED, fallback 1 \(.+\))'
   'e2e\] PASS'
 )
 # SKIPPED-BY-HYPERVISOR: VirtualBox emulates no virtio-blk and this VM has no NIC, so the storage and

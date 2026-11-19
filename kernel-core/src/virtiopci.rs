@@ -215,6 +215,220 @@ pub unsafe fn enable_bus_master(env: &impl PciEnv, bdf: Bdf) {
     unsafe { env.write32(bdf, CFG_COMMAND, command | (command_status & 0xFFFF_0000)) };
 }
 
+// --- Message-signalled interrupts (ADR-264) -------------------------------------------------------
+// One copy of the capability programming every target shares; each target supplies only WHERE a
+// message goes (an xAPIC doorbell on x86-64, a GICv2m frame on aarch64) and what data it carries.
+
+/// Message Signalled Interrupts capability id (PCI 3.0 section 6.8.1).
+pub const CAP_ID_MSI: u8 = 0x05;
+/// MSI-X capability id (PCI 3.0 section 6.8.2).
+pub const CAP_ID_MSIX: u8 = 0x11;
+/// Command register bit 10: the function's legacy INTx pin stays silent once a message path owns it.
+const CMD_INTX_DISABLE: u32 = 1 << 10;
+/// Upper bound on capability-list hops, the stop for a device that builds a cycle.
+const CAP_WALK_HOPS: u32 = 48;
+/// The capability list lives after the 64-byte standard header and before the end of the 256-byte
+/// configuration space (PCI 3.0 section 6.7); a pointer outside it is the device's lie.
+const CAP_LIST_MIN: u8 = 0x40;
+const CFG_SPACE_BYTES: usize = 0x100;
+/// A capability's id and next-pointer bytes: the least a list entry occupies.
+const CAP_HEADER_BYTES: usize = 2;
+/// Bytes of each capability this file reads or writes, from its pointer: MSI up to its mask register
+/// (64-bit layout: 16 + 4), MSI-X up to the PBA register (8 + 4).
+const MSI_CAP_BYTES: usize = 20;
+const MSIX_CAP_BYTES: usize = 12;
+
+// MSI capability (PCI 3.0 section 6.8.1): control is the high half of the id dword.
+const MSI_CTRL_SHIFT: u32 = 16;
+const MSI_CTRL_ENABLE: u32 = 1 << 0;
+const MSI_CTRL_MME_MASK: u32 = 0b111 << 4; // multiple-message enable: 0 = one vector
+const MSI_CTRL_64BIT: u32 = 1 << 7;
+const MSI_CTRL_MASKABLE: u32 = 1 << 8;
+const MSI_ADDR_LO: u8 = 4;
+const MSI_ADDR_HI: u8 = 8;
+const MSI_DATA_64: u8 = 12;
+const MSI_MASK_64: u8 = 16;
+const MSI_DATA_32: u8 = 8;
+const MSI_MASK_32: u8 = 12;
+
+// MSI-X capability (PCI 3.0 section 6.8.2).
+const MSIX_CTRL_SHIFT: u32 = 16;
+const MSIX_CTRL_FUNCTION_MASK: u32 = 1 << 14;
+const MSIX_CTRL_ENABLE: u32 = 1 << 15;
+const MSIX_CTRL_TABLE_SIZE_MASK: u32 = 0x7FF; // N - 1
+const MSIX_TABLE_REG: u8 = 4;
+const MSIX_TABLE_BIR_MASK: u32 = 0x7;
+const MSIX_TABLE_OFFSET_MASK: u32 = 0xFFFF_FFF8;
+const MSIX_ENTRY_BYTES: usize = 16;
+const MSIX_ENTRY_ADDR_LO: usize = 0;
+const MSIX_ENTRY_ADDR_HI: usize = 4;
+const MSIX_ENTRY_DATA: usize = 8;
+const MSIX_ENTRY_CTRL: usize = 12;
+const MSIX_ENTRY_MASKED: u32 = 1;
+
+/// Walk the capability list for `id`, bounded. `Ok(None)` = the list ends without `id`. The list
+/// is the device's own claim, so every pointer is checked before it is read through: at or past the
+/// standard header (0x40), the entry's header and the `body` bytes the caller will touch from it
+/// inside the 256-byte configuration space (a pointer near 0xFC would make `cap + offset` wrap a
+/// byte), and a list that does not end within [`CAP_WALK_HOPS`] is a loop. A malformed list is
+/// refused by name rather than read as "not found".
+/// # Safety
+/// The caller names a present function.
+pub unsafe fn find_cap(
+    env: &impl PciEnv,
+    bdf: Bdf,
+    id: u8,
+    body: usize,
+) -> Result<Option<u8>, &'static str> {
+    let mut ptr = unsafe { cfg_read8(env, bdf, CFG_CAP_PTR) } & 0xFC;
+    for _ in 0..CAP_WALK_HOPS {
+        if ptr == 0 {
+            return Ok(None);
+        }
+        if ptr < CAP_LIST_MIN || ptr as usize + CAP_HEADER_BYTES > CFG_SPACE_BYTES {
+            return Err("pci: the capability list points outside the configuration space");
+        }
+        if unsafe { cfg_read8(env, bdf, ptr) } == id {
+            if ptr as usize + body > CFG_SPACE_BYTES {
+                return Err("pci: the capability does not fit in the configuration space");
+            }
+            return Ok(Some(ptr));
+        }
+        ptr = unsafe { cfg_read8(env, bdf, ptr + 1) } & 0xFC;
+    }
+    Err("pci: the capability list does not end (a loop)")
+}
+
+/// Silence the legacy INTx pin. Config-space status holds write-1-to-clear bits, so only the
+/// command half is written (the status half is zero, which clears nothing).
+unsafe fn intx_off(env: &impl PciEnv, bdf: Bdf) {
+    let command = unsafe { env.read32(bdf, CFG_COMMAND) } & 0xFFFF;
+    unsafe { env.write32(bdf, CFG_COMMAND, command | CMD_INTX_DISABLE) };
+}
+
+/// Point a function's single-vector MSI at `addr`/`data` and enable it. Refuses by name a function
+/// with no MSI capability. The pin is silenced once the message path is live.
+/// # Safety
+/// The caller owns this function's configuration space and has no interrupt in flight.
+pub unsafe fn enable_msi(
+    env: &impl PciEnv,
+    bdf: Bdf,
+    addr: u64,
+    data: u16,
+) -> Result<(), &'static str> {
+    let cap = unsafe { find_cap(env, bdf, CAP_ID_MSI, MSI_CAP_BYTES) }?
+        .ok_or("pci: the function has no MSI capability - completions cannot wake the CPU")?;
+    let head = unsafe { env.read32(bdf, cap) };
+    let ctrl = head >> MSI_CTRL_SHIFT;
+    let (data_reg, mask_reg) = if ctrl & MSI_CTRL_64BIT != 0 {
+        unsafe { env.write32(bdf, cap + MSI_ADDR_HI, (addr >> 32) as u32) };
+        (MSI_DATA_64, MSI_MASK_64)
+    } else {
+        if addr > u32::MAX as u64 {
+            return Err("pci: the MSI capability is 32-bit but the doorbell is above 4 GiB");
+        }
+        (MSI_DATA_32, MSI_MASK_32)
+    };
+    unsafe {
+        env.write32(bdf, cap + MSI_ADDR_LO, addr as u32);
+        // The data register is 16 bits; the dword's upper half is the reserved/mask area, so the
+        // read-modify-write keeps it.
+        let word = env.read32(bdf, cap + data_reg);
+        env.write32(bdf, cap + data_reg, (word & 0xFFFF_0000) | data as u32);
+        if ctrl & MSI_CTRL_MASKABLE != 0 {
+            env.write32(bdf, cap + mask_reg, 0);
+        }
+    }
+    let enabled = (ctrl & !MSI_CTRL_MME_MASK) | MSI_CTRL_ENABLE;
+    unsafe {
+        env.write32(bdf, cap, (head & 0xFFFF) | (enabled << MSI_CTRL_SHIFT));
+        intx_off(env, bdf);
+    }
+    Ok(())
+}
+
+/// Program MSI-X table entry `entry` with `addr`/`data` (unmasked), keep entry 0 masked when it is
+/// not the one used (a controller's admin vector must not fire into the I/O path's counters), and
+/// enable MSI-X. Returns the table's size. The table lives in a BAR; it is mapped through the
+/// target's rule. Refuses by name: no capability, an entry past the table, an unassigned or I/O BAR.
+/// # Safety
+/// The caller owns this function's configuration space and has no interrupt in flight.
+pub unsafe fn enable_msix_entry(
+    env: &impl PciEnv,
+    bdf: Bdf,
+    entry: u16,
+    addr: u64,
+    data: u32,
+) -> Result<u16, &'static str> {
+    let cap = unsafe { find_cap(env, bdf, CAP_ID_MSIX, MSIX_CAP_BYTES) }?
+        .ok_or("pci: the function has no MSI-X capability - completions cannot wake the CPU")?;
+    let head = unsafe { env.read32(bdf, cap) };
+    let ctrl = head >> MSIX_CTRL_SHIFT;
+    let size = (ctrl & MSIX_CTRL_TABLE_SIZE_MASK) as u16 + 1;
+    if entry >= size {
+        return Err("pci: the MSI-X entry is past the table the function advertises");
+    }
+    let table = unsafe { env.read32(bdf, cap + MSIX_TABLE_REG) };
+    let bir = (table & MSIX_TABLE_BIR_MASK) as u8;
+    let bar = bar_base_pa(env, bdf, bir)?;
+    let table_bytes = size as u64 * MSIX_ENTRY_BYTES as u64;
+    let table_end = (table & MSIX_TABLE_OFFSET_MASK) as u64 + table_bytes;
+    // The table's BIR and offset are the function's own claim. The writes below land wherever they
+    // point, so the table must lie inside the memory BAR it names: not the upper half of a 64-bit
+    // BAR (a BAR index is a base, not a window), and not past the BAR's extent.
+    if bir > 0 && is_bar_upper_half(env, bdf, bir - 1) {
+        return Err("pci: the MSI-X table names the upper half of a 64-bit BAR");
+    }
+    if table_end > unsafe { bar_extent(env, bdf, bir) }? {
+        return Err("pci: the MSI-X table lies outside the BAR it names");
+    }
+    let table_pa = bar
+        .checked_add((table & MSIX_TABLE_OFFSET_MASK) as u64)
+        .ok_or("pci: the MSI-X table address overflows")?;
+    let table_va = env
+        .map_region(table_pa, table_bytes as usize)
+        .ok_or("pci: the MSI-X table could not be mapped as device memory")?;
+    // Function-mask first so no half-written message is ever delivered, then write the entry.
+    let masked = ctrl | MSIX_CTRL_FUNCTION_MASK | MSIX_CTRL_ENABLE;
+    unsafe { env.write32(bdf, cap, (head & 0xFFFF) | (masked << MSIX_CTRL_SHIFT)) };
+    let at = table_va + entry as usize * MSIX_ENTRY_BYTES;
+    // SAFETY: the table lies inside the mapped region above and `entry < size`.
+    unsafe {
+        write_volatile((at + MSIX_ENTRY_ADDR_LO) as *mut u32, addr as u32);
+        write_volatile((at + MSIX_ENTRY_ADDR_HI) as *mut u32, (addr >> 32) as u32);
+        write_volatile((at + MSIX_ENTRY_DATA) as *mut u32, data);
+        write_volatile((at + MSIX_ENTRY_CTRL) as *mut u32, 0);
+        if entry != 0 {
+            write_volatile((table_va + MSIX_ENTRY_CTRL) as *mut u32, MSIX_ENTRY_MASKED);
+        }
+    }
+    let live = (ctrl | MSIX_CTRL_ENABLE) & !MSIX_CTRL_FUNCTION_MASK;
+    unsafe {
+        env.write32(bdf, cap, (head & 0xFFFF) | (live << MSIX_CTRL_SHIFT));
+        intx_off(env, bdf);
+    }
+    Ok(size)
+}
+
+/// Whether BAR `index` is a 64-bit memory BAR, so that BAR `index + 1` is its upper half.
+fn is_bar_upper_half(env: &impl PciEnv, bdf: Bdf, index: u8) -> bool {
+    let low = unsafe { env.read32(bdf, CFG_BAR0 + index * 4) };
+    low & 1 == 0 && (low >> 1) & 3 == 2
+}
+
+/// A live BAR's extent: [`bar_size`] with the function's memory decode off for the probe, so the
+/// all-ones write is never a window the function answers on. The command register is rewritten
+/// without its write-1-to-clear status half.
+/// # Safety
+/// The caller owns this function's configuration space and has no access to it in flight.
+unsafe fn bar_extent(env: &impl PciEnv, bdf: Bdf, index: u8) -> Result<u64, &'static str> {
+    let command = unsafe { env.read32(bdf, CFG_COMMAND) } & 0xFFFF;
+    unsafe { env.write32(bdf, CFG_COMMAND, command & !CMD_MEMORY_SPACE) };
+    let size = unsafe { bar_size(env, bdf, index) };
+    unsafe { env.write32(bdf, CFG_COMMAND, command) };
+    size
+}
+
 /// Resolve the device's virtio capabilities into MAPPED regions. Refuses a device missing any
 /// of COMMON/NOTIFY/DEVICE config, a cycle-building cap list, or a region the target refuses
 /// to map - fail closed, never a guessed offset.

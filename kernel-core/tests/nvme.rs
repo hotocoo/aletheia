@@ -1,13 +1,14 @@
 //! Hosted proof of the NVMe driver (ADR-223) against a simulated controller that follows the NVM
 //! Express Base Specification's queue protocol - and can be told to break it in named ways.
 
+use kernel_core::devirq::{IrqSample, RunFault};
 use kernel_core::nvme::{
-    device_suite, Nvme, NvmeRegs, REG_ACQ, REG_AQA, REG_ASQ, REG_CAP, REG_CC, REG_CSTS,
-    REG_DOORBELL_BASE, REG_INTMS, REG_VS,
+    device_suite, fallback_suite, interrupt_suite, Nvme, NvmeRegs, REG_ACQ, REG_AQA, REG_ASQ,
+    REG_CAP, REG_CC, REG_CSTS, REG_DOORBELL_BASE, REG_INTMS, REG_VS,
 };
 use kernel_core::storage::{BlockDevice, StorageError, BLOCK_SIZE};
 use kernel_core::virtioblk::VirtioHal;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const PAGE: usize = 4096;
@@ -16,10 +17,28 @@ struct HostHal;
 
 thread_local! {
     static CLOCK: AtomicU64 = const { AtomicU64::new(0) };
+    /// Interrupts the simulated controller raised, times the platform wait halted the CPU, and the
+    /// controller the wait lets answer while it sleeps.
+    static IRQS: Cell<u64> = const { Cell::new(0) };
+    static SLEEPS: Cell<u64> = const { Cell::new(0) };
+    /// Times the driver called the platform wait, ready or not.
+    static WAITS: Cell<u64> = const { Cell::new(0) };
+    static DEVICE: Cell<*const Sim> = const { Cell::new(std::ptr::null()) };
+    static CLOCK_ANSWERS_AFTER: Cell<u32> = const { Cell::new(0) };
 }
 
 impl VirtioHal for HostHal {
     fn now_ns() -> u64 {
+        // A controller that runs beside the CPU answers between two looks at the clock: the
+        // countdown names which look it answers after.
+        let left = CLOCK_ANSWERS_AFTER.with(Cell::get);
+        if left > 0 {
+            CLOCK_ANSWERS_AFTER.with(|c| c.set(left - 1));
+            if left == 1 {
+                // SAFETY: DEVICE points at the Sim the running test owns.
+                DEVICE.with(|d| unsafe { (*d.get()).deliver() });
+            }
+        }
         CLOCK.with(|c| c.fetch_add(1_000_000, Ordering::Relaxed))
     }
     fn alloc_frame() -> Option<usize> {
@@ -46,6 +65,17 @@ struct Faults {
     sqid_lie: bool,
     /// Controller comes out of firmware already enabled.
     starts_enabled: bool,
+    /// The test armed an interrupt vector: the I/O CQ must be created with IEN, and only then.
+    armed: bool,
+    /// The controller answers only while the CPU sleeps (the platform wait lets it run), the way a
+    /// real device completes after the doorbell, not during it.
+    deferred: bool,
+    /// The controller never raises an interrupt although the CQ enabled one.
+    no_irq: bool,
+    /// The controller raises two interrupts per completion (status never cleared).
+    storm: bool,
+    /// The controller never sees the CQ head doorbell (the driver skipped writing it).
+    skip_cq_doorbell: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +116,9 @@ struct DevQueue {
     cq_tail: u16,
     phase: bool,
     cqid: u16,
+    ien: bool,
+    /// The CQ head the driver last told the controller (its head doorbell).
+    cq_head: u16,
 }
 
 struct State {
@@ -103,6 +136,10 @@ struct State {
     violations: Vec<&'static str>,
     flushes: usize,
     io_commands: usize,
+    /// Commands the doorbell accepted that a deferred controller has not answered yet.
+    pending: Vec<(usize, usize)>,
+    /// The MSI-X vector the I/O CQ was created with.
+    io_vector: Option<u16>,
 }
 
 struct Sim {
@@ -135,6 +172,8 @@ impl Sim {
                 violations: vec![],
                 flushes: 0,
                 io_commands: 0,
+                pending: vec![],
+                io_vector: None,
             }),
         }
     }
@@ -147,6 +186,13 @@ impl Sim {
         let cqid = s.queues[qid].unwrap().cqid as usize;
         let q = s.queues[qid].unwrap();
         let cq = s.queues[cqid].unwrap();
+        // A controller never overwrites an entry the driver has not freed (NVMe 1.4 §4.1.1: the
+        // queue is full when tail + 1 == head). Real ones stall the command; here it is recorded.
+        if (cq.cq_tail + 1) % cq.depth == cq.cq_head {
+            s.violations
+                .push("completion owed to a full queue: the CQ head doorbell was not written");
+            return;
+        }
         let slot = cq.cq + cq.cq_tail as usize * 16;
         // SAFETY: the driver handed this CQ frame to the controller.
         unsafe {
@@ -162,6 +208,17 @@ impl Sim {
         c.cq_tail = (c.cq_tail + 1) % c.depth;
         if c.cq_tail == 0 {
             c.phase = !c.phase;
+        }
+        if c.ien && !s.f.no_irq {
+            IRQS.with(|i| i.set(i.get() + 1 + s.f.storm as u64));
+        }
+    }
+
+    /// A deferred controller answers what it was told, while the CPU sleeps.
+    fn deliver(&self) {
+        let mut s = self.st.borrow_mut();
+        for (qid, sqe) in std::mem::take(&mut s.pending) {
+            Sim::execute(&mut s, qid, sqe);
         }
     }
 
@@ -201,14 +258,18 @@ impl Sim {
                     ok(s);
                 }
                 0x05 => {
-                    if c11 & 2 != 0 {
-                        s.violations.push("io cq created with interrupts enabled");
+                    let ien = c11 & 2 != 0;
+                    if ien != s.f.armed {
+                        s.violations
+                            .push("io cq interrupt enable does not match the armed vector");
                     }
+                    s.io_vector = ien.then_some((c11 >> 16) as u16);
                     s.queues[(c10 & 0xFFFF) as usize] = Some(DevQueue {
                         cq: prp1,
                         depth: (c10 >> 16) as u16 + 1,
                         phase: true,
                         cqid: 1,
+                        ien,
                         ..Default::default()
                     });
                     ok(s);
@@ -328,7 +389,13 @@ impl NvmeRegs for Sim {
                 }
                 let qid = idx / 2;
                 if idx % 2 == 1 {
-                    return; // CQ head doorbell: the slot is free again
+                    // CQ head doorbell: the slots up to `v` are free again.
+                    if !s.f.skip_cq_doorbell {
+                        if let Some(c) = s.queues[qid].as_mut() {
+                            c.cq_head = v as u16;
+                        }
+                    }
+                    return;
                 }
                 let Some(q) = s.queues[qid] else {
                     s.violations
@@ -340,7 +407,11 @@ impl NvmeRegs for Sim {
                     let sqe = q.sq + head as usize * 64;
                     head = (head + 1) % q.depth;
                     s.queues[qid].as_mut().unwrap().sq_head = head;
-                    Sim::execute(&mut s, qid, sqe);
+                    if s.f.deferred && qid != 0 {
+                        s.pending.push((qid, sqe));
+                    } else {
+                        Sim::execute(&mut s, qid, sqe);
+                    }
                 }
             }
             _ => {}
@@ -583,4 +654,246 @@ fn out_of_range_and_wrong_sized_requests_never_reach_the_controller() {
         &sim,
     );
     assert_eq!(sim.st.borrow().io_commands, 0);
+}
+
+// --- Interrupt-driven completions (ADR-264) ----------------------------------------------------
+
+/// The platform wait the tests install: nothing ready means the CPU halts, and the controller
+/// answers while it does.
+fn platform_wait(ready: &dyn Fn() -> bool) {
+    WAITS.with(|c| c.set(c.get() + 1));
+    if !ready() {
+        SLEEPS.with(|c| c.set(c.get() + 1));
+        // SAFETY: DEVICE points at the Sim the running test owns.
+        DEVICE.with(|d| unsafe { (*d.get()).deliver() });
+    }
+}
+
+fn sample() -> IrqSample {
+    IrqSample {
+        interrupts: IRQS.with(Cell::get),
+        sleeps: SLEEPS.with(Cell::get),
+        bound_wakes: 0,
+    }
+}
+
+fn armed_sim(f: Faults) -> Sim {
+    IRQS.with(|c| c.set(0));
+    SLEEPS.with(|c| c.set(0));
+    WAITS.with(|c| c.set(0));
+    Sim::new(
+        Geometry::healthy(9, GATE_BLOCKS),
+        Faults { armed: true, ..f },
+    )
+}
+
+fn open_armed(sim: &Sim) -> Nvme<HostHal, &Sim> {
+    DEVICE.with(|d| d.set(sim));
+    let (mut dev, _) = unsafe { Nvme::<HostHal, &Sim>::init_with_io_vector(sim, Some(1)) }
+        .expect("init with a vector");
+    dev.set_completion_wait(Some(platform_wait))
+        .expect("an armed queue takes a wait");
+    dev
+}
+
+#[test]
+fn the_io_queue_is_created_with_the_armed_vector_and_only_then() {
+    let sim = armed_sim(Faults::default());
+    let _dev = open_armed(&sim);
+    assert_eq!(sim.st.borrow().io_vector, Some(1));
+    assert!(sim.st.borrow().violations.is_empty());
+    // Unarmed: the queue is polled, as before, and the controller checks that too.
+    let polled = Sim::new(Geometry::healthy(9, GATE_BLOCKS), Faults::default());
+    let (dev, _) = unsafe { Nvme::<HostHal, &Sim>::init(&polled) }.expect("polled init");
+    assert_eq!(dev.io_vector(), None);
+    assert_eq!(polled.st.borrow().io_vector, None);
+    assert!(polled.st.borrow().violations.is_empty());
+}
+
+#[test]
+fn a_wait_is_refused_on_a_queue_with_no_interrupt() {
+    let sim = Sim::new(Geometry::healthy(9, GATE_BLOCKS), Faults::default());
+    let (mut dev, _) = unsafe { Nvme::<HostHal, &Sim>::init(&sim) }.expect("init");
+    assert!(dev.set_completion_wait(Some(platform_wait)).is_err());
+    assert!(dev.set_completion_wait(None).is_ok());
+}
+
+#[test]
+fn the_interrupt_group_holds_when_the_controller_interrupts_and_the_cpu_sleeps() {
+    let sim = armed_sim(Faults {
+        deferred: true,
+        ..Default::default()
+    });
+    let dev = open_armed(&sim);
+    let mut names = vec![];
+    let n = interrupt_suite(&dev, 100, &sample, &mut |i, ok, name: &str| {
+        assert!(ok, "invariant {i} failed: {name}");
+        names.push((i, name.to_string()));
+    })
+    .expect("interrupt group");
+    assert_eq!(n, 7, "interrupt group count changed - update the VM gates");
+    assert_eq!(
+        names[0].0, 101,
+        "the group continues the caller's numbering"
+    );
+    assert!(names[0]
+        .1
+        .starts_with("nvme: the I/O queue was created with an interrupt vector"));
+    assert!(sim.st.borrow().violations.is_empty());
+    let (slept, polled) = dev.completion_counts();
+    assert!(slept > 0 && polled == 0);
+}
+
+#[test]
+fn a_driver_that_polls_fails_the_group_by_name() {
+    let sim = armed_sim(Faults::default());
+    DEVICE.with(|d| d.set(&sim));
+    let (dev, _) = unsafe { Nvme::<HostHal, &Sim>::init_with_io_vector(&sim, Some(1)) }.unwrap();
+    // No platform wait installed: every completion is a spin.
+    let r = interrupt_suite(&dev, 0, &sample, &mut |_, _, _| {});
+    let (idx, name) = r.expect_err("a polling driver must fail");
+    assert_eq!(idx, 1);
+    assert!(name.contains("wait through the platform"));
+}
+
+#[test]
+fn a_vector_that_never_fires_is_refused_by_the_run_verdict() {
+    let sim = armed_sim(Faults {
+        deferred: true,
+        no_irq: true,
+        ..Default::default()
+    });
+    let dev = open_armed(&sim);
+    let (_, name) = interrupt_suite(&dev, 0, &sample, &mut |_, _, _| {})
+        .expect_err("an unarmed source must fail");
+    assert_eq!(name, RunFault::NoInterrupt.name());
+}
+
+#[test]
+fn an_unacknowledged_status_shows_as_extra_interrupts() {
+    let sim = armed_sim(Faults {
+        deferred: true,
+        storm: true,
+        ..Default::default()
+    });
+    let dev = open_armed(&sim);
+    let (_, name) =
+        interrupt_suite(&dev, 0, &sample, &mut |_, _, _| {}).expect_err("a storm must fail");
+    assert_eq!(name, RunFault::ExtraInterrupts.name());
+}
+
+/// The lost-wakeup window, deterministic: the controller answers (and its interrupt latches)
+/// between the driver's first look and the wait's check, the check is made to report the stale
+/// "not ready", and the driver must still finish the command through that one wait.
+#[test]
+fn a_completion_that_races_the_wait_is_consumed_through_one_wait() {
+    let sim = armed_sim(Faults {
+        deferred: true,
+        ..Default::default()
+    });
+    let dev = open_armed(&sim);
+    let mut back = [0u8; BLOCK_SIZE];
+    dev.read_block(0, &mut back).expect("plain read");
+    let (i0, s0) = (IRQS.with(Cell::get), SLEEPS.with(Cell::get));
+    assert_eq!(
+        s0, 1,
+        "a plain read sleeps once: the device answers while the CPU waits"
+    );
+    // Look 1 stamps the start, look 2 is the driver's budget check after its first (empty) look:
+    // the controller answers right there, before the wait's own check.
+    CLOCK_ANSWERS_AFTER.with(|c| c.set(2));
+    let raced = dev.race_read_block(0, &mut back);
+    CLOCK_ANSWERS_AFTER.with(|c| c.set(0));
+    raced.expect("raced read");
+    assert_eq!(
+        SLEEPS.with(Cell::get),
+        s0 + 1,
+        "the stale look sent the CPU to sleep once more"
+    );
+    assert_eq!(
+        IRQS.with(Cell::get),
+        i0 + 1,
+        "the raced command's interrupt is counted"
+    );
+}
+
+#[test]
+fn a_silent_controller_still_times_out_through_the_platform_wait() {
+    let sim = armed_sim(Faults {
+        deferred: true,
+        drop_io: true,
+        ..Default::default()
+    });
+    let mut dev = open_armed(&sim);
+    dev.set_completion_budget_ns(5_000_000);
+    let mut back = [0u8; BLOCK_SIZE];
+    assert_eq!(dev.read_block(0, &mut back), Err(StorageError::Device));
+    assert!(
+        SLEEPS.with(Cell::get) > 0,
+        "the wait was asked before the bound fired"
+    );
+}
+
+#[test]
+fn the_fallback_group_passes_only_for_a_named_polled_reason() {
+    let polled = Sim::new(Geometry::healthy(9, GATE_BLOCKS), Faults::default());
+    let (dev, _) = unsafe { Nvme::<HostHal, &Sim>::init(&polled) }.expect("polled init");
+    let mut seen = vec![];
+    let n = fallback_suite(&dev, 23, "no MSI-X capability", &mut |i, ok, name: &str| {
+        seen.push((i, ok, name.to_string()))
+    })
+    .expect("a named fallback");
+    assert_eq!(n, 1);
+    assert_eq!((seen[0].0, seen[0].1), (24, true));
+    // An empty reason is a silent fallback.
+    assert!(fallback_suite(&dev, 0, "", &mut |_, _, _| {}).is_err());
+    // A queue created with an interrupt vector and a wait armed is not a fallback: claiming one is a lie.
+    let sim = armed_sim(Faults::default());
+    let armed = open_armed(&sim);
+    assert!(fallback_suite(&armed, 0, "no MSI-X capability", &mut |_, _, _| {}).is_err());
+}
+
+/// The evidence for "completed through the wait" is the wait being CALLED, not the wait being
+/// configured: a controller that has already answered when the driver first looks (not deferred)
+/// still sees every command enter the platform's wait once. A driver that has a wait set but
+/// spins anyway would leave the wait's own counter at zero and fail the group's verdict.
+#[test]
+fn a_command_is_credited_to_the_wait_only_when_the_wait_was_called() {
+    let sim = armed_sim(Faults::default());
+    let dev = open_armed(&sim);
+    let mut back = [0u8; BLOCK_SIZE];
+    for _ in 0..5 {
+        dev.read_block(0, &mut back).expect("read");
+    }
+    assert_eq!(dev.completion_counts(), (5, 0));
+    assert_eq!(WAITS.with(Cell::get), 5, "each command entered the wait");
+    assert_eq!(
+        SLEEPS.with(Cell::get),
+        0,
+        "an answered command never sleeps"
+    );
+    // And the group refuses that run by name: no sleep ever took place.
+    let (_, name) = interrupt_suite(&dev, 0, &sample, &mut |_, _, _| {})
+        .expect_err("a wait that never slept must fail");
+    assert_eq!(name, RunFault::NeverSlept.name());
+}
+
+/// A driver that never writes the CQ head doorbell stalls the ring at its depth: the controller
+/// owes a completion to a full queue. The run (three queue lengths plus one) cannot pass.
+#[test]
+fn a_skipped_cq_head_doorbell_fails_the_group() {
+    let sim = armed_sim(Faults {
+        deferred: true,
+        skip_cq_doorbell: true,
+        ..Default::default()
+    });
+    let mut dev = open_armed(&sim);
+    dev.set_completion_budget_ns(5_000_000);
+    assert!(interrupt_suite(&dev, 0, &sample, &mut |_, _, _| {}).is_err());
+    assert!(sim
+        .st
+        .borrow()
+        .violations
+        .iter()
+        .any(|v| v.contains("CQ head doorbell was not written")));
 }

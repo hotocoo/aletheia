@@ -156,7 +156,8 @@ impl Dtb {
                     let interesting = node.prop("compatible").is_some()
                         && (node.compatible_contains("arm,smmu-v3")
                             || node.compatible_contains("pci-host-ecam-generic")
-                            || node.compatible_contains("virtio,mmio"));
+                            || node.compatible_contains("virtio,mmio")
+                            || node.compatible_contains("arm,gic-v2m-frame"));
                     if interesting {
                         done.push(node);
                     }
@@ -248,6 +249,18 @@ impl Dtb {
                 map,
             },
         ))
+    }
+
+    /// The GICv2m MSI frame's register base, when the platform declares one (ADR-264): the
+    /// doorbell a PCI function writes to raise a message-signalled interrupt. `None` = the
+    /// platform wires only pin interrupts, and the drivers that need a message path refuse by name.
+    pub fn discover_v2m(&self) -> Option<usize> {
+        let (ac, sc) = self.root_cells;
+        let node = self
+            .nodes
+            .iter()
+            .find(|n| n.compatible_contains("arm,gic-v2m-frame"))?;
+        decode_reg(node.prop("reg")?, ac, sc).map(|(base, _)| base)
     }
 
     /// Platform devices behind the unit? On this machine the answer must be NO for every

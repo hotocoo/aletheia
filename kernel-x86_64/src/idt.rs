@@ -31,6 +31,12 @@ pub const INPUT_MSIX_VECTOR: u8 = 0x51;
 pub const BLK_MSIX_VECTOR: u8 = 0x52;
 /// The LAPIC one-shot that bounds an interrupt-driven block wait (ADR-260).
 pub const BLK_TIMEOUT_VECTOR: u8 = 0x53;
+/// The NVMe controller's I/O completion queue interrupts here (MSI-X, ADR-264). The handler counts
+/// and acknowledges; the waiting foreground reads the completion queue itself.
+pub const NVME_MSIX_VECTOR: u8 = 0x54;
+/// The AHCI controller's ports interrupt here (MSI, ADR-264): count and acknowledge only; the
+/// foreground clears PxIS then IS.
+pub const AHCI_MSI_VECTOR: u8 = 0x55;
 
 static BLK_MSIX_HITS: AtomicU64 = AtomicU64::new(0);
 static BLK_BOUND_WAKES: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +111,8 @@ pub fn init() {
         idt[INPUT_MSIX_VECTOR].set_handler_fn(input_msix);
         idt[BLK_MSIX_VECTOR].set_handler_fn(blk_msix);
         idt[BLK_TIMEOUT_VECTOR].set_handler_fn(blk_timeout);
+        idt[NVME_MSIX_VECTOR].set_handler_fn(nvme_msix);
+        idt[AHCI_MSI_VECTOR].set_handler_fn(ahci_msi);
         IDT.get().load();
     }
 }
@@ -135,8 +143,17 @@ extern "x86-interrupt" fn blk_timeout(_frame: InterruptStackFrame) {
     crate::smp::msi_eoi();
 }
 
+extern "x86-interrupt" fn nvme_msix(_frame: InterruptStackFrame) {
+    crate::devirq::on_nvme_irq();
+    crate::smp::msi_eoi();
+}
+
+extern "x86-interrupt" fn ahci_msi(_frame: InterruptStackFrame) {
+    crate::devirq::on_ahci_irq();
+    crate::smp::msi_eoi();
+}
+
 /// Block sleeps the LAPIC one-shot ended because no completion came first (ADR-260).
-#[cfg(feature = "interactive")]
 pub fn blk_bound_wakes() -> u64 {
     BLK_BOUND_WAKES.load(Ordering::Relaxed)
 }

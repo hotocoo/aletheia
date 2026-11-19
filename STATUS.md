@@ -33,7 +33,7 @@ interactive comparison under identical QEMU/TCG conditions; it is not a GUI poin
 physical-hardware measurement. The payload sizes were **1,822,208 B** for the Aletheia EFI and
 **13,895,207 B** for Linux kernel+initramfs. No physical overclock claim is made.
 
-**As of:** 2026-10-08, latest (A NATIVE SYSTEM 1, LAYA WITHOUT PYTHON, CONSOLE ACCOUNTS AND ROLES, BLOCK RUNS, OWNERSHIP, A FASTER NATIVE LAYA, AND v0.7.3 — ADR-237..251; before it DRIVERS FOR DEVICE CLASSES REAL MACHINES SHIP, AND v0.5.0 — ADR-223..228; before it A GAME, AND A CLOCK TO PACE IT — ADR-222; before it THE OPERATOR ADDS PROGRAMS TO THE BOOT — ADR-221; before it THE DESKTOP'S LOOK IS A SETTING — ADR-220; before it THE MACHINE KEEPS ITS SETTINGS — ADR-219; before it A PROGRAM DRAWS IN COLOUR — ADR-218; before it A PROGRAM FEELS THE POINTER OVER ITS WINDOW — ADR-217; before it A PROGRAM HEARS WHAT IS TYPED AT ITS WINDOW — ADR-216; before it A PROGRAM DRAWS INTO ITS OWN WINDOW — ADR-215; before it A PROGRAM'S WRITABLE MEMORY IS SEVERAL PAGES — ADR-214; before it PROGRAMS LEFT RUNNING IN THE BACKGROUND — ADR-213; before it PROGRAMS RUN TOGETHER — ADR-212; before it A PROGRAM LARGER THAN ONE PAGE — ADR-211; before it A PROGRAM HAS WRITABLE MEMORY — ADR-210; before it SYSTEM 1 V3, MEASURED AND NOT SHIPPED — ADR-209; before it THE COMPARISONS, RE-MEASURED — ADR-208; before it A PROGRAM READS THE NAMESPACE — ADR-207; before it A PROGRAM IS HANDED ITS ARGUMENTS — ADR-206; before it A PROGRAM WRITTEN IN RUST — ADR-205; before it A PROGRAM WRITES TO THE CONSOLE — ADR-204; before it A PROGRAM THAT NEVER YIELDS IS PREEMPTED — ADR-203; before it A PROGRAM CANNOT STOP THE MACHINE BY FAULTING — ADR-202; before it A PROGRAM FROM THE NAMESPACE RUNS — ADR-201; before it THE CLOCK KEEPS TIME WHILE THE MACHINE IDLES — ADR-200; before it THE SCHEDULER IS ADVISED WHILE THE MACHINE RUNS — ADR-199, see the dated section below; waves ADR-174..198 are recorded there too. Before it: THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
+**As of:** 2026-10-23, latest (NVME AND AHCI COMPLETIONS WAKE THE CPU — ADR-264; before it THE AUDIT WAVE — ADR-263; before it ONE COMMAND RUNS EVERY END-TO-END GATE — ADR-262; before it BLOCK COMPLETIONS WAKE THE CPU ON EVERY CPU — ADR-260/261; before it A NATIVE SYSTEM 1, LAYA WITHOUT PYTHON, CONSOLE ACCOUNTS AND ROLES, BLOCK RUNS, OWNERSHIP, A FASTER NATIVE LAYA, AND v0.7.3 — ADR-237..251; before it DRIVERS FOR DEVICE CLASSES REAL MACHINES SHIP, AND v0.5.0 — ADR-223..228; before it A GAME, AND A CLOCK TO PACE IT — ADR-222; before it THE OPERATOR ADDS PROGRAMS TO THE BOOT — ADR-221; before it THE DESKTOP'S LOOK IS A SETTING — ADR-220; before it THE MACHINE KEEPS ITS SETTINGS — ADR-219; before it A PROGRAM DRAWS IN COLOUR — ADR-218; before it A PROGRAM FEELS THE POINTER OVER ITS WINDOW — ADR-217; before it A PROGRAM HEARS WHAT IS TYPED AT ITS WINDOW — ADR-216; before it A PROGRAM DRAWS INTO ITS OWN WINDOW — ADR-215; before it A PROGRAM'S WRITABLE MEMORY IS SEVERAL PAGES — ADR-214; before it PROGRAMS LEFT RUNNING IN THE BACKGROUND — ADR-213; before it PROGRAMS RUN TOGETHER — ADR-212; before it A PROGRAM LARGER THAN ONE PAGE — ADR-211; before it A PROGRAM HAS WRITABLE MEMORY — ADR-210; before it SYSTEM 1 V3, MEASURED AND NOT SHIPPED — ADR-209; before it THE COMPARISONS, RE-MEASURED — ADR-208; before it A PROGRAM READS THE NAMESPACE — ADR-207; before it A PROGRAM IS HANDED ITS ARGUMENTS — ADR-206; before it A PROGRAM WRITTEN IN RUST — ADR-205; before it A PROGRAM WRITES TO THE CONSOLE — ADR-204; before it A PROGRAM THAT NEVER YIELDS IS PREEMPTED — ADR-203; before it A PROGRAM CANNOT STOP THE MACHINE BY FAULTING — ADR-202; before it A PROGRAM FROM THE NAMESPACE RUNS — ADR-201; before it THE CLOCK KEEPS TIME WHILE THE MACHINE IDLES — ADR-200; before it THE SCHEDULER IS ADVISED WHILE THE MACHINE RUNS — ADR-199, see the dated section below; waves ADR-174..198 are recorded there too. Before it: THE LETHE GOVERNOR WAVES, MERGED — ADR-165..173. The resident performance
 advisor (`lethe=12`) and the resident governor on real timer interrupts (`lethed=15`) boot on all three CPUs, 4-7 ms each,
 with a live census gated on every target; conformance 383 -> **397**; attack surface measured against Linux and the boot
 gap attributed, each its own CI job. Before it: THE BROWSER WINDOW'S OWN KEYS — ADR-164. While the browser window holds focus,
@@ -1270,6 +1270,45 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Current live x86 evidence includes **14/14 VT-d, 39/39 ring-3, 72/72 VM, 23/23 SMP, 10/10 live input-hardware** invariants. `kernel-core` host verification remains **133 unit + 7 bench + all integration suites passed**.
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
+
+### 2026-10-23 — NVMe and AHCI completions wake the CPU (ADR-264)
+
+- `Nvme` and `AhciDisk` join the `CompletionWait` seam (`set_completion_wait`, `completion_counts`),
+  refusing a wait on a controller whose interrupt was never enabled. NVMe's I/O completion queue is
+  created with `IEN = 1` on MSI-X entry 1 (admin entry 0 stays masked); AHCI enables `PxIE` and
+  `GHC.IE` and acknowledges `PxIS` then `IS` after every completion. `virtiopci` gains shared
+  `enable_msi` / `enable_msix_entry`; `kernel_core::devirq` holds the counters and `judge_run`.
+- x86-64: vectors 0x54 (NVMe) and 0x55 (AHCI) to the BSP's xAPIC; aarch64: two SPIs of the GICv2m
+  frame the device tree declares, the GIC opened for the interrupt group only and restored after.
+  RISC-V runs neither driver, so its gate is unchanged.
+- New invariants: `nvme=23 -> 30`, `ahci=24 -> 31` on aarch64 (`scripts/vm-e2e.sh`) and x86-64
+  (`kernel-x86_64/scripts/smoke-test.sh`); VirtualBox (`vm-e2e-vbox.sh`) accepts `ahci=25` (named
+  polled fallback) or 31 and requires the `completions:` line. Gates also pin the boot line
+  `completions: interrupt-driven (...), N interrupts, M sleeps, 0 bound wakes`.
+- Review fixes: NVMe now has the same named polled fallback as AHCI (`nvme::fallback_suite`, 24
+  invariants, `[nvme] completions: POLLED, fallback 1 (<reason>)`) where the message path cannot be
+  armed (x2APIC-mode LAPIC, no GICv2m frame, no MSI-X), so ADR-228 holds: a shorter suite, never a
+  failed boot; the QEMU gates still pin the interrupt-driven line. A stale AHCI `PxIS` fails one
+  command and is acknowledged, not wedged. `enable_msix_entry` refuses a table outside its BAR or in
+  a 64-bit BAR's upper half. The aarch64 bound wake counts every one-shot that fired, lost wakes
+  included.
+- Second review wave: a command is credited to the platform wait (`slept`) only when it called it
+  (the wait is entered once before the first look), so a driver with a wait set that spins anyway
+  fails `judge_run`; the x86-64 NVMe / AHCI wait disarms the one-shot with interrupts off and books a
+  bound wake on its own counters only when the one-shot fired and the controller did not interrupt
+  (the shared console counter is no longer reported); NVMe's quiet-window invariant (it could not
+  fail on edge-triggered MSI-X) became "a run longer than the queue was fully consumed", which fails
+  if the CQ head doorbell is skipped (the simulated controller refuses to post into a full queue);
+  the GICv2m frame must lie in the peripheral GiB; `find_cap` refuses a pointer below 0x40, a body
+  past 0x100 and a looping list by name. Invariant counts unchanged (30 / 31).
+- Measured: x86-64 `nvme` 52 interrupts / 50 sleeps (1 interrupt was already counted when the
+  window opened, 0 sleeps), `ahci` 19 / 18; aarch64 `nvme` 51 / 50, `ahci`
+  19 / 18; 0 bound wakes everywhere. A mutation (the `PxIE` write removed) fails the boot at
+  `ahci invariant 26: completions arrived but no interrupt did`.
+- Gates run on this host (load 6 to 12): kernel-core `cargo test` (75 suites), quality gate,
+  `vm-e2e.sh`, `vm-e2e-riscv.sh`, `vm-e2e-x86.sh`, `console-e2e`, `usbkbd-e2e`, `keyboard-e2e`,
+  `vinput-e2e`, `desktop-e2e-dt`, `crash-e2e`, `hda-e2e` PASS (`hda-e2e`'s x86-64 third boot failed
+  once under load and passed alone). `vm-e2e-vbox.sh` was not run (arm64 host): CI decides.
 
 ### 2026-10-15 — one command runs every end-to-end gate (ADR-262)
 

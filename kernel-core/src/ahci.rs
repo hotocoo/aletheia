@@ -13,16 +13,20 @@ use core::cell::Cell;
 use core::marker::PhantomData;
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::devirq::{judge_run, IrqProbe};
 use crate::dma::DmaRegistry;
 use crate::storage::{BlockDevice, Journal, StorageError, BLOCK_SIZE};
-use crate::virtioblk::VirtioHal;
+use crate::virtioblk::{CompletionWait, VirtioHal};
 
 // HBA registers (§3.1).
 pub const HBA_CAP: usize = 0x00;
 pub const HBA_GHC: usize = 0x04;
+pub const HBA_IS: usize = 0x08;
 pub const HBA_PI: usize = 0x0C;
 pub const HBA_VS: usize = 0x10;
 const GHC_AE: u32 = 1 << 31;
+/// GHC.IE (§3.1.2): the HBA may raise its interrupt at all.
+const GHC_IE: u32 = 1 << 1;
 // Port registers (§3.3), at 0x100 + port * 0x80.
 pub const PORT_BASE: usize = 0x100;
 pub const PORT_STRIDE: usize = 0x80;
@@ -46,6 +50,13 @@ const TFD_ERR: u32 = 1 << 0;
 const TFD_DRQ: u32 = 1 << 3;
 const TFD_BSY: u32 = 1 << 7;
 const IS_TFES: u32 = 1 << 30;
+/// PxIS/PxIE bit 0 (§3.3.5): a D2H Register FIS arrived, how a non-NCQ command completes.
+const IS_DHRS: u32 = 1 << 0;
+/// The fatal port conditions (§3.3.5): host bus fatal, host bus data, interface fatal, task file
+/// error. They end a command, so they interrupt too and are never swallowed.
+const IS_FATAL: u32 = IS_TFES | (1 << 29) | (1 << 28) | (1 << 27);
+/// What this driver asks a port to interrupt for: a command's completion or a fatal condition.
+const IE_COMPLETION: u32 = IS_DHRS | IS_FATAL;
 const SSTS_DET_PRESENT: u32 = 3; // device present, phy communication established
 /// PxSIG of an ATA disk (§3.3.9; QEMU `SATA_SIGNATURE_DISK`).
 pub const SIG_ATA: u32 = 0x0000_0101;
@@ -144,6 +155,16 @@ pub struct AhciDisk<H: VirtioHal, R: Regs> {
     model: [u8; 40],
     dma: DmaRegistry,
     issued: Cell<u64>,
+    /// PxIE and GHC.IE are programmed for this port (ADR-264): completions may interrupt.
+    irq_armed: Cell<bool>,
+    /// How a command waits for its completion: `None` spins, `Some(wait)` hands each look to the
+    /// platform, which sleeps until the HBA's interrupt (ADR-264).
+    wait: Option<CompletionWait>,
+    /// Commands completed through the platform's wait, and by spinning.
+    slept: Cell<u64>,
+    polled: Cell<u64>,
+    /// Diagnostic for the lost-wakeup proof (see `Nvme::race_read_block`).
+    stale_look: Cell<bool>,
     _hal: PhantomData<H>,
 }
 
@@ -223,6 +244,11 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
             model: [0; 40],
             dma,
             issued: Cell::new(0),
+            irq_armed: Cell::new(false),
+            wait: None,
+            slept: Cell::new(0),
+            polled: Cell::new(0),
+            stale_look: Cell::new(false),
             _hal: PhantomData,
         };
         d.command(ATA_IDENTIFY, 0, 0, 512, false)
@@ -299,17 +325,83 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
         write_volatile(h.add(3), (t as u64 >> 32) as u32);
         H::barrier();
         let pb = self.port;
-        self.regs.w32(pb + PX_IS, u32::MAX);
+        let waited = self.wait.is_some();
+        if waited {
+            // Interrupt mode: completion status is the interrupt's own, cleared only by the
+            // acknowledgement below, so a stale bit is a missed acknowledgement, not something to
+            // wipe before the next command hides it: this command is refused, naming it. The
+            // refusal then acknowledges what it saw (PxIS, then the HBA's IS bit, as below) so one
+            // late or extra D2H FIS fails one command and does not wedge the disk for good.
+            // Bits that cannot interrupt (PIO setup, PRD done...) are not ours to keep.
+            let stale = self.regs.r32(pb + PX_IS);
+            if stale & IE_COMPLETION != 0 {
+                self.regs.w32(pb + PX_IS, stale);
+                self.regs.w32(HBA_IS, 1 << self.port_index());
+                return Err(StorageError::Device);
+            }
+            self.regs.w32(pb + PX_IS, stale);
+        } else {
+            self.regs.w32(pb + PX_IS, u32::MAX);
+        }
         self.regs.w32(pb + PX_CI, 1);
         self.issued.set(self.issued.get() + 1);
         let mut failed = false;
-        let done = wait::<H>(|| {
-            failed = self.regs.r32(pb + PX_IS) & IS_TFES != 0;
-            failed || self.regs.r32(pb + PX_CI) & 1 == 0
-        });
+        let started = H::now_ns();
+        // Polled: the command slot clears (or the task file fails). Interrupt mode: the status the
+        // interrupt reports (a completion or a fatal condition) is what the wait is woken for.
+        let posted = || {
+            let is = self.regs.r32(pb + PX_IS);
+            if waited {
+                is & IE_COMPLETION != 0
+            } else {
+                is & IS_TFES != 0 || self.regs.r32(pb + PX_CI) & 1 == 0
+            }
+        };
+        // Whether this command really entered the platform's wait: that call, not the
+        // configuration (`waited`), credits it as completed through the wait (`slept`). The wait is
+        // entered once BEFORE the first look; its own check (interrupts off) finds a completion that
+        // is already there and returns without sleeping, so an early completion is still proved to
+        // have gone through the platform and a driver that spins instead cannot be credited.
+        let mut entered = false;
+        let done = loop {
+            if let Some(wait) = self.wait {
+                entered = true;
+                wait(&|| {
+                    if self.stale_look.replace(false) {
+                        // The lost-wakeup window: the completion lands between the wait's check
+                        // and its sleep; report the stale "not ready" the check would have seen.
+                        while !posted() && H::now_ns().wrapping_sub(started) <= BUDGET_NS {
+                            core::hint::spin_loop();
+                        }
+                        return false;
+                    }
+                    posted()
+                });
+            }
+            if posted() {
+                break true;
+            }
+            if H::now_ns().wrapping_sub(started) > BUDGET_NS {
+                break false;
+            }
+            if self.wait.is_none() {
+                core::hint::spin_loop();
+            }
+        };
+        let status = self.regs.r32(pb + PX_IS);
+        if waited {
+            // The acknowledgement, in the order the specification gives (§10.1.2): PxIS first, then
+            // the HBA's IS bit for this port. Both are write-1-to-clear. With IS left set, a
+            // message-signalled HBA raises nothing for the next completion.
+            self.regs.w32(pb + PX_IS, status);
+            self.regs.w32(HBA_IS, 1 << self.port_index());
+        }
+        failed |= status & IS_FATAL != 0;
+        let counter = if entered { &self.slept } else { &self.polled };
+        counter.set(counter.get() + 1);
         H::barrier();
         let tfd = self.regs.r32(pb + PX_TFD);
-        if !done || failed || tfd & (TFD_ERR | TFD_BSY) != 0 {
+        if !done || failed || tfd & (TFD_ERR | TFD_BSY) != 0 || self.regs.r32(pb + PX_CI) & 1 != 0 {
             return Err(StorageError::Device);
         }
         // Bytes the HBA reports moving must be exactly what the PRD asked for.
@@ -337,6 +429,66 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
     /// Commands sent to the disk so far.
     pub fn issued(&self) -> u64 {
         self.issued.get()
+    }
+
+    /// This port's number on the HBA (the bit of its IS register).
+    fn port_index(&self) -> usize {
+        (self.port - PORT_BASE) / PORT_STRIDE
+    }
+
+    /// Let this port's completions interrupt (ADR-264): clear whatever status polling left (PxIS,
+    /// then the HBA's IS bit, write-1-to-clear), unmask the completion and fatal conditions in
+    /// PxIE, then set GHC.IE. Needs the HBA's message path (MSI) programmed by the caller before
+    /// the first command waits on it. Idempotent.
+    pub fn enable_interrupts(&self) {
+        let pb = self.port;
+        self.regs.w32(pb + PX_IS, u32::MAX);
+        self.regs.w32(HBA_IS, 1 << self.port_index());
+        self.regs.w32(pb + PX_IE, IE_COMPLETION);
+        self.regs.w32(HBA_GHC, self.regs.r32(HBA_GHC) | GHC_IE);
+        self.irq_armed.set(true);
+    }
+
+    /// Wait for completions through `wait` (sleeping until the HBA's interrupt) instead of
+    /// spinning, or spin again with `None`. Refuses by name a port whose interrupts were never
+    /// enabled: a wait there could only ever end on the clock.
+    pub fn set_completion_wait(
+        &mut self,
+        wait: Option<CompletionWait>,
+    ) -> Result<(), &'static str> {
+        if wait.is_some() && !self.irq_armed.get() {
+            return Err(
+                "ahci: the port's interrupts are not enabled - a wait could never be woken",
+            );
+        }
+        self.wait = wait;
+        Ok(())
+    }
+
+    /// Commands completed through the platform's wait, and by spinning.
+    pub fn completion_counts(&self) -> (u64, u64) {
+        (self.slept.get(), self.polled.get())
+    }
+
+    /// Whether this port's completions go through a platform wait.
+    pub fn waits_on_platform(&self) -> bool {
+        self.wait.is_some()
+    }
+
+    /// `(HBA IS bit for this port, PxIS)` as the hardware holds them: both zero once a completion
+    /// has been acknowledged.
+    pub fn interrupt_status(&self) -> (u32, u32) {
+        let is = self.regs.r32(HBA_IS) & (1 << self.port_index());
+        (is, self.regs.r32(self.port + PX_IS))
+    }
+
+    /// Read sector 0 with a deliberately stale first look at the port's status: the wait's check
+    /// finds the completion already landed (its interrupt latched) and still reports "not ready".
+    pub fn race_read_first_sector(&self, out: &mut [u8; 512]) -> Result<(), StorageError> {
+        self.stale_look.set(true);
+        let r = self.read_first_sector(out);
+        self.stale_look.set(false);
+        r
     }
 
     pub fn dma_gate_refuses_unregistered(&self) -> bool {
@@ -375,6 +527,7 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
 impl<H: VirtioHal, R: Regs> Drop for AhciDisk<H, R> {
     fn drop(&mut self) {
         let pb = self.port;
+        self.regs.w32(pb + PX_IE, 0); // no interrupt for a port nobody waits on
         self.regs
             .w32(pb + PX_CMD, self.regs.r32(pb + PX_CMD) & !CMD_ST);
         let _ = wait::<H>(|| self.regs.r32(pb + PX_CMD) & CMD_CR == 0);
@@ -528,4 +681,164 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
         Err((i, name)) => return Err((base + i, name)),
     }
     Ok(n)
+}
+
+/// Reads of sector 0 per disk in the measured interrupt run: enough that a missing acknowledgement
+/// or a lost interrupt shows as a count mismatch, few enough to be invisible in the boot budget.
+const RUN_READS_PER_DISK: u64 = 8;
+/// The quiet window after the run, in nanoseconds of the platform clock (see `nvme`).
+const QUIET_WINDOW_NS: u64 = 5_000_000;
+
+/// The interrupt group (ADR-264): proves every disk's completions wake the CPU, reads only, so it
+/// holds on any machine's disks. `first` is the number already proved; the return is how many this
+/// group proved. `probe` reads the platform's interrupt counters (taking any pending interrupt
+/// first). Each check fails if the path is reverted: spinning shows in the driver's polled count,
+/// an unarmed HBA as no interrupt, an unacknowledged IS as the NEXT completion raising none, and a
+/// lost wakeup as a sleep only the bounding timer ended.
+pub fn interrupt_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
+    disks: &[AhciDisk<H, R>],
+    first: usize,
+    probe: IrqProbe,
+    log: &mut F,
+) -> Result<usize, (usize, &'static str)> {
+    use crate::devirq::RunFault::{ExtraInterrupts, LostInterrupt, NoInterrupt, SilentlyPolled};
+    let mut n = first;
+    macro_rules! check {
+        ($name:expr, $cond:expr) => {{
+            n += 1;
+            let ok = $cond;
+            log(n, ok, $name);
+            if !ok {
+                return Err((n, $name));
+            }
+        }};
+    }
+    macro_rules! verdict {
+        ($name:expr, $res:expr, $pass:expr) => {{
+            n += 1;
+            let res: Result<(), crate::devirq::RunFault> = $res;
+            let ok = res.map_or_else(|f| $pass(f), |_| true);
+            match res {
+                Err(f) if !ok => {
+                    log(n, false, f.name());
+                    return Err((n, f.name()));
+                }
+                _ => log(n, true, $name),
+            }
+        }};
+    }
+    // Total commands completed through the wait / by spinning, across every disk.
+    let counts = || {
+        disks.iter().fold((0u64, 0u64), |(s, p), d| {
+            let (ds, dp) = d.completion_counts();
+            (s + ds, p + dp)
+        })
+    };
+    check!(
+        "ahci: every disk's port interrupts are enabled and its commands wait through the platform",
+        !disks.is_empty() && disks.iter().all(|d| d.waits_on_platform())
+    );
+    let commands = RUN_READS_PER_DISK * disks.len() as u64;
+    let (slept0, polled0) = counts();
+    let before = probe();
+    let mut same = true;
+    for d in disks {
+        let mut base = [0u8; 512];
+        same &= d.read_first_sector(&mut base).is_ok();
+        for _ in 1..RUN_READS_PER_DISK {
+            let mut back = [0u8; 512];
+            same &= d.read_first_sector(&mut back).is_ok() && back == base;
+        }
+    }
+    let after = probe();
+    let (slept1, polled1) = counts();
+    let run = judge_run(commands, slept1 - slept0, polled1 - polled0, before, after);
+    verdict!(
+        "ahci: every command of the run raised exactly one interrupt and none was polled (counted interrupts == completed commands)",
+        run,
+        |f| !matches!(f, SilentlyPolled | NoInterrupt | LostInterrupt | ExtraInterrupts)
+    );
+    check!("ahci: the run's sector data is intact on every disk", same);
+    verdict!(
+        "ahci: the CPU slept until the HBA answered, and no sleep needed the bounding timer",
+        run,
+        |_f| false
+    );
+    // Acknowledged: PxIS then IS were written 1-to-clear after each completion, so both read zero
+    // now, and the NEXT completion still raises its interrupt (a stale IS would swallow it).
+    let clear = disks.iter().all(|d| d.interrupt_status() == (0, 0));
+    let (slept0, polled0) = counts();
+    let before = probe();
+    let mut next_ok = true;
+    for d in disks {
+        let mut s = [0u8; 512];
+        next_ok &= d.read_first_sector(&mut s).is_ok();
+    }
+    let after = probe();
+    let (slept1, polled1) = counts();
+    check!(
+        "ahci: PxIS then IS are acknowledged write-1-to-clear (both read clear) and the next completion still interrupts",
+        clear
+            && next_ok
+            && judge_run(
+                disks.len() as u64,
+                slept1 - slept0,
+                polled1 - polled0,
+                before,
+                after
+            )
+            .is_ok()
+    );
+    // The lost-wakeup window on the first disk.
+    let (slept0, polled0) = counts();
+    let before = probe();
+    let mut raced = [0u8; 512];
+    let landed = disks[0].race_read_first_sector(&mut raced).is_ok();
+    let after = probe();
+    let (slept1, polled1) = counts();
+    check!(
+        "ahci: a completion that races the wait is not lost (its interrupt wakes the sleep at once, not the bounding timer)",
+        landed && judge_run(1, slept1 - slept0, polled1 - polled0, before, after).is_ok()
+    );
+    let quiet_from = probe();
+    let t0 = H::now_ns();
+    while H::now_ns().wrapping_sub(t0) < QUIET_WINDOW_NS {
+        core::hint::spin_loop();
+    }
+    check!(
+        "ahci: nothing is left pending once the status is acknowledged (a quiet window takes no interrupt)",
+        probe().interrupts == quiet_from.interrupts && disks.iter().all(|d| d.interrupt_status() == (0, 0))
+    );
+    Ok(n - first)
+}
+
+/// What stands in for the interrupt group when the platform could not arm the HBA's interrupt
+/// (ADR-264): ONE invariant, and it passes only if the fallback is real, NAMED and counted - every
+/// disk completed its commands by polling, none through a wait, and the reason is not empty. A
+/// machine that falls back silently, or claims a reason while waiting on a wake that cannot come,
+/// fails here. Returns the invariants proved (1).
+pub fn fallback_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
+    disks: &[AhciDisk<H, R>],
+    first: usize,
+    reason: &str,
+    log: &mut F,
+) -> Result<usize, (usize, &'static str)> {
+    const NAME: &str =
+        "ahci: completions are polled for a named, counted reason (no interrupt path armed)";
+    let mut s = [0u8; 512];
+    let reads = disks.iter().all(|d| d.read_first_sector(&mut s).is_ok());
+    let polled_only = disks.iter().all(|d| {
+        let (slept, polled) = d.completion_counts();
+        slept == 0 && polled > 0 && !d.waits_on_platform()
+    });
+    let ok = !reason.is_empty() && reads && polled_only;
+    log(first + 1, ok, NAME);
+    if ok {
+        Ok(1)
+    } else {
+        Err((
+            first + 1,
+            "ahci: fallback to polling without a named reason or with a wait armed",
+        ))
+    }
 }

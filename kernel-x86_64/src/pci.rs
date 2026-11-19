@@ -323,9 +323,18 @@ pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
         let base = Ports
             .map_region(pa, 0x2000)
             .ok_or("nvme BAR0 could not be mapped as device memory")?;
-        unsafe { Nvme::init(kernel_core::nvme::MmioRegs::new(base)) }
+        // The I/O completion queue interrupts on its own MSI-X entry (ADR-264). A function that
+        // cannot deliver one (no MSI-X, an x2APIC-mode LAPIC) is not a failed boot (ADR-228):
+        // the queue is created polled and the reason is carried to the boot log.
+        let armed = unsafe { crate::devirq::arm_nvme(bdf) };
+        let (entry, reason) = match armed {
+            Ok(entry) => (Some(entry), None),
+            Err(why) => (None, Some(why)),
+        };
+        unsafe { Nvme::init_with_io_vector(kernel_core::nvme::MmioRegs::new(base), entry) }
+            .map(|(dev, rep)| (dev, rep, reason))
     })();
-    let (mut dev, rep) = match opened {
+    let (mut dev, rep, fallback) = match opened {
         Ok(t) => t,
         Err(e) => {
             kprintln!("[nvme] init refused: {}", e);
@@ -335,14 +344,60 @@ pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
     kernel_core::nvme::log_report(&rep, bdf.bus, bdf.device, bdf.function, &mut |s| {
         kprintln!("{}", s)
     });
-    match kernel_core::nvme::device_suite(&mut dev, NVME_GATE_BLOCKS, &mut |n, passed, name| {
+    let mut log = |n: usize, passed: bool, name: &str| {
         if passed {
             kprintln!("  [pass {:>2}] {}", n, name);
         } else {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
-    }) {
-        Ok(n) => Ok(n as u32),
+    };
+    // The polled invariants first, unchanged: they prove the driver itself.
+    let polled = match kernel_core::nvme::device_suite(&mut dev, NVME_GATE_BLOCKS, &mut log) {
+        Ok(n) => n,
+        Err((i, name)) => return Err((i as u32, name)),
+    };
+    // Then the same controller's completions wake the CPU, or a polled fallback that is named,
+    // counted and printed, never silent (ADR-264). An armed vector that never fires still fails.
+    let verdict = match fallback {
+        None => {
+            if let Err(e) = dev.set_completion_wait(Some(crate::devirq::wait_nvme)) {
+                return Err((polled as u32 + 1, e));
+            }
+            crate::devirq::with_interrupts(|| {
+                kernel_core::nvme::interrupt_suite(
+                    &dev,
+                    polled,
+                    &crate::devirq::probe_nvme,
+                    &mut log,
+                )
+            })
+            .inspect(|_| {
+                kernel_core::devirq::completion_line(
+                    "nvme",
+                    &alloc::format!(
+                        "MSI-X vector {:#x}, table entry {}",
+                        crate::idt::NVME_MSIX_VECTOR,
+                        dev.io_vector().unwrap_or(0)
+                    ),
+                    None,
+                    crate::devirq::probe_nvme(),
+                    &mut |l| kprintln!("{}", l),
+                );
+            })
+        }
+        Some(reason) => {
+            kernel_core::devirq::completion_line(
+                "nvme",
+                "",
+                Some(reason),
+                Default::default(),
+                &mut |l| kprintln!("{}", l),
+            );
+            kernel_core::nvme::fallback_suite(&dev, polled, reason, &mut log)
+        }
+    };
+    match verdict {
+        Ok(n) => Ok((polled + n) as u32),
         Err((i, name)) => Err((i as u32, name)),
     }
 }
@@ -472,14 +527,58 @@ pub fn ahci_selftest() -> Result<u32, (u32, &'static str)> {
         bdf.device,
         bdf.function
     );
-    match ahci::device_suite(&mut disks, AHCI_SCRATCH_BLOCKS, &mut |n, passed, name| {
+    let mut log = |n: usize, passed: bool, name: &str| {
         if passed {
             kprintln!("  [pass {:>2}] {}", n, name);
         } else {
             kprintln!("  [FAIL {:>2}] {}", n, name);
         }
-    }) {
-        Ok(n) => Ok(n as u32),
+    };
+    // The polled invariants first, unchanged: they prove the driver itself.
+    let polled = match ahci::device_suite(&mut disks, AHCI_SCRATCH_BLOCKS, &mut log) {
+        Ok(n) => n,
+        Err((i, name)) => return Err((i as u32, name)),
+    };
+    // Then completions wake the CPU, or, where the function has no MSI (VirtualBox's default
+    // chipset), a polled fallback that is named, counted and printed, never silent (ADR-264).
+    // SAFETY: this boot owns the function and no command is in flight.
+    let armed = unsafe { crate::devirq::arm_ahci(bdf) };
+    let verdict = match armed {
+        Ok(()) => {
+            let mut waits = Ok(());
+            for d in disks.iter_mut() {
+                d.enable_interrupts();
+                waits = waits.and(d.set_completion_wait(Some(crate::devirq::wait_ahci)));
+            }
+            match waits {
+                Ok(()) => crate::devirq::with_interrupts(|| {
+                    ahci::interrupt_suite(&disks, polled, &crate::devirq::probe_ahci, &mut log)
+                })
+                .inspect(|_| {
+                    kernel_core::devirq::completion_line(
+                        "ahci",
+                        &alloc::format!("MSI vector {:#x}", crate::idt::AHCI_MSI_VECTOR),
+                        None,
+                        crate::devirq::probe_ahci(),
+                        &mut |l| kprintln!("{}", l),
+                    );
+                }),
+                Err(e) => Err((polled + 1, e)),
+            }
+        }
+        Err(reason) => {
+            kernel_core::devirq::completion_line(
+                "ahci",
+                "",
+                Some(reason),
+                Default::default(),
+                &mut |l| kprintln!("{}", l),
+            );
+            ahci::fallback_suite(&disks, polled, reason, &mut log)
+        }
+    };
+    match verdict {
+        Ok(n) => Ok((polled + n) as u32),
         Err((i, name)) => Err((i as u32, name)),
     }
 }

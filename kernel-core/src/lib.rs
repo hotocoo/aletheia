@@ -45,6 +45,7 @@ pub mod crypto;
 pub mod deadva;
 pub mod desktop;
 pub mod device;
+pub mod devirq;
 pub mod dhcp;
 pub mod dma;
 pub mod dns;

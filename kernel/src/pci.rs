@@ -156,14 +156,25 @@ const NVME_BAR_BASE: usize = BAR_ASSIGN_BASE + 0x0100_0000;
 /// This target's NVMe driver (ADR-223): the shared driver over BAR0 in the identity window.
 pub type Nvme = kernel_core::nvme::Nvme<crate::virtio::Aarch64Virtio, kernel_core::nvme::MmioRegs>;
 
+/// An opened NVMe controller: the driver, its init report, its function, and why its completions are
+/// polled when they cannot be interrupt-driven (ADR-264).
+pub type OpenedNvme = (
+    Nvme,
+    kernel_core::nvme::NvmeReport,
+    Bdf,
+    Option<&'static str>,
+);
+
 /// Find the first NVM Express function (by class code, any vendor), give it BARs, enable decoding
 /// and bus master, and initialize the shared driver. `None` = no controller (graceful skip);
-/// `Some(Err)` = a controller is present and was refused.
+/// `Some(Err)` = a controller is present and was refused. The last tuple field is why its
+/// completions are polled, when they cannot be interrupt-driven.
 /// # Safety
 /// Walks ECAM and programs the found function's BARs and command register exclusively.
 pub unsafe fn open_nvme(
     pcie: &PcieDt,
-) -> Option<Result<(Nvme, kernel_core::nvme::NvmeReport, Bdf), &'static str>> {
+    v2m_base: Option<usize>,
+) -> Option<Result<OpenedNvme, &'static str>> {
     let env = Ecam::new(pcie.ecam_base);
     let bdf = unsafe { virtiopci::find_class_nth(&env, virtiopci::CLASS_NVME, 0) }?;
     let mut cursor = NVME_BAR_BASE;
@@ -175,8 +186,29 @@ pub unsafe fn open_nvme(
         let base = env
             .map_region(base as u64, 0x2000)
             .ok_or("nvme BAR0 is outside the identity window")?;
-        let (dev, report) = unsafe { Nvme::init(kernel_core::nvme::MmioRegs::new(base))? };
-        Ok((dev, report, bdf))
+        // The I/O completion queue interrupts on its own MSI-X entry, a message to the GICv2m
+        // frame the device tree declares (ADR-264). A board without one (GICv3, ITS) or a function
+        // that cannot take it is not a failed boot (ADR-228): the queue is created polled and the
+        // reason is carried to the boot log, so a wait is never armed on a wake that cannot come.
+        let armed = crate::devirq::claim_nvme(v2m_base).and_then(|msg| unsafe {
+            virtiopci::enable_msix_entry(
+                &env,
+                bdf,
+                crate::devirq::NVME_IO_ENTRY,
+                msg.address,
+                msg.data,
+            )
+        });
+        let (entry, reason) = match armed {
+            Ok(_) => (Some(crate::devirq::NVME_IO_ENTRY), None),
+            Err(why) => {
+                crate::devirq::release_nvme();
+                (None, Some(why))
+            }
+        };
+        let (dev, report) =
+            unsafe { Nvme::init_with_io_vector(kernel_core::nvme::MmioRegs::new(base), entry)? };
+        Ok((dev, report, bdf, reason))
     })())
 }
 
@@ -190,8 +222,8 @@ pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
         return Ok(0);
     };
     // SAFETY: nothing else owns the NVMe function's configuration space during boot.
-    let opened = unsafe { open_nvme(&disc.pcie) };
-    let (mut dev, rep, bdf) = match opened {
+    let opened = unsafe { open_nvme(&disc.pcie, disc.v2m_base) };
+    let (mut dev, rep, bdf, fallback) = match opened {
         None => {
             kprintln!("[nvme] no controller (skipped)");
             return Ok(0);
@@ -205,14 +237,49 @@ pub fn nvme_selftest() -> Result<u32, (u32, &'static str)> {
     kernel_core::nvme::log_report(&rep, bdf.bus, bdf.device, bdf.function, &mut |s| {
         kprintln!("{}", s)
     });
-    match kernel_core::nvme::device_suite(&mut dev, NVME_GATE_BLOCKS, &mut |n, passed, name| {
-        if passed {
-            kprintln!("  [pass {:>2}] {}", n, name);
-        } else {
-            kprintln!("  [FAIL {:>2}] {}", n, name);
+    // The polled invariants first, unchanged: they prove the driver itself.
+    let polled = match kernel_core::nvme::device_suite(&mut dev, NVME_GATE_BLOCKS, &mut suite_log) {
+        Ok(n) => n,
+        Err((i, name)) => return Err((i as u32, name)),
+    };
+    // Then the same controller's completions wake the CPU, or a polled fallback that is named,
+    // counted and printed, never silent (ADR-264). An armed vector that never fires still fails.
+    let verdict = match fallback {
+        None => {
+            if let Err(e) = dev.set_completion_wait(Some(crate::devirq::wait_nvme)) {
+                return Err((polled as u32 + 1, e));
+            }
+            crate::devirq::with_window(|| {
+                kernel_core::nvme::interrupt_suite(
+                    &dev,
+                    polled,
+                    &crate::devirq::probe_nvme,
+                    &mut suite_log,
+                )
+            })
+            .inspect(|_| {
+                kernel_core::devirq::completion_line(
+                    "nvme",
+                    &alloc::format!("GICv2m MSI-X, table entry {}", dev.io_vector().unwrap_or(0)),
+                    None,
+                    crate::devirq::probe_nvme(),
+                    &mut |l| kprintln!("{}", l),
+                );
+            })
         }
-    }) {
-        Ok(n) => Ok(n as u32),
+        Some(reason) => {
+            kernel_core::devirq::completion_line(
+                "nvme",
+                "",
+                Some(reason),
+                Default::default(),
+                &mut |l| kprintln!("{}", l),
+            );
+            kernel_core::nvme::fallback_suite(&dev, polled, reason, &mut suite_log)
+        }
+    };
+    match verdict {
+        Ok(n) => Ok((polled + n) as u32),
         Err((i, name)) => Err((i as u32, name)),
     }
 }
@@ -351,9 +418,60 @@ pub fn ahci_selftest() -> Result<u32, (u32, &'static str)> {
             return Err((0, "ahci controller initialization"));
         }
     };
-    ahci::device_suite(&mut disks, 256, &mut suite_log)
-        .map(|n| n as u32)
-        .map_err(|(i, name)| (i as u32, name))
+    // The polled invariants first, unchanged: they prove the driver itself.
+    let polled = match ahci::device_suite(&mut disks, 256, &mut suite_log) {
+        Ok(n) => n,
+        Err((i, name)) => return Err((i as u32, name)),
+    };
+    // Then completions wake the CPU, or a polled fallback that is named, counted and printed,
+    // never silent (ADR-264).
+    let armed = crate::devirq::claim_ahci(disc.v2m_base).and_then(|msg| {
+        // SAFETY: this boot owns the function and no command is in flight.
+        unsafe { virtiopci::enable_msi(&env, bdf, msg.address, msg.data as u16) }
+    });
+    let verdict = match armed {
+        Ok(()) => {
+            let mut waits = Ok(());
+            for d in disks.iter_mut() {
+                d.enable_interrupts();
+                waits = waits.and(d.set_completion_wait(Some(crate::devirq::wait_ahci)));
+            }
+            match waits {
+                Ok(()) => crate::devirq::with_window(|| {
+                    ahci::interrupt_suite(
+                        &disks,
+                        polled,
+                        &crate::devirq::probe_ahci,
+                        &mut suite_log,
+                    )
+                })
+                .inspect(|_| {
+                    kernel_core::devirq::completion_line(
+                        "ahci",
+                        "GICv2m MSI",
+                        None,
+                        crate::devirq::probe_ahci(),
+                        &mut |l| kprintln!("{}", l),
+                    );
+                }),
+                Err(e) => Err((polled + 1, e)),
+            }
+        }
+        Err(reason) => {
+            kernel_core::devirq::completion_line(
+                "ahci",
+                "",
+                Some(reason),
+                Default::default(),
+                &mut |l| kprintln!("{}", l),
+            );
+            ahci::fallback_suite(&disks, polled, reason, &mut suite_log)
+        }
+    };
+    match verdict {
+        Ok(n) => Ok((polled + n) as u32),
+        Err((i, name)) => Err((i as u32, name)),
+    }
 }
 
 /// xHCI BARs 64 MiB above the virtio-blk-pci window, clear of NVMe, e1000 and AHCI (ADR-253).

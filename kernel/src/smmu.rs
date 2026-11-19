@@ -54,12 +54,15 @@ pub struct Discovery {
     pub pcie: PcieDt,
     /// Platform devices carrying an iommus property - this machine must report ZERO here.
     pub mmio_attached: usize,
+    /// The GICv2m MSI frame the device tree declares, if any (ADR-264).
+    pub v2m_base: Option<usize>,
 }
 
 /// Called ONCE, first thing in kmain - before frames::init hands out any frame.
 pub fn discover_early() {
     let found = Dtb::load().and_then(|dtb| {
         let mmio_attached = dtb.virtio_mmio_attached_count();
+        let v2m_base = dtb.discover_v2m();
         match dtb.discover_smmu() {
             Ok((smmu, pcie)) => {
                 kprintln!(
@@ -72,6 +75,7 @@ pub fn discover_early() {
                     smmu,
                     pcie,
                     mmio_attached,
+                    v2m_base,
                 })
             }
             Err(e) => {

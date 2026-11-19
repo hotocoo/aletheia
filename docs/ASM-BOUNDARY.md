@@ -35,6 +35,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel/src/arch.rs` | 3 | aarch64 system-register read/write, fence + wfe/sev, counter reads |
 | `kernel/src/bench.rs` | 4 | cycle-counter and barrier instructions for the boot benchmark family |
 | `kernel/src/conirq.rs` | 9 | GIC interrupt acknowledge/EOI sequencing for the console input path, plus the generic-timer PPI the live desktop is pumped from (ADR-085): CNTFRQ read, CNTP_TVAL/CNTP_CTL arm; the console idle's `wfi`, issued with IRQs masked after the ring is checked empty (ADR-180); and the block completion wait's `wfi` plus the timer disarm that ends its one-shot (ADR-261) |
+| `kernel/src/devirq.rs` | 8 | the NVMe and AHCI completion wait (ADR-264): `daif` read and set/clear of the IRQ mask, CNTP_TVAL/CNTP_CTL arm, read and disarm of the bounding one-shot, and the `wfi` issued with IRQs masked after the completion was checked absent |
 | `kernel/src/main.rs` | 2 | entry hand-off from the `_start` stub; boot stack/exception-level setup |
 | `kernel/src/semihosting.rs` | 2 | ARM semihosting call sequence (HLT instruction) |
 | `kernel/src/shellio.rs` | 1 | the PSCI `SYSTEM_RESET` call behind `reboot` (the idle's `wfi` moved to `conirq.rs`, ADR-180) |
@@ -64,6 +65,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel-x86_64/src/virtio.rs` | 1 | MMIO notify write |
 | `kernel-x86_64/src/shellio.rs` | 1 | the block completion wait's `sti; hlt` (ADR-260), issued after IF was cleared and the used ring checked, with a LAPIC one-shot armed so a dead device still wakes the CPU |
 | `kernel-x86_64/src/conirq.rs` | 1 | the console idle's `sti; hlt`, issued after IF was cleared and the ring checked empty, so `sti`'s shadow cannot lose the wake-up (ADR-180) |
+| `kernel-x86_64/src/devirq.rs` | 1 | the NVMe and AHCI completion wait's `sti; hlt`, issued with IF cleared and the completion checked absent, so `sti`'s shadow cannot lose the wake-up (ADR-264) |
 
 ## Rules of the boundary
 

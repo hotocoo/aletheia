@@ -108,11 +108,8 @@ const IA32_GS_BASE: u32 = 0xC000_0101;
 
 const LAPIC_ID: usize = 0x020;
 const LAPIC_EOI: usize = 0x0B0;
-#[cfg(feature = "input-msix")]
 const LAPIC_LVT_TIMER: usize = 0x320;
-#[cfg(feature = "input-msix")]
 const LAPIC_TIMER_INITIAL: usize = 0x380;
-#[cfg(feature = "input-msix")]
 const LAPIC_TIMER_DIVIDE: usize = 0x3E0;
 const LAPIC_SVR: usize = 0x0F0;
 const LAPIC_ICR_LO: usize = 0x300;
@@ -146,7 +143,6 @@ fn lapic_r(reg: usize) -> u32 {
 /// after `count` ticks of the bus clock divided by 16 (ADR-260: the wake that bounds an
 /// interrupt-driven wait when the device never answers). Uncalibrated on purpose: the bound only
 /// needs a wake that comes, and the completion budget is measured on the platform clock.
-#[cfg(feature = "input-msix")]
 pub fn lapic_oneshot(vector: u8, count: u32) {
     if LAPIC_BASE.load(Ordering::Relaxed) == 0 {
         return;
@@ -165,7 +161,6 @@ fn lapic_enable_self() {
 /// the SMP bring-up suite: a one-CPU machine still has a LAPIC and must be able to receive PCI
 /// message-signalled interrupts.  x2APIC is refused by this first xAPIC-only interrupt domain
 /// rather than being mistaken for an initialized MMIO LAPIC.
-#[cfg(feature = "input-msix")]
 pub fn enable_msi_target() -> bool {
     let mut apic_base = unsafe { Msr::new(IA32_APIC_BASE).read() };
     if apic_base & (1 << 10) != 0 {
@@ -195,7 +190,7 @@ fn lapic_send(dest_apic_id: u32, icr_lo: u32) {
     }
 }
 
-fn bsp_apic_id() -> u32 {
+pub(crate) fn bsp_apic_id() -> u32 {
     // CPUID leaf 1 is universally supported; EBX[31:24] = initial APIC ID.
     core::arch::x86_64::__cpuid(1).ebx >> 24
 }

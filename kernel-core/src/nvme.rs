@@ -20,9 +20,10 @@ use core::cell::Cell;
 use core::marker::PhantomData;
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::devirq::{judge_run, IrqProbe};
 use crate::dma::DmaRegistry;
 use crate::storage::{BlockDevice, Journal, StorageError, BLOCK_SIZE};
-use crate::virtioblk::VirtioHal;
+use crate::virtioblk::{CompletionWait, VirtioHal};
 
 // --- Controller registers (Base spec §3.1 "Controller Properties") -----------------------------
 /// Controller Capabilities, 64-bit (§3.1.1).
@@ -88,6 +89,11 @@ const IDN_NSZE: usize = 0; // namespace size in LBAs, u64
 const IDN_NLBAF: usize = 25; // zero-based number of LBA formats
 const IDN_FLBAS: usize = 26; // bits 3:0 select the format in use
 const IDN_LBAF: usize = 128; // LBA format table, 4 bytes each: MS u16, LBADS u8, RP u8
+
+// Create I/O Completion Queue, CDW11 (§5.4): PC bit 0, IEN bit 1, interrupt vector 31:16.
+const CQ_PC: u32 = 1 << 0;
+const CQ_IEN: u32 = 1 << 1;
+const CQ_IV_SHIFT: u32 = 16;
 
 /// The one namespace this driver speaks to.
 pub const NSID: u32 = 1;
@@ -190,6 +196,18 @@ pub struct Nvme<H: VirtioHal, R: NvmeRegs> {
     scratch: bool,
     dma: DmaRegistry,
     budget_ns: u64,
+    /// The MSI-X vector the I/O completion queue interrupts on, when it was created with
+    /// interrupts enabled (ADR-264); `None` = a polled queue, which refuses a completion wait.
+    io_vector: Option<u16>,
+    /// How an I/O command waits for its completion: `None` spins, `Some(wait)` hands each look to
+    /// the platform, which sleeps until the device's interrupt (ADR-264).
+    wait: Option<CompletionWait>,
+    /// I/O commands completed through the platform's wait, and by spinning.
+    slept: Cell<u64>,
+    polled: Cell<u64>,
+    /// Diagnostic for the lost-wakeup proof: the NEXT wait's first look finds the completion
+    /// already landed, then reports "not ready", exactly the window a completion races a wait.
+    stale_look: Cell<bool>,
     _hal: PhantomData<H>,
 }
 
@@ -246,6 +264,20 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
     /// `regs` must reach a live NVMe controller's BAR0 and `H::alloc_frame` must return zeroed,
     /// identity-mapped frames this kernel owns exclusively (they become the controller's DMA targets).
     pub unsafe fn init(regs: R) -> Result<(Self, NvmeReport), &'static str> {
+        unsafe { Self::init_with_io_vector(regs, None) }
+    }
+
+    /// [`Self::init`], creating the I/O completion queue with interrupts enabled on MSI-X vector
+    /// `io_vector` when one is given (ADR-264). The admin queue stays polled and vector 0 stays
+    /// masked at the controller, so an I/O interrupt is exactly one I/O completion.
+    ///
+    /// # Safety
+    /// As [`Self::init`]. `io_vector`, when given, must name an MSI-X table entry the caller
+    /// programs before the first I/O command waits on it.
+    pub unsafe fn init_with_io_vector(
+        regs: R,
+        io_vector: Option<u16>,
+    ) -> Result<(Self, NvmeReport), &'static str> {
         let cap = regs.r64(REG_CAP);
         if cap == u64::MAX {
             return Err("nvme: CAP reads all-ones (no controller behind BAR0)");
@@ -299,7 +331,8 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
         H::barrier();
         regs.w32(REG_CC, CC_EN | CC_IOSQES | CC_IOCQES);
         wait_status::<H, R>(&regs, true, ready_ns)?;
-        // Polled driver: mask the pin-based/MSI vector 0 (§3.1.3). MSI-X is never enabled here.
+        // Vector 0 (the admin queue's) stays masked (§3.1.3): admin completions are polled, so only the
+        // I/O queue's own vector can ever interrupt (ADR-264).
         regs.w32(REG_INTMS, 1);
 
         let mut dev = Nvme {
@@ -330,6 +363,11 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
             scratch: false,
             dma,
             budget_ns: COMMAND_BUDGET_NS,
+            io_vector,
+            wait: None,
+            slept: Cell::new(0),
+            polled: Cell::new(0),
+            stale_look: Cell::new(false),
             _hal: PhantomData,
         };
 
@@ -382,9 +420,14 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
         dev.namespace_lbas = nsze;
         dev.volatile_cache = vwc;
 
-        // Create I/O Completion Queue 1 (§5.4): PC=1, IEN=0 (polled). Then SQ 1 bound to CQ 1 (§5.5).
+        // Create I/O Completion Queue 1 (§5.4): PC=1, and IEN=1 with its vector only when the caller
+        // armed one (polled otherwise). Then SQ 1 bound to CQ 1 (§5.5).
         let qdw10 = q << 16 | 1;
-        dev.admin_cmd(ADM_CREATE_CQ, 0, iocq, qdw10, 1)
+        let cq_flags = match io_vector {
+            Some(iv) => CQ_PC | CQ_IEN | (iv as u32) << CQ_IV_SHIFT,
+            None => CQ_PC,
+        };
+        dev.admin_cmd(ADM_CREATE_CQ, 0, iocq, qdw10, cq_flags)
             .map_err(|_| "nvme: Create I/O Completion Queue failed")?;
         dev.admin_cmd(ADM_CREATE_SQ, 0, iosq, qdw10, 1 << 16 | 1)
             .map_err(|_| "nvme: Create I/O Submission Queue failed")?;
@@ -406,6 +449,32 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
     /// Tighten (or restore) the per-command completion budget.
     pub fn set_completion_budget_ns(&mut self, ns: u64) {
         self.budget_ns = ns;
+    }
+
+    /// Wait for I/O completions through `wait` (sleeping until the device's interrupt) instead of
+    /// spinning, or spin again with `None` (ADR-264). Refuses by name a controller whose I/O queue
+    /// was created without interrupts: a wait on an unarmed queue could only ever end on the clock.
+    pub fn set_completion_wait(
+        &mut self,
+        wait: Option<CompletionWait>,
+    ) -> Result<(), &'static str> {
+        if wait.is_some() && self.io_vector.is_none() {
+            return Err(
+                "nvme: the I/O queue has no interrupt vector - a wait could never be woken",
+            );
+        }
+        self.wait = wait;
+        Ok(())
+    }
+
+    /// I/O commands completed through the platform's wait, and by spinning.
+    pub fn completion_counts(&self) -> (u64, u64) {
+        (self.slept.get(), self.polled.get())
+    }
+
+    /// The MSI-X vector the I/O queue interrupts on, if it was created with one.
+    pub fn io_vector(&self) -> Option<u16> {
+        self.io_vector
     }
 
     /// The grants this driver holds for its controller (queues + data), for the IOMMU window.
@@ -489,16 +558,46 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
         let head = q.head.get();
         let cqe = q.cq + head as usize * CQE_BYTES;
         let started = H::now_ns();
-        // SAFETY: `cqe` lies inside the completion queue's registered frame (depth*16 <= 4096).
-        let dw3 = loop {
+        // The phase bit of the slot at head says whether the controller has posted into it.
+        // SAFETY (closure): `cqe` lies inside the completion queue's registered frame.
+        let posted = || {
             let dw3 = unsafe { read_volatile((cqe + 12) as *const u32) };
-            if ((dw3 >> 16) & 1 != 0) == q.phase.get() {
-                break dw3;
+            ((dw3 >> 16) & 1 != 0) == q.phase.get()
+        };
+        // Only the I/O queue has an interrupt; admin commands are polled.
+        let wait = if q.qid != 0 { self.wait } else { None };
+        // Whether this command really entered the platform's wait: that call, not the
+        // configuration, is what credits it as "completed through the wait" (`slept`). A wait is
+        // entered once BEFORE the first look: its own check (interrupts off) finds a completion that
+        // is already there and returns without sleeping, so an early completion is still proved to
+        // have gone through the platform and a driver that spins instead cannot be credited.
+        let mut entered = false;
+        let dw3 = loop {
+            if let Some(wait) = wait {
+                entered = true;
+                wait(&|| {
+                    if self.stale_look.replace(false) {
+                        // The lost-wakeup window: the completion lands (and its interrupt
+                        // latches) between the wait's check and its sleep. Let it land, then
+                        // report the stale "not ready" the check would have seen.
+                        while !posted() && H::now_ns().wrapping_sub(started) <= self.budget_ns {
+                            core::hint::spin_loop();
+                        }
+                        return false;
+                    }
+                    posted()
+                });
+            }
+            if posted() {
+                // SAFETY: as above.
+                break unsafe { read_volatile((cqe + 12) as *const u32) };
             }
             if H::now_ns().wrapping_sub(started) > self.budget_ns {
                 return Err(NvmeError::Timeout);
             }
-            core::hint::spin_loop();
+            if wait.is_none() {
+                core::hint::spin_loop();
+            }
         };
         H::barrier();
         let (dw0, dw2) = unsafe {
@@ -513,7 +612,13 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
             q.phase.set(!q.phase.get());
         }
         q.head.set(new_head);
+        // The CQ head doorbell is the acknowledgement: it frees the slot and lets the controller
+        // drop its pending interrupt (§4.1.3).
         self.regs.w32(self.cq_doorbell(q.qid), new_head as u32);
+        if q.qid != 0 {
+            let counter = if entered { &self.slept } else { &self.polled };
+            counter.set(counter.get() + 1);
+        }
 
         if dw3 & 0xFFFF != cid as u32 {
             return Err(NvmeError::WrongCommandId);
@@ -694,6 +799,162 @@ pub fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
         Err((i, name)) => return Err((fs_base + i, name)),
     }
     Ok(n)
+}
+
+impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
+    /// Read a block with a deliberately stale first look at the completion queue: the wait's
+    /// check finds the completion already landed (its interrupt latched) and still reports "not
+    /// ready", so the sleep begins with the wake already pending. A wait that loses that wake
+    /// sleeps to the clock's bound instead (ADR-264).
+    pub fn race_read_block(&self, idx: usize, buf: &mut [u8]) -> Result<(), StorageError> {
+        self.stale_look.set(true);
+        let r = self.read_block(idx, buf);
+        self.stale_look.set(false);
+        r
+    }
+
+    /// Whether I/O completions go through a platform wait.
+    pub fn waits_on_platform(&self) -> bool {
+        self.wait.is_some()
+    }
+}
+
+/// The interrupt group (ADR-264): proves the I/O queue's completions wake the CPU. READS only, so
+/// it holds on any controller (scratch or not). `first` is the number of invariants already
+/// proved, so the log keeps one numbering; the return is how many this group proved. `probe`
+/// reads the platform's interrupt counters (and takes any interrupt already pending first).
+///
+/// Every check would FAIL if the path were reverted: a driver that spins is caught by its own
+/// polled count, an unarmed vector by zero interrupts, an unacknowledged queue by extra ones, and a
+/// lost wakeup by a sleep the bounding timer had to end.
+pub fn interrupt_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
+    dev: &Nvme<H, R>,
+    first: usize,
+    probe: IrqProbe,
+    log: &mut F,
+) -> Result<usize, (usize, &'static str)> {
+    let mut n = first;
+    macro_rules! check {
+        ($name:expr, $cond:expr) => {{
+            n += 1;
+            let ok = $cond;
+            log(n, ok, $name);
+            if !ok {
+                return Err((n, $name));
+            }
+        }};
+    }
+    // A named fault is logged by its own name, so a failing boot says which property broke.
+    macro_rules! verdict {
+        ($name:expr, $res:expr, $pass:expr) => {{
+            n += 1;
+            let res: Result<(), crate::devirq::RunFault> = $res;
+            let ok = res.map_or_else(|f| $pass(f), |_| true);
+            match res {
+                Err(f) if !ok => {
+                    log(n, false, f.name());
+                    return Err((n, f.name()));
+                }
+                _ => log(n, true, $name),
+            }
+        }};
+    }
+    check!(
+        "nvme: the I/O queue was created with an interrupt vector and its commands wait through the platform",
+        dev.io_vector().is_some() && dev.waits_on_platform()
+    );
+    // A run of three queue lengths plus one: the CQ phase flips and the ring wraps while every
+    // completion arrives by interrupt.
+    let mut base = [0u8; BLOCK_SIZE];
+    check!(
+        "nvme: a first interrupt-driven read completes",
+        dev.read_block(0, &mut base).is_ok()
+    );
+    let commands = 3 * dev.depth as u64 + 1;
+    let (slept0, polled0) = dev.completion_counts();
+    let before = probe();
+    let mut same = true;
+    let mut completed = 0u64;
+    for _ in 0..commands {
+        let mut back = [0u8; BLOCK_SIZE];
+        let ok = dev.read_block(0, &mut back).is_ok();
+        completed += ok as u64;
+        same &= ok && back == base;
+    }
+    let after = probe();
+    let (slept1, polled1) = dev.completion_counts();
+    let run = judge_run(commands, slept1 - slept0, polled1 - polled0, before, after);
+    use crate::devirq::RunFault::{ExtraInterrupts, LostInterrupt, NoInterrupt, SilentlyPolled};
+    verdict!(
+        "nvme: every command of the run raised exactly one interrupt and none was polled (counted interrupts == completed commands)",
+        run,
+        |f| !matches!(f, SilentlyPolled | NoInterrupt | LostInterrupt | ExtraInterrupts)
+    );
+    check!(
+        "nvme: the run's data is intact over a wrapped queue and a flipped phase",
+        same
+    );
+    verdict!(
+        "nvme: the CPU slept until the device answered, and no sleep needed the bounding timer",
+        run,
+        |_f| false
+    );
+    // The lost-wakeup window: the completion lands between the wait's check and its sleep.
+    let (slept0, polled0) = dev.completion_counts();
+    let before = probe();
+    let mut raced = [0u8; BLOCK_SIZE];
+    let landed = dev.race_read_block(0, &mut raced).is_ok() && raced == base;
+    let after = probe();
+    let (slept1, polled1) = dev.completion_counts();
+    check!(
+        "nvme: a completion that races the wait is not lost (its interrupt wakes the sleep at once, not the bounding timer)",
+        landed && judge_run(1, slept1 - slept0, polled1 - polled0, before, after).is_ok()
+    );
+    // Acknowledged: a controller never posts into a full completion queue (tail + 1 == head, NVMe
+    // §4.1.1), and the CQ head doorbell is the only way it learns a slot is free. The run above is
+    // three queue lengths plus one, so it can only complete in full if the doorbell was written for
+    // every slot: a skipped one stalls the ring at its depth and the command times out. (Message
+    // interrupts are edges, one per entry, so a quiet window after the run proves nothing about the
+    // doorbell; the ring running past its own depth does.)
+    check!(
+        "nvme: every completion of a run longer than the queue was consumed, so every completion queue head doorbell reached the controller",
+        commands > dev.depth as u64 && completed == commands
+    );
+    Ok(n - first)
+}
+
+/// The fallback group (ADR-264): a controller whose completions cannot wake the CPU (no MSI-X
+/// capability, an xAPIC in x2APIC mode, no GICv2m frame) runs polled, and says why. Passes only
+/// when `reason` is not empty, the I/O queue was created without an interrupt vector, a read
+/// completes, and every I/O command so far was polled with no wait armed: a machine that falls
+/// back silently, or claims a reason while waiting on a wake that cannot come, fails here.
+/// Returns the invariants proved (1).
+pub fn fallback_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
+    dev: &Nvme<H, R>,
+    first: usize,
+    reason: &str,
+    log: &mut F,
+) -> Result<usize, (usize, &'static str)> {
+    const NAME: &str =
+        "nvme: completions are polled for a named, counted reason (no interrupt path armed)";
+    let mut buf = [0u8; BLOCK_SIZE];
+    let reads = dev.read_block(0, &mut buf).is_ok();
+    let (slept, polled) = dev.completion_counts();
+    let ok = !reason.is_empty()
+        && reads
+        && dev.io_vector().is_none()
+        && !dev.waits_on_platform()
+        && slept == 0
+        && polled > 0;
+    log(first + 1, ok, NAME);
+    if ok {
+        Ok(1)
+    } else {
+        Err((
+            first + 1,
+            "nvme: fallback to polling without a named reason or with a wait armed",
+        ))
+    }
 }
 
 /// Format the init report as the one boot log line every target prints.

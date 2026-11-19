@@ -28,6 +28,7 @@ mod arch;
 mod bench;
 mod conirq;
 mod desktop;
+mod devirq;
 mod dtb;
 mod frames;
 mod fwcfg;
