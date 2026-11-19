@@ -44,12 +44,7 @@ impl Hal for Amd64Hal {
     }
 
     fn ticks_to_ns(ticks: u64) -> u64 {
-        let hz = Self::timer_freq_hz();
-        if hz == 0 {
-            ticks
-        } else {
-            ticks.saturating_mul(1_000_000_000).saturating_div(hz)
-        }
+        kernel_core::ticks_to_ns_at(ticks, Self::timer_freq_hz())
     }
 
     fn current_privilege() -> u64 {

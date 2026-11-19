@@ -185,6 +185,18 @@ pub(crate) fn storm_report(family: &'static str, before: usize, after: usize) {
 /// target implements this for its own `…Hal` struct; the kernel is written against the trait, never
 /// against a specific CPU. Associated functions (no `self`) so the active backend is statically
 /// selected and zero-cost.
+/// `ticks` of a `hz` counter in nanoseconds, the conversion every [`Hal::ticks_to_ns`] uses. The
+/// product is taken in 128 bits: in 64 a 100 MHz counter overflows `ticks * 10^9` after 184 s, and
+/// a saturating product then FREEZES the clock there, so every wait bounded by it never ends
+/// (x86-64's HPET under QEMU, and its TSC on VirtualBox after a few seconds). A zero frequency is
+/// read as a counter already in nanoseconds.
+pub fn ticks_to_ns_at(ticks: u64, hz: u64) -> u64 {
+    if hz == 0 {
+        return ticks;
+    }
+    (ticks as u128 * 1_000_000_000 / hz as u128) as u64
+}
+
 pub trait Hal {
     /// Human-readable name of the active target backend.
     fn arch_name() -> &'static str;

@@ -51,3 +51,22 @@ which is right for real pre-invariant hardware for the same reason.
   ring-3 preemption); observed, not changed here.
 * x86-64 numbers published before this ADR (ADR-162's harvest, ADR-179's IPC round trip) carry the
   old calibration's error; only the boot-cost page is re-measured here.
+
+## Addendum 2026-11-19: the clock froze at 184 seconds
+
+x86-64's `ticks_to_ns` was `ticks.saturating_mul(10^9) / hz`. With the 100 MHz HPET this ADR chose
+under QEMU, `ticks * 10^9` passes `u64::MAX` at 184.47 s of uptime, and the saturating product then
+returned the same value forever: `uptime` read `0h 03m 04s (184467440737 ns since boot)` twice twenty
+seconds apart. Every wait bounded by `now_ns` (ADR-150) became unbounded after that moment, which
+explains two flakes: the x86-64 second boot that hit the 240 s watchdog only on a loaded host (a
+boot slower than 184 s), and the VirtualBox job hanging after e1000 invariant 5. VirtualBox has no
+HPET; its TSC calibrates at 1.48-1.80 GHz on the CI runner and starts near zero, so the product froze
+10-12 s into the guest's life. The echo-peer ARP that follows invariant 5 is never answered there
+(no peer at 10.0.2.100), and its 2 s budget ends only on the clock: a boot that reached it before the
+freeze passed (2.0 s spent), one that reached it after hung until the watchdog. aarch64 and riscv64
+already multiplied in 128 bits.
+
+The conversion now lives once in `kernel_core::ticks_to_ns_at(ticks, hz)`, 128-bit, used by all
+three CPUs. `kernel-core/tests/ticks.rs` crosses the 64-bit edge at 100 MHz and a day of a 3 GHz
+TSC. Live, on the interactive x86-64 image: `uptime` after 200 s read 203.7 s, then 223.7 s twenty
+seconds later (the old image, same script: 184.47 s both times).

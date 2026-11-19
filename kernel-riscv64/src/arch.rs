@@ -19,5 +19,5 @@ pub fn rdtime() -> u64 {
 /// Convert timer ticks to nanoseconds using the emulated CPU's own timebase.
 #[inline]
 pub fn ticks_to_ns(ticks: u64) -> u64 {
-    ((ticks as u128 * 1_000_000_000u128) / TIMEBASE_HZ as u128) as u64
+    kernel_core::ticks_to_ns_at(ticks, TIMEBASE_HZ)
 }

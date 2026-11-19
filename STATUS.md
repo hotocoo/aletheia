@@ -1271,6 +1271,15 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 - Fresh same-host/same-QEMU comparative measurement (`BOOT_SAMPLES=3`, `WORKLOAD_OPS=12`) passed: Aletheia median boot **8,193 ms** vs Linux **4,149 ms**, idle host CPU **5.3%** vs **1.1%**, typed echo **7 ms/op** vs **39 ms/op**. The boot-path asymmetry and TCG variability remain documented; no overall speed winner is claimed.
 - QEMU still reports no architectural HWP actuator. Physical unlocked-ratio/voltage overclocking remains hardware-qualified work only; no unsafe or synthetic OC claim was introduced.
 
+### 2026-11-19 — x86-64's clock no longer freezes at 184 s (ADR-200 addendum)
+
+- `ticks_to_ns` on x86-64 saturated `ticks * 10^9` in 64 bits: with QEMU's 100 MHz HPET the clock
+  stopped at 184.47 s of uptime (`uptime` read the same value twenty seconds apart), and on
+  VirtualBox's ~1.5-1.8 GHz TSC 10-12 s in. Every clock-bounded wait after that was unbounded: the
+  root cause of the VirtualBox job's hang after e1000 invariant 5 and of the x86-64 second-boot
+  watchdog on a loaded host. One 128-bit `kernel_core::ticks_to_ns_at` now serves all three CPUs
+  (`kernel-core/tests/ticks.rs`); live, `uptime` reads 203.7 s then 223.7 s.
+
 ### 2026-11-19 — the network stops being guessable (ADR-265)
 
 - `kernel_core::netguard::NetSecret`: 32 bytes drawn once from the platform's `random`

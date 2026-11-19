@@ -22,8 +22,7 @@ pub fn cntvct() -> u64 {
 /// Convert timer ticks to nanoseconds using the emulated CPU's own timer frequency.
 #[inline]
 pub fn ticks_to_ns(ticks: u64) -> u64 {
-    let f = cntfrq().max(1);
-    ((ticks as u128 * 1_000_000_000u128) / f as u128) as u64
+    kernel_core::ticks_to_ns_at(ticks, cntfrq())
 }
 
 /// Current exception level (0..3), from `CurrentEL[3:2]`.
