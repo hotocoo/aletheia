@@ -36,6 +36,7 @@ data structures, drivers' logic and all protocol code are plain safe-or-reviewed
 | `kernel/src/bench.rs` | 4 | cycle-counter and barrier instructions for the boot benchmark family |
 | `kernel/src/conirq.rs` | 9 | GIC interrupt acknowledge/EOI sequencing for the console input path, plus the generic-timer PPI the live desktop is pumped from (ADR-085): CNTFRQ read, CNTP_TVAL/CNTP_CTL arm; the console idle's `wfi`, issued with IRQs masked after the ring is checked empty (ADR-180); and the block completion wait's `wfi` plus the timer disarm that ends its one-shot (ADR-261) |
 | `kernel/src/devirq.rs` | 8 | the NVMe and AHCI completion wait (ADR-264): `daif` read and set/clear of the IRQ mask, CNTP_TVAL/CNTP_CTL arm, read and disarm of the bounding one-shot, and the `wfi` issued with IRQs masked after the completion was checked absent |
+| `kernel/src/smmu.rs` | 1 | `dsb sy` in `MmioRegs::publish_barrier`, before every SMMU register write that tells the unit to read tables or queues the kernel just wrote (ADR-270) |
 | `kernel/src/main.rs` | 2 | entry hand-off from the `_start` stub; boot stack/exception-level setup |
 | `kernel/src/semihosting.rs` | 2 | ARM semihosting call sequence (HLT instruction) |
 | `kernel/src/shellio.rs` | 1 | the PSCI `SYSTEM_RESET` call behind `reboot` (the idle's `wfi` moved to `conirq.rs`, ADR-180) |

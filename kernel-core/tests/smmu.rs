@@ -17,11 +17,12 @@ use std::rc::Rc;
 
 use kernel_core::iommu::PAGE;
 use kernel_core::smmu::{
-    audit_tree, cmd, program_identity_domain, queue_base_encode, rewrite_ste, ste_cfg,
-    ste_s2_decode, ste_s2_encode, strtab_slot, Controller, EventRecord, QueueGeom, Regs,
-    S2Geometry, SmmuFault, SteFault, TableMem, CMDQ_ENTRY_BYTES, CR0_ENABLE_ALL, CR0_SMMUEN,
-    EVTQ_ENTRY_BYTES, GERROR_CMDQ_ERR, REG_CMDQ_BASE, REG_CMDQ_CONS, REG_CMDQ_PROD, REG_CR0,
-    REG_CR0ACK, REG_EVENTQ_BASE, REG_GERROR, REG_IDR0, REG_IDR5,
+    audit_tree, cmd, leaf_spans, merge_spans, program_identity_domain, queue_base_encode,
+    rewrite_page_leaf, rewrite_ste, ste_cfg, ste_s2_decode, ste_s2_encode, strtab_slot, Controller,
+    EventRecord, QueueGeom, Regs, S2Geometry, SmmuFault, SteFault, TableMem, CMDQ_ENTRY_BYTES,
+    CR0_ENABLE_ALL, CR0_SMMUEN, EVTQ_ENTRY_BYTES, GERROR_CMDQ_ERR, REG_CMDQ_BASE, REG_CMDQ_CONS,
+    REG_CMDQ_PROD, REG_CR0, REG_CR0ACK, REG_EVENTQ_BASE, REG_GERROR, REG_IDR0, REG_IDR5,
+    REG_STRTAB_BASE,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -114,6 +115,10 @@ struct SimUnit {
     journal: Vec<&'static str>,
     cfgi_count: usize,
     tlbi_s2_count: usize,
+    /// Arena writes at the last publish barrier (ADR-270): a doorbell that arrives with more
+    /// writes in the journal than that announced memory the unit may not yet see.
+    published_writes: usize,
+    unordered_doorbells: Vec<usize>,
 }
 
 impl SimUnit {
@@ -129,6 +134,16 @@ impl SimUnit {
             journal: Vec::new(),
             cfgi_count: 0,
             tlbi_s2_count: 0,
+            published_writes: 0,
+            unordered_doorbells: Vec::new(),
+        }
+    }
+
+    /// A register write that tells the unit to read memory: every arena write before it must
+    /// have been published by a barrier.
+    fn doorbell(&mut self, off: usize) {
+        if self.arena.0.borrow().journal.len() != self.published_writes {
+            self.unordered_doorbells.push(off);
         }
     }
 
@@ -217,6 +232,17 @@ impl Regs for SimUnit {
         self.r32slot(off)
     }
     fn w32(&mut self, off: usize, v: u32) {
+        if [
+            REG_CR0,
+            REG_CMDQ_PROD,
+            REG_CMDQ_BASE,
+            REG_EVENTQ_BASE,
+            REG_STRTAB_BASE,
+        ]
+        .contains(&off)
+        {
+            self.doorbell(off);
+        }
         match off {
             REG_CR0 => {
                 self.w32slot(REG_CR0, v);
@@ -253,6 +279,9 @@ impl Regs for SimUnit {
     fn w64(&mut self, off: usize, v: u64) {
         self.w32(off, v as u32);
         self.w32(off + 4, (v >> 32) as u32);
+    }
+    fn publish_barrier(&mut self) {
+        self.published_writes = self.arena.0.borrow().journal.len();
     }
 }
 
@@ -706,6 +735,11 @@ fn controller_end_to_end_against_the_simulated_unit() {
     );
 
     let (unit, _mem) = ctrl.into_inner();
+    assert!(
+        unit.unordered_doorbells.is_empty(),
+        "a doorbell overtook the writes it announces: {:x?}",
+        unit.unordered_doorbells
+    );
     assert!(unit.cfgi_count >= 1, "CFGI_STE reached the unit");
     assert!(unit.tlbi_s2_count >= 1, "TLBI_S12_VMALL reached the unit");
     assert_eq!(
@@ -910,4 +944,180 @@ fn the_controller_publishes_a_two_level_table_only_when_aligned() {
     );
     assert_eq!(ctrl.set_strtab_2level(0x4010_0000, 8), Ok(()));
     assert_eq!(ctrl.strtab_base(), 0x4010_0000);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-stream windows and ordered publication (ADR-270).
+// ---------------------------------------------------------------------------------------------
+
+/// Two drivers' grants: the block device's ring and data frames, another device's buffer.
+const BLOCK_GRANTS: [(usize, usize); 2] = [(0x4100_0000, 0x4100_2000), (0x4100_5000, 0x4100_6000)];
+const OTHER_GRANT: (usize, usize) = (0x4200_0000, 0x4200_1000);
+
+fn window(arena: &Arena, grants: &[(usize, usize)], vmid: u16) -> usize {
+    let mut mem = arena.clone();
+    program_identity_domain(&mut mem, grants, IMG, &S2Geometry::standard(vmid))
+        .expect("window builds")
+        .0
+}
+
+#[test]
+fn a_window_holds_exactly_its_drivers_grants_and_nothing_of_another_device() {
+    let arena = Arena::new(64);
+    let block = window(&arena, &BLOCK_GRANTS, 2);
+    let other = window(&arena, &[OTHER_GRANT], 3);
+    let mut mem = arena.clone();
+    assert_eq!(leaf_spans(&mut mem, block, &geom()), BLOCK_GRANTS.to_vec());
+    assert_eq!(leaf_spans(&mut mem, other, &geom()), vec![OTHER_GRANT]);
+    drop(mem);
+
+    let strtab = arena.raw_page();
+    let mut mem = arena.clone();
+    rewrite_ste(
+        &mut mem,
+        strtab,
+        0x08,
+        Some(&ste_s2_encode(&S2Geometry::standard(2), block).unwrap()),
+    )
+    .unwrap();
+    rewrite_ste(
+        &mut mem,
+        strtab,
+        0x10,
+        Some(&ste_s2_encode(&S2Geometry::standard(3), other).unwrap()),
+    )
+    .unwrap();
+    drop(mem);
+    let w = walker_for(&arena, strtab);
+    assert_eq!(
+        w.translate(0x08, 0x4100_1234, true).translated,
+        Some(0x4100_1234)
+    );
+    // The other device's buffer has no leaf in the block device's window, and the reverse.
+    let ev = w
+        .translate(0x08, OTHER_GRANT.0, true)
+        .event
+        .expect("faults");
+    assert_eq!(
+        (ev.kind, ev.sid, ev.addr),
+        (0x10, 0x08, OTHER_GRANT.0 as u64)
+    );
+    assert!(w.translate(0x10, BLOCK_GRANTS[0].0, false).event.is_some());
+    // A hole between two grants is a hole.
+    assert!(w.translate(0x08, 0x4100_3000, false).event.is_some());
+}
+
+#[test]
+fn revoking_one_page_faults_exactly_that_address_and_spares_the_rest() {
+    let arena = Arena::new(64);
+    let block = window(&arena, &BLOCK_GRANTS, 2);
+    let strtab = arena.raw_page();
+    let mut mem = arena.clone();
+    rewrite_ste(
+        &mut mem,
+        strtab,
+        0x08,
+        Some(&ste_s2_encode(&S2Geometry::standard(2), block).unwrap()),
+    )
+    .unwrap();
+    let data = BLOCK_GRANTS[1].0;
+    let old = rewrite_page_leaf(&mut mem, block, &geom(), data, None).expect("revoke");
+    assert_eq!(
+        rewrite_page_leaf(&mut mem, block, &geom(), data, None),
+        Err(SmmuFault::MalformedRange),
+        "revoking an absent leaf is refused, never a silent act"
+    );
+    drop(mem);
+    {
+        let w = walker_for(&arena, strtab);
+        let ev = w
+            .translate(0x08, data + 0x40, true)
+            .event
+            .expect("revoked page faults");
+        assert_eq!(
+            (ev.kind, ev.sid, ev.addr),
+            (0x10, 0x08, (data + 0x40) as u64)
+        );
+        assert!(
+            w.translate(0x08, BLOCK_GRANTS[0].0, true)
+                .translated
+                .is_some(),
+            "the ring stays"
+        );
+    }
+    let mut mem = arena.clone();
+    rewrite_page_leaf(&mut mem, block, &geom(), data, Some(old)).expect("restore");
+    assert_eq!(leaf_spans(&mut mem, block, &geom()), BLOCK_GRANTS.to_vec());
+    drop(mem);
+    assert!(walker_for(&arena, strtab)
+        .translate(0x08, data, true)
+        .translated
+        .is_some());
+}
+
+#[test]
+fn a_page_rewrite_never_allocates_and_refuses_a_huge_leaf() {
+    let (arena, ttb, _stats) = build_domain();
+    let before = arena.0.borrow().bump;
+    let mut mem = arena.clone();
+    // 0x4020_0000 lies in a 2 MiB block of the identity domain: not page-granular.
+    assert_eq!(
+        rewrite_page_leaf(&mut mem, ttb, &geom(), 0x4020_0000, None),
+        Err(SmmuFault::MalformedRange)
+    );
+    // Far outside RAM: no interior path, and none is built.
+    assert_eq!(
+        rewrite_page_leaf(&mut mem, ttb, &geom(), 0x7_0000_0000, None),
+        Err(SmmuFault::MalformedRange)
+    );
+    assert_eq!(arena.0.borrow().bump, before, "a rewrite allocated a table");
+}
+
+#[test]
+fn merged_spans_join_neighbours_and_keep_holes() {
+    assert_eq!(
+        merge_spans(vec![
+            (0x3000, 0x4000),
+            (0x1000, 0x2000),
+            (0x2000, 0x3000),
+            (0x6000, 0x7000)
+        ]),
+        vec![(0x1000, 0x4000), (0x6000, 0x7000)]
+    );
+}
+
+/// The ordering proof: a controller whose doorbells did not publish first would let the unit read
+/// a command or a table entry it cannot see yet. Silicon reorders; QEMU does not, so only this
+/// simulated unit can tell.
+#[test]
+fn every_doorbell_follows_a_barrier_over_the_writes_it_announces() {
+    let (arena, ttb, _stats) = build_domain();
+    let strtab = arena.raw_page();
+    let cmdq = arena.raw_page();
+    let evtq = arena.raw_page();
+    let mut mem = arena.clone();
+    rewrite_ste(
+        &mut mem,
+        strtab,
+        0x08,
+        Some(&ste_s2_encode(&geom(), ttb).unwrap()),
+    )
+    .unwrap();
+    let mut ctrl = Controller::new(SimUnit::new(&arena), arena.clone());
+    ctrl.set_strtab(strtab, 6).unwrap();
+    ctrl.set_queue(false, cmdq, &QueueGeom::new(6, CMDQ_ENTRY_BYTES))
+        .unwrap();
+    ctrl.set_queue(true, evtq, &QueueGeom::new(6, EVTQ_ENTRY_BYTES))
+        .unwrap();
+    ctrl.enable_translation().unwrap();
+    // A leaf rewrite, then the invalidation that covers it: the PROD doorbell must publish both.
+    rewrite_page_leaf(ctrl.table_mem(), ttb, &geom(), 0x4000_1000, None).unwrap();
+    ctrl.invalidate_stream(0x08, geom().vmid).unwrap();
+    let (unit, _) = ctrl.into_inner();
+    assert!(
+        unit.unordered_doorbells.is_empty(),
+        "{:x?}",
+        unit.unordered_doorbells
+    );
+    assert!(unit.tlbi_s2_count >= 1);
 }

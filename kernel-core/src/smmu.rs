@@ -173,6 +173,12 @@ pub trait Regs {
     fn w32(&mut self, off: usize, v: u32);
     fn r64(&mut self, off: usize) -> u64;
     fn w64(&mut self, off: usize, v: u64);
+    /// Make every table and queue write made so far visible to the unit before the next register
+    /// write that tells it to read them (ADR-270). On ARM the stores go to normal memory and the
+    /// register to device memory, which the architecture does NOT order against each other: a
+    /// doorbell can overtake the command it announces. In-kernel this is `dsb sy`; the host's
+    /// simulated unit records that it happened. No default: every implementer decides.
+    fn publish_barrier(&mut self);
 }
 
 /// Table memory: read/write one u64 at a PHYSICAL address inside a walk frame, hand out fresh
@@ -800,6 +806,84 @@ fn count_leaf(audit: &mut TreeAudit, e: u64, huge: bool, image: (usize, usize), 
     }
 }
 
+/// Every translated span of a programmed domain, merged and sorted: what the device behind it can
+/// reach. The per-stream window audit (ADR-270) requires it to EQUAL the driver's grant set,
+/// neither a byte more (a window nobody granted) nor less (a grant that would fault).
+pub fn leaf_spans<M: TableMem>(
+    mem: &mut M,
+    top: usize,
+    g: &S2Geometry,
+) -> alloc::vec::Vec<(usize, usize)> {
+    let shifts = g.shifts();
+    let mut out: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    let mut stack: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    stack.push((top, 0));
+    while let Some((table, level)) = stack.pop() {
+        for idx in 0..512usize {
+            let e = mem.read_u64(table + idx * 8);
+            if e & DESC_VALID == 0 {
+                continue;
+            }
+            let leaf = level + 1 == shifts.len() || e & 0b11 == DESC_BLOCK;
+            if leaf {
+                let base = (e & OA_MASK_4K) as usize;
+                out.push((base, base + (1usize << shifts[level])));
+            } else {
+                stack.push(((e & OA_MASK_4K) as usize, level + 1));
+            }
+        }
+    }
+    out.sort_unstable();
+    merge_spans(out)
+}
+
+/// Sort-merged `[start, end)` spans: adjacent and overlapping spans become one.
+pub fn merge_spans(mut spans: alloc::vec::Vec<(usize, usize)>) -> alloc::vec::Vec<(usize, usize)> {
+    spans.sort_unstable();
+    let mut merged: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    for (s, e) in spans {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
+/// Replace the PAGE leaf that translates `va` (ADR-270): `None` clears it (a revocation),
+/// `Some(desc)` writes it back. Walks the existing interior path WITHOUT allocating (an absent
+/// interior table is `MalformedRange`), refuses a `va` a huge block covers (revocation is
+/// page-granular or nothing), and refuses to revoke a leaf that is already absent (absence must
+/// never look like an act). Returns the leaf that was there.
+pub fn rewrite_page_leaf<M: TableMem>(
+    mem: &mut M,
+    top: usize,
+    g: &S2Geometry,
+    va: usize,
+    desc: Option<u64>,
+) -> Result<u64, SmmuFault> {
+    const MASK: usize = 0x1FF;
+    let shifts = g.shifts();
+    let mut table = top;
+    for &sh in &shifts[..shifts.len() - 1] {
+        let e = mem.read_u64(table + ((va >> sh) & MASK) * 8);
+        if e & DESC_VALID == 0 {
+            return Err(SmmuFault::MalformedRange);
+        }
+        if e & 0b11 == DESC_BLOCK {
+            return Err(SmmuFault::MalformedRange);
+        }
+        table = (e & OA_MASK_4K) as usize;
+    }
+    let slot = table + ((va >> 12) & MASK) * 8;
+    let old = mem.read_u64(slot);
+    if desc.is_none() && old & DESC_VALID == 0 {
+        return Err(SmmuFault::MalformedRange);
+    }
+    mem.write_u64(slot, desc.unwrap_or(0));
+    Ok(old)
+}
+
 // --- the controller ------------------------------------------------------------------------------------------
 
 const HANDSHAKE_BOUND: u32 = 1_000_000;
@@ -876,6 +960,7 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
         if !l1_pa.is_multiple_of(l1_bytes) {
             return Err(SmmuFault::MisalignedPointer);
         }
+        self.regs.publish_barrier();
         self.regs
             .w64(REG_STRTAB_BASE, l1_pa as u64 & 0x000F_FFFF_FFFF_FFC0);
         self.regs.w32(REG_STRTAB_BASE_CFG, cfg);
@@ -894,10 +979,11 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
         if log2size > 0x3F || !base_pa.is_multiple_of(1usize << (log2size + 6).min(63)) {
             return Err(SmmuFault::MisalignedPointer);
         }
+        let cfg = strtab_cfg_linear(log2size)?;
+        self.regs.publish_barrier();
         self.regs
             .w64(REG_STRTAB_BASE, base_pa as u64 & 0x000F_FFFF_FFFF_FFC0);
-        self.regs
-            .w32(REG_STRTAB_BASE_CFG, strtab_cfg_linear(log2size)?);
+        self.regs.w32(REG_STRTAB_BASE_CFG, cfg);
         Ok(())
     }
 
@@ -917,6 +1003,7 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
             (REG_CMDQ_BASE, REG_CMDQ_PROD, REG_CMDQ_CONS)
         };
         let enc = queue_base_encode(base_pa, g)?;
+        self.regs.publish_barrier();
         self.regs.w64(base_reg, enc);
         self.regs.w32(prod_reg, 0);
         self.regs.w32(cons_reg, 0);
@@ -933,6 +1020,7 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
         if self.smmu_enabled() {
             return Err(SmmuFault::TranslationAlreadyEnabled);
         }
+        self.regs.publish_barrier();
         self.regs.w32(REG_CR0, CR0_ENABLE_ALL);
         // Poll the ACK: the unit confirms the REQUESTED (non-reserved) bits, so a mirrored
         // mistake elsewhere would show up here as a mismatch instead of a green.
@@ -968,6 +1056,9 @@ impl<R: Regs, M: TableMem> Controller<R, M> {
         // advancing - the poll watches both outcomes, because waiting only for progress would
         // turn a named refusal into a timeout.
         let next = g.advance(prod);
+        // The command (and any table write it covers, such as an STE or a leaf) must be visible
+        // before the unit is told to read it.
+        self.regs.publish_barrier();
         self.regs.w32(REG_CMDQ_PROD, next);
         for _ in 0..HANDSHAKE_BOUND {
             let cons_now = self.regs.r32(REG_CMDQ_CONS);

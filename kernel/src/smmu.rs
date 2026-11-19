@@ -43,6 +43,13 @@ use kernel_core::virtiopci::Bdf;
 /// enough that a suite paying one timeout per kick stays inside the boot watchdog (ADR-150).
 const PROBE_BUDGET_NS: u64 = 500_000_000;
 
+/// The block function's own window (ADR-270) carries its own VMID, so its TLB entries are never
+/// another domain's: the shared identity domain is VMID 1.
+const WINDOW_VMID: u16 = 2;
+/// What the revoked page holds while the device is denied it: no block of the probe's pattern is
+/// all one byte, so any byte the device managed to write would show.
+const REVOKED_SENTINEL: u8 = 0x5C;
+
 /// The discovery facts parsed before any frame churned. Leaked deliberately: the boot heap
 /// never frees (ADR-063), and one boxed struct is cheaper than re-walking a tree the pool may
 /// already have overwritten.
@@ -118,6 +125,12 @@ impl Regs for MmioRegs {
     fn w64(&mut self, off: usize, v: u64) {
         self.w32(off, v as u32);
         self.w32(off + 4, (v >> 32) as u32);
+    }
+    fn publish_barrier(&mut self) {
+        // SAFETY: a full-system data synchronization barrier has no operands and no effect but
+        // ordering: every earlier store to the table and queue frames completes before the
+        // register write that follows tells the unit to read them (ADR-270).
+        unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
     }
 }
 
@@ -581,6 +594,169 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
         }
     }
     pass!(NAME_13);
+
+    // --- 14..16: the block function's stream gets its OWN window (ADR-270) -----------------------------
+    // Until here every function shared one identity domain over all of RAM, so one device could
+    // DMA into another's buffers. The block function now gets a window built from exactly what its
+    // driver granted, under its own VMID: the hardware obeys the registry, not a policy.
+    let win_geom = smmu::S2Geometry::standard(WINDOW_VMID);
+    let grants = blk.dev.dma_grants();
+    let want = smmu::merge_spans(
+        grants
+            .iter()
+            .map(|g| (g.addr, g.addr + g.pages * PAGE))
+            .collect(),
+    );
+    let Some(data_page) = grants
+        .iter()
+        .find(|g| g.owner == "virtio-blk.data")
+        .map(|g| g.addr)
+    else {
+        bail!("the block driver granted no data frame", NAME_13);
+    };
+
+    n += 1;
+    const NAME_14: &str =
+        "the block function's stream gets its own window: exactly its driver's grants, leaf for leaf, under its own VMID";
+    let win_ste = {
+        let mem = ctrl.table_mem();
+        let win = match smmu::program_identity_domain(&mut *mem, &want, image, &win_geom) {
+            Ok((top, _)) => top,
+            Err(e) => bail!(format_args!("window refused {:?}", e), NAME_14),
+        };
+        let leaves = smmu::leaf_spans(&mut *mem, win, &win_geom);
+        let audit = smmu::audit_tree(&mut *mem, win, &win_geom, image);
+        if leaves != want || audit.image_violations != 0 {
+            bail!(
+                format_args!(
+                    "window leaves {:x?} != grants {:x?} (image violations {})",
+                    leaves, want, audit.image_violations
+                ),
+                NAME_14
+            );
+        }
+        // The shared domain's own command queue is RAM the identity domain maps; the window
+        // must not, or it is not a window.
+        if leaves.iter().any(|&(a, b)| a <= cmdq && cmdq < b) {
+            bail!("the window maps a frame no driver granted", NAME_14);
+        }
+        let ste = match smmu::ste_s2_encode(&win_geom, win) {
+            Ok(s) => s,
+            Err(e) => bail!(format_args!("window STE refused {:?}", e), NAME_14),
+        };
+        if let Err(e) = write_ste(&mut *mem, probe_rid, Some(&ste)) {
+            bail!(format_args!("window grant refused {:?}", e), NAME_14);
+        }
+        (win, ste)
+    };
+    if let Err(e) = ctrl.invalidate_stream(probe_rid, WINDOW_VMID) {
+        bail!(format_args!("invalidate {:?}", e), NAME_14);
+    }
+    {
+        use kernel_core::storage::BlockDevice;
+        seen.clear();
+        let _ = ctrl.drain_events(&mut seen);
+        seen.clear();
+        let mut back = [0u8; kernel_core::storage::BLOCK_SIZE];
+        let ok = blk.dev.read_block(last, &mut back).is_ok() && back == pattern;
+        let quiet = ctrl.drain_events(&mut seen).is_ok() && seen.is_empty();
+        if !ok || !quiet {
+            bail!(
+                format_args!("through the window: read={} events={}", ok, seen.len()),
+                NAME_14
+            );
+        }
+    }
+    kprintln!(
+        "[smmu] window for rid {:#04x}: {} granted span(s), vmid {}",
+        probe_rid,
+        want.len(),
+        WINDOW_VMID
+    );
+    pass!(NAME_14);
+
+    n += 1;
+    const NAME_15: &str =
+        "revoking one granted page denies the device's DMA there by name (F_TRANSLATION at its own stream id and that page), and no byte arrives";
+    let old_leaf = {
+        use kernel_core::storage::BlockDevice;
+        let old = {
+            let mem = ctrl.table_mem();
+            match smmu::rewrite_page_leaf(&mut *mem, win_ste.0, &win_geom, data_page, None) {
+                Ok(old) => old,
+                Err(e) => bail!(format_args!("page revoke refused {:?}", e), NAME_15),
+            }
+        };
+        if let Err(e) = ctrl.invalidate_stream(probe_rid, WINDOW_VMID) {
+            bail!(format_args!("invalidate {:?}", e), NAME_15);
+        }
+        // A sentinel in the revoked page: whatever the device answers, the bytes it was asked
+        // for must not arrive. QEMU drops the faulted writes and still completes the request
+        // with status OK (measured), so the request's own verdict is not the evidence; the
+        // untouched page and the unit's record are.
+        // SAFETY: the data frame is identity-mapped and the driver's own; one request in flight.
+        unsafe { core::ptr::write_bytes(data_page as *mut u8, REVOKED_SENTINEL, PAGE) };
+        let mut back = [0u8; kernel_core::storage::BLOCK_SIZE];
+        let _ = blk.dev.read_block(last, &mut back);
+        let refused = back != pattern && back.iter().all(|&b| b == REVOKED_SENTINEL);
+        seen.clear();
+        let _ = ctrl.drain_events(&mut seen);
+        let named = seen.iter().any(|e| {
+            e.kind == smmu::evt::F_TRANSLATION
+                && e.sid == probe_rid
+                && (e.addr as usize) & !(PAGE - 1) == data_page
+        });
+        if !refused || !named {
+            for e in seen.iter().take(4) {
+                kprintln!(
+                    "[smmu] event kind={:#x} sid={:#x} addr={:#x}",
+                    e.kind,
+                    e.sid,
+                    e.addr
+                );
+            }
+            bail!(
+                format_args!("refused={} named={} events={}", refused, named, seen.len()),
+                NAME_15
+            );
+        }
+        old
+    };
+    pass!(NAME_15);
+
+    n += 1;
+    const NAME_16: &str =
+        "restoring the page brings the device back through its window: the same bytes, and the unit quiet";
+    {
+        use kernel_core::storage::BlockDevice;
+        {
+            let mem = ctrl.table_mem();
+            if let Err(e) =
+                smmu::rewrite_page_leaf(&mut *mem, win_ste.0, &win_geom, data_page, Some(old_leaf))
+            {
+                bail!(format_args!("page restore refused {:?}", e), NAME_16);
+            }
+        }
+        if let Err(e) = ctrl.invalidate_stream(probe_rid, WINDOW_VMID) {
+            bail!(format_args!("invalidate {:?}", e), NAME_16);
+        }
+        if let Err(e) = blk.dev.reset() {
+            bail!(format_args!("device reset {}", e), NAME_16);
+        }
+        seen.clear();
+        let _ = ctrl.drain_events(&mut seen);
+        seen.clear();
+        let mut back = [0u8; kernel_core::storage::BLOCK_SIZE];
+        let ok = blk.dev.read_block(last, &mut back).is_ok() && back == pattern;
+        let quiet = ctrl.drain_events(&mut seen).is_ok() && seen.is_empty();
+        if !ok || !quiet {
+            bail!(
+                format_args!("restored={} events={}", ok, seen.len()),
+                NAME_16
+            );
+        }
+    }
+    pass!(NAME_16);
 
     kprintln!("[smmu] translation REMAINS ON from here to halt");
     Ok(n as u32)
