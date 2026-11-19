@@ -502,6 +502,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-arm qemu-system-misc qemu-system-x86 \
                                   ovmf mtools dosfstools perl python3
+          # Ubuntu 26.04's QEMU 10 moved riscv64 out of qemu-system-misc, as every other job knows.
+          sudo apt-get install -y qemu-system-riscv || true
       - name: Install Rust nightly + all three bare-metal targets
         run: |
           rustup toolchain install nightly-2026-08-09 --profile minimal
