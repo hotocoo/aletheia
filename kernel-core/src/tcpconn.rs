@@ -90,6 +90,10 @@ pub enum TcpRefusal {
     /// Received data that does not fit the receive buffer. Dropped without advancing the
     /// acknowledgement, so the peer sends it again once the application has read.
     RecvFull,
+    /// A reset inside the receive window but not at its first byte (RFC 5961 section 3.2): only
+    /// a peer that sees our acknowledgements can send the exact one, so this one is answered with
+    /// a challenge acknowledgement and the connection stays.
+    ResetNotExact,
 }
 
 /// What a received segment meant to the layer above.
@@ -324,23 +328,45 @@ impl Connection {
 
     /// Hand the connection a parsed segment. Returns what it meant.
     pub fn on_segment(&mut self, seg: &TcpView<'_>, now: u64) -> TcpEvent {
-        if seg.sport != self.rport || seg.dport != self.lport {
+        if seg.src != self.remote || seg.sport != self.rport || seg.dport != self.lport {
             self.refusals += 1;
             return TcpEvent::Refused(TcpRefusal::NotOurs);
         }
         self.segments_in += 1;
         if seg.has(RST) {
-            self.state = TcpState::Closed;
-            self.send_len = 0;
-            self.in_flight = 0;
-            self.refusals += 1;
-            return TcpEvent::Ended(TcpRefusal::Reset);
+            return self.on_reset(seg);
         }
         match self.state {
             TcpState::Closed | TcpState::TimeWait => TcpEvent::Nothing,
             TcpState::SynSent => self.on_syn_ack(seg, now),
             _ => self.on_open_segment(seg, now),
         }
+    }
+
+    /// A reset is believed only when it proves it saw this connection (ADR-265). Before the
+    /// handshake that proof is acknowledging our SYN (RFC 793); after it, a sequence number exactly
+    /// at `rcv_nxt` (RFC 5961 section 3.2). One elsewhere in the window earns a challenge
+    /// acknowledgement, which the real peer answers with the exact reset if it meant one; one
+    /// outside the window is dropped. Guessing a port pair is no longer enough to end a connection.
+    fn on_reset(&mut self, seg: &TcpView<'_>) -> TcpEvent {
+        let believed = match self.state {
+            TcpState::Closed | TcpState::TimeWait => return TcpEvent::Nothing,
+            TcpState::SynSent => seg.has(ACK) && seg.ack == self.snd_nxt.wrapping_add(1),
+            _ => seg.seq == self.rcv_nxt,
+        };
+        self.refusals += 1;
+        if believed {
+            self.state = TcpState::Closed;
+            self.send_len = 0;
+            self.in_flight = 0;
+            return TcpEvent::Ended(TcpRefusal::Reset);
+        }
+        let window = (RECV_CAP - self.recv_len) as u32;
+        if self.state != TcpState::SynSent && seg.seq.wrapping_sub(self.rcv_nxt) < window {
+            self.ack_due = true;
+            return TcpEvent::Refused(TcpRefusal::ResetNotExact);
+        }
+        TcpEvent::Refused(TcpRefusal::OutOfWindow)
     }
 
     /// The handshake's second segment. Anything that is not SYN+ACK acknowledging exactly our SYN

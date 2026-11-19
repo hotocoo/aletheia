@@ -1431,6 +1431,34 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // What a neighbour must not guess or forge (ADR-265): the keyed initial sequence number, local
+    // port and DNS id, and the ARP reply check every NIC driver uses.
+    kprintln!("");
+    kprintln!("--- network-guard selftests (keyed numbers, believable ARP answers) ---");
+    match kernel_core::netguard::netguard_suite(|n, passed, name| {
+        if passed {
+            kprintln!("  [pass {:>2}] {}", n, name);
+        } else {
+            kprintln!("  [FAIL {:>2}] {}", n, name);
+        }
+    }) {
+        Ok(n) => {
+            kprintln!("[netguard] ALL {} NETWORK-GUARD INVARIANTS HOLD", n);
+            kprintln!(
+                "[boot] netguard suite: {} ms",
+                kernel_core::boottime::lap::<ActiveHal>("netguard")
+            );
+        }
+        Err((idx, name)) => {
+            kprintln!(
+                "[netguard] FAILED at network-guard invariant {}: {}",
+                idx,
+                name
+            );
+            semihosting::exit(1200 + idx as i32);
+        }
+    }
+
     // The TLS 1.3 KEY SCHEDULE (REQ-SEC-TLS-001, ADR-141, Lethe stage N2's first rung): HKDF over
     // the SHA-256 this kernel already proves, and the ordered schedule RFC 8446 specifies. The
     // order is the security argument - a traffic secret derived before the key exchange was mixed

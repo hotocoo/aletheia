@@ -84,6 +84,7 @@ pub mod mlrisk;
 pub mod mlrisk_contract;
 pub mod mlrisk_stress;
 pub mod mlsched;
+pub mod netguard;
 pub mod nvme;
 pub mod persist;
 pub mod persona;

@@ -57,6 +57,9 @@ pub enum TcpError {
 /// A parsed segment: the header fields a connection needs, plus the exact payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TcpView<'a> {
+    /// The sending host's address, from the IPv4 header the checksum covered (ADR-265): a
+    /// connection is a 4-tuple, and a segment from any other host is not its segment.
+    pub src: [u8; 4],
     pub sport: u16,
     pub dport: u16,
     pub seq: u32,
@@ -192,6 +195,7 @@ pub fn parse_tcp<'a>(ip: &Ipv4View<'a>) -> Result<TcpView<'a>, TcpError> {
         return Err(TcpError::UrgentUnsupported);
     }
     Ok(TcpView {
+        src: ip.src,
         sport,
         dport,
         seq: u32::from_be_bytes([d[4], d[5], d[6], d[7]]),
@@ -429,6 +433,7 @@ pub fn tcp_suite(
     //     acknowledgement in the state machine is arithmetic on this number.
     {
         let mk = |flags: u8, payload: &'static [u8]| TcpView {
+            src: [0; 4],
             sport: 1,
             dport: 2,
             seq: 0,

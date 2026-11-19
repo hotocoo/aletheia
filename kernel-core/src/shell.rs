@@ -896,8 +896,9 @@ pub struct NetFacts {
     pub arp_requests: u32,
     /// DMA regions the device's queues registered.
     pub dma_regions: usize,
-    /// The local port the next conversation will use.
-    pub next_port: u16,
+    /// Where the secret behind local ports, sequence numbers and DNS ids came from (ADR-265). The
+    /// next port itself is no longer shown: printing it would hand out what the secret hides.
+    pub secret: &'static str,
 }
 
 /// The facts a command may ask of the running target. Everything here is already established by the
@@ -2649,11 +2650,11 @@ pub fn execute_as<H: ShellHost, D: BlockDevice>(
                     );
                     outf!(
                         out,
-                        "  {} frame(s) dropped, {} ARP request(s) sent, {} DMA region(s), next local port {}",
+                        "  {} frame(s) dropped, {} ARP request(s) sent, {} DMA region(s), ports and sequence numbers keyed from {}",
                         f.dropped,
                         f.arp_requests,
                         f.dma_regions,
-                        f.next_port
+                        f.secret
                     );
                 }
                 None => out("net: this machine has no network device"),

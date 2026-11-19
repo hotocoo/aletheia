@@ -8,6 +8,7 @@
 //! between keystrokes. Nothing here runs in an interrupt handler.
 
 use kernel_core::entropy;
+use kernel_core::netguard::{self, NetSecret};
 use kernel_core::tcpconn::Connection;
 use kernel_core::tcpnet::{self, LinkError, Plan};
 use kernel_core::tlsclient::{self, TlsPump, TlsReport};
@@ -28,10 +29,22 @@ static mut RNG: Option<Rng> = None;
 /// later one: ninety kilobytes of workspace on a heap that never frees, allocated once (ADR-151).
 static mut TLS: Option<(TlsPump, Handshake<PinnedRoot>)> = None;
 
-/// The first ephemeral port this machine offers. Walked upward per connection so two conversations
-/// in one session cannot collide in the peer's table.
-const FIRST_PORT: u16 = 49152;
-static mut NEXT_PORT: u16 = FIRST_PORT;
+/// The secret behind this machine's local ports, initial sequence numbers and DNS ids (ADR-265),
+/// drawn on the first conversation, after the boot suite has proved the entropy source.
+static mut SECRET: Option<NetSecret> = None;
+
+/// The network secret: seeded once from the entropy source, or from the clock, by name, when there
+/// is none.
+fn secret() -> &'static mut NetSecret {
+    // SAFETY: the console's main thread is the only context that touches `SECRET` (module
+    // header), and no caller holds the reference across another call.
+    unsafe {
+        (*core::ptr::addr_of_mut!(SECRET)).get_or_insert_with(|| {
+            let mut key = [0u8; netguard::SECRET_LEN];
+            NetSecret::new(random(&mut key).map(|()| key), ActiveHal::timer_ticks())
+        })
+    }
+}
 
 /// Keep the device the boot suite proved.
 ///
@@ -51,14 +64,9 @@ pub unsafe fn keep_entropy(dev: Rng) {
 
 /// The device's addresses and counters for the console's `net` (ADR-185), `None` without a NIC.
 pub fn facts() -> Option<kernel_core::shell::NetFacts> {
-    // SAFETY: the console's main thread is the only context that touches `NET`/`NEXT_PORT`
+    // SAFETY: the console's main thread is the only context that touches `NET`
     // after boot (module header); this is a read between keystrokes.
-    let (dev, next_port) = unsafe {
-        (
-            (*core::ptr::addr_of!(NET)).as_ref()?,
-            *core::ptr::addr_of!(NEXT_PORT),
-        )
-    };
+    let dev = unsafe { (*core::ptr::addr_of!(NET)).as_ref()? };
     Some(kernel_core::shell::NetFacts {
         mac: dev.mac(),
         ip: dev.ip(),
@@ -67,7 +75,7 @@ pub fn facts() -> Option<kernel_core::shell::NetFacts> {
         dropped: dev.dropped(),
         arp_requests: dev.arp_wire_requests(),
         dma_regions: dev.dma_regions(),
-        next_port,
+        secret: secret().source().describe(),
     })
 }
 
@@ -90,21 +98,21 @@ pub fn fetch(
     let link = unsafe { NetLink::resolve(dev, ip) }
         .map_err(|_| "no answer to the address resolution for that peer")?;
 
-    // SAFETY: as above; this is the sole writer of the port counter.
-    let lport = unsafe {
-        let p = NEXT_PORT;
-        NEXT_PORT = if p == u16::MAX { FIRST_PORT } else { p + 1 };
-        p
-    };
+    let lport = secret().local_port(dev.ip(), ip, port);
 
     let hz = ActiveHal::timer_freq_hz().max(1);
     // A fifth of a second between retransmissions: long enough that a local answer arrives first,
     // short enough that a lost segment does not read as a hung console.
     let rto = (hz / 5).max(1);
     let mut conn = Connection::new(dev.ip(), lport, ip, port, rto);
-    // The initial sequence number must be unpredictable on a real network, so it comes from the
-    // machine's clock rather than from a constant this kernel ships.
-    let iss = (ActiveHal::timer_ticks() as u32) ^ ((lport as u32) << 16);
+    // RFC 6528: the clock moves it forward, the secret hides where it starts (ADR-265).
+    let iss = secret().iss(
+        dev.ip(),
+        lport,
+        ip,
+        port,
+        netguard::iss_clock(ActiveHal::timer_ticks(), hz),
+    );
     let plan = Plan {
         iss,
         budget: 4_000,
@@ -122,7 +130,8 @@ pub fn fetch(
 }
 
 /// Ask the DNS server at `server:port` for `name`'s addresses (ADR-176), over the same device.
-/// The query id and source port come from the machine's clock, so an off-path guess must hit both.
+/// The query id and source port come from the network secret (ADR-265), so an off-path forger
+/// must guess both.
 pub fn resolve(
     server: [u8; 4],
     port: u16,
@@ -132,17 +141,9 @@ pub fn resolve(
     let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
         return Err("this machine has no network device");
     };
-    let t = ActiveHal::timer_ticks();
-    // SAFETY: as above; this is the sole writer of the port counter.
-    let sport = unsafe {
-        let p = NEXT_PORT;
-        NEXT_PORT = if p == u16::MAX { FIRST_PORT } else { p + 1 };
-        p
-    };
+    let (id, sport) = secret().dns_query();
     // SAFETY: the device was brought up by the boot and its queues are live.
-    unsafe {
-        kernel_core::virtionet::resolve_name(dev, server, port, sport, (t ^ (t >> 17)) as u16, name)
-    }
+    unsafe { kernel_core::virtionet::resolve_name(dev, server, port, sport, id, name) }
 }
 
 /// Fresh bytes from the machine's entropy source (ADR-244): salts for console accounts. Refused
@@ -183,12 +184,7 @@ pub fn fetch_tls(
     // SAFETY: the device was brought up by the boot and its queues are live.
     let link = unsafe { NetLink::resolve(dev, ip) }
         .map_err(|_| "no answer to the address resolution for that peer")?;
-    // SAFETY: as above; this is the sole writer of the port counter.
-    let lport = unsafe {
-        let p = NEXT_PORT;
-        NEXT_PORT = if p == u16::MAX { FIRST_PORT } else { p + 1 };
-        p
-    };
+    let lport = secret().local_port(dev.ip(), ip, port);
 
     let clock = crate::rtc::GoldfishRtc::new();
     let verifier = kernel_core::clock::verifier_at(&clock, pin)
@@ -198,7 +194,7 @@ pub fn fetch_tls(
     let rto = (hz / 5).max(1);
     let mut conn = Connection::new(dev.ip(), lport, ip, port, rto);
     let ticks = ActiveHal::timer_ticks();
-    let iss = (ticks as u32) ^ ((lport as u32) << 16);
+    let iss = secret().iss(dev.ip(), lport, ip, port, netguard::iss_clock(ticks, hz));
     // The key's material comes from the entropy device the boot suite proved, checked draw by
     // draw (ADR-153); a machine without one opens no conversation, because a key made from a
     // clock is a key a patient observer can make too.

@@ -124,6 +124,8 @@ REQUIRED=(
   # The resident governor (REQ-PM-002, ADR-166) stands the watch on every CPU: the tick contract
   # depends on no device, so a second hypervisor must prove it too.
   'ALL 15 RESIDENT GOVERNOR INVARIANTS HOLD'
+  # The network guard (ADR-265) is pure arithmetic over fixed keys and frames: no device.
+  'ALL 9 NETWORK-GUARD INVARIANTS HOLD'
   'DMA-BOUNDARY INVARIANTS HOLD'
   'INPUT-RING INVARIANTS HOLD'
   'CONSOLE INVARIANTS HOLD'

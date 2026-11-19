@@ -33,6 +33,22 @@ fn deliver(
     payload: &[u8],
     now: u64,
 ) -> TcpEvent {
+    deliver_from(SERVER, conn, wire, seq, ack, flags, window, payload, now)
+}
+
+/// [`deliver`] from any host: the same segment, its IPv4 source `src`.
+#[allow(clippy::too_many_arguments)]
+fn deliver_from(
+    src: [u8; 4],
+    conn: &mut Connection,
+    wire: &mut [u8],
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    payload: &[u8],
+    now: u64,
+) -> TcpEvent {
     let seg = Segment {
         seq,
         ack,
@@ -40,7 +56,7 @@ fn deliver(
         window,
         payload,
     };
-    let Some(bytes) = build_segment(wire, 1, SERVER, CLIENT, SPORT, CPORT, &seg) else {
+    let Some(bytes) = build_segment(wire, 1, src, CLIENT, SPORT, CPORT, &seg) else {
         return TcpEvent::Refused(TcpRefusal::NotOurs);
     };
     let n = bytes.len();
@@ -426,7 +442,101 @@ pub fn tcpconn_suite(
         );
     }
 
-    // 15 — a whole connection — handshake, data both ways, close — allocates NOTHING. On a heap
+    // 15 — a connection is a 4-tuple (ADR-265): the right ports from another host are not its
+    //      segment, even a reset at exactly the right sequence number.
+    {
+        let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
+        let now = handshake(&mut c, &mut tx, &mut rx);
+        let before = c.segments_in;
+        let data = deliver_from(
+            [10, 0, 2, 99],
+            &mut c,
+            &mut rx,
+            0x5001,
+            0x1001,
+            ACK | PSH,
+            4096,
+            b"forged",
+            now,
+        );
+        let reset = deliver_from(
+            [10, 0, 2, 99],
+            &mut c,
+            &mut rx,
+            0x5001,
+            0x1001,
+            RST,
+            0,
+            &[],
+            now,
+        );
+        check!(
+            data == TcpEvent::Refused(TcpRefusal::NotOurs)
+                && reset == TcpEvent::Refused(TcpRefusal::NotOurs)
+                && c.segments_in == before
+                && c.readable() == 0
+                && c.state() == TcpState::Established,
+            "tcpconn: a segment from another host with this connection's ports is refused by name"
+        );
+    }
+
+    // 16 — RFC 5961 section 3.2: a reset in the window but not at its first byte earns a challenge
+    //      acknowledgement and leaves the connection up; one outside the window is dropped
+    //      silently; only the exact one ends it.
+    {
+        let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
+        let now = handshake(&mut c, &mut tx, &mut rx);
+        // Drain the handshake's own acknowledgement so the next segment out is the challenge.
+        while c.poll_transmit(now, &mut tx).is_some() {}
+        let inside = deliver(&mut c, &mut rx, 0x5001 + 100, 0, RST, 0, &[], now);
+        let k = c.poll_transmit(now, &mut tx).unwrap_or(0);
+        let challenge = sent(&tx, k)
+            .is_some_and(|s| s.has(ACK) && !s.has(RST) && s.ack == 0x5001 && s.seq == 0x1001);
+        let outside = deliver(
+            &mut c,
+            &mut rx,
+            0x5001u32.wrapping_sub(1),
+            0,
+            RST,
+            0,
+            &[],
+            now,
+        );
+        let quiet = c.poll_transmit(now, &mut tx).is_none();
+        let still_up = c.state() == TcpState::Established;
+        let exact = deliver(&mut c, &mut rx, 0x5001, 0, RST, 0, &[], now);
+        check!(
+            inside == TcpEvent::Refused(TcpRefusal::ResetNotExact)
+                && challenge
+                && outside == TcpEvent::Refused(TcpRefusal::OutOfWindow)
+                && quiet
+                && still_up
+                && exact == TcpEvent::Ended(TcpRefusal::Reset)
+                && c.state() == TcpState::Closed,
+            "tcpconn: a reset not at the next expected byte is challenged or dropped, never believed"
+        );
+    }
+
+    // 17 — before the handshake a reset must acknowledge our SYN (RFC 793): one that does not is
+    //      refused and the SYN keeps its retransmission schedule.
+    {
+        let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
+        c.open(0x1000, 10).ok();
+        c.poll_transmit(10, &mut tx);
+        let bare = deliver(&mut c, &mut rx, 0, 0, RST, 0, &[], 11);
+        let wrong = deliver(&mut c, &mut rx, 0, 0x1002, RST | ACK, 0, &[], 11);
+        let waiting = c.state() == TcpState::SynSent;
+        let right = deliver(&mut c, &mut rx, 0, 0x1001, RST | ACK, 0, &[], 12);
+        check!(
+            bare == TcpEvent::Refused(TcpRefusal::OutOfWindow)
+                && wrong == TcpEvent::Refused(TcpRefusal::OutOfWindow)
+                && waiting
+                && right == TcpEvent::Ended(TcpRefusal::Reset),
+            "tcpconn: a reset before the handshake ends it only when it acknowledges our SYN"
+        );
+    }
+
+    // 18 — a whole connection — handshake, data both ways, close — allocates NOTHING. On a heap
     //      that never frees, a per-segment allocation is a leak measured in connections.
     {
         let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
@@ -469,7 +579,7 @@ mod tests {
             seen += 1;
         })
         .expect("the tcp connection suite should hold");
-        assert_eq!(n, 15);
-        assert_eq!(seen, 15);
+        assert_eq!(n, 18);
+        assert_eq!(seen, 18);
     }
 }

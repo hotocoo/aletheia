@@ -373,6 +373,9 @@ CONTRACT=(
   "tcpconn: a close sends FIN after the staged bytes and walks to TIME-WAIT"
   "tcpconn: the peer's FIN opens CLOSE-WAIT, and ours closes the connection from there"
   "tcpconn: a segment for another port pair is refused by name and not counted as ours"
+  "tcpconn: a segment from another host with this connection's ports is refused by name"
+  "tcpconn: a reset not at the next expected byte is challenged or dropped, never believed"
+  "tcpconn: a reset before the handshake ends it only when it acknowledges our SYN"
   "tcpconn: two hundred segments in and out allocate nothing at all"
 
 
@@ -563,6 +566,18 @@ CONTRACT=(
   "tcpnet: a request goes out over the link and the peer's answer comes back"
   "tcpnet: a deaf peer costs the budget and is refused by name, never waited on forever"
   "tcpnet: a reply larger than the caller's buffer is truncated, never overflowed"
+
+  # What a neighbour must not guess or forge (ADR-265): the same keyed numbers and the same ARP
+  # check on every CPU.
+  "netguard: the initial sequence number depends on the secret and on every part of the 4-tuple"
+  "netguard: one 4-tuple's initial sequence number moves forward with the clock, across the wrap"
+  "netguard: local ports stay in the dynamic range and step by one per destination, across the wrap"
+  "netguard: the port towards one host says nothing about the port towards another, or under another secret"
+  "netguard: each DNS question takes a fresh id and source port from the secret"
+  "netguard: a secret seeded from the clock says so, and still differs per boot moment"
+  "netguard: a reply to this machine's question about the asked address is believed"
+  "netguard: a reply to someone else's question, about another address, or a request, is not believed"
+  "netguard: a reply naming a broadcast, zero, or other-than-its-own sender is not believed"
 
   # Windows are a managed set (ADR-084): the same routing decision on every CPU.
   "wm: the close box, the drag band and the client area are exactly the painted chrome"

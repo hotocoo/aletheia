@@ -66,7 +66,6 @@ const RX_BUFFERS: u16 = 8;
 
 /// Ethernet.
 pub const ETH_HDR_LEN: usize = 14;
-const ETHERTYPE_ARP: u16 = 0x0806;
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const BROADCAST: [u8; 6] = [0xFF; 6];
 
@@ -403,43 +402,22 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
     /// # Safety
     /// The device must be live.
     pub unsafe fn arp_resolve(&self, target: [u8; 4]) -> Result<[u8; 6], NetError> {
-        if let Some(mac) = self.arp_cache.borrow_mut().lookup(target) {
+        if let Some(mac) = self.arp_cache.borrow_mut().lookup(target, H::now_ns()) {
             return Ok(mac);
         }
-        let mut frame = [0u8; ETH_HDR_LEN + 28];
-        frame[0..6].copy_from_slice(&BROADCAST);
-        frame[6..12].copy_from_slice(&self.mac);
-        put_be16(&mut frame, 12, ETHERTYPE_ARP);
-        {
-            let a = &mut frame[ETH_HDR_LEN..];
-            put_be16(a, 0, 1); // hardware type: Ethernet
-            put_be16(a, 2, ETHERTYPE_IPV4); // protocol type: IPv4
-            a[4] = 6; // hardware address length
-            a[5] = 4; // protocol address length
-            put_be16(a, 6, 1); // operation: request
-            a[8..14].copy_from_slice(&self.mac);
-            a[14..18].copy_from_slice(&self.ip());
-            a[18..24].copy_from_slice(&[0u8; 6]); // target hardware address: the question itself
-            a[24..28].copy_from_slice(&target);
-        }
-        self.send(&frame)?;
+        self.send(&crate::netguard::arp_request(self.mac, self.ip(), target))?;
         self.arp_wire_requests.set(self.arp_wire_requests.get() + 1);
 
-        let mac = self.recv_until(20_000_000, |f| {
-            if f.len() < ETH_HDR_LEN + 28 || be16(f, 12) != ETHERTYPE_ARP {
-                return None;
-            }
-            let a = &f[ETH_HDR_LEN..];
-            // A reply, for the address asked about, carrying a sender hardware address.
-            if be16(a, 6) != 2 || a[14..18] != target {
-                return None;
-            }
-            let mut mac = [0u8; 6];
-            mac.copy_from_slice(&a[8..14]);
-            Some(mac)
+        // Only an answer to this question, addressed to this machine, from a sender that can
+        // exist (ADR-265); anything else is dropped like any other frame that is not the answer.
+        let (mac, ip) = (self.mac, self.ip());
+        let found = self.recv_until(20_000_000, |f| {
+            crate::netguard::arp_reply(f, mac, ip, target).ok()
         })?;
-        self.arp_cache.borrow_mut().insert(target, mac);
-        Ok(mac)
+        self.arp_cache
+            .borrow_mut()
+            .insert(target, found, H::now_ns());
+        Ok(found)
     }
 
     /// Send an ICMP echo request to `target` (at `target_mac`) and wait for the matching reply, returning

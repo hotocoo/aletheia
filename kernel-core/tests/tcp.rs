@@ -7,9 +7,11 @@
 
 use kernel_core::tcp::{
     build_segment, parse_tcp, seq_in_window, seq_lt, tcp_suite, Segment, TcpError, ACK, FIN, PSH,
-    SYN,
+    RST, SYN,
 };
-use kernel_core::tcpconn::{Connection, TcpEvent, TcpState, MAX_RETRIES, MSS, TX_BUF_MIN};
+use kernel_core::tcpconn::{
+    Connection, TcpEvent, TcpRefusal, TcpState, MAX_RETRIES, MSS, RECV_CAP, TX_BUF_MIN,
+};
 use kernel_core::tcpsuite::tcpconn_suite;
 use kernel_core::udpv4::{parse_ipv4, IPV4_HDR_MIN};
 
@@ -395,4 +397,117 @@ fn an_echo_of_a_retransmitted_segment_is_never_taken_as_a_measurement() {
     // backed-off timeout stands.
     assert_eq!(c.rto(), 2 * RTO, "an ambiguous echo moved the estimate");
     assert_eq!(c.unacked(), 0);
+}
+
+/// A blind reset campaign (ADR-265, RFC 5961 section 3.2): an off-path forger who knows the port
+/// pair sprays resets across the sequence space. Only the one at exactly `rcv_nxt` ends the
+/// connection; every other one inside the receive window earns exactly one challenge ACK naming the
+/// real `rcv_nxt`, and every one outside it is dropped without a word. The same resets from any
+/// other host are not this connection's segments at all.
+#[test]
+fn a_blind_reset_must_hit_the_exact_sequence_number() {
+    let mut tx = [0u8; TX_BUF_MIN];
+    let mut rx = [0u8; TX_BUF_MIN];
+    let mut c = Connection::new(CLIENT, CPORT, SERVER, SPORT, RTO);
+    c.open(0x1000, 0).unwrap();
+    c.poll_transmit(0, &mut tx).unwrap();
+    let mut p = Peer::new(0x7000_0000, 0);
+    let syn_ack = Segment {
+        seq: 0x7000_0000,
+        ack: 0x1001,
+        flags: SYN | ACK,
+        window: 4096,
+        payload: &[],
+    };
+    let n = build_segment(&mut rx, 1, SERVER, CLIENT, SPORT, CPORT, &syn_ack)
+        .unwrap()
+        .len();
+    assert_eq!(feed(&mut c, &rx[..n], 1), TcpEvent::Connected);
+    p.seq = 0x7000_0001;
+    while c.poll_transmit(1, &mut tx).is_some() {}
+    let rcv_nxt = p.seq;
+
+    let (mut challenged, mut dropped) = (0u32, 0u32);
+    // Every 2^16-th sequence number around the space, plus the window's edges.
+    let mut guesses: Vec<u32> = (0..=0xFFFFu32).map(|i| i << 16).collect();
+    guesses.extend([
+        rcv_nxt.wrapping_add(1),
+        rcv_nxt.wrapping_add(RECV_CAP as u32 - 1),
+    ]);
+    guesses.extend([
+        rcv_nxt.wrapping_add(RECV_CAP as u32),
+        rcv_nxt.wrapping_sub(1),
+    ]);
+    for &g in guesses.iter().filter(|&&g| g != rcv_nxt) {
+        let forged = Segment {
+            seq: g,
+            ack: 0,
+            flags: RST,
+            window: 0,
+            payload: &[],
+        };
+        let n = build_segment(&mut rx, 1, SERVER, CLIENT, SPORT, CPORT, &forged)
+            .unwrap()
+            .len();
+        match feed(&mut c, &rx[..n], 2) {
+            TcpEvent::Refused(TcpRefusal::ResetNotExact) => {
+                challenged += 1;
+                let k = c
+                    .poll_transmit(2, &mut tx)
+                    .expect("a challenge ACK goes out");
+                let ip = parse_ipv4(&tx[..k]).unwrap();
+                let v = parse_tcp(&ip).unwrap();
+                assert!(
+                    v.has(ACK) && !v.has(RST) && v.ack == rcv_nxt,
+                    "the challenge names rcv_nxt"
+                );
+                assert!(
+                    c.poll_transmit(2, &mut tx).is_none(),
+                    "one challenge per reset"
+                );
+            }
+            TcpEvent::Refused(TcpRefusal::OutOfWindow) => {
+                dropped += 1;
+                assert!(
+                    c.poll_transmit(2, &mut tx).is_none(),
+                    "{g:#x}: dropped without a word"
+                );
+            }
+            other => panic!("reset at {g:#x} gave {other:?}"),
+        }
+        assert_eq!(
+            c.state(),
+            TcpState::Established,
+            "reset at {g:#x} must not end it"
+        );
+    }
+    assert_eq!(challenged, 2, "only the window's two edges fall inside it");
+    assert_eq!(dropped as usize, guesses.len() - 2);
+
+    let exact = Segment {
+        seq: rcv_nxt,
+        ack: 0,
+        flags: RST,
+        window: 0,
+        payload: &[],
+    };
+    let n = build_segment(&mut rx, 1, [10, 0, 2, 99], CLIENT, SPORT, CPORT, &exact)
+        .unwrap()
+        .len();
+    assert_eq!(
+        feed(&mut c, &rx[..n], 3),
+        TcpEvent::Refused(TcpRefusal::NotOurs)
+    );
+    assert_eq!(
+        c.state(),
+        TcpState::Established,
+        "the exact reset from another host is not ours"
+    );
+    let n = build_segment(&mut rx, 1, SERVER, CLIENT, SPORT, CPORT, &exact)
+        .unwrap()
+        .len();
+    assert_eq!(
+        feed(&mut c, &rx[..n], 3),
+        TcpEvent::Ended(TcpRefusal::Reset)
+    );
 }

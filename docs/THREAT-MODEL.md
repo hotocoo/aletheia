@@ -60,7 +60,7 @@ assert unauthorized effects and state preservation separately from exhaustion be
 * B-06: `kernel-core/src/vmaddr.rs`, `kernel-core/src/memattr.rs`, `kernel-core/src/frameown.rs`;
 * B-07: `kernel-core/src/dma.rs`, `kernel-core/src/iommu.rs`, `kernel-core/src/vtd.rs`, `kernel-core/src/smmu.rs`;
 * B-08: `kernel-core/src/bootroot.rs`, `kernel-core/src/capvault.rs`;
-* B-09: `kernel-core/src/virtionet.rs`, `kernel-core/src/udpv4.rs`, `kernel-core/src/dhcp.rs`;
+* B-09: `kernel-core/src/virtionet.rs`, `kernel-core/src/udpv4.rs`, `kernel-core/src/dhcp.rs`, `kernel-core/src/netguard.rs` and `kernel-core/src/tcpsuite.rs` (off-path forgery: keyed ISN, port and DNS id, 4-tuple matching, RFC 5961 resets, checked and aged ARP; ADR-265);
 * B-10: `kernel-core/src/vinput.rs`;
 * B-11: `kernel-core/src/compositor.rs`, `kernel-core/src/fbcon.rs`, `kernel-core/src/wm.rs`;
 * B-12: `kernel-core/src/mlsched.rs`, `kernel-core/src/reclaim.rs`;
@@ -75,6 +75,10 @@ required threat-class sections. It is a consistency gate, not a claim of product
 Interrupt-driven I/O, complete network protocols, live reclaim residency, hardware frequency control,
 secure boot/update milestones, and hardware-level DMA isolation remain governed by their open/deferred
 findings. They are not silently promoted to security-complete by this document.
+
+The wire (B-09) resists an off-path forger only (ADR-265): a host that sees the traffic sees every
+sequence number, port and id, and only TLS protects a conversation from it. A machine without an
+entropy source keys those numbers from its boot clock and reports that it did.
 
 The browser stack (B-14) reads only what its list names: no DOM, CSS, images, forms or subresources,
 one connection at a time, no DNS. The property campaign proves bounds, printability, determinism and

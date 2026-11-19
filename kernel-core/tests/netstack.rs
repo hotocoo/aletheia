@@ -188,14 +188,17 @@ fn the_cache_answers_only_what_the_wire_told_it() {
     let mut c = ArpCache::<4>::new();
     // Before anything is learned, every question misses — including the gateway's.
     for last in 0..=255u8 {
-        assert!(c.lookup([10, 0, 2, last]).is_none());
+        assert!(c.lookup([10, 0, 2, last], 0).is_none());
     }
-    c.insert(GATEWAY, [0x52, 0x54, 0, 0x12, 0x35, 0x02]);
+    c.insert(GATEWAY, [0x52, 0x54, 0, 0x12, 0x35, 0x02], 0);
     // The learned binding answers; the 255 neighbors do not, byte-exactly.
-    assert_eq!(c.lookup(GATEWAY), Some([0x52, 0x54, 0, 0x12, 0x35, 0x02]));
+    assert_eq!(
+        c.lookup(GATEWAY, 0),
+        Some([0x52, 0x54, 0, 0x12, 0x35, 0x02])
+    );
     for last in (0..=255u8).filter(|&b| b != 2) {
         assert!(
-            c.lookup([10, 0, 2, last]).is_none(),
+            c.lookup([10, 0, 2, last], 0).is_none(),
             ".{last} must not alias .2"
         );
     }

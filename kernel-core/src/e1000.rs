@@ -395,31 +395,11 @@ impl<H: VirtioHal, R: Regs> E1000<H, R> {
 
     /// Broadcast an ARP request for `target` and return the hardware address that answers.
     pub fn arp_resolve(&self, target: [u8; 4]) -> Result<[u8; 6], E1000Error> {
-        let mut f = [0u8; ETH_HDR_LEN + 28];
-        f[0..6].copy_from_slice(&[0xFF; 6]);
-        f[6..12].copy_from_slice(&self.mac);
-        put_be16(&mut f, 12, 0x0806);
-        let a = &mut f[ETH_HDR_LEN..];
-        put_be16(a, 0, 1); // Ethernet
-        put_be16(a, 2, 0x0800); // IPv4
-        a[4] = 6;
-        a[5] = 4;
-        put_be16(a, 6, 1); // request
-        a[8..14].copy_from_slice(&self.mac);
-        a[14..18].copy_from_slice(&self.ip());
-        a[24..28].copy_from_slice(&target);
-        self.send(&f)?;
+        self.send(&crate::netguard::arp_request(self.mac, self.ip(), target))?;
+        let (mac, ip) = (self.mac, self.ip());
+        // Believed only as an answer to this question, for this machine (ADR-265).
         self.recv_until(u64::MAX, |r| {
-            if r.len() < ETH_HDR_LEN + 28 || be16(r, 12) != 0x0806 {
-                return None;
-            }
-            let a = &r[ETH_HDR_LEN..];
-            if be16(a, 6) != 2 || a[14..18] != target {
-                return None;
-            }
-            let mut m = [0u8; 6];
-            m.copy_from_slice(&a[8..14]);
-            Some(m)
+            crate::netguard::arp_reply(r, mac, ip, target).ok()
         })
     }
 }
