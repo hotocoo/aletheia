@@ -105,3 +105,13 @@ Parity before and after, `scripts/system1/native_parity.py` against a binary bui
 previous lockfile, same checkpoint: console v4, console corpus, 400 rows, CPU and Metal, 932/932
 answers each, max |Δconf| 0.0000; scheduler run 2, `corpus-v2`, seed 31337, 300 rows, CPU, 700/700,
 max |Δconf| 0.0000. Accuracy and latency unchanged (388/400 and 251/300 on both builds).
+
+## Addendum 2026-11-19: where the deferred items went
+
+* Predictable port, ISN and DNS id, the unchecked reset sender, ARP never ageing: ADR-265.
+* NVMe, GPU, HD Audio and virtio-net timeouts leaving a request in flight: ADR-266 (NVMe, AHCI),
+  ADR-267 (virtio-net, virtio-rng), ADR-268 (HD Audio), ADR-269 (virtio-gpu). xHCI matches every
+  completion to its TRB and needs none.
+* Still open: approval separation of persons, the SMMU register seam's barriers, and the near-copy
+  `frames.rs` / `desktop.rs` / `heap.rs`.
+

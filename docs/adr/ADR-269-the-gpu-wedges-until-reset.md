@@ -35,9 +35,10 @@ whatever the device last wrote: a command that failed could read as accepted.
   framebuffer-console and composition suites and, in `vinput-e2e.sh` and `desktop-fuzz-e2e.sh`, the
   live desktop under keyboard and pointer storms: all on the device the suite reset.
 * `kernel-core/tests/virtiogpu.rs` pins the count (14) and the new name.
-* No hosted virtio-gpu device model exists, so the wedge check was not mutation-tested; the
-  invariant compares against the refusal and an unchanged `cmds_sent`, so a driver without the
-  check fails it.
+* The GPU's wedge shares its trigger and recovery with ADR-267's (`poll_used_within`,
+  `Virtqueue::reset`), which `kernel-core/tests/virtio_wedge.rs` proves on a simulated device with
+  mutants; the GPU-specific half (refusal before publishing, the resource table emptied) is proved
+  only by the boot invariant, which compares against the refusal and an unchanged `cmds_sent`.
 * Gates: `vm-e2e.sh`, `vm-e2e-riscv.sh`, `vm-e2e-x86.sh` (its second boot once stayed in OVMF on a
   loaded host and passed rerun alone; see ADR-200's addendum), `vinput-e2e.sh`,
   `desktop-fuzz-e2e.sh`, quality gate under Rust 1.100's clippy, every `check-*.sh`.

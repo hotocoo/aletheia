@@ -46,6 +46,46 @@ fn secret() -> &'static mut NetSecret {
     }
 }
 
+/// The kept entropy device, reset first if an unanswered request wedged it (ADR-267): a draw that
+/// timed out once must not cost the console its keys until reboot, and the reset says so.
+fn rng() -> Option<&'static mut Rng> {
+    // SAFETY: main thread only (the console's own thread); the device outlives the machine.
+    let dev = unsafe { (*core::ptr::addr_of_mut!(RNG)).as_mut()? };
+    if dev.is_wedged() {
+        // SAFETY: the boot brought the device up; its queue is live.
+        let back = unsafe { dev.reset() }.is_ok();
+        crate::kprintln!(
+            "[entropy] the device held an unanswered request; reset it: {}",
+            if back {
+                "answering again"
+            } else {
+                "still wedged"
+            }
+        );
+    }
+    Some(dev)
+}
+
+/// The kept virtio NIC, reset first if a transmit it never handed back wedged it (ADR-267). The
+/// MAC, the lease and the ARP cache survive the reset; the reset says so.
+fn recover_net() {
+    // SAFETY: main thread only (the console's own thread); the device outlives the machine.
+    if let Some(d) = unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() } {
+        if d.is_wedged() {
+            // SAFETY: the boot brought the device up; its queues are live.
+            let back = unsafe { d.reset() }.is_ok();
+            crate::kprintln!(
+                "[net] the device held a transmit it never handed back; reset it: {}",
+                if back {
+                    "sending again"
+                } else {
+                    "still wedged"
+                }
+            );
+        }
+    }
+}
+
 /// Keep the device the boot suite proved.
 ///
 /// # Safety
@@ -91,6 +131,7 @@ pub fn fetch(
     reply: &mut [u8],
 ) -> Result<usize, &'static str> {
     // SAFETY: main thread only (the console's own thread), and the device outlives the machine.
+    recover_net();
     let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
         return Err("this machine has no network device");
     };
@@ -138,6 +179,7 @@ pub fn resolve(
     name: &[u8],
 ) -> Result<kernel_core::dns::Resolved, &'static str> {
     // SAFETY: main thread only (the console's own thread), and the device outlives the machine.
+    recover_net();
     let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
         return Err("this machine has no network device");
     };
@@ -149,8 +191,7 @@ pub fn resolve(
 /// Fresh bytes from the machine's entropy source (ADR-244): salts for console accounts. Refused
 /// by name without a device, and when a draw is all one byte value.
 pub fn random(out: &mut [u8]) -> Result<(), &'static str> {
-    // SAFETY: main thread only (the console's own thread); the device outlives the machine.
-    match unsafe { (*core::ptr::addr_of_mut!(RNG)).as_mut() } {
+    match rng() {
         Some(rng) => {
             entropy::EntropySource::fill(rng, out).map_err(|_| "the entropy device did not answer")
         }
@@ -178,6 +219,7 @@ pub fn fetch_tls(
     reply: &mut [u8],
 ) -> Result<TlsReport, &'static str> {
     // SAFETY: main thread only (the console's own thread), and the device outlives the machine.
+    recover_net();
     let Some(dev) = (unsafe { (*core::ptr::addr_of_mut!(NET)).as_mut() }) else {
         return Err("this machine has no network device");
     };
@@ -198,9 +240,8 @@ pub fn fetch_tls(
     // The key's material comes from the entropy device the boot suite proved, checked draw by
     // draw (ADR-153); a machine without one opens no conversation, because a key made from a
     // clock is a key a patient observer can make too.
-    // SAFETY: main thread only (the console's own thread); the device outlives the machine.
     let seed =
-        match unsafe { (*core::ptr::addr_of_mut!(RNG)).as_mut() } {
+        match rng() {
             Some(rng) => entropy::tls_seed(rng).map_err(|why| match why {
                 entropy::EntropyRefusal::Degenerate | entropy::EntropyRefusal::Repeated => {
                     "the entropy device produced no entropy; refusing to make a key from it"

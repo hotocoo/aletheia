@@ -43,8 +43,12 @@ the rest of the boot.
   (virtio-mmio), riscv64 (virtio-mmio) and x86-64 (virtio-pci): after the reset the gateway answers
   an ICMP echo with its own payload, and two draws are fresh and different. Each new invariant
   compares against the refusal itself (`Err(NetError::Wedged)`, an `Err` from `fill`) and an
-  unchanged avail index, so a driver without the check fails it; there is no hosted virtio-net or
-  virtio-rng simulator, so that mutation was not run.
+  unchanged avail index, so a driver without the check fails it.
+* `kernel-core/tests/virtio_wedge.rs` (added after the wave): a simulated virtio-rng device on a fake
+  transport that can answer after the budget. A late answer wedges the driver, lands in the used ring,
+  and is NOT harvested by the next draw (nothing more is published); after `reset` the device
+  answers from used index 0 and draws are fresh. Mutants: removing the wedge check, or the
+  `last_used` restart in `Virtqueue::reset`, each fail it.
 * Gates on this tree: `vm-e2e.sh`, `vm-e2e-riscv.sh`, `vm-e2e-x86.sh` (three boots), `conformance.sh`
   (422 behaviors), `console-e2e.sh`, `tcp-e2e.sh`, `dns-e2e.sh`, `tls-e2e.sh`, `https-e2e.sh`,
   `net-fuzz-e2e.sh` (the hostile peer, which exercises every send and draw path the console has),
@@ -55,6 +59,8 @@ the rest of the boot.
 * **virtio-gpu, HD Audio and xHCI still return a timeout and go on.** The GPU's reset also drops
   every resource and the scanout, so it needs the desktop to rebuild them; HD Audio's CORB/RIRB and
   xHCI's command and event rings carry their own indices. Next rungs, named.
-* **Nothing outside the boot suites calls `reset`.** A console whose NIC or entropy source wedges
-  refuses by name until reboot rather than mixing up answers.
+* **The console resets them, nothing else does.** Each target's `netstatic` resets a wedged NIC
+  (`recover_net`, before every NIC command) or entropy source (`rng`, before every draw) and prints
+  that it did, so one slow transmit or draw costs one failed command, not the device until reboot.
+  No live gate wedges them on purpose: the recovery path is the reset the boot invariants prove.
 * **One request in flight per queue**, as before.

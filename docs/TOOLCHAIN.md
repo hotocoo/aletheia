@@ -50,6 +50,12 @@ before anything builds, for crates that use no unstable features and are already
 `clippy -D warnings` and `--locked`. The bare-metal crates — where the compiler genuinely affects the
 artifact — carry the dated pin. If a stable-release regression ever bites, this is the file to change.
 
+The cost of floating is lint drift, and it is paid in CI: Rust 1.100.0 (2026-11-09) brought clippy
+lints the tree had not met (`needless_range_loop` on two index loops, `chunks_exact_to_as_chunks`),
+and three pushes went red on the quality gate alone while a local gate on 1.99 passed. Run
+`rustup update stable` before `scripts/quality-gate.sh`, which already puts `$HOME/.cargo/bin` first so
+rustup's shims (not a system cargo) choose the toolchain.
+
 ## Components
 
 Every pin requests `clippy` and `rustfmt` explicitly, so the quality gate cannot be skipped for lack of a

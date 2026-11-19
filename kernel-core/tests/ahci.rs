@@ -217,7 +217,7 @@ impl Sim {
             s.r.insert(b + PX_TFD, 0x50);
         }
         s.r.insert(b + PX_IS, is);
-        // A task-file error stops the port with the slot still set (AHCI 1.3.1 §6.2.2.1): only
+        // A task-file error stops the port with the slot still set (AHCI 1.3.1 §5.3.16.5): only
         // clearing PxCMD.ST releases it. A good completion releases it.
         if !(s.f.task_file_error && port == 2) {
             s.r.insert(b + PX_CI, 0);
@@ -695,7 +695,7 @@ fn a_port_whose_disk_stays_busy_is_refused_by_name_and_stays_wedged() {
     assert!(d[1].is_wedged());
 }
 
-/// A task-file error stops the port with its slot still set (AHCI 1.3.1 §6.2.2.1), so the port is
+/// A task-file error stops the port with its slot still set (AHCI 1.3.1 §5.3.16.5), so the port is
 /// wedged, and only the reset (clearing PxCMD.ST) releases the slot for the next command.
 #[test]
 fn a_task_file_error_wedges_the_port_until_its_reset() {

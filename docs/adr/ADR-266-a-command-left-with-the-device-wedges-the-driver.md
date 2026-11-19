@@ -23,8 +23,8 @@ same rule was missing here.
 
 * **Wedged until reset.** `Nvme::submit` sets `wedged` on a timeout and on `WrongCommandId` /
   `WrongQueue`; `AhciDisk::command` sets it when the budget ran out or PxCI still holds slot 0 after
-  the wait. That includes a task-file error: the HBA stops the port with the slot still set (AHCI
-  1.3.1 §6.2.2.1) until software clears PxCMD.ST, which is what `reset` does. A failed command whose
+  the wait. That includes a task-file error: the HBA stops the port with the slot still set until
+  software clears PxCMD.ST (AHCI 1.3.1 §5.3.16.5), which is what `reset` does. A failed command whose
   slot the device released (an AHCI short transfer, an NVMe status code) does not wedge: nothing is
   left with the device. A wedged driver refuses every
   command before writing anything the device reads and before ringing the doorbell or writing PxCI
@@ -34,7 +34,8 @@ same rule was missing here.
   indices and phase, re-enable with the same admin queue, and recreate the I/O pair with the same
   MSI-X vector. Bring-up shares `enable_admin` and `create_io_queues` with `init`. Same five frames,
   nothing allocated.
-* **AHCI reset** (`AhciDisk::reset`, AHCI 1.3.1 §10.4.2): PxCMD.ST = 0, which clears PxCI and ends
+* **AHCI reset** (`AhciDisk::reset`), AHCI 1.3.1 §6.2.2.1's non-queued error recovery, an engine
+  restart and not §10.4.2's COMRESET: PxCMD.ST = 0, which clears PxCI and ends
   the slot (§3.3.14), wait for PxCMD.CR = 0, clear PxSERR, PxIS and (when the port interrupts) the
   HBA's IS bit, then restart ST once the task file is idle. A disk still busy after its engine
   stopped needs a COMRESET, which this driver does not issue: that is refused by name and the port
@@ -62,7 +63,8 @@ same rule was missing here.
   `a_command_left_with_the_hba_is_never_finished_into_the_next` and
   `a_port_whose_disk_stays_busy_is_refused_by_name_and_stays_wedged`, and
   `a_task_file_error_wedges_the_port_until_its_reset` (the simulated HBA now keeps PxCI set on a
-  task-file error, as §6.2.2.1 says, where it used to clear it). Each read after the reset
+  task-file error, as §5.3.16.5 says, where it used to clear it). Every AHCI section cited was checked
+  against the AHCI 1.3.1 text. Each read after the reset
   returns its own block, and the NVMe controller records no protocol violation.
 * Mutation: removing the wedge check from `submit` fails 5 NVMe tests; from `command`, 3 AHCI tests.
 * Gates: `vm-e2e.sh`, `vm-e2e-x86.sh`, quality gate, kernel-core suite, every `check-*.sh`.

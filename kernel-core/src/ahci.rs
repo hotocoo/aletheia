@@ -414,8 +414,8 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
         let tfd = self.regs.r32(pb + PX_TFD);
         // A slot the HBA has not released is still its: the next command would rewrite the table
         // and the data frame under it, and could take this one's late completion for its own. A
-        // task-file error leaves the slot set too (AHCI 1.3.1 §6.2.2.1: the port stops until
-        // software clears PxCMD.ST), so it wedges as well, and `reset` is that recovery.
+        // task-file error leaves the slot set too (AHCI 1.3.1 §5.3.16.5: the HBA waits for
+        // software to clear PxCMD.ST), so it wedges as well, and `reset` is §6.2.2.1's recovery.
         if !done || self.regs.r32(pb + PX_CI) & 1 != 0 {
             self.wedged.set(true);
             return Err(StorageError::Device);
@@ -450,8 +450,9 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
         self.issued.get()
     }
 
-    /// Bring a wedged (or healthy) port back (ADR-266; AHCI 1.3.1 §10.4.2): stop the command
-    /// engine, which clears PxCI and ends what the slot held (§3.3.14), wait for PxCMD.CR = 0,
+    /// Bring a wedged (or healthy) port back (ADR-266) by AHCI 1.3.1 §6.2.2.1's non-queued error
+    /// recovery, an engine restart rather than §10.4.2's COMRESET: stop the command engine, which
+    /// clears PxCI and ends what the slot held (§3.3.14), wait for PxCMD.CR = 0,
     /// clear the port's error and status bits (and the HBA's IS bit when the port interrupts), and
     /// start the engine again once the disk is idle. The frames stay where they are; nothing is
     /// allocated. A disk still busy after its engine stopped needs a COMRESET, which this driver
@@ -709,7 +710,7 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     ok &= d.read_block(1, &mut b).is_ok() && b == b1;
     ok &= d.read_block(0, &mut b).is_ok() && b == b0 && d.dma.live_regions() == 3;
     check!(
-        "ahci: a wedged port refuses the next command before PxCI, and a port reset brings it back reading the right blocks",
+        "ahci: a wedged port refuses the next command before PxCI, and an engine restart brings it back reading the right blocks",
         ok
     );
     // Gate group: only where a disk carries the scratch serial. Elsewhere the read-only group is

@@ -356,7 +356,8 @@ jobs:
           # fetch with retries into a file and dearmor only a body that is a key.
           curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
             -o "$RUNNER_TEMP/oracle_vbox_2016.asc" https://www.virtualbox.org/download/oracle_vbox_2016.asc
-          grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$RUNNER_TEMP/oracle_vbox_2016.asc"
+          grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$RUNNER_TEMP/oracle_vbox_2016.asc" \
+            || { echo "FAIL: Oracle's signing key did not arrive as a PGP public key"; exit 1; }
           sudo gpg --dearmor -o /usr/share/keyrings/oracle-virtualbox-2016.gpg "$RUNNER_TEMP/oracle_vbox_2016.asc"
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-virtualbox-2016.gpg] https://download.virtualbox.org/virtualbox/debian $(lsb_release -cs) contrib" \
             | sudo tee /etc/apt/sources.list.d/virtualbox.list
