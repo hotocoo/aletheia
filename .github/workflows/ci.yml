@@ -352,13 +352,18 @@ jobs:
       # kernels (7.0 support since 7.2.8). A module build failure prints its log, then fails.
       - name: Install VirtualBox, free VT-x from KVM, load vboxdrv
         run: |
-          # The key host fails a fetch now and then (an empty body: "no valid OpenPGP data"), so
-          # fetch with retries into a file and dearmor only a body that is a key.
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
-            -o "$RUNNER_TEMP/oracle_vbox_2016.asc" https://www.virtualbox.org/download/oracle_vbox_2016.asc
-          grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$RUNNER_TEMP/oracle_vbox_2016.asc" \
-            || { echo "FAIL: Oracle's signing key did not arrive as a PGP public key"; exit 1; }
-          sudo gpg --dearmor -o /usr/share/keyrings/oracle-virtualbox-2016.gpg "$RUNNER_TEMP/oracle_vbox_2016.asc"
+          # www.virtualbox.org answers the runners with 410 Gone (it serves the same file to other
+          # hosts), so the repository's own host is tried too. Either way the key is accepted only
+          # if it is Oracle's 2016 signing key by fingerprint: a mirror cannot substitute one.
+          key="$RUNNER_TEMP/oracle_vbox_2016.asc"
+          for url in https://download.virtualbox.org/virtualbox/debian/oracle_vbox_2016.asc \
+                     https://www.virtualbox.org/download/oracle_vbox_2016.asc; do
+            curl -fsSL --retry 3 --retry-all-errors --retry-delay 5 -o "$key" "$url" && break
+          done
+          gpg --show-keys --with-colons "$key" 2>/dev/null \
+            | grep -q '^fpr:::::::::B9F8D658297AF3EFC18D5CDFA2F683C52980AECF:' \
+            || { echo "FAIL: Oracle's 2016 signing key (B9F8 D658 ... 2980 AECF) did not arrive"; exit 1; }
+          sudo gpg --dearmor -o /usr/share/keyrings/oracle-virtualbox-2016.gpg "$key"
           echo "deb [arch=amd64 signed-by=/usr/share/keyrings/oracle-virtualbox-2016.gpg] https://download.virtualbox.org/virtualbox/debian $(lsb_release -cs) contrib" \
             | sudo tee /etc/apt/sources.list.d/virtualbox.list
           sudo apt-get update
