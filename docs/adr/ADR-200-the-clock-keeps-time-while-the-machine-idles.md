@@ -64,10 +64,12 @@ near zero, so the product froze `2^64 / 10^9` ticks in: 14.6 s at the 1.26 GHz t
 (44460064031) calibrated. That run's clock sample (4.56 s) plus its suite laps before the e1000
 family (8.44 s) put the echo-peer ARP at about 13 s, and that ARP is never answered on VirtualBox (no
 peer at 10.0.2.100), so its 2 s budget, ending only on the clock, ran into the freeze. The passing run
-on 095eee3 reached it at about 6.7 s against a 12.4 s freeze (1.48 GHz) and spent its 2.0 s. It would
-also explain the x86-64 second boot that hit the 240 s watchdog only on a loaded host (a boot slower
-than 184 s), though that serial log was not kept; `smoke-test.sh` now prints the tail of a failed
-later boot's log. aarch64 and riscv64 already multiplied in 128 bits.
+on 095eee3 reached it at about 6.7 s against a 12.4 s freeze (1.48 GHz) and spent its 2.0 s. It does
+NOT explain the x86-64 second boot that hits the 240 s watchdog on a loaded host: `smoke-test.sh` now
+prints the tail of a failed later boot's log, and the next occurrence (after this fix) showed only
+OVMF's screen-clear sequences, so the firmware never handed off to the kernel at all. That flake is
+the firmware's under load, not this clock; it passes rerun alone. aarch64 and riscv64 already
+multiplied in 128 bits.
 
 The conversion now lives once in `kernel_core::ticks_to_ns_at(ticks, hz)`, 128-bit, used by all
 three CPUs. `kernel-core/tests/ticks.rs` crosses the 64-bit edge at 100 MHz and a day of a 3 GHz

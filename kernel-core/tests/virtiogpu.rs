@@ -224,8 +224,8 @@ fn every_response_code_the_driver_knows_has_a_name() {
 }
 
 #[test]
-fn the_vm_gate_marker_count_is_thirteen_and_dense() {
-    // The suite proves THIRTEEN invariants; the VM gates grep that exact number. This test
+fn the_vm_gate_marker_count_is_fourteen_and_dense() {
+    // The suite proves FOURTEEN invariants; the VM gates grep that exact number. This test
     // exists so renumbering the suite fails `cargo test` HERE first, with a message, instead of
     // failing three QEMU gates with a count mismatch.
     let names = [
@@ -242,8 +242,9 @@ fn the_vm_gate_marker_count_is_thirteen_and_dense() {
         "gpu: RESOURCE_FLUSH of the full resource is accepted",
         "gpu: a flush for a never-created resource is answered INVALID_RESOURCE_ID",
         "gpu: DETACH_BACKING plus UNREF end the lifecycle",
+        "gpu: a wedged device is told nothing until a reset on the same frames",
     ];
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 14);
     // Every name is a PREFIX of its suite counterpart (the suite names carry the rest).
     assert!(names.iter().all(|n| n.starts_with("gpu:")));
 }

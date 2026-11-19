@@ -429,7 +429,60 @@ pub struct VirtioGpu<H: VirtioHal, T: Transport> {
     /// batteries: silence is MEASURED, not assumed.
     cmds_sent: Cell<u64>,
     local_refusals: Cell<u64>,
+    /// A command was never answered (ADR-269): the device may still read the command buffer and
+    /// write the response buffer the next command uses, and its late used entry would read as the
+    /// next command's answer.
+    wedged: Cell<bool>,
     _hal: PhantomData<H>,
+}
+
+/// Reset the device and negotiate VERSION_1 (plus the platform IOMMU and EDID when offered),
+/// declining VIRGL and blobs. Returns the status reached (FEATURES_OK) and whether EDID was
+/// accepted. Shared by `init` and `reset`.
+///
+/// # Safety
+/// `transport` must be bound to a live virtio GPU device.
+unsafe fn negotiate<T: Transport>(transport: &T) -> Result<(u32, bool), GpuError> {
+    transport.set_status(0);
+    let mut status = S_ACKNOWLEDGE;
+    transport.set_status(status);
+    status |= S_DRIVER;
+    transport.set_status(status);
+
+    let hi = transport.device_features(1);
+    if hi & (1 << F_VERSION_1_BIT) == 0 {
+        return Err(GpuError::Unsupported(
+            "device does not offer VIRTIO_F_VERSION_1",
+        ));
+    }
+    // Accept ONLY VERSION_1 - plus the platform-IOMMU feature whenever the device offers it:
+    // behind the VT-d identity domain descriptor addresses are unchanged, and a device that
+    // REQUIRES the feature clears FEATURES_OK otherwise. VIRGL, EDID and blob resources stay
+    // declined; they are behaviors this driver has no proofs for.
+    let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
+    // EDID (ADR-191): accepted when offered - the display's own statement of its modes, read
+    // by a bounded, checksummed parser (`crate::edid`). VIRGL and blobs stay declined.
+    let edid = transport.device_features(0) & (1 << F_EDID_BIT) != 0;
+    transport.set_driver_features(0, if edid { 1 << F_EDID_BIT } else { 0 });
+    transport.set_driver_features(
+        1,
+        1 << F_VERSION_1_BIT
+            | if iommu_platform {
+                1 << F_IOMMU_PLATFORM_BIT
+            } else {
+                0
+            },
+    );
+    status |= S_FEATURES_OK;
+    transport.set_status(status);
+    if transport.status() & S_FEATURES_OK == 0 {
+        transport.set_status(status | S_FAILED);
+        return Err(GpuError::Unsupported(
+            "device rejected the negotiated features",
+        ));
+    }
+
+    Ok((status, edid))
 }
 
 /// The resource the suite drives through its whole lifecycle.
@@ -452,44 +505,7 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
             return Err(GpuError::Unsupported("not a virtio GPU device"));
         }
 
-        transport.set_status(0);
-        let mut status = S_ACKNOWLEDGE;
-        transport.set_status(status);
-        status |= S_DRIVER;
-        transport.set_status(status);
-
-        let hi = transport.device_features(1);
-        if hi & (1 << F_VERSION_1_BIT) == 0 {
-            return Err(GpuError::Unsupported(
-                "device does not offer VIRTIO_F_VERSION_1",
-            ));
-        }
-        // Accept ONLY VERSION_1 - plus the platform-IOMMU feature whenever the device offers it:
-        // behind the VT-d identity domain descriptor addresses are unchanged, and a device that
-        // REQUIRES the feature clears FEATURES_OK otherwise. VIRGL, EDID and blob resources stay
-        // declined; they are behaviors this driver has no proofs for.
-        let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
-        // EDID (ADR-191): accepted when offered - the display's own statement of its modes, read
-        // by a bounded, checksummed parser (`crate::edid`). VIRGL and blobs stay declined.
-        let edid = transport.device_features(0) & (1 << F_EDID_BIT) != 0;
-        transport.set_driver_features(0, if edid { 1 << F_EDID_BIT } else { 0 });
-        transport.set_driver_features(
-            1,
-            1 << F_VERSION_1_BIT
-                | if iommu_platform {
-                    1 << F_IOMMU_PLATFORM_BIT
-                } else {
-                    0
-                },
-        );
-        status |= S_FEATURES_OK;
-        transport.set_status(status);
-        if transport.status() & S_FEATURES_OK == 0 {
-            transport.set_status(status | S_FAILED);
-            return Err(GpuError::Unsupported(
-                "device rejected the negotiated features",
-            ));
-        }
+        let (mut status, edid) = negotiate(&transport)?;
 
         // Config space (`struct virtio_gpu_config`): num_scanouts lives at offset 8. Read after
         // feature negotiation, when the config layout is settled.
@@ -529,6 +545,7 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
             status_at_ok: status,
             cmds_sent: Cell::new(0),
             local_refusals: Cell::new(0),
+            wedged: Cell::new(false),
             _hal: PhantomData,
         })
     }
@@ -612,6 +629,9 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
     /// # Safety
     /// The device must be live; both buffers were registered at init.
     unsafe fn command(&mut self, req_len: usize) -> Result<(u32, usize), GpuError> {
+        if self.wedged.get() {
+            return Err(self.refused("the device still holds an unanswered command (reset first)"));
+        }
         self.ctrl
             .add_chain::<H>(
                 0,
@@ -636,8 +656,47 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
                 }
                 Ok((le32(resp, 0), resp.len()))
             }
-            None => Err(GpuError::Timeout),
+            None => {
+                self.wedged.set(true);
+                Err(GpuError::Timeout)
+            }
         }
+    }
+
+    /// Bring a wedged (or healthy) device back on its frames (ADR-269): reset it (status 0, which
+    /// ends the command it held and forgets every resource, binding and backing), negotiate as
+    /// `init` does, re-publish the control queue on its frame, DRIVER_OK. The local resource table
+    /// follows the device: every backing page's DMA registration is revoked and the table emptied,
+    /// so nothing vouches for memory the device no longer knows. Whoever drew on this device
+    /// creates its resources again. Nothing is allocated. A reset that fails leaves it wedged.
+    ///
+    /// # Safety
+    /// The device must be live (it is, from `init` on).
+    pub unsafe fn reset(&mut self) -> Result<(), GpuError> {
+        self.wedged.set(true);
+        let (status, edid) = negotiate(&self.transport)?;
+        if edid != self.edid {
+            return Err(GpuError::Unsupported(
+                "the device changed its EDID feature across a reset",
+            ));
+        }
+        self.ctrl
+            .reset::<H, T>(&mut self.transport)
+            .map_err(GpuError::Queue)?;
+        for r in core::mem::take(&mut self.resources) {
+            for h in r.backing {
+                self.ctrl.revoke_buffer(h);
+            }
+        }
+        self.transport.set_status(status | S_DRIVER_OK);
+        self.status_at_ok = status | S_DRIVER_OK;
+        self.wedged.set(false);
+        Ok(())
+    }
+
+    /// Whether every command is refused until [`Self::reset`].
+    pub fn is_wedged(&self) -> bool {
+        self.wedged.get()
     }
 
     /// Did the device agree to answer GET_EDID?
@@ -1245,6 +1304,23 @@ pub fn gpu_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
         unsafe { dev.probe_device_error(RESOURCE_UNDER_TEST) } == Ok(RESP_ERR_INVALID_RESOURCE_ID);
     check!("gpu: DETACH_BACKING plus UNREF end the lifecycle — the device itself confirms the resource is gone",
         detached && unreffed && forgotten && really_gone
+    );
+
+    // 14 — ADR-269: a wedged device is told nothing (no command published) until a reset on the
+    //      same frames, after which it answers again with the same display. The wedge is set
+    //      directly: an unanswered command is what sets it, and provoking one would race the
+    //      device. Here, at the end of the suite, no resource is alive, so nothing is lost.
+    dev.wedged.set(true);
+    let before = dev.cmds_sent();
+    // SAFETY: the device is live.
+    let refused = unsafe { dev.get_display_info() }.is_err() && dev.cmds_sent() == before;
+    // SAFETY: the device is live.
+    let back = unsafe { dev.reset() }.is_ok() && !dev.is_wedged();
+    // SAFETY: the device is live.
+    let again = unsafe { dev.get_display_info() };
+    check!(
+        "gpu: a wedged device is told nothing until a reset on the same frames, and it answers again after it",
+        refused && back && matches!((&again, &scans), (Ok(a), Ok(b)) if a == b)
     );
 
     Ok(n)
