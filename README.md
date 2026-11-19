@@ -454,6 +454,14 @@ its own disks** by CI before upload (`docs/RELEASING.md`). Latest: **v0.7.3**.
    `edk2-i386-vars.fd` beside it; Debian/Ubuntu as `/usr/share/OVMF/OVMF_CODE_4M.fd` and
    `OVMF_VARS_4M.fd` (package `ovmf`).
 
+**v0.9.0** is a hardening release (ADR-264..272): NVMe and AHCI completions wake the CPU by MSI-X,
+MSI and GICv2m; a command, transmit, draw or verb a device never answers wedges its driver until a
+reset on the same frames (NVMe, AHCI, virtio-net, virtio-rng, HD Audio, virtio-gpu); TCP sequence
+numbers, local ports and DNS ids are keyed from a boot secret, resets are believed only per RFC
+5961, and ARP replies are checked and aged; the aarch64 block function and the kept USB keyboard DMA
+through their own SMMUv3 windows, published behind barriers; an approval must come from a second
+person; one frame allocator serves all three CPUs; and x86-64's clock no longer freezes at 184 s.
+
 **v0.8.0** is a drivers release (ADR-252..261): an xHCI USB driver whose boot keyboard is the
 console's input on x86-64 and aarch64, the e1000 driver on the 82574L (e1000e), an HD Audio driver
 whose tone is captured and measured, four block reads in flight behind one doorbell, and block
