@@ -1277,6 +1277,8 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
   grants (VMID 2), audited leaf for leaf; a revoked page is denied by name (`F_TRANSLATION` at
   stream 0x48 in that page) and restores to silence. `smmu=13 -> 16`. QEMU completes the denied
   request OK after dropping the writes, so the proof is the unit's record plus a sentinel page.
+- The interactive image's kept USB keyboard controller gets its own resident window (VMID 3);
+  `usbkbd-e2e.sh` types through it.
 - Every SMMU register write that makes the unit read memory is preceded by `dsb sy`
   (`Regs::publish_barrier`); the host's simulated unit flags any unordered doorbell.
 - The console resets a wedged NIC or entropy source before the next command;

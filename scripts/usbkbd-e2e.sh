@@ -149,6 +149,10 @@ time.sleep(0.5)
 text = log_text()
 check('ALL 7 XHCI INVARIANTS HOLD' in text, 'xhci: the boot suite proved the controller and keyboard')
 check('USB keyboard kept as console input' in text, 'xhci: the interactive machine kept the keyboard')
+if not routed:
+    # ADR-270: the kept controller types through its OWN SMMU window, not the shared domain.
+    check('the kept USB keyboard' in text and 'vmid 3' in text,
+          'smmu: the kept keyboard controller has its own window (its grants only)')
 
 mark = len(log_text())
 typed('echo Usb')

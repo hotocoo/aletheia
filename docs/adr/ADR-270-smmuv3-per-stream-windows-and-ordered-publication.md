@@ -72,3 +72,16 @@ could show the bug.
 * **No MSI through the SMMU**: the suite's block device is polled. Interrupt remapping and
   per-stream MSI doorbell mappings are not done.
 * QEMU's model, not silicon.
+
+## Addendum 2026-11-19: the kept keyboard gets a resident window
+
+The interactive image keeps the USB keyboard's xHCI controller DMAing for the rest of the boot, and
+the SMMU suite runs after it is kept. The suite now builds that function's own window too, from
+exactly `KeyboardInput::dma_grants()` under VMID 3, checks it leaf for leaf and grants it in place of
+the shared domain: `[smmu] window for rid 0x18: the kept USB keyboard's 1 granted span(s), vmid 3`.
+`usbkbd-e2e.sh` (aarch64 leg) requires that line and then types through it: every keystroke, the
+arrow-key edit and the write/read-back travel the keyboard's own window. Not a numbered invariant,
+because only an interactive image keeps a keyboard; a refusal still fails the boot by name. The
+residual is now the functions opened by suites after the gate and then dropped (NVMe, AHCI, HD
+Audio, e1000, e1000e), which stay on the shared, image-excluding domain.
+

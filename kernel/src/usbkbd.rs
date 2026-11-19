@@ -33,3 +33,10 @@ pub fn getc() -> Option<u8> {
     // boot, and no interrupt handler reaches it.
     unsafe { (*core::ptr::addr_of_mut!(KEPT)).as_mut() }?.getc()
 }
+
+/// The kept controller's live DMA grants, for its own SMMU window (ADR-270), or `None` without a
+/// kept keyboard.
+pub fn dma_grants() -> Option<alloc::vec::Vec<kernel_core::dma::Grant>> {
+    // SAFETY: written once on the boot path; the SMMU suite reads it on the same single thread.
+    unsafe { (*core::ptr::addr_of!(KEPT)).as_ref() }.map(|i| i.dma_grants())
+}

@@ -46,6 +46,9 @@ const PROBE_BUDGET_NS: u64 = 500_000_000;
 /// The block function's own window (ADR-270) carries its own VMID, so its TLB entries are never
 /// another domain's: the shared identity domain is VMID 1.
 const WINDOW_VMID: u16 = 2;
+/// The kept USB keyboard controller's resident window (ADR-270).
+#[cfg(feature = "interactive")]
+const KEYBOARD_VMID: u16 = 3;
 /// What the revoked page holds while the device is denied it: no block of the probe's pattern is
 /// all one byte, so any byte the device managed to write would show.
 const REVOKED_SENTINEL: u8 = 0x5C;
@@ -757,6 +760,61 @@ pub fn suite(report: &mut dyn FnMut(u32, bool, &'static str)) -> Result<u32, (u3
         }
     }
     pass!(NAME_16);
+
+    // The interactive machine's kept USB keyboard controller DMAs for the rest of the boot (every
+    // keystroke). It gets its own resident window too, from exactly what its driver granted, so
+    // the one device still working after the suites cannot reach any other device's buffers
+    // (ADR-270). `usbkbd-e2e.sh` types through it. Not a numbered invariant: only an interactive
+    // image keeps a keyboard.
+    #[cfg(feature = "interactive")]
+    if let Some(grants) = crate::usbkbd::dma_grants() {
+        // SAFETY: walks ECAM only.
+        let Some(bdf) = (unsafe {
+            kernel_core::virtiopci::find_class_nth(&env, kernel_core::xhci::CLASS_XHCI, 0)
+        }) else {
+            bail!(
+                "a keyboard is kept but no xHCI function is behind the unit",
+                NAME_16
+            );
+        };
+        let kb_rid = rid(bdf);
+        let kb_geom = smmu::S2Geometry::standard(KEYBOARD_VMID);
+        let want = smmu::merge_spans(
+            grants
+                .iter()
+                .map(|g| (g.addr, g.addr + g.pages * PAGE))
+                .collect(),
+        );
+        {
+            let mem = ctrl.table_mem();
+            let top = match smmu::program_identity_domain(&mut *mem, &want, image, &kb_geom) {
+                Ok((top, _)) => top,
+                Err(e) => bail!(format_args!("keyboard window refused {:?}", e), NAME_16),
+            };
+            if smmu::leaf_spans(&mut *mem, top, &kb_geom) != want {
+                bail!("the keyboard window is not its grant set", NAME_16);
+            }
+            let ste = match smmu::ste_s2_encode(&kb_geom, top) {
+                Ok(s) => s,
+                Err(e) => bail!(format_args!("keyboard STE refused {:?}", e), NAME_16),
+            };
+            if let Err(e) = write_ste(&mut *mem, kb_rid, Some(&ste)) {
+                bail!(
+                    format_args!("keyboard window grant refused {:?}", e),
+                    NAME_16
+                );
+            }
+        }
+        if let Err(e) = ctrl.invalidate_stream(kb_rid, KEYBOARD_VMID) {
+            bail!(format_args!("invalidate {:?}", e), NAME_16);
+        }
+        kprintln!(
+            "[smmu] window for rid {:#04x}: the kept USB keyboard's {} granted span(s), vmid {}",
+            kb_rid,
+            want.len(),
+            KEYBOARD_VMID
+        );
+    }
 
     kprintln!("[smmu] translation REMAINS ON from here to halt");
     Ok(n as u32)
