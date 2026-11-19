@@ -220,10 +220,13 @@ if [ "$RC" -eq 33 ] \
       exit 0
     fi
     echo "SMOKE TEST: FAIL (absent platform root was not refused by name, or the machine did not continue)"
+    echo "--- last 40 lines of the third boot's serial log ---"; tail -n 40 "$LOG3"
     rm -rf "$WORK"
     exit 1
   fi
   echo "SMOKE TEST: FAIL (the OS did not remember across the reboot)"
+  # The log goes with $WORK, so a later boot's failure says where it stopped before it is deleted.
+  echo "--- last 40 lines of the second boot's serial log ---"; tail -n 40 "$LOG2"
   rm -rf "$WORK"
   exit 1
 fi

@@ -57,14 +57,17 @@ which is right for real pre-invariant hardware for the same reason.
 x86-64's `ticks_to_ns` was `ticks.saturating_mul(10^9) / hz`. With the 100 MHz HPET this ADR chose
 under QEMU, `ticks * 10^9` passes `u64::MAX` at 184.47 s of uptime, and the saturating product then
 returned the same value forever: `uptime` read `0h 03m 04s (184467440737 ns since boot)` twice twenty
-seconds apart. Every wait bounded by `now_ns` (ADR-150) became unbounded after that moment, which
-explains two flakes: the x86-64 second boot that hit the 240 s watchdog only on a loaded host (a
-boot slower than 184 s), and the VirtualBox job hanging after e1000 invariant 5. VirtualBox has no
-HPET; its TSC calibrates at 1.48-1.80 GHz on the CI runner and starts near zero, so the product froze
-10-12 s into the guest's life. The echo-peer ARP that follows invariant 5 is never answered there
-(no peer at 10.0.2.100), and its 2 s budget ends only on the clock: a boot that reached it before the
-freeze passed (2.0 s spent), one that reached it after hung until the watchdog. aarch64 and riscv64
-already multiplied in 128 bits.
+seconds apart. Every wait bounded by `now_ns` (ADR-150) became unbounded after that moment.
+
+That is the VirtualBox job's hang after e1000 invariant 5. VirtualBox has no HPET, and its TSC starts
+near zero, so the product froze `2^64 / 10^9` ticks in: 14.6 s at the 1.26 GHz the failing run
+(44460064031) calibrated. That run's clock sample (4.56 s) plus its suite laps before the e1000
+family (8.44 s) put the echo-peer ARP at about 13 s, and that ARP is never answered on VirtualBox (no
+peer at 10.0.2.100), so its 2 s budget, ending only on the clock, ran into the freeze. The passing run
+on 095eee3 reached it at about 6.7 s against a 12.4 s freeze (1.48 GHz) and spent its 2.0 s. It would
+also explain the x86-64 second boot that hit the 240 s watchdog only on a loaded host (a boot slower
+than 184 s), though that serial log was not kept; `smoke-test.sh` now prints the tail of a failed
+later boot's log. aarch64 and riscv64 already multiplied in 128 bits.
 
 The conversion now lives once in `kernel_core::ticks_to_ns_at(ticks, hz)`, 128-bit, used by all
 three CPUs. `kernel-core/tests/ticks.rs` crosses the 64-bit edge at 100 MHz and a day of a 3 GHz

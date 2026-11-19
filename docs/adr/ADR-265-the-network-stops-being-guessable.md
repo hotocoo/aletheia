@@ -69,6 +69,10 @@ could poison the cache for the rest of the boot.
   across the sequence space from the peer's own address; none ends the connection, the two inside
   the window each earn exactly one challenge ACK naming `rcv_nxt`, every other is dropped without a
   segment, and the exact reset from another host is still not the connection's.
+* `console-e2e.sh` types `net` on all three CPUs and requires `ports and sequence numbers keyed from
+  the entropy source` (added after the wave: the network gates pass equally on the old counter and
+  clock ISN, so this is the live check that fails on the old code). A peer cannot see the source
+  ports, which QEMU's user-mode NAT rewrites.
 * `arpcache.rs` `a_binding_expires_after_its_max_age_and_a_backwards_clock_expires_it_too`;
   `netguard.rs` unit tests over the suite and `iss_clock`'s 4-microsecond scale.
 * Live gates, all on this wave's tree: `vm-e2e.sh`, `vm-e2e-x86.sh` (three boots; its second boot

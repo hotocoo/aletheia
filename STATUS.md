@@ -1275,9 +1275,9 @@ scripts/vm-e2e-vbox.sh (VirtualBox, the second-hypervisor rung), and scripts/des
 
 - `ticks_to_ns` on x86-64 saturated `ticks * 10^9` in 64 bits: with QEMU's 100 MHz HPET the clock
   stopped at 184.47 s of uptime (`uptime` read the same value twenty seconds apart), and on
-  VirtualBox's ~1.5-1.8 GHz TSC 10-12 s in. Every clock-bounded wait after that was unbounded: the
-  root cause of the VirtualBox job's hang after e1000 invariant 5 and of the x86-64 second-boot
-  watchdog on a loaded host. One 128-bit `kernel_core::ticks_to_ns_at` now serves all three CPUs
+  VirtualBox's 1.26-1.80 GHz TSC 10-15 s in. Every clock-bounded wait after that was unbounded: the
+  VirtualBox job's hang after e1000 invariant 5 (its never-answered echo-peer ARP crossed the freeze),
+  and plausibly the x86-64 second-boot watchdog on a loaded host. One 128-bit `kernel_core::ticks_to_ns_at` now serves all three CPUs
   (`kernel-core/tests/ticks.rs`); live, `uptime` reads 203.7 s then 223.7 s.
 
 ### 2026-11-19 — the network stops being guessable (ADR-265)

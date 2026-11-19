@@ -114,6 +114,12 @@ check_session() {
   grep -q "aletheia> "                   <<<"$log" || { echo "  FAIL [$label/$phase] no prompt was printed"; bad=1; }
   grep -q "halting."                     <<<"$log" || { echo "  FAIL [$label/$phase] halt did not run"; bad=1; }
   grep -q "persistent virtio-blk device" <<<"$log" || { echo "  FAIL [$label/$phase] the console did not choose the persistent disk"; bad=1; }
+  # ADR-265: the gated machine has an entropy source, so its ports and sequence numbers are keyed
+  # from it; a clock-seeded secret, or a printed next port, fails here.
+  if [ "$phase" = first ]; then
+    grep -q "ports and sequence numbers keyed from the entropy source" <<<"$log" \
+      || { echo "  FAIL [$label/$phase] net did not report a secret keyed from the entropy source"; bad=1; }
+  fi
   # An interactive boot pays for contracts, not storms (ADR-163): the image SAYS which proofs it
   # deferred, and none of the deferred families' markers appear - the gate image proves those.
   grep -q "\[boot\] deferred in this interactive image (ADR-163): bench, soak, mlrisk-stress, wmstorm, schedstorm, fsstorm, shellstorm" <<<"$log" \
@@ -376,7 +382,7 @@ mmio_leg() {
   local log; log="$(mktemp)"
 
   echo "--> session 1: an operator writes an object through the console"
-  drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
+  drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "net" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
     "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "together trap trap trap" "+2" "mlstat" "date" "uptime" "+10" "date" "uptime" "passwd ada" "Sesame-42" "Sesame-42" "sync" "lsblk" "halt"
   sed -n '/interactive console/,$p' "$log"
@@ -457,7 +463,7 @@ x86_leg() {
   local log; log="$work/serial.log"
 
   echo "--> session 1: an operator writes an object through the console"
-  drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "write manifesto $BODY" "cat manifesto" \
+  drive_session "$log" 180 "help" "ver" "arch" "mem" "lsblk" "net" "write manifesto $BODY" "cat manifesto" \
     "append manifesto and work in" "wc manifesto" "grep work manifesto" "cp manifesto copy" \
     "mv copy backup" "touch marker" "find man" "hexdump marker" "history" "ls" "input" "mem" "tasks" "tasks" "run hello" "run hello" "run trap" "run trap" "run spin" "run hello" "run hello to the world" "run show manifesto" "run counter manifesto" "run manifesto" "run nosuch" "together spin hello trap" "start spin" "start hello" "+1" "mem" "+2" "mem" "jobs" "kill spin" "jobs" "start spin" "start spin" "weight spin 1" "jobs" "+2" "jobs" "kill spin" "kill spin" "start draw" "+2" "input" "kill draw" "input" "refresh 120" "refresh" "persona macos" "persona" "autostart add hello" "autostart" "mem" "together trap trap trap" "+2" "mlstat" "date" "uptime" "+10" "date" "uptime" "passwd ada" "Sesame-42" "Sesame-42" "sync" "lsblk" "halt"
   sed -n '/interactive console/,$p' "$log"
