@@ -122,6 +122,9 @@ pub enum NetError {
     TooLong,
     /// Nothing arrived within the bounded wait — a fact about this attempt, not a claim about the peer.
     Timeout,
+    /// A transmitted frame was never handed back, so the device may still own the transmit buffer
+    /// and its descriptor: nothing is sent until [`VirtioNet::reset`] (ADR-267).
+    Wedged,
 }
 
 /// A live virtio network device.
@@ -146,7 +149,59 @@ pub struct VirtioNet<H: VirtioHal, T: Transport> {
     dropped: core::cell::Cell<u64>,
     /// Where this device's machine lives (ADR-234).
     addr: core::cell::Cell<Addressing>,
+    /// A transmitted frame was never handed back (ADR-267): the device may still read the transmit
+    /// buffer the next send would rewrite, and its late used entry would read as the next send's.
+    wedged: core::cell::Cell<bool>,
     _hal: core::marker::PhantomData<H>,
+}
+
+/// Reset the device and negotiate VERSION_1 plus MAC (and the platform IOMMU when offered):
+/// every offload declined, which is what keeps the transmit header all-zero. Returns the status
+/// reached (FEATURES_OK) and whether the device offers its MAC. Shared by `init` and `reset`.
+///
+/// # Safety
+/// `transport` must be bound to a live virtio network device.
+unsafe fn negotiate<T: Transport>(transport: &T) -> Result<(u32, bool), NetError> {
+    transport.set_status(0);
+    let mut status = S_ACKNOWLEDGE;
+    transport.set_status(status);
+    status |= S_DRIVER;
+    transport.set_status(status);
+
+    let lo = transport.device_features(0);
+    let hi = transport.device_features(1);
+    if hi & (1 << F_VERSION_1_BIT) == 0 {
+        return Err(NetError::Unsupported(
+            "device does not offer VIRTIO_F_VERSION_1",
+        ));
+    }
+    // Accept only MAC (so the address comes from the device rather than being invented) plus
+    // VERSION_1. Every offload feature is declined, which is what keeps the header all-zero.
+    let want_mac = lo & (1 << F_NET_MAC_BIT) != 0;
+    // Acknowledge the platform-IOMMU feature whenever offered: behind the VT-d identity
+    // domain descriptor addresses are unchanged, and a device that REQUIRES the feature
+    // clears FEATURES_OK otherwise.
+    let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
+    transport.set_driver_features(0, if want_mac { 1 << F_NET_MAC_BIT } else { 0 });
+    transport.set_driver_features(
+        1,
+        1 << F_VERSION_1_BIT
+            | if iommu_platform {
+                1 << F_IOMMU_PLATFORM_BIT
+            } else {
+                0
+            },
+    );
+    status |= S_FEATURES_OK;
+    transport.set_status(status);
+    if transport.status() & S_FEATURES_OK == 0 {
+        transport.set_status(status | S_FAILED);
+        return Err(NetError::Unsupported(
+            "device rejected the negotiated features",
+        ));
+    }
+
+    Ok((status, want_mac))
 }
 
 pub(crate) fn be16(b: &[u8], at: usize) -> u16 {
@@ -177,45 +232,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             return Err(NetError::Unsupported("not a virtio network device"));
         }
 
-        transport.set_status(0);
-        let mut status = S_ACKNOWLEDGE;
-        transport.set_status(status);
-        status |= S_DRIVER;
-        transport.set_status(status);
-
-        let lo = transport.device_features(0);
-        let hi = transport.device_features(1);
-        if hi & (1 << F_VERSION_1_BIT) == 0 {
-            return Err(NetError::Unsupported(
-                "device does not offer VIRTIO_F_VERSION_1",
-            ));
-        }
-        // Accept only MAC (so the address comes from the device rather than being invented) plus
-        // VERSION_1. Every offload feature is declined, which is what keeps the header all-zero.
-        let want_mac = lo & (1 << F_NET_MAC_BIT) != 0;
-        // Acknowledge the platform-IOMMU feature whenever offered: behind the VT-d identity
-        // domain descriptor addresses are unchanged, and a device that REQUIRES the feature
-        // clears FEATURES_OK otherwise.
-        let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
-        transport.set_driver_features(0, if want_mac { 1 << F_NET_MAC_BIT } else { 0 });
-        transport.set_driver_features(
-            1,
-            1 << F_VERSION_1_BIT
-                | if iommu_platform {
-                    1 << F_IOMMU_PLATFORM_BIT
-                } else {
-                    0
-                },
-        );
-        status |= S_FEATURES_OK;
-        transport.set_status(status);
-        if transport.status() & S_FEATURES_OK == 0 {
-            transport.set_status(status | S_FAILED);
-            return Err(NetError::Unsupported(
-                "device rejected the negotiated features",
-            ));
-        }
-
+        let (status, want_mac) = negotiate(&transport)?;
         // config space: mac[6] at offset 0.
         let cfg = transport.config_u64(0);
         let mut mac = [0u8; 6];
@@ -248,8 +265,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             .map_err(|_| NetError::Queue("the transmit buffer was refused as a DMA region"))?;
 
         // Buffers are published; NOW the device may run.
-        status |= S_DRIVER_OK;
-        transport.set_status(status);
+        transport.set_status(status | S_DRIVER_OK);
         rx.kick::<H, T>(&transport);
 
         Ok(VirtioNet {
@@ -263,8 +279,52 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             arp_wire_requests: core::cell::Cell::new(0),
             dropped: core::cell::Cell::new(0),
             addr: core::cell::Cell::new(Addressing::QEMU_USER),
+            wedged: core::cell::Cell::new(false),
             _hal: core::marker::PhantomData,
         })
+    }
+
+    /// Bring the device back on the frames it already has (ADR-267): reset it (status 0, which
+    /// ends everything it held), negotiate the same features again, re-publish both queues on
+    /// their frames with their indices restarted, re-post every receive buffer, then DRIVER_OK.
+    /// The MAC, the lease and the ARP cache are this machine's, not the device's, and stay.
+    /// Nothing is allocated. A reset that fails leaves the device wedged.
+    ///
+    /// # Safety
+    /// The device must be live (it is, from `init` on).
+    pub unsafe fn reset(&mut self) -> Result<(), NetError> {
+        self.wedged.set(true);
+        let (status, want_mac) = negotiate(&self.transport)?;
+        if !want_mac {
+            return Err(NetError::Unsupported(
+                "device no longer offers its MAC address",
+            ));
+        }
+        self.rx
+            .reset::<H, T>(&mut self.transport)
+            .map_err(NetError::Queue)?;
+        self.tx
+            .reset::<H, T>(&mut self.transport)
+            .map_err(NetError::Queue)?;
+        for (slot, &buf) in self.rx_bufs.iter().enumerate() {
+            self.rx
+                .add::<H>(slot as u16, buf as u64, RX_BUF_LEN as u32, true)
+                .map_err(|_| NetError::Queue("a receive buffer failed the DMA gate"))?;
+        }
+        self.transport.set_status(status | S_DRIVER_OK);
+        self.rx.kick::<H, T>(&self.transport);
+        self.wedged.set(false);
+        Ok(())
+    }
+
+    /// Whether every send is refused until [`Self::reset`].
+    pub fn is_wedged(&self) -> bool {
+        self.wedged.get()
+    }
+
+    /// Frames offered to the device for transmission since the transmit queue was (re)published.
+    pub fn transmits_offered(&self) -> u16 {
+        self.tx.published()
     }
 
     /// The device's own MAC address.
@@ -328,6 +388,9 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
     /// # Safety
     /// The device must be live.
     unsafe fn send(&self, frame: &[u8]) -> Result<(), NetError> {
+        if self.wedged.get() {
+            return Err(NetError::Wedged);
+        }
         if NET_HDR_LEN + frame.len() > 4096 {
             return Err(NetError::TooLong);
         }
@@ -342,7 +405,11 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
         self.tx
             .poll_used_within::<H>(TX_BUDGET_NS)
             .map(|_| ())
-            .ok_or(NetError::Timeout)
+            .ok_or_else(|| {
+                // The device still owns the buffer and the descriptor slot this frame used.
+                self.wedged.set(true);
+                NetError::Timeout
+            })
     }
 
     /// Wait for a received frame that `accept` recognizes, returning what it extracted. Frames that are
@@ -956,6 +1023,29 @@ pub fn net_suite<H: VirtioHal, T: Transport, F: FnMut(usize, bool, &str)>(
     check!(
         "net: a second DISCOVER under a new transaction id draws its own fresh answer",
         matches!(&offer2, Ok(o) if o.yiaddr == dev.ip())
+    );
+
+    // 10 — ADR-267: a wedged device sends nothing (the transmit queue offers no new buffer) until a
+    //      reset on the same frames, after which the wire answers again. The wedge is set directly:
+    //      provoking a lost transmit would race the device, and a transmit wait that ran out of
+    //      time is what sets it.
+    let mut dev = dev;
+    dev.wedged.set(true);
+    let offered = dev.transmits_offered();
+    // SAFETY: as above.
+    let refused = unsafe { dev.icmp_echo(gateway, gw_mac, 0xA1E7, 3, b"wedged") }
+        == Err(NetError::Wedged)
+        && dev.transmits_offered() == offered;
+    // SAFETY: as above.
+    let back = unsafe { dev.reset() }.is_ok() && !dev.is_wedged();
+    // SAFETY: as above.
+    let echo3 = unsafe { dev.icmp_echo(gateway, gw_mac, 0xA1E7, 4, b"after-reset") };
+    check!(
+        "net: a wedged device sends nothing until a reset on the same frames, and the wire answers after it",
+        refused
+            && back
+            && matches!(&echo3, Ok((buf, len)) if *len == 11 && &buf[..11] == b"after-reset")
+            && dev.dma_regions() >= 2
     );
 
     Ok((n, dev))

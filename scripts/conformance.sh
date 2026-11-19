@@ -196,6 +196,7 @@ CONTRACT=(
   "net: a DHCP DISCOVER is answered by an OFFER bound to its transaction id (UDP round trip)"
   "net: the network's lease is requested and acknowledged, and the driver speaks from the leased address"
   "net: a second DISCOVER under a new transaction id draws its own fresh answer"
+  "net: a wedged device sends nothing until a reset on the same frames, and the wire answers after it"
   # The task supervisor's POLICY (REQ-REL-002, ADR-042) — every target compiles it in and routes its
   # unexpected-user-fault path through it. All three targets now take an undeclared fault, reclaim its
   # address space, then run another task; this is the part that must not vary.
@@ -475,6 +476,7 @@ CONTRACT=(
   "entropy: the DMA gate refuses an address the driver never registered"
   "entropy: no device is a named refusal, and a refusal seeds no TLS key"
   "entropy: two TLS seeds derive two different ephemeral keys, neither zero"
+  "entropy: a wedged device hands out nothing until a reset, and draws are fresh after it"
 
   # The HTTP/1.1 client (ADR-155): the same bounded reader on every CPU.
   "http: a GET carries the host, asks the peer to close, and ends with the blank line"

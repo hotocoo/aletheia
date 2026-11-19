@@ -87,6 +87,9 @@ pub struct VirtioRng<H: VirtioHal, T: Transport> {
     /// Draws completed and draws refused, counted like every other refusal in this tree.
     pub draws: u64,
     pub refusals: u64,
+    /// A request was never answered (ADR-267): the device may still write the frame the next
+    /// request would hand out, and its late used entry would read as the next request's.
+    wedged: bool,
     _hal: PhantomData<H>,
 }
 
@@ -102,35 +105,7 @@ impl<H: VirtioHal, T: Transport> VirtioRng<H, T> {
         if device_id != VIRTIO_ID_RNG {
             return Err(EntropyRefusal::Device("not a virtio entropy device"));
         }
-        transport.set_status(0);
-        let mut status = S_ACKNOWLEDGE;
-        transport.set_status(status);
-        status |= S_DRIVER;
-        transport.set_status(status);
-        let hi = transport.device_features(1);
-        if hi & (1 << F_VERSION_1_BIT) == 0 {
-            return Err(EntropyRefusal::Device(
-                "device does not offer VIRTIO_F_VERSION_1",
-            ));
-        }
-        let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
-        transport.set_driver_features(0, 0);
-        transport.set_driver_features(
-            1,
-            (1 << F_VERSION_1_BIT)
-                | if iommu_platform {
-                    1 << F_IOMMU_PLATFORM_BIT
-                } else {
-                    0
-                },
-        );
-        transport.set_status(status | S_FEATURES_OK);
-        if transport.status() & S_FEATURES_OK == 0 {
-            transport.set_status(status | S_FAILED);
-            return Err(EntropyRefusal::Device(
-                "device rejected the negotiated features",
-            ));
-        }
+        let status = negotiate(&transport)?;
         let mut queue = Virtqueue::new::<H, T>(&mut transport, REQUEST_QUEUE)
             .map_err(EntropyRefusal::Device)?;
         let frame =
@@ -138,8 +113,7 @@ impl<H: VirtioHal, T: Transport> VirtioRng<H, T> {
         queue
             .register_buffer(frame, crate::dma::PAGE, "virtio-rng.buffer")
             .map_err(|_| EntropyRefusal::Device("the buffer frame was refused as a DMA region"))?;
-        status |= S_FEATURES_OK | S_DRIVER_OK;
-        transport.set_status(status);
+        transport.set_status(status | S_DRIVER_OK);
         Ok(VirtioRng {
             transport,
             queue,
@@ -148,8 +122,31 @@ impl<H: VirtioHal, T: Transport> VirtioRng<H, T> {
             has_last: false,
             draws: 0,
             refusals: 0,
+            wedged: false,
             _hal: PhantomData,
         })
+    }
+
+    /// Bring the device back on its frames (ADR-267): reset it (status 0 ends the request it
+    /// held), negotiate again, re-publish the queue with its indices restarted, DRIVER_OK. The
+    /// buffer frame stays registered; nothing is allocated. A reset that fails leaves it wedged.
+    ///
+    /// # Safety
+    /// The device must be live (it is, from `init` on).
+    pub unsafe fn reset(&mut self) -> Result<(), EntropyRefusal> {
+        self.wedged = true;
+        let status = negotiate(&self.transport)?;
+        self.queue
+            .reset::<H, T>(&mut self.transport)
+            .map_err(EntropyRefusal::Device)?;
+        self.transport.set_status(status | S_DRIVER_OK);
+        self.wedged = false;
+        Ok(())
+    }
+
+    /// Whether every draw is refused until [`Self::reset`].
+    pub fn is_wedged(&self) -> bool {
+        self.wedged
     }
 
     /// Whether the DMA gate would refuse to tell the device about `addr..addr+len`. The suite
@@ -169,6 +166,11 @@ impl<H: VirtioHal, T: Transport> VirtioRng<H, T> {
     /// # Safety
     /// The queue and the device must be live (they are, from `init` on).
     unsafe fn request(&mut self, want: usize) -> Result<usize, EntropyRefusal> {
+        if self.wedged {
+            return Err(EntropyRefusal::Device(
+                "the device still holds an unanswered request (reset first)",
+            ));
+        }
         // The frame is zeroed first, so a device that "completes" without writing hands back
         // zeros - which the degeneracy check then refuses - rather than a previous draw.
         core::ptr::write_bytes(self.frame as *mut u8, 0, want);
@@ -179,7 +181,10 @@ impl<H: VirtioHal, T: Transport> VirtioRng<H, T> {
         let (slot, written) = self
             .queue
             .poll_used_within::<H>(COMPLETION_NS)
-            .ok_or(EntropyRefusal::Device("the device did not answer"))?;
+            .ok_or_else(|| {
+                self.wedged = true;
+                EntropyRefusal::Device("the device did not answer")
+            })?;
         if slot != 0 {
             return Err(EntropyRefusal::Device(
                 "the device completed a descriptor it was not given",
@@ -235,6 +240,44 @@ impl<H: VirtioHal, T: Transport> EntropySource for VirtioRng<H, T> {
         self.draws += 1;
         Ok(())
     }
+}
+
+/// Reset the device and negotiate VERSION_1 (and the platform IOMMU when offered); virtio-rng
+/// has no device features. Returns the status reached (FEATURES_OK). Shared by `init` and `reset`.
+///
+/// # Safety
+/// `transport` must be bound to a live virtio-rng device.
+unsafe fn negotiate<T: Transport>(transport: &T) -> Result<u32, EntropyRefusal> {
+    transport.set_status(0);
+    let mut status = S_ACKNOWLEDGE;
+    transport.set_status(status);
+    status |= S_DRIVER;
+    transport.set_status(status);
+    let hi = transport.device_features(1);
+    if hi & (1 << F_VERSION_1_BIT) == 0 {
+        return Err(EntropyRefusal::Device(
+            "device does not offer VIRTIO_F_VERSION_1",
+        ));
+    }
+    let iommu_platform = hi & (1 << F_IOMMU_PLATFORM_BIT) != 0;
+    transport.set_driver_features(0, 0);
+    transport.set_driver_features(
+        1,
+        (1 << F_VERSION_1_BIT)
+            | if iommu_platform {
+                1 << F_IOMMU_PLATFORM_BIT
+            } else {
+                0
+            },
+    );
+    transport.set_status(status | S_FEATURES_OK);
+    if transport.status() & S_FEATURES_OK == 0 {
+        transport.set_status(status | S_FAILED);
+        return Err(EntropyRefusal::Device(
+            "device rejected the negotiated features",
+        ));
+    }
+    Ok(status | S_FEATURES_OK)
 }
 
 /// The seed one TLS conversation is made from, or the named reason there is none. This is the
@@ -329,6 +372,24 @@ pub fn entropy_suite<H: VirtioHal, T: Transport>(
         check!(
             ok,
             "entropy: two TLS seeds derive two different ephemeral keys, neither zero"
+        );
+    }
+
+    // 7 - ADR-267: a wedged device hands out nothing (no buffer is offered) until a reset on the
+    //     same frames, after which draws are fresh again. The wedge is set directly; an unanswered
+    //     request is what sets it.
+    {
+        dev.wedged = true;
+        let offered = dev.queue.published();
+        let mut b = [0u8; 32];
+        let refused = dev.fill(&mut b).is_err() && dev.queue.published() == offered;
+        // SAFETY: the device is live, from `init` on.
+        let back = unsafe { dev.reset() }.is_ok() && !dev.is_wedged();
+        let (mut x, mut y) = ([0u8; 32], [0u8; 32]);
+        let fresh = dev.fill(&mut x).is_ok() && dev.fill(&mut y).is_ok() && x != y;
+        check!(
+            refused && back && fresh,
+            "entropy: a wedged device hands out nothing until a reset, and draws are fresh after it"
         );
     }
 

@@ -111,6 +111,39 @@ impl Virtqueue {
         })
     }
 
+    /// Re-publish this queue on the SAME frame after a device reset (ADR-267): zero the descriptor
+    /// table and both rings, restart `last_used` at zero (the device's used index restarted with the
+    /// reset, so ours must, or every new completion reads as old), and tell the device the three
+    /// addresses again. The buffers this queue registered stay registered; nothing is allocated.
+    ///
+    /// # Safety
+    /// The device must have been reset (status 0) and be between FEATURES_OK and DRIVER_OK, and
+    /// the caller must re-post any buffers the device should hold.
+    pub unsafe fn reset<H: VirtioHal, T: Transport>(
+        &self,
+        transport: &mut T,
+    ) -> Result<(), &'static str> {
+        transport.select_queue(self.index);
+        transport.after_queue_select();
+        if transport.queue_num_max() < self.qsize as u32 {
+            return Err("virtqueue: the device no longer offers this queue's size");
+        }
+        core::ptr::write_bytes(self.desc as *mut u8, 0, crate::dma::PAGE);
+        self.last_used.set(0);
+        transport.set_queue_num(self.qsize as u32);
+        transport.set_queue_addrs(self.desc as u64, self.avail as u64, self.used as u64);
+        H::barrier();
+        transport.queue_ready();
+        Ok(())
+    }
+
+    /// How many buffers this driver has offered the device since the queue was (re)published: the
+    /// avail ring's index. A refusal that must not reach the device leaves it unchanged.
+    pub fn published(&self) -> u16 {
+        // SAFETY: the avail ring lies in this queue's own frame.
+        unsafe { read_volatile((self.avail + 2) as *const u16) }
+    }
+
     /// This queue's index.
     pub fn index(&self) -> u16 {
         self.index
