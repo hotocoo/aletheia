@@ -71,8 +71,6 @@ const ATA_FLUSH_EXT: u8 = 0xEA;
 /// The serial number that marks a disk this driver may write. Nothing else is ever written.
 pub const SCRATCH_SERIAL: &[u8] = b"ALETHEIA-SCRATCH";
 const BUDGET_NS: u64 = 10_000_000_000;
-/// Zero-budget reads the wedge invariant may try before one is left with the HBA (ADR-266).
-const WEDGE_TRIES: usize = 64;
 
 pub trait Regs {
     fn r32(&self, off: usize) -> u32;
@@ -415,7 +413,9 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
         H::barrier();
         let tfd = self.regs.r32(pb + PX_TFD);
         // A slot the HBA has not released is still its: the next command would rewrite the table
-        // and the data frame under it, and could take this one's late completion for its own.
+        // and the data frame under it, and could take this one's late completion for its own. A
+        // task-file error leaves the slot set too (AHCI 1.3.1 §6.2.2.1: the port stops until
+        // software clears PxCMD.ST), so it wedges as well, and `reset` is that recovery.
         if !done || self.regs.r32(pb + PX_CI) & 1 != 0 {
             self.wedged.set(true);
             return Err(StorageError::Device);
@@ -694,31 +694,23 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     // ADR-266: a command left with the HBA wedges the port until a reset. A zero budget makes the
     // first look miss (the HBA moves the data after PxCI is written, not during the write); that
     // command then finishes late, in the slot, table and frame the next command would rewrite.
+    // The wedge is set directly: provoking a real timeout here would race the HBA (one that
+    // completes during the PxCI write never misses a look), and the hosted tests prove that a
+    // command left with the device sets it. Two DIFFERENT blocks are read back, so a port that
+    // answered with a stale block could not pass.
     let d = &disks[0];
-    let mut first = [0u8; 512];
-    let mut left = d.read_first_sector(&mut first).is_ok();
-    d.set_completion_budget_ns(Some(0));
-    let mut timed_out = false;
-    for _ in 0..WEDGE_TRIES {
-        let mut b = [0u8; 512];
-        if d.read_first_sector(&mut b).is_err() {
-            timed_out = d.is_wedged();
-            break;
-        }
-    }
-    d.set_completion_budget_ns(None);
-    left &= timed_out;
+    let (mut b0, mut b1) = ([0u8; BLOCK_SIZE], [0u8; BLOCK_SIZE]);
+    let mut ok = d.read_block(0, &mut b0).is_ok() && d.read_block(1, &mut b1).is_ok();
+    d.wedged.set(true);
     let before = d.issued();
-    let mut b = [0u8; 512];
-    let refused = d.read_first_sector(&mut b).is_err() && d.issued() == before;
-    let back = d.reset().is_ok()
-        && !d.is_wedged()
-        && d.read_first_sector(&mut b).is_ok()
-        && b == first
-        && d.dma.live_regions() == 3;
+    let mut b = [0u8; BLOCK_SIZE];
+    ok &= d.read_block(1, &mut b).is_err() && d.issued() == before;
+    ok &= d.reset().is_ok() && !d.is_wedged();
+    ok &= d.read_block(1, &mut b).is_ok() && b == b1;
+    ok &= d.read_block(0, &mut b).is_ok() && b == b0 && d.dma.live_regions() == 3;
     check!(
-        "ahci: a command left with the HBA wedges the port: the next is refused before PxCI, and a port reset brings it back",
-        left && refused && back
+        "ahci: a wedged port refuses the next command before PxCI, and a port reset brings it back reading the right blocks",
+        ok
     );
     // Gate group: only where a disk carries the scratch serial. Elsewhere the read-only group is
     // the whole suite, and each VM gate pins which count it expects.

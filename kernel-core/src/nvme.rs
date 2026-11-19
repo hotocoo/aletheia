@@ -220,10 +220,6 @@ pub struct Nvme<H: VirtioHal, R: NvmeRegs> {
     _hal: PhantomData<H>,
 }
 
-/// Zero-budget reads the wedge invariant may try before one is left with the controller. A
-/// controller answers after its doorbell, so the first nearly always is; a bound, not a hope.
-const WEDGE_TRIES: usize = 64;
-
 /// The serial number that marks a controller this driver may write (ADR-228). A real machine's
 /// SSD holds someone's data; nothing without this mark is ever written.
 pub const SCRATCH_SERIAL: &[u8] = b"ALETHEIA-SCRATCH";
@@ -833,34 +829,25 @@ pub fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
         "nvme: queue tail, head and phase wrap in step over three full queue lengths",
         wrapped
     );
-    // ADR-266: a command left with the controller wedges the driver until a reset. A zero budget
-    // makes the first look miss (a controller answers after its doorbell, not during the write);
-    // that command's answer then lands late, in the slot and the frame the next command would use.
-    let budget = dev.budget_ns;
-    dev.set_completion_budget_ns(0);
-    let mut left = false;
-    for _ in 0..WEDGE_TRIES {
-        let mut b = [0u8; BLOCK_SIZE];
-        if dev.read_block(0, &mut b).is_err() {
-            left = dev.is_wedged();
-            break;
-        }
-    }
-    dev.set_completion_budget_ns(budget);
+    // ADR-266: a wedged driver refuses before the doorbell and a reset brings it back. The wedge is
+    // set directly: provoking a real timeout here would race the controller (one that completes
+    // during the doorbell write never misses a look), and the hosted tests prove that a command
+    // left with the device sets it. Two DIFFERENT blocks are read back after the reset, so a
+    // controller that answered with a stale block could not pass.
+    let mut second = [0u8; BLOCK_SIZE];
+    let mut ok = dev.read_block(1, &mut second).is_ok();
+    dev.wedged.set(true);
     let tail = dev.io.tail.get();
     let nlb = (dev.lbas_per_block - 1) as u32;
-    let refused = dev.submit(&dev.io, NVM_READ, NSID, dev.data, [0, 0, nlb])
-        == Err(NvmeError::Wedged)
+    ok &= dev.submit(&dev.io, NVM_READ, NSID, dev.data, [1, 0, nlb]) == Err(NvmeError::Wedged)
         && dev.io.tail.get() == tail;
-    let mut again = [0u8; BLOCK_SIZE];
-    let back = dev.reset().is_ok()
-        && !dev.is_wedged()
-        && dev.read_block(0, &mut again).is_ok()
-        && again == first
-        && dev.dma.live_regions() == 5;
+    ok &= dev.reset().is_ok() && !dev.is_wedged();
+    let mut b = [0u8; BLOCK_SIZE];
+    ok &= dev.read_block(1, &mut b).is_ok() && b == second;
+    ok &= dev.read_block(0, &mut b).is_ok() && b == first && dev.dma.live_regions() == 5;
     check!(
-        "nvme: a command left with the controller wedges the driver: the next is refused before the doorbell, and a reset on the same frames brings it back",
-        left && refused && back
+        "nvme: a wedged driver refuses the next command before the doorbell, and a reset on the same frames brings it back reading the right blocks",
+        ok
     );
     // Everything below WRITES. Only a controller marked scratch carries it (ADR-228); on any other
     // machine the read-only group above is the whole suite, and each VM gate pins which count.

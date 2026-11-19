@@ -23,8 +23,10 @@ same rule was missing here.
 
 * **Wedged until reset.** `Nvme::submit` sets `wedged` on a timeout and on `WrongCommandId` /
   `WrongQueue`; `AhciDisk::command` sets it when the budget ran out or PxCI still holds slot 0 after
-  the wait. A failed command whose slot the device released (a task-file error, a short transfer, an
-  NVMe status code) does not wedge: nothing is left with the device. A wedged driver refuses every
+  the wait. That includes a task-file error: the HBA stops the port with the slot still set (AHCI
+  1.3.1 §6.2.2.1) until software clears PxCMD.ST, which is what `reset` does. A failed command whose
+  slot the device released (an AHCI short transfer, an NVMe status code) does not wedge: nothing is
+  left with the device. A wedged driver refuses every
   command before writing anything the device reads and before ringing the doorbell or writing PxCI
   (`NvmeError::Wedged`; `StorageError::Device` through `BlockDevice`).
 * **NVMe reset** (`Nvme::reset`): CC.EN = 0, which deletes every queue and ends what they held (NVMe
@@ -38,11 +40,12 @@ same rule was missing here.
   stopped needs a COMRESET, which this driver does not issue: that is refused by name and the port
   stays wedged.
 * **A boot invariant each, in the read-only group** (so it holds on any controller, scratch or
-  not, and on VirtualBox's AHCI): a zero budget leaves a read with the device (a controller answers
-  after its doorbell, not during it; up to 64 tries bound the attempt), the next command must be
-  refused with nothing issued, and `reset` must bring the driver back to a correct read on the same
-  frames. The interrupt groups that follow then judge a clean run, which proves NVMe's I/O queue
-  came back with its vector and AHCI's port with its interrupt.
+  not, and on VirtualBox's AHCI): the suite sets the wedge directly, then the next command must be
+  refused with nothing issued, and `reset` must bring the driver back reading two DIFFERENT blocks
+  correctly on the same frames. Provoking a real timeout at boot would race the device (one that
+  completes during the doorbell write never misses a look); the hosted tests prove that a command
+  left with the device sets the wedge. The interrupt groups that follow then judge a clean run,
+  which proves NVMe's I/O queue came back with its vector and AHCI's port with its interrupt.
 
 ## Evidence
 
@@ -57,7 +60,9 @@ same rule was missing here.
 * `kernel-core/tests/nvme.rs` `a_command_left_with_the_controller_is_never_answered_into_the_next`
   and `a_completion_for_another_command_wedges_the_driver`; `kernel-core/tests/ahci.rs`
   `a_command_left_with_the_hba_is_never_finished_into_the_next` and
-  `a_port_whose_disk_stays_busy_is_refused_by_name_and_stays_wedged`. Each read after the reset
+  `a_port_whose_disk_stays_busy_is_refused_by_name_and_stays_wedged`, and
+  `a_task_file_error_wedges_the_port_until_its_reset` (the simulated HBA now keeps PxCI set on a
+  task-file error, as §6.2.2.1 says, where it used to clear it). Each read after the reset
   returns its own block, and the NVMe controller records no protocol violation.
 * Mutation: removing the wedge check from `submit` fails 5 NVMe tests; from `command`, 3 AHCI tests.
 * Gates: `vm-e2e.sh`, `vm-e2e-x86.sh`, quality gate, kernel-core suite, every `check-*.sh`.
@@ -70,6 +75,9 @@ same rule was missing here.
   the same hazard, and their fix is a virtio device reset with renegotiation, as virtio-blk has.
   HD Audio's CORB/RIRB and xHCI's command and event rings carry their own indices and are the
   following rung. Deferred, named.
+* **Nothing outside the boot suites calls `reset`.** The console's block device is virtio-blk;
+  a wedged NVMe or AHCI disk stays wedged until reboot, refusing by name rather than answering
+  wrong.
 * **No COMRESET.** An AHCI disk that stays busy after its port stops is left wedged.
 * **One command in flight.** A queue with several outstanding commands would have to abort them
   individually (NVMe Abort, AHCI per-slot) rather than reset the whole controller or port.

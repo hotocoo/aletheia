@@ -217,7 +217,11 @@ impl Sim {
             s.r.insert(b + PX_TFD, 0x50);
         }
         s.r.insert(b + PX_IS, is);
-        s.r.insert(b + PX_CI, 0);
+        // A task-file error stops the port with the slot still set (AHCI 1.3.1 §6.2.2.1): only
+        // clearing PxCMD.ST releases it. A good completion releases it.
+        if !(s.f.task_file_error && port == 2) {
+            s.r.insert(b + PX_CI, 0);
+        }
         let ie = s.r.get(&(b + PX_IE)).copied().unwrap_or(0);
         if is & ie != 0 {
             let hba_is = s.r.get(&HBA_IS).copied().unwrap_or(0);
@@ -689,4 +693,23 @@ fn a_port_whose_disk_stays_busy_is_refused_by_name_and_stays_wedged() {
         Err("ahci: the disk stayed busy after its port stopped (it needs a COMRESET)")
     );
     assert!(d[1].is_wedged());
+}
+
+/// A task-file error stops the port with its slot still set (AHCI 1.3.1 §6.2.2.1), so the port is
+/// wedged, and only the reset (clearing PxCMD.ST) releases the slot for the next command.
+#[test]
+fn a_task_file_error_wedges_the_port_until_its_reset() {
+    let sim = Sim::new(Faults::default(), 512);
+    let d = disks(&sim);
+    let scratch = &d[1];
+    sim.0.borrow_mut().f.task_file_error = true;
+    let mut b = [0u8; BLOCK_SIZE];
+    assert_eq!(scratch.read_block(3, &mut b), Err(StorageError::Device));
+    assert!(scratch.is_wedged(), "the slot is still the HBA's");
+    sim.0.borrow_mut().f.task_file_error = false;
+    let issued = scratch.issued();
+    assert_eq!(scratch.read_block(3, &mut b), Err(StorageError::Device));
+    assert_eq!(scratch.issued(), issued);
+    scratch.reset().expect("reset");
+    assert!(scratch.read_block(3, &mut b).is_ok());
 }
