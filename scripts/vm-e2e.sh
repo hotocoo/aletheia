@@ -172,7 +172,7 @@ echo "$OUT" | grep -E "abstaining workload: [0-9]+ tasks, 0 positions move" >/de
 echo "$OUT" | grep "ALL 21 MEMORY INVARIANTS HOLD" >/dev/null        || { echo "FAIL: memory invariants marker missing"; fail=1; }
 echo "$OUT" | grep "ALL 66 VIRTUAL-MEMORY INVARIANTS HOLD" >/dev/null || { echo "FAIL: virtual-memory invariants marker missing"; fail=1; }
 echo "$OUT" | grep "ALL 62 EL0-BOUNDARY INVARIANTS HOLD" >/dev/null  || { echo "FAIL: EL0 user-mode invariants marker missing"; fail=1; }
-echo "$OUT" | grep "ALL 30 NVME INVARIANTS HOLD" >/dev/null || { echo "FAIL: nvme invariants marker missing (controller attached, driver must run; ADR-223, ADR-264)"; fail=1; }
+echo "$OUT" | grep "ALL 31 NVME INVARIANTS HOLD" >/dev/null || { echo "FAIL: nvme invariants marker missing (controller attached, driver must run; ADR-223, ADR-264, ADR-266)"; fail=1; }
 # Completions wake the CPU (ADR-264): the boot log's own line says how the controller's completions
 # were waited for. A fallback to polling prints "POLLED" instead and fails here, never silently.
 echo "$OUT" | grep -E "\[nvme\] completions: interrupt-driven \(GICv2m MSI-X, table entry 1\), [0-9]+ interrupts, [0-9]+ sleeps, 0 bound wakes" >/dev/null || { echo "FAIL: nvme completions are not interrupt-driven with 0 bound wakes (ADR-264)"; fail=1; }
@@ -225,7 +225,7 @@ echo "$OUT" | grep "risk advisor: RESIDENT" >/dev/null             || { echo "FA
 # changing without the gate being told. Extra families fail too — new suites join this map
 # deliberately. Measured on this target (ADR-061); identical to the RISC-V gate's map by design.
 source "$ROOT/scripts/lib-markers.sh"
-AARCH64_EXPECTED="ahci=31 bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 dns=9 e1000=6 e1000e=6 hda=6 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 nvme=30 net=9 netguard=9 persist=10 pm=14 reclaim=11 anomaly=7 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=18 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=62 smmu=13 vault=14 vinput=10 virtio=23 x25519=7 x509=9 vm=66 xhci=7"
+AARCH64_EXPECTED="ahci=32 bench=12 browser=9 cap=14 clock=7 compose=8 compositor=14 conring=10 content=8 policy=8 console=59 dma=9 dns=9 e1000=6 e1000e=6 hda=6 ed25519=8 edid=5 kheap=5 entropy=6 fbcon=6 fs=15 fsstorm=5 lethe=12 lethed=15 linebuf=4 shellstorm=5 gpu=13 hkdf=9 http=8 input=13 iommu=9 keys=12 mlrisk-stress=8 mlrisk=22 mlsched=17 mm=21 nvme=31 net=9 netguard=9 persist=10 pm=14 reclaim=11 anomaly=7 selftest=13 sha512=5 smp=22 soak=12 filepanel=13 persona=8 tcp=9 tcpconn=18 tcpnet=3 textgrid=7 tlsclient=8 tlshandshake=12 tlsrecord=9 trust=9 schedstorm=5 wm=14 wmstorm=6 usermode=62 smmu=13 vault=14 vinput=10 virtio=23 x25519=7 x509=9 vm=66 xhci=7"
 if ! printf '%s\n' "$OUT" | markers_assert "$AARCH64_EXPECTED"; then fail=1; fi
 
 echo "$OUT" | grep "\[e2e\] PASS" >/dev/null                  || { echo "FAIL: e2e PASS marker missing"; fail=1; }

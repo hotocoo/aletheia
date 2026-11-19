@@ -154,6 +154,10 @@ pub enum NvmeError {
     Status(u16),
     /// A buffer about to be handed to the controller is not a registered DMA region.
     Unregistered,
+    /// An earlier command timed out or was answered by a completion that was not its own, so the
+    /// controller may still own a slot and a buffer this command would reuse: every command is
+    /// refused, before the doorbell, until [`Nvme::reset`] (ADR-266).
+    Wedged,
 }
 
 /// What init observed, for the caller's log line.
@@ -208,8 +212,17 @@ pub struct Nvme<H: VirtioHal, R: NvmeRegs> {
     /// Diagnostic for the lost-wakeup proof: the NEXT wait's first look finds the completion
     /// already landed, then reports "not ready", exactly the window a completion races a wait.
     stale_look: Cell<bool>,
+    /// A command was posted and never properly answered: the controller may still complete it
+    /// late, into a slot and a data frame the next command would reuse (ADR-266).
+    wedged: Cell<bool>,
+    /// How long the controller may take to change CSTS.RDY (CAP.TO, capped), kept for `reset`.
+    ready_ns: u64,
     _hal: PhantomData<H>,
 }
+
+/// Zero-budget reads the wedge invariant may try before one is left with the controller. A
+/// controller answers after its doorbell, so the first nearly always is; a bound, not a hope.
+const WEDGE_TRIES: usize = 64;
 
 /// The serial number that marks a controller this driver may write (ADR-228). A real machine's
 /// SSD holds someone's data; nothing without this mark is ever written.
@@ -245,6 +258,27 @@ fn wait_status<H: VirtioHal, R: NvmeRegs>(
         }
         core::hint::spin_loop();
     }
+}
+
+/// Program the admin queue on a DISABLED controller and enable it (§3.5.1: AQA/ASQ/ACQ may only be
+/// written while CC.EN = 0 and CSTS.RDY = 0). Vector 0, the admin queue's, stays masked (§3.1.3):
+/// admin completions are polled, so only the I/O queue's own vector can ever interrupt (ADR-264).
+fn enable_admin<H: VirtioHal, R: NvmeRegs>(
+    regs: &R,
+    asq: usize,
+    acq: usize,
+    depth: u16,
+    ready_ns: u64,
+) -> Result<(), &'static str> {
+    let q = (depth - 1) as u32;
+    regs.w32(REG_AQA, q << 16 | q);
+    regs.w64(REG_ASQ, asq as u64);
+    regs.w64(REG_ACQ, acq as u64);
+    H::barrier();
+    regs.w32(REG_CC, CC_EN | CC_IOSQES | CC_IOCQES);
+    wait_status::<H, R>(regs, true, ready_ns)?;
+    regs.w32(REG_INTMS, 1);
+    Ok(())
 }
 
 unsafe fn rd8(a: usize) -> u8 {
@@ -324,16 +358,7 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
                 .map_err(|_| "nvme: a queue or data frame was refused as a DMA region")?;
         }
 
-        let q = (depth - 1) as u32;
-        regs.w32(REG_AQA, q << 16 | q);
-        regs.w64(REG_ASQ, asq as u64);
-        regs.w64(REG_ACQ, acq as u64);
-        H::barrier();
-        regs.w32(REG_CC, CC_EN | CC_IOSQES | CC_IOCQES);
-        wait_status::<H, R>(&regs, true, ready_ns)?;
-        // Vector 0 (the admin queue's) stays masked (§3.1.3): admin completions are polled, so only the
-        // I/O queue's own vector can ever interrupt (ADR-264).
-        regs.w32(REG_INTMS, 1);
+        enable_admin::<H, R>(&regs, asq, acq, depth, ready_ns)?;
 
         let mut dev = Nvme {
             regs,
@@ -368,6 +393,8 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
             slept: Cell::new(0),
             polled: Cell::new(0),
             stale_look: Cell::new(false),
+            wedged: Cell::new(false),
+            ready_ns,
             _hal: PhantomData,
         };
 
@@ -420,17 +447,7 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
         dev.namespace_lbas = nsze;
         dev.volatile_cache = vwc;
 
-        // Create I/O Completion Queue 1 (§5.4): PC=1, and IEN=1 with its vector only when the caller
-        // armed one (polled otherwise). Then SQ 1 bound to CQ 1 (§5.5).
-        let qdw10 = q << 16 | 1;
-        let cq_flags = match io_vector {
-            Some(iv) => CQ_PC | CQ_IEN | (iv as u32) << CQ_IV_SHIFT,
-            None => CQ_PC,
-        };
-        dev.admin_cmd(ADM_CREATE_CQ, 0, iocq, qdw10, cq_flags)
-            .map_err(|_| "nvme: Create I/O Completion Queue failed")?;
-        dev.admin_cmd(ADM_CREATE_SQ, 0, iosq, qdw10, 1 << 16 | 1)
-            .map_err(|_| "nvme: Create I/O Submission Queue failed")?;
+        dev.create_io_queues()?;
 
         let report = NvmeReport {
             version,
@@ -444,6 +461,61 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
             model,
         };
         Ok((dev, report))
+    }
+
+    /// Create I/O Completion Queue 1 (§5.4): PC=1, and IEN=1 with its vector only when the caller
+    /// armed one (polled otherwise). Then SQ 1 bound to CQ 1 (§5.5).
+    fn create_io_queues(&self) -> Result<(), &'static str> {
+        let qdw10 = ((self.depth - 1) as u32) << 16 | 1;
+        let cq_flags = match self.io_vector {
+            Some(iv) => CQ_PC | CQ_IEN | (iv as u32) << CQ_IV_SHIFT,
+            None => CQ_PC,
+        };
+        self.admin_cmd(ADM_CREATE_CQ, 0, self.io.cq, qdw10, cq_flags)
+            .map_err(|_| "nvme: Create I/O Completion Queue failed")?;
+        self.admin_cmd(ADM_CREATE_SQ, 0, self.io.sq, qdw10, 1 << 16 | 1)
+            .map_err(|_| "nvme: Create I/O Submission Queue failed")?;
+        Ok(())
+    }
+
+    /// Bring a wedged (or healthy) controller back on the frames it already has (ADR-266):
+    /// disable it, which deletes its I/O queues and ends any command it still held (§3.7.2), wait
+    /// for CSTS.RDY = 0, zero both queue pairs and restart our indices, then enable and recreate
+    /// the I/O pair with the same vector. Nothing is allocated, so a reset on a heap that never
+    /// frees costs nothing; a reset that fails leaves the driver wedged.
+    pub fn reset(&mut self) -> Result<(), &'static str> {
+        self.wedged.set(true);
+        self.regs.w32(REG_CC, 0);
+        wait_status::<H, R>(&self.regs, false, self.ready_ns)?;
+        for q in [&self.admin, &self.io] {
+            // SAFETY: both frames of each queue are ours (registered, identity-mapped), and the
+            // controller is disabled, so it no longer reads or writes them.
+            unsafe {
+                core::ptr::write_bytes(q.sq as *mut u8, 0, crate::dma::PAGE);
+                core::ptr::write_bytes(q.cq as *mut u8, 0, crate::dma::PAGE);
+            }
+            q.tail.set(0);
+            q.head.set(0);
+            q.phase.set(true);
+        }
+        enable_admin::<H, R>(
+            &self.regs,
+            self.admin.sq,
+            self.admin.cq,
+            self.depth,
+            self.ready_ns,
+        )?;
+        self.wedged.set(false);
+        if let Err(e) = self.create_io_queues() {
+            self.wedged.set(true);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Whether every command is refused until [`Self::reset`].
+    pub fn is_wedged(&self) -> bool {
+        self.wedged.get()
     }
 
     /// Tighten (or restore) the per-command completion budget.
@@ -527,6 +599,9 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
         prp1: usize,
         cdw: [u32; 3],
     ) -> Result<u32, NvmeError> {
+        if self.wedged.get() {
+            return Err(NvmeError::Wedged);
+        }
         // THE GATE (REQ-DRV-006): the only buffer address a command carries must be registered.
         if prp1 != 0 && !self.dma.visible(prp1, crate::dma::PAGE) {
             return Err(NvmeError::Unregistered);
@@ -593,6 +668,9 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
                 break unsafe { read_volatile((cqe + 12) as *const u32) };
             }
             if H::now_ns().wrapping_sub(started) > self.budget_ns {
+                // The command is still the controller's: it may complete late into this slot and
+                // this data frame, where the next command would take its answer for its own.
+                self.wedged.set(true);
                 return Err(NvmeError::Timeout);
             }
             if wait.is_none() {
@@ -620,10 +698,13 @@ impl<H: VirtioHal, R: NvmeRegs> Nvme<H, R> {
             counter.set(counter.get() + 1);
         }
 
+        // A completion that is not this command's means this command is still outstanding.
         if dw3 & 0xFFFF != cid as u32 {
+            self.wedged.set(true);
             return Err(NvmeError::WrongCommandId);
         }
         if dw2 >> 16 != q.qid as u32 {
+            self.wedged.set(true);
             return Err(NvmeError::WrongQueue);
         }
         // Status field 31:17: SC 24:17, SCT 27:25 (§4.6.1).
@@ -751,6 +832,35 @@ pub fn device_suite<H: VirtioHal, R: NvmeRegs, F: FnMut(usize, bool, &str)>(
     check!(
         "nvme: queue tail, head and phase wrap in step over three full queue lengths",
         wrapped
+    );
+    // ADR-266: a command left with the controller wedges the driver until a reset. A zero budget
+    // makes the first look miss (a controller answers after its doorbell, not during the write);
+    // that command's answer then lands late, in the slot and the frame the next command would use.
+    let budget = dev.budget_ns;
+    dev.set_completion_budget_ns(0);
+    let mut left = false;
+    for _ in 0..WEDGE_TRIES {
+        let mut b = [0u8; BLOCK_SIZE];
+        if dev.read_block(0, &mut b).is_err() {
+            left = dev.is_wedged();
+            break;
+        }
+    }
+    dev.set_completion_budget_ns(budget);
+    let tail = dev.io.tail.get();
+    let nlb = (dev.lbas_per_block - 1) as u32;
+    let refused = dev.submit(&dev.io, NVM_READ, NSID, dev.data, [0, 0, nlb])
+        == Err(NvmeError::Wedged)
+        && dev.io.tail.get() == tail;
+    let mut again = [0u8; BLOCK_SIZE];
+    let back = dev.reset().is_ok()
+        && !dev.is_wedged()
+        && dev.read_block(0, &mut again).is_ok()
+        && again == first
+        && dev.dma.live_regions() == 5;
+    check!(
+        "nvme: a command left with the controller wedges the driver: the next is refused before the doorbell, and a reset on the same frames brings it back",
+        left && refused && back
     );
     // Everything below WRITES. Only a controller marked scratch carries it (ADR-228); on any other
     // machine the read-only group above is the whole suite, and each VM gate pins which count.

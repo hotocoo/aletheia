@@ -54,6 +54,10 @@ struct Faults {
     no_irq: bool,
     /// An acknowledgement does not take: IS stays set once set, so no later completion raises one.
     sticky_is: bool,
+    /// The HBA runs each command after PxCI is written, on the CPU's SECOND look at the clock (the
+    /// driver's first is its start time), as silicon does: a command the driver stops waiting for
+    /// finishes LATE, in the slot, table and data frame the next command would rewrite (ADR-266).
+    late: bool,
 }
 
 struct Disk {
@@ -254,6 +258,11 @@ impl Regs for Sim {
                     return;
                 }
                 PX_CMD => {
+                    // Clearing ST clears PxCI and ends what the slot held (AHCI 1.3.1 §3.3.14).
+                    if v & 1 == 0 {
+                        s.r.insert(off - PX_CMD + PX_CI, 0);
+                        s.pending.retain(|&p| p != port);
+                    }
                     // Engines report running exactly when enabled.
                     let mut c = v & !(1 << 14 | 1 << 15);
                     if v & 1 != 0 {
@@ -267,7 +276,12 @@ impl Regs for Sim {
                 }
                 PX_CI if v & 1 != 0 => {
                     s.r.insert(off, 1);
-                    if s.f.deferred && s.r.get(&(off - PX_CI + PX_IE)).copied().unwrap_or(0) != 0 {
+                    if s.f.late {
+                        CLOCK_ANSWERS_AFTER.with(|c| c.set(2));
+                        s.pending.push(port);
+                    } else if s.f.deferred
+                        && s.r.get(&(off - PX_CI + PX_IE)).copied().unwrap_or(0) != 0
+                    {
                         s.pending.push(port);
                     } else {
                         Sim::run(&mut s, port);
@@ -287,7 +301,19 @@ impl Regs for Sim {
     }
 }
 
+/// An HBA that runs commands on the clock after PxCI, as silicon does (ADR-266).
+fn late_sim(sector: usize) -> Sim {
+    Sim::new(
+        Faults {
+            late: true,
+            ..Default::default()
+        },
+        sector,
+    )
+}
+
 fn disks(sim: &Sim) -> Vec<AhciDisk<HostHal, &Sim>> {
+    DEVICE.with(|d| d.set(sim));
     disk_ports(&sim)
         .into_iter()
         .map(|p| unsafe { AhciDisk::<HostHal, &Sim>::open(sim, p) }.expect("open"))
@@ -297,7 +323,7 @@ fn disks(sim: &Sim) -> Vec<AhciDisk<HostHal, &Sim>> {
 #[test]
 fn the_suite_holds_and_never_writes_the_boot_disk() {
     for sector in [512, 4096] {
-        let sim = Sim::new(Faults::default(), sector);
+        let sim = late_sim(sector);
         let mut d = disks(&sim);
         assert_eq!(d.len(), 2);
         assert!(!d[0].is_scratch() && d[1].is_scratch());
@@ -306,7 +332,7 @@ fn the_suite_holds_and_never_writes_the_boot_disk() {
             assert!(ok, "{i}: {name}")
         })
         .unwrap();
-        assert_eq!(n, 24, "invariant count changed - update the VM gates");
+        assert_eq!(n, 25, "invariant count changed - update the VM gates");
         drop(d);
         let st = sim.0.borrow();
         assert_eq!(st.disks[0].writes, 0, "the boot disk must never be written");
@@ -318,13 +344,14 @@ fn the_suite_holds_and_never_writes_the_boot_disk() {
 fn a_machine_with_only_its_own_disk_gets_the_read_only_group_and_no_writes() {
     // An ordinary one-disk PC or the VMware package (ADR-228): no scratch disk, so the suite is
     // read-only, passes, and nothing is written.
-    let sim = Sim::new(Faults::default(), 512);
+    let sim = late_sim(512);
+    DEVICE.with(|d| d.set(&sim));
     let mut d = vec![unsafe { AhciDisk::<HostHal, &Sim>::open(&sim, 0) }.expect("open")];
     let n = device_suite(&mut d, 256, &mut |i, ok, name: &str| {
         assert!(ok, "{i}: {name}")
     })
     .unwrap();
-    assert_eq!(n, 5, "read-only group count changed - update the gates");
+    assert_eq!(n, 6, "read-only group count changed - update the gates");
     drop(d);
     let st = sim.0.borrow();
     assert_eq!(st.disks[0].writes, 0);
@@ -615,4 +642,51 @@ fn a_command_is_credited_to_the_wait_only_when_the_wait_was_called() {
     let (_, name) = interrupt_suite(&d, 0, &sample, &mut |_, _, _| {})
         .expect_err("a wait that never slept must fail");
     assert_eq!(name, RunFault::NeverSlept.name());
+}
+
+// --- A command left with the HBA (ADR-266) -----------------------------------------------------
+
+/// A read the driver stopped waiting for finishes late, in the slot, table and data frame the next
+/// command would rewrite. Wedged, the port refuses the next command before PxCI (nothing more is
+/// issued), and a port reset, which clears PxCI, brings it back reading the right sectors.
+#[test]
+fn a_command_left_with_the_hba_is_never_finished_into_the_next() {
+    let sim = late_sim(512);
+    let mut d = disks(&sim);
+    let scratch = &mut d[1];
+    let (a, b) = ([0x11u8; BLOCK_SIZE], [0x22u8; BLOCK_SIZE]);
+    scratch.write_block(21, &a).unwrap();
+    scratch.write_block(22, &b).unwrap();
+
+    scratch.set_completion_budget_ns(Some(0));
+    let mut back = [0u8; BLOCK_SIZE];
+    assert_eq!(scratch.read_block(21, &mut back), Err(StorageError::Device));
+    assert!(scratch.is_wedged(), "a timed-out command wedges the port");
+    scratch.set_completion_budget_ns(None);
+
+    let issued = scratch.issued();
+    assert_eq!(scratch.read_block(22, &mut back), Err(StorageError::Device));
+    assert_eq!(scratch.write_block(22, &a), Err(StorageError::Device));
+    assert_eq!(scratch.issued(), issued, "a wedged port issues nothing");
+
+    scratch.reset().expect("port reset");
+    assert!(!scratch.is_wedged());
+    scratch.read_block(22, &mut back).unwrap();
+    assert_eq!(back, b, "after the reset the read returns its own sectors");
+    scratch.read_block(21, &mut back).unwrap();
+    assert_eq!(back, a);
+}
+
+/// A disk still busy after its engine stopped needs a COMRESET, which is refused by name: the
+/// port stays wedged rather than restarting under a busy device.
+#[test]
+fn a_port_whose_disk_stays_busy_is_refused_by_name_and_stays_wedged() {
+    let sim = late_sim(512);
+    let d = disks(&sim);
+    sim.0.borrow_mut().f.stays_busy = true;
+    assert_eq!(
+        d[1].reset(),
+        Err("ahci: the disk stayed busy after its port stopped (it needs a COMRESET)")
+    );
+    assert!(d[1].is_wedged());
 }

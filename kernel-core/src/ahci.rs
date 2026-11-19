@@ -71,6 +71,8 @@ const ATA_FLUSH_EXT: u8 = 0xEA;
 /// The serial number that marks a disk this driver may write. Nothing else is ever written.
 pub const SCRATCH_SERIAL: &[u8] = b"ALETHEIA-SCRATCH";
 const BUDGET_NS: u64 = 10_000_000_000;
+/// Zero-budget reads the wedge invariant may try before one is left with the HBA (ADR-266).
+const WEDGE_TRIES: usize = 64;
 
 pub trait Regs {
     fn r32(&self, off: usize) -> u32;
@@ -165,6 +167,11 @@ pub struct AhciDisk<H: VirtioHal, R: Regs> {
     polled: Cell<u64>,
     /// Diagnostic for the lost-wakeup proof (see `Nvme::race_read_block`).
     stale_look: Cell<bool>,
+    /// A command was issued and never properly finished: the HBA may still own slot 0, its table
+    /// and the data frame, which the next command would rewrite under it (ADR-266).
+    wedged: Cell<bool>,
+    /// How long one command may take, [`BUDGET_NS`] unless a proof tightens it.
+    budget_ns: Cell<u64>,
     _hal: PhantomData<H>,
 }
 
@@ -249,6 +256,8 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
             slept: Cell::new(0),
             polled: Cell::new(0),
             stale_look: Cell::new(false),
+            wedged: Cell::new(false),
+            budget_ns: Cell::new(BUDGET_NS),
             _hal: PhantomData,
         };
         d.command(ATA_IDENTIFY, 0, 0, 512, false)
@@ -294,6 +303,9 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
         bytes: usize,
         write: bool,
     ) -> Result<(), StorageError> {
+        if self.wedged.get() {
+            return Err(StorageError::Device);
+        }
         if bytes > 0 && !self.dma.visible(self.data, bytes) {
             return Err(StorageError::Device);
         }
@@ -346,6 +358,7 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
         self.regs.w32(pb + PX_CI, 1);
         self.issued.set(self.issued.get() + 1);
         let mut failed = false;
+        let budget = self.budget_ns.get();
         let started = H::now_ns();
         // Polled: the command slot clears (or the task file fails). Interrupt mode: the status the
         // interrupt reports (a completion or a fatal condition) is what the wait is woken for.
@@ -370,7 +383,7 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
                     if self.stale_look.replace(false) {
                         // The lost-wakeup window: the completion lands between the wait's check
                         // and its sleep; report the stale "not ready" the check would have seen.
-                        while !posted() && H::now_ns().wrapping_sub(started) <= BUDGET_NS {
+                        while !posted() && H::now_ns().wrapping_sub(started) <= budget {
                             core::hint::spin_loop();
                         }
                         return false;
@@ -381,7 +394,7 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
             if posted() {
                 break true;
             }
-            if H::now_ns().wrapping_sub(started) > BUDGET_NS {
+            if H::now_ns().wrapping_sub(started) > budget {
                 break false;
             }
             if self.wait.is_none() {
@@ -401,7 +414,13 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
         counter.set(counter.get() + 1);
         H::barrier();
         let tfd = self.regs.r32(pb + PX_TFD);
-        if !done || failed || tfd & (TFD_ERR | TFD_BSY) != 0 || self.regs.r32(pb + PX_CI) & 1 != 0 {
+        // A slot the HBA has not released is still its: the next command would rewrite the table
+        // and the data frame under it, and could take this one's late completion for its own.
+        if !done || self.regs.r32(pb + PX_CI) & 1 != 0 {
+            self.wedged.set(true);
+            return Err(StorageError::Device);
+        }
+        if failed || tfd & (TFD_ERR | TFD_BSY) != 0 {
             return Err(StorageError::Device);
         }
         // Bytes the HBA reports moving must be exactly what the PRD asked for.
@@ -429,6 +448,44 @@ impl<H: VirtioHal, R: Regs> AhciDisk<H, R> {
     /// Commands sent to the disk so far.
     pub fn issued(&self) -> u64 {
         self.issued.get()
+    }
+
+    /// Bring a wedged (or healthy) port back (ADR-266; AHCI 1.3.1 §10.4.2): stop the command
+    /// engine, which clears PxCI and ends what the slot held (§3.3.14), wait for PxCMD.CR = 0,
+    /// clear the port's error and status bits (and the HBA's IS bit when the port interrupts), and
+    /// start the engine again once the disk is idle. The frames stay where they are; nothing is
+    /// allocated. A disk still busy after its engine stopped needs a COMRESET, which this driver
+    /// does not issue: that is refused by name and the port stays wedged.
+    pub fn reset(&self) -> Result<(), &'static str> {
+        let pb = self.port;
+        self.wedged.set(true);
+        self.regs
+            .w32(pb + PX_CMD, self.regs.r32(pb + PX_CMD) & !CMD_ST);
+        if !wait::<H>(|| self.regs.r32(pb + PX_CMD) & CMD_CR == 0) {
+            return Err("ahci: the port's command engine did not stop");
+        }
+        self.regs.w32(pb + PX_SERR, u32::MAX);
+        self.regs.w32(pb + PX_IS, u32::MAX);
+        if self.irq_armed.get() {
+            self.regs.w32(HBA_IS, 1 << self.port_index());
+        }
+        if !wait::<H>(|| self.regs.r32(pb + PX_TFD) & (TFD_BSY | TFD_DRQ) == 0) {
+            return Err("ahci: the disk stayed busy after its port stopped (it needs a COMRESET)");
+        }
+        self.regs
+            .w32(pb + PX_CMD, self.regs.r32(pb + PX_CMD) | CMD_ST);
+        self.wedged.set(false);
+        Ok(())
+    }
+
+    /// Whether every command is refused until [`Self::reset`].
+    pub fn is_wedged(&self) -> bool {
+        self.wedged.get()
+    }
+
+    /// Tighten (or restore, with `None`) the per-command completion budget.
+    pub fn set_completion_budget_ns(&self, ns: Option<u64>) {
+        self.budget_ns.set(ns.unwrap_or(BUDGET_NS));
     }
 
     /// This port's number on the HBA (the bit of its IS register).
@@ -633,6 +690,35 @@ pub fn device_suite<H: VirtioHal, R: Regs, F: FnMut(usize, bool, &str)>(
     check!(
         "ahci: a write to any disk not marked scratch is refused without a command",
         refused
+    );
+    // ADR-266: a command left with the HBA wedges the port until a reset. A zero budget makes the
+    // first look miss (the HBA moves the data after PxCI is written, not during the write); that
+    // command then finishes late, in the slot, table and frame the next command would rewrite.
+    let d = &disks[0];
+    let mut first = [0u8; 512];
+    let mut left = d.read_first_sector(&mut first).is_ok();
+    d.set_completion_budget_ns(Some(0));
+    let mut timed_out = false;
+    for _ in 0..WEDGE_TRIES {
+        let mut b = [0u8; 512];
+        if d.read_first_sector(&mut b).is_err() {
+            timed_out = d.is_wedged();
+            break;
+        }
+    }
+    d.set_completion_budget_ns(None);
+    left &= timed_out;
+    let before = d.issued();
+    let mut b = [0u8; 512];
+    let refused = d.read_first_sector(&mut b).is_err() && d.issued() == before;
+    let back = d.reset().is_ok()
+        && !d.is_wedged()
+        && d.read_first_sector(&mut b).is_ok()
+        && b == first
+        && d.dma.live_regions() == 3;
+    check!(
+        "ahci: a command left with the HBA wedges the port: the next is refused before PxCI, and a port reset brings it back",
+        left && refused && back
     );
     // Gate group: only where a disk carries the scratch serial. Elsewhere the read-only group is
     // the whole suite, and each VM gate pins which count it expects.

@@ -76,6 +76,10 @@ struct Faults {
     storm: bool,
     /// The controller never sees the CQ head doorbell (the driver skipped writing it).
     skip_cq_doorbell: bool,
+    /// The controller answers each I/O command after its doorbell, on the CPU's SECOND look at the
+    /// clock (the driver's first is its start time), the way silicon does: a command the driver stops waiting for completes LATE, into
+    /// the slot and the data frame the next command would use (ADR-266).
+    late: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -352,7 +356,10 @@ impl NvmeRegs for Sim {
             o if o == REG_CC => {
                 s.cc = v;
                 if v & 1 == 0 {
+                    // A controller reset deletes every queue and ends what they held (NVMe §3.7.2).
                     s.csts = 0;
+                    s.queues = [None, None];
+                    s.pending.clear();
                 } else if s.f.fatal_on_enable {
                     s.csts = 2;
                 } else if !s.f.never_ready {
@@ -407,7 +414,10 @@ impl NvmeRegs for Sim {
                     let sqe = q.sq + head as usize * 64;
                     head = (head + 1) % q.depth;
                     s.queues[qid].as_mut().unwrap().sq_head = head;
-                    if s.f.deferred && qid != 0 {
+                    if (s.f.deferred || s.f.late) && qid != 0 {
+                        if s.f.late {
+                            CLOCK_ANSWERS_AFTER.with(|c| c.set(2));
+                        }
                         s.pending.push((qid, sqe));
                     } else {
                         Sim::execute(&mut s, qid, sqe);
@@ -423,6 +433,23 @@ fn open(g: Geometry, f: Faults) -> Result<Nvme<HostHal, Sim>, &'static str> {
     unsafe { Nvme::<HostHal, Sim>::init(Sim::new(g, f)) }.map(|(d, _)| d)
 }
 
+/// A controller that answers I/O on the clock after its doorbell, as silicon does: what the suite's
+/// wedge invariant needs to leave one command with the controller (ADR-266).
+fn late_sim(g: Geometry) -> Sim {
+    Sim::new(
+        g,
+        Faults {
+            late: true,
+            ..Default::default()
+        },
+    )
+}
+
+fn open_late(sim: &Sim) -> Nvme<HostHal, &Sim> {
+    DEVICE.with(|d| d.set(sim));
+    unsafe { Nvme::<HostHal, &Sim>::init(sim) }.expect("init").0
+}
+
 const GATE_BLOCKS: u64 = 256;
 
 #[test]
@@ -433,9 +460,9 @@ fn a_controller_not_marked_scratch_is_never_written() {
         scratch: false,
         ..Geometry::healthy(9, 64)
     };
-    let sim = Sim::new(g, Faults::default());
+    let sim = late_sim(g);
     {
-        let (mut dev, _) = unsafe { Nvme::<HostHal, &Sim>::init(&sim) }.expect("init");
+        let mut dev = open_late(&sim);
         assert!(!dev.is_scratch());
         assert_eq!(
             dev.write_block(10, &[1u8; BLOCK_SIZE]),
@@ -446,7 +473,7 @@ fn a_controller_not_marked_scratch_is_never_written() {
             assert!(ok, "{i}: {name}")
         })
         .expect("read-only suite");
-        assert_eq!(n, 5, "read-only group count changed - update the gates");
+        assert_eq!(n, 6, "read-only group count changed - update the gates");
     }
     let s = sim.st.borrow();
     assert!(s.disk.iter().all(|&b| b == 0), "the disk must be untouched");
@@ -460,7 +487,8 @@ fn a_controller_not_marked_scratch_is_never_written() {
 
 #[test]
 fn the_suite_holds_over_a_512_byte_lba_namespace() {
-    let mut dev = open(Geometry::healthy(9, GATE_BLOCKS), Faults::default()).expect("init");
+    let sim = late_sim(Geometry::healthy(9, GATE_BLOCKS));
+    let mut dev = open_late(&sim);
     assert_eq!(dev.lba_bytes(), 512);
     let mut names = vec![];
     let n = device_suite(&mut dev, GATE_BLOCKS as usize, &mut |i, ok, name: &str| {
@@ -468,9 +496,15 @@ fn the_suite_holds_over_a_512_byte_lba_namespace() {
         names.push(name.to_string());
     })
     .expect("suite");
-    assert_eq!(n, 23, "invariant count changed - update the VM gates");
+    assert_eq!(n, 24, "invariant count changed - update the VM gates");
     assert!(names[0].starts_with("nvme: controller enabled"));
-    assert!(names[8].starts_with("fs: "));
+    assert!(names[9].starts_with("fs: "));
+    drop(dev);
+    assert!(
+        sim.st.borrow().violations.is_empty(),
+        "{:?}",
+        sim.st.borrow().violations
+    );
 }
 
 #[test]
@@ -478,7 +512,8 @@ fn the_suite_holds_over_a_4_kib_lba_namespace_and_a_wider_doorbell_stride() {
     let mut g = Geometry::healthy(12, GATE_BLOCKS);
     g.dstrd = 1;
     g.mqes = 3; // depth 4: the wrap invariant crosses the phase flip many times
-    let mut dev = open(g, Faults::default()).expect("init");
+    let sim = late_sim(g);
+    let mut dev = open_late(&sim);
     assert_eq!(dev.lba_bytes(), 4096);
     device_suite(&mut dev, GATE_BLOCKS as usize, &mut |i, ok, name: &str| {
         assert!(ok, "invariant {i} failed: {name}")
@@ -896,4 +931,67 @@ fn a_skipped_cq_head_doorbell_fails_the_group() {
         .violations
         .iter()
         .any(|v| v.contains("CQ head doorbell was not written")));
+}
+
+// --- A command left with the controller (ADR-266) ----------------------------------------------
+
+/// The hazard itself: a read the driver stopped waiting for completes late, into the completion
+/// slot and the data frame the next command would use. Wedged, the driver refuses the next command
+/// before its doorbell rings (the controller executes nothing more), and only a reset, which
+/// deletes the controller's queues, brings it back, reading the right block with no protocol
+/// violation recorded.
+#[test]
+fn a_command_left_with_the_controller_is_never_answered_into_the_next() {
+    let sim = late_sim(Geometry::healthy(9, 64));
+    let mut dev = open_late(&sim);
+    let (a, b) = ([0x11u8; BLOCK_SIZE], [0x22u8; BLOCK_SIZE]);
+    dev.write_block(21, &a).unwrap();
+    dev.write_block(22, &b).unwrap();
+
+    dev.set_completion_budget_ns(0);
+    let mut back = [0u8; BLOCK_SIZE];
+    assert_eq!(dev.read_block(21, &mut back), Err(StorageError::Device));
+    assert!(dev.is_wedged(), "a timed-out command wedges the driver");
+    dev.set_completion_budget_ns(20_000_000_000);
+
+    let executed = sim.st.borrow().io_commands;
+    assert_eq!(dev.read_block(22, &mut back), Err(StorageError::Device));
+    assert_eq!(dev.flush(), Err(StorageError::Device));
+    assert_eq!(
+        sim.st.borrow().io_commands,
+        executed,
+        "a wedged driver rings no doorbell"
+    );
+
+    dev.reset().expect("reset");
+    assert!(!dev.is_wedged());
+    dev.read_block(22, &mut back).unwrap();
+    assert_eq!(back, b, "after the reset the read returns its own block");
+    dev.read_block(21, &mut back).unwrap();
+    assert_eq!(back, a);
+    drop(dev);
+    assert!(
+        sim.st.borrow().violations.is_empty(),
+        "{:?}",
+        sim.st.borrow().violations
+    );
+}
+
+/// A completion that names another command means this one is still outstanding: wedged too.
+#[test]
+fn a_completion_for_another_command_wedges_the_driver() {
+    let sim = Sim::new(
+        Geometry::healthy(9, 64),
+        Faults {
+            cid_lie: true,
+            ..Default::default()
+        },
+    );
+    let (dev, _) = unsafe { Nvme::<HostHal, &Sim>::init(&sim) }.expect("init");
+    let mut back = [0u8; BLOCK_SIZE];
+    assert_eq!(dev.read_block(0, &mut back), Err(StorageError::Device));
+    assert!(dev.is_wedged());
+    let executed = sim.st.borrow().io_commands;
+    assert_eq!(dev.read_block(0, &mut back), Err(StorageError::Device));
+    assert_eq!(sim.st.borrow().io_commands, executed);
 }
