@@ -30,7 +30,7 @@ times, and the only host proof of the rules was `frameown`'s, not the allocator'
 * The three boot gates (`vm-e2e.sh`, `vm-e2e-riscv.sh`, `vm-e2e-x86.sh`) and `conformance.sh` pass
   on the shared allocator: every `frames:` invariant and every family above it (memory, virtual
   memory, user mode, reclaim) allocate through it.
-* 1,727 lines of `frames.rs` became 1,132 plus 231 in `kernel-core` (-364 net); the unsafe audit moves
+* The three `frames.rs` lost 595 lines and `kernel-core` gained 231 (-364 net); the unsafe audit moves
   8 sites from each target to one place.
 
 ## What this is not
