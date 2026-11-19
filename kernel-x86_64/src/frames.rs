@@ -31,202 +31,17 @@
 //! conventional RAM manages less of it rather than running a tail with no ownership state, and
 //! `init_from_uefi` reports the clamp so it is never silent.
 use core::cell::UnsafeCell;
-use kernel_core::frameown::{FrameOwnerTable, Owner};
+use kernel_core::frameown::Owner;
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 use x86_64::structures::paging::{
     FrameAllocator as X86FrameAllocator, PhysFrame as X86PhysFrame, Size4KiB,
 };
 use x86_64::PhysAddr;
 
-/// 4 KiB frame — the x86-64 base page size.
-pub const FRAME_SIZE: usize = 4096;
+pub use kernel_core::framealloc::FRAME_SIZE;
 
-#[inline]
-const fn align_up(x: usize, a: usize) -> usize {
-    (x + a - 1) & !(a - 1)
-}
-
-/// A 4 KiB-aligned physical frame; holding one is a claim on that physical memory. The inner
-/// address is always `FRAME_SIZE`-aligned and inside the allocator's managed region.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Frame(usize);
-
-impl Frame {
-    /// Physical (== identity-virtual, under OVMF's map) base address of the frame.
-    #[inline]
-    pub fn addr(self) -> usize {
-        self.0
-    }
-    /// Mutable byte view of the frame. SAFETY: caller holds this frame (from `alloc`, not freed)
-    /// and it is identity-accessible (true under OVMF's post-exit identity map).
-    #[inline]
-    unsafe fn as_bytes_mut(self) -> &'static mut [u8] {
-        core::slice::from_raw_parts_mut(self.0 as *mut u8, FRAME_SIZE)
-    }
-}
-
-/// Intrusive free-list allocator over a half-open physical range `[base, end)`.
-struct FrameAllocator {
-    head: usize, // phys addr of first free frame, or 0 when empty
-    free: usize,
-    total: usize,
-    base: usize,
-    end: usize,
-    /// `None` until `attach_owners` runs; the global pool always attaches one during init.
-    owners: Option<FrameOwnerTable<'static>>,
-}
-
-impl FrameAllocator {
-    const fn empty() -> Self {
-        FrameAllocator {
-            head: 0,
-            free: 0,
-            total: 0,
-            base: 0,
-            end: 0,
-            owners: None,
-        }
-    }
-
-    /// Populate the free-list from every aligned frame in `[base, end)` (rounded inward).
-    ///
-    /// SAFETY: `[base, end)` must be RAM the caller owns exclusively and that is not otherwise
-    /// live (not the running image, stack, or firmware structures). The allocator writes a link
-    /// word into each frame, so the range must be read/write-accessible at its identity address.
-    unsafe fn init(&mut self, base: usize, end: usize) {
-        let base = align_up(base, FRAME_SIZE);
-        let end = end & !(FRAME_SIZE - 1);
-        self.base = base;
-        self.end = end;
-        self.head = 0;
-        self.free = 0;
-        self.total = 0;
-        if end <= base {
-            return;
-        }
-        let mut f = end - FRAME_SIZE;
-        loop {
-            self.push_raw(f);
-            self.total += 1;
-            if f == base {
-                break;
-            }
-            f -= FRAME_SIZE;
-        }
-    }
-
-    #[inline]
-    unsafe fn push_raw(&mut self, frame: usize) {
-        *(frame as *mut usize) = self.head;
-        self.head = frame;
-        self.free += 1;
-    }
-
-    /// Give this pool an ownership table covering exactly the frames it manages, built from the
-    /// pool's OWN base and frame count so the two can never describe different windows.
-    fn attach_owners(&mut self, state: &'static mut [u8]) -> bool {
-        match FrameOwnerTable::new(self.base, self.total, state) {
-            Ok(t) => {
-                self.owners = Some(t);
-                true
-            }
-            Err(_) => false, // fail-closed: an unprotected tail is worse than no pool
-        }
-    }
-
-    /// Allocate one frame for `owner`. Ownership is claimed BEFORE the frame leaves the list, so a
-    /// frame the table already considers owned stays put and the caller gets `None`.
-    fn alloc_as(&mut self, owner: Owner) -> Option<Frame> {
-        if self.head == 0 {
-            return None;
-        }
-        let f = self.head;
-        if let Some(t) = self.owners.as_mut() {
-            t.claim(f, owner).ok()?;
-        }
-        // SAFETY: `f` is a frame we previously pushed; its first word is the next-free link.
-        self.head = unsafe { *(f as *const usize) };
-        self.free -= 1;
-        Some(Frame(f))
-    }
-
-    fn alloc(&mut self) -> Option<Frame> {
-        self.alloc_as(Owner::KERNEL)
-    }
-
-    fn alloc_zeroed_as(&mut self, owner: Owner) -> Option<Frame> {
-        let frame = self.alloc_as(owner)?;
-        // SAFETY: we hold `frame` exclusively; identity-accessible.
-        unsafe { frame.as_bytes_mut().fill(0) };
-        Some(frame)
-    }
-
-    fn alloc_zeroed(&mut self) -> Option<Frame> {
-        self.alloc_zeroed_as(Owner::KERNEL)
-    }
-
-    /// Return a frame held by `owner`. Rejected (list untouched) when misaligned, out of region,
-    /// already free (double free), or held by a different owner.
-    fn free_as(&mut self, frame: Frame, owner: Owner) -> bool {
-        let a = frame.addr();
-        if a < self.base || a >= self.end || !a.is_multiple_of(FRAME_SIZE) {
-            return false;
-        }
-        if let Some(t) = self.owners.as_mut() {
-            if t.release(a, owner).is_err() {
-                return false;
-            }
-        }
-        // ERASE ON FREE (REQ-MM-005, ADR-033, GAPS4 ALET-P2-026). Ownership stops two owners from
-        // holding one frame at the same TIME; it says nothing about what the next owner can READ.
-        // A page released by a task carrying keys, message bodies, or decrypted content kept those
-        // bytes verbatim until someone overwrote them, so the next `alloc` — in any address space,
-        // for any task — could read them. Erasing at RELEASE (not at allocation) makes the
-        // guarantee unconditional: it holds for every path that returns a frame, including page-table
-        // reclamation and address-space teardown, and it cannot be skipped by a caller who used
-        // plain `alloc`. The link word `push_raw` writes below is the only thing left in the frame.
-        // SAFETY: the release above proves this frame is ours and now unowned; it is identity-
-        // accessible, so writing its whole 4 KiB is sound and observed by nobody else.
-        unsafe { frame_bytes_mut(a).fill(0) };
-        // SAFETY: `a` is a valid, aligned, in-range frame address; writing its link word is sound.
-        unsafe { self.push_raw(a) };
-        true
-    }
-
-    fn free(&mut self, frame: Frame) -> bool {
-        self.free_as(frame, Owner::KERNEL)
-    }
-
-    fn owner_of(&self, pa: usize) -> Option<Owner> {
-        self.owners.as_ref()?.owner_of(pa).ok().flatten()
-    }
-
-    fn owned_free_count(&self) -> Option<usize> {
-        Some(self.owners.as_ref()?.free_count())
-    }
-
-    fn free_count(&self) -> usize {
-        self.free
-    }
-    fn total_count(&self) -> usize {
-        self.total
-    }
-    fn base(&self) -> usize {
-        self.base
-    }
-    fn end(&self) -> usize {
-        self.end
-    }
-}
-
-/// Mutable byte view of the frame at physical address `a`, for erase-on-free.
-///
-/// SAFETY: `a` must be a frame this allocator owns, aligned and in range, with no other live
-/// reference to its contents.
-#[inline]
-unsafe fn frame_bytes_mut(a: usize) -> &'static mut [u8] {
-    core::slice::from_raw_parts_mut(a as *mut u8, FRAME_SIZE)
-}
+use kernel_core::framealloc::FrameAllocator;
+pub use kernel_core::framealloc::PhysFrame as Frame;
 
 /// Single-core interior-mutability wrapper (mirrors `heap.rs` / the aarch64 backend): uniprocessor
 /// with no preemption during allocation, so `unsafe impl Sync` is sound.
@@ -313,7 +128,7 @@ pub fn free_as(frame: Frame, owner: Owner) -> bool {
 /// address-taking form page-table reclamation needs (it walks live tables and knows physical
 /// addresses, not `Frame` handles). Every ownership rule still applies (REQ-MM-002).
 pub fn free_addr_as(pa: usize, owner: Owner) -> bool {
-    kframes().free_as(Frame(pa), owner)
+    kframes().free_as(Frame::from_addr(pa), owner)
 }
 
 /// Current holder of the frame at `pa`.
@@ -446,7 +261,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         "frames: free returns capacity to the pool"
     );
     check!(
-        !free(Frame(a.addr() + 1)),
+        !free(Frame::from_addr(a.addr() + 1)),
         "frames: misaligned free rejected (fail-closed)"
     );
 
@@ -457,7 +272,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
         // SAFETY: SCRATCH is a private, 4 KiB-aligned 4-frame static owned solely by this test.
         unsafe { scratch.init(sbase, sbase + FRAME_SIZE * 4) };
         let cap = scratch.total_count();
-        let mut held = [Frame(0); 4];
+        let mut held = [Frame::from_addr(0); 4];
         for slot in held.iter_mut().take(cap) {
             *slot = scratch.alloc().expect("scratch frame within capacity");
         }
@@ -514,7 +329,7 @@ pub fn selftest() -> Result<u32, (u32, &'static str)> {
             Some(f) => f,
             None => return Err((n + 1, "frames: no frame for the never-allocated check")),
         };
-        let stranger = Frame(never.addr() + FRAME_SIZE);
+        let stranger = Frame::from_addr(never.addr() + FRAME_SIZE);
         check!(
             owner_of(stranger.addr()).is_none() && !free_as(stranger, Owner::KERNEL),
             "frames: freeing a never-allocated frame is refused"

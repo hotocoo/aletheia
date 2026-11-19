@@ -112,6 +112,7 @@ max |Δconf| 0.0000. Accuracy and latency unchanged (388/400 and 251/300 on both
 * NVMe, GPU, HD Audio and virtio-net timeouts leaving a request in flight: ADR-266 (NVMe, AHCI),
   ADR-267 (virtio-net, virtio-rng), ADR-268 (HD Audio), ADR-269 (virtio-gpu). xHCI matches every
   completion to its TRB and needs none.
-* Still open: approval separation of persons, the SMMU register seam's barriers, and the near-copy
-  `frames.rs` / `desktop.rs` / `heap.rs`.
+* The SMMU register seam's barriers: ADR-270. The near-copy `frames.rs`: ADR-271 (`desktop.rs` and
+  `heap.rs` stay per target, their differences being the point).
+* Still open: approval separation of persons.
 

@@ -59,6 +59,7 @@ pub mod faultdev;
 pub mod fbcon;
 pub mod filepanel;
 pub mod font8x8;
+pub mod framealloc;
 pub mod frameown;
 pub mod fs;
 pub mod fsstorm;
