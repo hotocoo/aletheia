@@ -103,7 +103,7 @@
       "license": "Apache-2.0 OR MIT",
       "name": "ctutils",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.4.2"
+      "version": "0.4.4"
     },
     {
       "license": "BSD-3-Clause",

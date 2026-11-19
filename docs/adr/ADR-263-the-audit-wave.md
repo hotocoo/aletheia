@@ -89,3 +89,19 @@ reading the code; each fix carries a test that fails on the old code where a hos
   emulated-only limit already recorded for the v0.8.0 drivers.
 * `frames.rs`, `desktop.rs` and `heap.rs` are near-copies across the three crates (about 900 lines).
   Deferred.
+
+## Addendum 2026-11-19: candle 0.11 closes the `zip` advisories
+
+candle 0.11.1 (2026-10-31) depends on `zip` 9, so `aletheia-laya` moves to candle 0.11.1 and
+`tokenizers` 0.23 (the version candle now carries, so the tree holds one copy). candle turns on
+`tokenizers`' `fancy-regex` feature; with `onig` also on, Oniguruma stays the pre-tokenizer's regex
+engine (`tokenizers` selects `fancy-regex` only without `onig`), so the pure-Rust crate is compiled
+but unused. No progress bars and no C++ suffix arrays, as before. `quality-gate.sh` drops its
+ignore list: RUSTSEC-2026-0367/0368/0369 and the five `zip` 7 advisories published since (0429,
+0545, 0546, 0547, 0548) no longer apply. `aletheia` takes
+`ctutils` 0.4.4 for RUSTSEC-2026-0385 (non-constant-time masks, reached through `poly1305`).
+
+Parity before and after, `scripts/system1/native_parity.py` against a binary built from the
+previous lockfile, same checkpoint: console v4, console corpus, 400 rows, CPU and Metal, 932/932
+answers each, max |Δconf| 0.0000; scheduler run 2, `corpus-v2`, seed 31337, 300 rows, CPU, 700/700,
+max |Δconf| 0.0000. Accuracy and latency unchanged (388/400 and 251/300 on both builds).
