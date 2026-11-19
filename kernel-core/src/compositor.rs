@@ -318,9 +318,11 @@ impl ClientSurface {
         // pixel. This path is used by every terminal repaint, so the old O(pixels) bit twiddling
         // was needlessly expensive even though the data already had the exact packing we need.
         let full_words = self.bits.len().min(buf.len() / core::mem::size_of::<u64>());
-        for word in 0..full_words {
-            let at = word * core::mem::size_of::<u64>();
-            self.bits[word] = u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
+        for (word, bytes) in self.bits[..full_words]
+            .iter_mut()
+            .zip(buf.as_chunks::<{ core::mem::size_of::<u64>() }>().0)
+        {
+            *word = u64::from_le_bytes(*bytes);
         }
 
         let tail_at = full_words * core::mem::size_of::<u64>();

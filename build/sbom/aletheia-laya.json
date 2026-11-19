@@ -1,7 +1,7 @@
 {
   "crate": "aletheia-laya",
   "format": "aletheia-sbom/1",
-  "package_count": 180,
+  "package_count": 177,
   "packages": [
     {
       "license": "Apache-2.0/MIT",
@@ -108,12 +108,6 @@
     {
       "license": "MIT OR Apache-2.0",
       "name": "candle-nn",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.11.1"
-    },
-    {
-      "license": "MIT OR Apache-2.0",
-      "name": "candle-transformers",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.11.1"
     },
@@ -284,12 +278,6 @@
       "name": "fancy-regex",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.17.0"
-    },
-    {
-      "license": "MIT",
-      "name": "fancy-regex",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.19.2"
     },
     {
       "license": "Apache-2.0 OR MIT",
@@ -806,12 +794,6 @@
       "name": "serde_json",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "1.0.151"
-    },
-    {
-      "license": "MIT/Apache-2.0",
-      "name": "serde_plain",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "1.0.2"
     },
     {
       "license": "MIT OR Apache-2.0",

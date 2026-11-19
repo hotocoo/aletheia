@@ -479,10 +479,8 @@ impl PmObserver {
     /// Claim (or find) the slot for `id`. Capacity-bounded: past `MAX_DOMAINS` domains the
     /// observer refuses and the advised path falls back to the baseline map for that domain.
     pub fn ensure(&mut self, id: u32) -> Option<usize> {
-        for i in 0..self.n_slots {
-            if self.ids[i] == id {
-                return Some(i);
-            }
+        if let Some(i) = self.ids[..self.n_slots].iter().position(|&x| x == id) {
+            return Some(i);
         }
         if self.n_slots >= MAX_DOMAINS {
             return None;
