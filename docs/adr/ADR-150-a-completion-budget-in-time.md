@@ -62,3 +62,14 @@ failure this tree exists to name.
 
 A boot on a starved host now waits for its disk instead of misreporting it. The boot watchdogs
 (240 s) remain the backstop above the budget.
+
+## Addendum 2026-11-19: the virtqueue waits follow
+
+Three completion waits were still spin counts: virtio-gpu's control queue (`TIMEOUT_SPINS`, 20 M),
+virtio-net's transmit (20 M) and virtio-rng's request (`COMPLETION_POLLS`, 20 M). They now go through
+`Virtqueue::poll_used_within(budget_ns)` on `now_ns`: 5 s for a GPU command (one may move a whole
+frame), 2 s for a transmitted frame and an entropy draw (the e1000's budget). `poll_used_bounded` is
+gone; virtio-net's `recv_until` keeps its spin argument, because it re-posts every buffer it sees and
+leaves nothing with the device. This is the precondition for ADR-267's wedge: a budget measured in
+polls would wedge a healthy device on a fast host.
+

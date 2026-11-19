@@ -321,18 +321,24 @@ impl Virtqueue {
         Some((id, written))
     }
 
-    /// Poll for a completion up to `spins` times. Bounded, so a device that never completes returns
-    /// `None` instead of hanging past the VM watchdog — the same doctrine as the block driver.
+    /// Poll for a completion for at most `budget_ns` on the platform clock. Bounded in TIME, not in
+    /// polls (ADR-150): a spin count measures how fast this CPU looks, so the same count is a long
+    /// wait on a slow emulated CPU and a short one on a fast host, where a healthy device that has
+    /// not answered yet would be declared dead. A device that never completes still returns `None`
+    /// instead of hanging past the VM watchdog.
     ///
     /// # Safety
     /// The queue must be live.
-    pub unsafe fn poll_used_bounded<H: VirtioHal>(&self, spins: u64) -> Option<(u16, u32)> {
-        for _ in 0..spins {
+    pub unsafe fn poll_used_within<H: VirtioHal>(&self, budget_ns: u64) -> Option<(u16, u32)> {
+        let started = H::now_ns();
+        loop {
             if let Some(done) = self.poll_used::<H>() {
                 return Some(done);
             }
+            if H::now_ns().wrapping_sub(started) > budget_ns {
+                return None;
+            }
             core::hint::spin_loop();
         }
-        None
     }
 }

@@ -37,9 +37,9 @@ const S_FEATURES_OK: u32 = 8;
 const S_FAILED: u32 = 0x80;
 /// virtio-rng has exactly one queue: the driver posts device-writable buffers on it.
 const REQUEST_QUEUE: u16 = 0;
-/// How many polls one request may take before the device is declared silent. The device answers
-/// in microseconds; this is the ADR-150 doctrine in the substrate's own unit.
-const COMPLETION_POLLS: u64 = 20_000_000;
+/// How long one request may take before the device is declared silent, on the platform clock
+/// (ADR-150). The device answers in microseconds; two seconds is the e1000's budget too.
+const COMPLETION_NS: u64 = 2_000_000_000;
 /// How many requests one `fill` may issue: a device that answers one byte at a time is refused
 /// rather than trusted to eventually finish.
 const MAX_REQUESTS_PER_FILL: usize = 64;
@@ -178,7 +178,7 @@ impl<H: VirtioHal, T: Transport> VirtioRng<H, T> {
         self.queue.kick::<H, T>(&self.transport);
         let (slot, written) = self
             .queue
-            .poll_used_bounded::<H>(COMPLETION_POLLS)
+            .poll_used_within::<H>(COMPLETION_NS)
             .ok_or(EntropyRefusal::Device("the device did not answer"))?;
         if slot != 0 {
             return Err(EntropyRefusal::Device(

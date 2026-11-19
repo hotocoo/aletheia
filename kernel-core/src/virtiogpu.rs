@@ -74,9 +74,10 @@ pub const RESP_OK_EDID: u32 = 0x1104;
 const GET_EDID_LEN: usize = CTRL_HDR_LEN + 8;
 pub const EDID_MAX: usize = 1024;
 
-/// Bounded completion wait — the same doctrine as the block and network drivers: a device that
-/// never completes yields an error instead of hanging past the VM watchdog.
-const TIMEOUT_SPINS: u64 = 20_000_000;
+/// Bounded completion wait, in time (ADR-150) — the same doctrine as the block and network
+/// drivers: a device that never completes yields an error instead of hanging past the VM watchdog.
+/// Five seconds, because one command may move a whole frame under an emulator on a loaded host.
+const TIMEOUT_NS: u64 = 5_000_000_000;
 
 /// Feature bit for VIRTIO_F_VERSION_1 (bit 32 ⇒ bit 0 of the high word). Every GPU-specific
 /// feature (VIRGL, EDID, blobs) is DECLINED — see the scope note above.
@@ -625,7 +626,7 @@ impl<H: VirtioHal, T: Transport> VirtioGpu<H, T> {
         // across refusal batteries, and a refused chain never became a descriptor.
         self.cmds_sent.set(self.cmds_sent.get() + 1);
         self.ctrl.kick::<H, T>(&self.transport);
-        match self.ctrl.poll_used_bounded::<H>(TIMEOUT_SPINS) {
+        match self.ctrl.poll_used_within::<H>(TIMEOUT_NS) {
             Some((_head, written)) => {
                 H::barrier(); // the response bytes precede the used-ring advance just observed
                 let n = core::cmp::min(written as usize, RESP_CAP);

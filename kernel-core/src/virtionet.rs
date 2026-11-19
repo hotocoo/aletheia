@@ -66,6 +66,8 @@ const RX_BUFFERS: u16 = 8;
 
 /// Ethernet.
 pub const ETH_HDR_LEN: usize = 14;
+/// How long one transmitted frame may take to be handed back, on the platform clock (ADR-150).
+const TX_BUDGET_NS: u64 = 2_000_000_000;
 const ETHERTYPE_IPV4: u16 = 0x0800;
 const BROADCAST: [u8; 6] = [0xFF; 6];
 
@@ -338,7 +340,7 @@ impl<H: VirtioHal, T: Transport> VirtioNet<H, T> {
             .map_err(|_| NetError::Queue("the transmit buffer is not DMA-visible"))?;
         self.tx.kick::<H, T>(&self.transport);
         self.tx
-            .poll_used_bounded::<H>(20_000_000)
+            .poll_used_within::<H>(TX_BUDGET_NS)
             .map(|_| ())
             .ok_or(NetError::Timeout)
     }
