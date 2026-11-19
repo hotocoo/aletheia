@@ -179,13 +179,41 @@ fn destructive_requires_approval_lifecycle_over_the_api() {
         "resolving an approval requires authority over the bound action"
     );
 
-    // Human grants it → the bound intent executes (approval confers no authority; caps re-checked).
-    let resolved = svc.handle(Request::ResolveApproval {
+    // The requester cannot approve its own request, even holding Allow (ADR-272): approval is a
+    // second person's decision, and the principal is read from the capability, not the request.
+    let self_approved = svc.handle(Request::ResolveApproval {
+        caps: vec![owner.clone()],
+        approval_id: approval_id.clone(),
+        granted: true,
+    });
+    assert!(
+        !self_approved.ok,
+        "the requester cannot resolve its own approval"
+    );
+
+    // A second human, granted authority over the bound action, grants it → the bound intent
+    // executes (approval confers no authority; the reviewer's capabilities are re-checked).
+    let reviewer = svc.handle(Request::Grant {
         caps: vec![owner],
+        subject: "human:reviewer".into(),
+        action: "entity.delete".into(),
+        scope_entities: vec![id.clone()],
+        approval: false,
+    });
+    assert!(
+        reviewer.ok,
+        "the owner delegates delete authority to a reviewer"
+    );
+    let reviewer = reviewer.data["token"].as_str().unwrap().to_string();
+    let resolved = svc.handle(Request::ResolveApproval {
+        caps: vec![reviewer],
         approval_id,
         granted: true,
     });
-    assert!(resolved.ok, "granted approval executes the bound intent");
+    assert!(
+        resolved.ok,
+        "a second principal's grant executes the bound intent"
+    );
 }
 
 #[test]

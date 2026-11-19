@@ -357,6 +357,71 @@ fn an_approval_constrained_holder_cannot_approve_itself() {
     assert!(core.resolve_approval(&t, &pending, true).unwrap().ok);
 }
 
+/// Separation of persons (ADR-272): a requester that holds `Allow` and asked for review still
+/// cannot approve its own request, a second token for the SAME principal does not help, and a
+/// different principal's authority resolves it. The rule survives a restart: who asked is part of
+/// the durable record.
+#[test]
+fn an_allow_holder_cannot_approve_its_own_request_and_the_rule_survives_restart() {
+    let path = dir();
+    let (pending, owner_caps, second_owner_cap, reviewer_cap) = {
+        let mut core = SysCore::open(path.clone(), det()).unwrap();
+        let t = owner(&mut core);
+        let e = core
+            .create_entity(
+                &t,
+                "human:owner",
+                EntityType::Document,
+                b"x",
+                serde_json::json!({}),
+            )
+            .unwrap();
+        let delete = Intent {
+            subject: "human:owner".into(),
+            verb: Verb::Delete { id: e.id.clone() },
+        };
+        // No inline consent: the owner asks for a review of its own destructive request.
+        let tr = core.handle_intent(&t, delete, false);
+        let pending = tr.approval_id.clone().expect("destructive op goes pending");
+        let same = core
+            .grant_to(
+                &t,
+                "human:owner",
+                "entity.delete",
+                Scope::All,
+                Constraints::none(),
+            )
+            .unwrap();
+        let reviewer = core
+            .grant_to(
+                &t,
+                "human:reviewer",
+                "entity.delete",
+                Scope::Entities(vec![e.id.clone()]),
+                Constraints::none(),
+            )
+            .unwrap();
+        (pending, t, same.token, reviewer.token)
+    };
+    let mut core = SysCore::open(path, det()).unwrap();
+    assert!(
+        core.resolve_approval(&owner_caps, &pending, true).is_err(),
+        "the requester's own Allow does not resolve its request"
+    );
+    assert!(
+        core.resolve_approval(&[second_owner_cap], &pending, false)
+            .is_err(),
+        "another token for the same principal is the same person, and cannot even deny"
+    );
+    let done = core
+        .resolve_approval(&[reviewer_cap], &pending, true)
+        .unwrap();
+    assert!(
+        done.ok,
+        "a second principal's grant executes the bound intent"
+    );
+}
+
 /// `RequireApproval` is not `Allow`: an approval-constrained grant or audit capability reads
 /// nothing and revokes nothing on its own.
 #[test]

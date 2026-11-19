@@ -243,6 +243,35 @@ impl CapEngine {
         }
     }
 
+    /// The subjects of the live capabilities in `offered` that cover `action` on `target`, with
+    /// `allowing_only` keeping just those that ALLOW it outright (no approval constraint). Who a
+    /// request came from, and who may resolve its approval, are read from here (ADR-272): the
+    /// capability names the principal, so a caller cannot claim one it does not hold.
+    pub fn covering_subjects(
+        &self,
+        action: &str,
+        target: &Target,
+        offered: &[CapToken],
+        allowing_only: bool,
+    ) -> Vec<String> {
+        let mut out: Vec<String> = offered
+            .iter()
+            .filter(|t| !self.revoked.contains(*t))
+            .filter_map(|t| self.registry.get(t))
+            .filter(|c| action_covers(&c.action, action) && scope_covers(&c.scope, target))
+            .filter(|c| {
+                c.constraints
+                    .expires_at
+                    .is_none_or(|exp| (self.now_fn)() <= exp)
+            })
+            .filter(|c| !allowing_only || !c.constraints.approval_required)
+            .map(|c| c.subject.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     pub fn get(&self, token: &str) -> Option<&StoredCapability> {
         if self.revoked.contains(token) {
             None

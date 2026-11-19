@@ -94,6 +94,11 @@ pub struct PendingApproval {
     pub requested_at: u64,
     pub expires_at: u64,
     pub state: ApprovalState,
+    /// The principals whose capabilities carried the request (ADR-272). None of them may resolve
+    /// it: approval is a second person's decision. Empty for records made before ADR-272 and for
+    /// console approvals, which the console's own operator resolves.
+    #[serde(default)]
+    pub requested_by: Vec<String>,
 }
 
 impl PendingApproval {
@@ -107,6 +112,7 @@ impl PendingApproval {
             requested_at: at,
             expires_at: at + APPROVAL_TTL_MS,
             state: ApprovalState::Pending,
+            requested_by: Vec::new(),
         }
     }
     pub fn is_expired(&self, at: u64) -> bool {

@@ -114,5 +114,5 @@ max |Δconf| 0.0000. Accuracy and latency unchanged (388/400 and 251/300 on both
   completion to its TRB and needs none.
 * The SMMU register seam's barriers: ADR-270. The near-copy `frames.rs`: ADR-271 (`desktop.rs` and
   `heap.rs` stay per target, their differences being the point).
-* Still open: approval separation of persons.
+* Approval separation of persons: ADR-272. Every deferred item is now closed.
 

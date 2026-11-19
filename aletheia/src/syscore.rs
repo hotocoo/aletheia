@@ -1029,8 +1029,10 @@ impl SysCore {
         &mut self,
         intent: &Intent,
         reason: &str,
+        requested_by: Vec<String>,
     ) -> Result<PendingApproval> {
-        let pa = PendingApproval::new(&intent.subject, intent.clone(), reason);
+        let mut pa = PendingApproval::new(&intent.subject, intent.clone(), reason);
+        pa.requested_by = requested_by;
         self.try_emit(
             "ApprovalRequested",
             &new_id(),
@@ -1076,6 +1078,20 @@ impl SysCore {
         if self.caps.evaluate(action, &target, offered) != Decision::Allow {
             return Err(AlethError::authorization(
                 "not permitted to resolve this approval",
+            ));
+        }
+        // Separation of persons (ADR-272): the authority that resolves must belong to a principal
+        // other than the ones who asked. Read from the capabilities, not from the request, so a
+        // requester cannot resolve its own approval by offering its own Allow capability.
+        if !pa.requested_by.is_empty()
+            && self
+                .caps
+                .covering_subjects(action, &target, offered, true)
+                .iter()
+                .all(|s| pa.requested_by.contains(s))
+        {
+            return Err(AlethError::authorization(
+                "an approval is resolved by someone other than who requested it",
             ));
         }
         self.try_emit(
@@ -1186,7 +1202,9 @@ impl SysCore {
             ApprovalVerdict::NotRequired => Err(AlethError::validation(
                 "approval requested for a line policy does not gate",
             )),
-            ApprovalVerdict::Required { reason } => self.record_pending_approval(&intent, &reason),
+            ApprovalVerdict::Required { reason } => {
+                self.record_pending_approval(&intent, &reason, Vec::new())
+            }
         }
     }
 
@@ -1584,7 +1602,11 @@ impl SysCore {
                     } else {
                         // Record a durable pending approval bound to this exact intent; stop with no
                         // effect. A human later grants/denies it via `resolve_approval`.
-                        let pa = match self.record_pending_approval(&intent, &reason) {
+                        let requested_by =
+                            self.caps
+                                .covering_subjects(meta.action, &target, offered, false);
+                        let pa = match self.record_pending_approval(&intent, &reason, requested_by)
+                        {
                             Ok(pa) => pa,
                             Err(e) => {
                                 trace.error = Some(e);
